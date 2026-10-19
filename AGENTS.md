@@ -150,7 +150,7 @@ their local `AGENTS.md` if you work inside them. Do not carry over the
 rules for their upstream contributions onto changes to the AnyPS3 project
 itself.
 
-Communicate in Czech, concisely and continuously. State the blocker found,
+Communicate in English, concisely and continuously. State the blocker found,
 the evidence of progress and what the next step addresses. Routine
 reversible steps within the authorized scope do not require repeated
 confirmation.
