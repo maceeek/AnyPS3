@@ -1,73 +1,73 @@
-# Konstantní fragment shader během načítání ACIT
+# Constant fragment shader during ACIT loading
 
-Datum: 2026-10-14. Cíl: původní menu ACIT a navigace gamepadem; zatím nesplněn.
+Date: 2026-10-14. Goal: the original ACIT menu and gamepad navigation; not yet met.
 
-## Ověřená překážka výkonu a změna
+## Verified performance blocker and change
 
-Běh 238 vykresluje střídavě QUAD s 921 600 pixely pozadí a QUAD s 17 161 pixely
-načítací ikony (`native-bundle-238/stderr.log`, první šestnáct `native RSX draw`).
-Jednoinstrukční původní konstantní MOV byl interpretován znovu pro každý quad,
-včetně vytváření registrů a interpolace nepoužitých vstupů.
+Run 238 alternately renders a QUAD with 921,600 background pixels and a QUAD with 17,161 pixels
+of the loading icon (`native-bundle-238/stderr.log`, the first sixteen `native RSX draw`).
+The single-instruction original constant MOV was interpreted anew for every quad,
+including creating registers and interpolating unused inputs.
 
-`anyps3/rsx_draw.py:709` rozpoznává výhradně shader s jedinou instrukcí MOV
-z inline konstanty. Při prvním pokrytém quadu jej vyhodnotí stávajícím interpretem;
-ten zachovává predikáty, masky, precision, H/R aliasing a explicitní chyby.
-`rsx_draw.py:757` nevytváří pro tuto větev registry a interpolované vstupy pro každý
-quad. Pokrytí, top-left pravidlo, culling, clipping, depth/alpha, blending, masky,
-zápisy guest paměti a počty vykreslených pixelů zůstávají skutečně prováděné.
-Jiné shadery pokračují obecnou cestou. Herní bajty se nemění.
+`anyps3/rsx_draw.py:709` recognizes exclusively a shader with a single MOV
+from an inline constant. On the first covered quad it evaluates it with the existing interpreter;
+that preserves predicates, masks, precision, H/R aliasing and explicit errors.
+`rsx_draw.py:757` does not create registers and interpolated inputs for this branch for every
+quad. Coverage, the top-left rule, culling, clipping, depth/alpha, blending, masks,
+guest memory writes and the counts of rendered pixels remain actually performed.
+Other shaders continue through the general path. The game bytes do not change.
 
-Zdrojový hash změněného `rsx_draw.py` ze snapshotu sestavení 239:
+Source hash of the changed `rsx_draw.py` from the snapshot of build 239:
 `70ef9fff4439764ce625009fc90ce582fec28499ee0e3d1faf4b0c79fc825fec`.
-Jde o jediný runtime soubor změněný proti 238; profil zůstal stejný.
-Předchozí implementace pro diagnostické srovnání:
+It is the only runtime file changed relative to 238; the profile stayed the same.
+The previous implementation for diagnostic comparison:
 `local/ratchet/rsx_draw-before-239.py`.
 
-## Ověřené testy a měření
+## Verified tests and measurements
 
-- `tests/test_rsx.py:250`: nativní očekávání osmi přesných barevných pixelů,
-  scissor, source-alpha blending, maskované modré složky, LESS depth, zachování
-  stencil bajtu a odmítnutí dalších fragmentů přes depth/alpha. Stejný shader
-  s úvodním NOP ověřuje obecnou cestu proti stejnému nezávislému očekávání.
-- `python -m unittest tests.test_rsx.RsxDrawTests -q` → 6 testů, OK (10,481 s),
+- `tests/test_rsx.py:250`: native expectation of eight exact color pixels,
+  scissor, source-alpha blending, masked blue components, LESS depth, preservation of the
+  stencil byte and rejection of further fragments via depth/alpha. The same shader
+  with a leading NOP verifies the general path against the same independent expectation.
+- `python -m unittest tests.test_rsx.RsxDrawTests -q` → 6 tests, OK (10.481 s),
   `local/ratchet/tests-rsx-239.log`.
 - `ANYPS3_REQUIRE_VULKAN=1 python -m unittest discover -s tests -q` →
-  **174 testů, OK (205,634 s), žádné skips**;
-  `local/ratchet/tests-native-239.log`. Vulkan test tedy skutečně běžel.
+  **174 tests, OK (205.634 s), no skips**;
+  `local/ratchet/tests-native-239.log`. The Vulkan test thus actually ran.
 - `PYTHONPATH=. python local/ratchet/tools/benchmark_constant_draw.py` →
-  dvacet drawů 1024×512, 10 485 760 pixelů; stará větev 611 131 µs,
-  nová 267 785 µs (~2,28× rychlejší). Oba programy ověřují přesný počet pixelů
-  a každý výsledný bajt celé černé surface. Zdroje, binárky, logy a hashe:
-  `local/ratchet/draw-benchmark-239/result.json`. Je to syntetické měření rendereru,
-  nikoli běh hry nebo důkaz menu; rychlost celé hry z něj nelze odvodit.
+  twenty draws of 1024×512, 10,485,760 pixels; old branch 611,131 µs,
+  new 267,785 µs (~2.28× faster). Both programs verify the exact pixel count
+  and every resulting byte of the entire black surface. Sources, binaries, logs and hashes:
+  `local/ratchet/draw-benchmark-239/result.json`. It is a synthetic renderer measurement,
+  not a game run or evidence of the menu; the speed of the whole game cannot be inferred from it.
 
-## Nová sestava a další ověření
+## New build and further verification
 
-Nový `native-bundle-239` vznikl standardním `anyps3.build_game` s původním profilem,
-firmwarem a `--max-steps 5000000000`, potom `c++ -std=c++17 -O2 -Wall -Wextra -Werror
--DANYPS3_VULKAN … -lvulkan`. Kompilace úspěšná v 201,298 s. Logy:
+The new `native-bundle-239` was created by the standard `anyps3.build_game` with the original profile,
+firmware and `--max-steps 5000000000`, then `c++ -std=c++17 -O2 -Wall -Wextra -Werror
+-DANYPS3_VULKAN … -lvulkan`. Compilation successful in 201.298 s. Logs:
 `local/ratchet/build-239.log`, `native-bundle-239/compile.log`.
-Všechny zdrojové hashe a snapshot profilu odpovídají současným souborům.
+All source hashes and the profile snapshot match the current files.
 
-Běh 238 zůstává srovnávací skutečný běh starého rendereru; 15:31:43 UTC měl
-315 čtení, 14 947 223 načtených bajtů, draw 18 432 a 162 snímků, session `36487`
-potvrzena živá. Překročil poslední čtení 235/236 (270 čtení, 13 187 843 bajtů).
-**Ověřeno:** větší rozpočet posunul původní načítání za starý SPU limit.
-Počty drawů a snímků nadále nejsou menu.
+Run 238 remains the comparison real run of the old renderer; at 15:31:43 UTC it had
+315 reads, 14,947,223 loaded bytes, draw 18,432 and 162 frames, session `36487`
+confirmed alive. It passed the last read of 235/236 (270 reads, 13,187,843 bytes).
+**Verified:** the larger budget moved the original loading past the old SPU limit.
+The counts of draws and frames are still not the menu.
 
-Původně plánovaný příkaz (neproveden):
+Originally planned command (not executed):
 
 ```bash
 ANYPS3_FRAME_STRIDE=600 PYTHONPATH=. python local/ratchet/run_native.py native-bundle-239 5000000000 > local/ratchet/run-239.log 2>&1
 ```
 
-Řidší záznam snímků mění pouze diagnostický interval; guest draw ani flip se
-nepřeskakují. Následně ověřit vlastní `verification.json`, PT_LOAD bajty,
-hash artefaktů, stop a zachycené pixely. Toto herní ověření při zápisu ještě
-neproběhlo. Virtuální ovladač ani fyzický gamepad a navigace menu nejsou ověřeny.
+Sparser frame recording changes only the diagnostic interval; no guest draw or flip is
+skipped. Then verify the run's own `verification.json`, the PT_LOAD bytes,
+the artifact hashes, the stop and the captured pixels. This game verification had not yet
+taken place at the time of writing. The virtual controller, the physical gamepad and menu navigation are not verified.
 
-**Aktualizace po konci 238:** dosažen nový statický stop `0x962700`. Sestavení
-239 nebylo spuštěno, má vlastní `NOT_RUN.txt`; bylo nahrazeno sestavením 240
-se stejnou testovanou implementací a rozšířeným ověřeným profilem. První
-skutečné herní ověření optimalizace tedy bude 240, viz
-[záznam 240](2026-10-14-vtable-240.md).
+**Update after the end of 238:** a new static stop `0x962700` was reached. Build
+239 was not run, it has its own `NOT_RUN.txt`; it was replaced by build 240
+with the same tested implementation and an extended verified profile. The first
+real game verification of the optimization will therefore be 240, see
+[record 240](2026-10-14-vtable-240.md).

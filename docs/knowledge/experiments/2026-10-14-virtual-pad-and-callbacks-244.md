@@ -1,93 +1,93 @@
-# Callbacky loaderu a skutečný SDL virtuální vstup (244)
+# Loader callbacks and real SDL virtual input (244)
 
-Datum: 2026-10-14. Původní menu ACIT a navigace gamepadem zatím neověřeny.
+Date: 2026-10-14. The original ACIT menu and gamepad navigation are not yet verified.
 
-## Konečný ověřený běh 242
+## Final verified run 242
 
-Session 31385 ukončena, wrapper exit 0, hra returncode 1. Nový stop
-`pc=0x53a244`, `lr=0x57a7e0`, 274 257 993 PPU kroků. 355 čtení,
-16 463 030 bajtů, SPU 0x100 755 183 648 instrukcí a čeká na událost,
-12 232 flipů, 24 456 drawů, 28 zachycených snímků, prezentace do okna 0.
-Vlastní `verification.json` 242 a všech šest artefaktových hashů znovu
-ověřeny; oba původní PT_LOAD úseky souhlasí.
+Session 31385 terminated, wrapper exit 0, game returncode 1. New stop
+`pc=0x53a244`, `lr=0x57a7e0`, 274,257,993 PPU steps. 355 reads,
+16,463,030 bytes, SPU 0x100 755,183,648 instructions and waiting for an event,
+12,232 flips, 24,456 draws, 28 captured frames, presentation to the window 0.
+The own `verification.json` of 242 and all six artifact hashes were verified
+again; both original PT_LOAD segments match.
 
-Loader dosáhl těla třetího typu po readiness metodě `0x962404`.
-R31=8, r8=`0xc53140`; nejde ještě o dokončení všech šesti typů.
+The loader reached the body of the third type after the readiness method `0x962404`.
+R31=8, r8=`0xc53140`; this is not yet the completion of all six types.
 R9=`0xd0efb0`, r6/CTR=`0x53a244`, TOC=`0xd34a88`, r7=`0xf46db0`.
-Původní `0x57a7a0..0x57a7dc` sestavuje argumenty count=`0x136`,
-element-size=4, flags=`0x20` a volá callback přes toto původní OPD.
+The original `0x57a7a0..0x57a7dc` assembles the arguments count=`0x136`,
+element-size=4, flags=`0x20` and calls the callback through this original OPD.
 
-## Ověřené callbacky a profil 244
+## Verified callbacks and profile 244
 
-Původní inicializace `0x32c40c..0x32c464` načte sedm OPD z constant-pool
-cells `0xc94440..0xc94458` a volá jednotlivé settery. Ty je instalují
-do control blocku `0xf46da4` na offsety +0xc, +0x10, +0x14, +0x1c,
-+0x24, +0x28, +0x2c. První odpovídá aktuálně dosaženému poli `0xf46db0`.
-Nejde o odhad podle sousedních OPD: evidence obsahuje původní load, BL,
-setter, TOC/bias a store pro každou položku.
+The original initialization `0x32c40c..0x32c464` loads seven OPDs from the constant-pool
+cells `0xc94440..0xc94458` and calls the individual setters. These install them
+into the control block `0xf46da4` at offsets +0xc, +0x10, +0x14, +0x1c,
++0x24, +0x28, +0x2c. The first corresponds to the currently reached field `0xf46db0`.
+This is not a guess based on neighboring OPDs: the evidence contains the original load, BL,
+setter, TOC/bias and store for each item.
 
 ```bash
 PYTHONPATH=. python local/ratchet/tools/verify_loader_callbacks.py --apply > local/ratchet/target-244-evidence.json 2> local/ratchet/callbacks-244.log
 ```
 
-Ověřen pinned původní ELF SHA-256
+The pinned original ELF SHA-256
 `6debdca0f181f35d98ebe23faabe2531b697c558b4e3384b06630173400674c1`,
-všech sedm OPD, TOC `0xd34a88` a executable kódové bajty. Profil obsahuje
-novou `static_function_tables` položku s původem a skutečně pozorovaný
-`observed_indirect_entries` záznam. Přidáno sedm seeds: `0x53a244`,
+all seven OPDs, TOC `0xd34a88` and executable code bytes were verified. The profile contains a
+new `static_function_tables` item with its origin and an actually observed
+`observed_indirect_entries` record. Seven seeds added: `0x53a244`,
 `0x53a644`, `0x53a520`, `0x53be88`, `0x94f3b4`, `0x4ec0f4`, `0x4ebecc`.
-Další callbacky jsou ověřeny z registrace, nikoli vydávány za vykonané.
-Herní bajty se nemění, nové host služby nebyly zavedeny.
+The other callbacks are verified from the registration, not passed off as executed.
+The game bytes are not changed, no new host services were introduced.
 
-243 bylo zahájeno před úspěšnou kontrolou profilu a přerušeno přes session
-63268, exit 130. Chybný helper assert vyžadoval jen callee successor,
-zatímco BL má callee i návratové pokračování. Selhal před úpravou profilu;
-243 obsahuje starý profil a hra v něm neběžela. Artefakty jsou zachovány,
-`native-bundle-243/TERMINATED.txt`. Opravená kontrola ověřuje oba cíle.
+243 was started before the profile check succeeded and was interrupted via session
+63268, exit 130. A faulty helper assert required only the callee successor,
+whereas BL has both the callee and the return continuation. It failed before the profile was modified;
+243 contains the old profile and the game did not run in it. The artifacts are preserved,
+`native-bundle-243/TERMINATED.txt`. The corrected check verifies both targets.
 
-## Diagnostický virtuální gamepad
+## Diagnostic virtual gamepad
 
-`local/ratchet/tools/virtual_pad.py` vytváří explicitně opt-in diagnostický
-obal. Kopíruje původní přeložený C++ jako `program.base.cpp` bez změny
-bajtů; přejmenuje pouze host main přes preprocesor a před jeho zavoláním
-připojí SDL2 virtuální GameController. Žádný guest kód, paměť, menu nebo
-asset nepatchuje ani nenahrazuje. Normální runtime SDL backend zůstává
-zdrojem `cellPad` výsledků. `diagnostic-manifest.json` eviduje původ,
-wrapper/base/binary hashe; původní build metadata jsou navíc zachována.
+`local/ratchet/tools/virtual_pad.py` creates an explicitly opt-in diagnostic
+wrapper. It copies the original translated C++ as `program.base.cpp` without changing
+bytes; it renames only the host main via the preprocessor and before calling it
+attaches an SDL2 virtual GameController. It does not patch or replace any guest code, memory, menu or
+asset. The normal runtime SDL backend remains the
+source of `cellPad` results. `diagnostic-manifest.json` records the origin and
+the wrapper/base/binary hashes; the original build metadata is additionally preserved.
 
-Control file: sedm desítkových polí `mask LX LY RX RY LT RT`; 15 SDL
-buttons, šest int16 axes. Neutrální stav: `0 0 0 0 0 -32768 -32768`.
-Atomický zápis zajistí subcommand `set`. Tlačítka mají jména down/up/left/right,
-cross/circle/square/triangle, start/select, l1/r1/l3/r3. Neplatná data
-explicitně zastaví diagnostiku; žádná implicitní neutralizace při chybě.
+Control file: seven decimal fields `mask LX LY RX RY LT RT`; 15 SDL
+buttons, six int16 axes. Neutral state: `0 0 0 0 0 -32768 -32768`.
+The subcommand `set` ensures an atomic write. The buttons have the names down/up/left/right,
+cross/circle/square/triangle, start/select, l1/r1/l3/r3. Invalid data
+explicitly stops the diagnostics; no implicit neutralization on error.
 
-API zdroje: instalované `/usr/include/SDL2/SDL_joystick.h:132` (lockování),
-`:370` (attach), `:467` (axis), `:485` (button); header verze 2.32.74
-z `SDL_version.h:59`. [SDL2 LockJoysticks](https://wiki.libsdl.org/SDL2/SDL_LockJoysticks)
-vyžaduje lock při přístupu z více vláken, [SetVirtualButton](https://wiki.libsdl.org/SDL2/SDL_JoystickSetVirtualButton)
-publikuje nastavené hodnoty při dalším joystick update. Input worker používá
-SDL lock a hodnoty spotřebovává původní `NativePad::poll`. Při cleanup
-vyhledává zařízení podle stabilního instance ID, nikoli starého indexu.
+Source API: the installed `/usr/include/SDL2/SDL_joystick.h:132` (locking),
+`:370` (attach), `:467` (axis), `:485` (button); header version 2.32.74
+from `SDL_version.h:59`. [SDL2 LockJoysticks](https://wiki.libsdl.org/SDL2/SDL_LockJoysticks)
+requires a lock when accessed from multiple threads, [SetVirtualButton](https://wiki.libsdl.org/SDL2/SDL_JoystickSetVirtualButton)
+publishes the set values at the next joystick update. The input worker uses the
+SDL lock and the values are consumed by the original `NativePad::poll`. On cleanup
+it looks up the device by its stable instance ID, not by the old index.
 
 ```bash
 PYTHONPATH=. python local/ratchet/tools/virtual_pad.py self-test local/ratchet/virtual-pad-selftest-2
 ```
 
-Ověřeno nativně: init/connected virtuálního zařízení, přesné guest big-endian
-`cellPad` button words (down+cross), levá páčka +32767→255 a −32768→0,
-neutrál 128, L2 pressure 255, délka 20, release a lifecycle. Log
-`local/ratchet/virtual-pad-selftest-2.log`, zdroje/binárka/manifest ve stejnojmenném
-adresáři. **Je to vstupní test, nikoli menu nebo fyzický gamepad.**
-Předchozí selftest-1 také ověřil pět chybových případů (mask mimo rozsah,
-chybějící axis, trailing token, chybějící opt-in, neznámé jméno bez přepsání
-control file): `virtual-pad-selftest-1/error-checks.json`. Reader se od té
-doby nezměnil; změnil se lock/index lifecycle a znovu prošel selftest-2.
+Verified natively: init/connected of the virtual device, exact guest big-endian
+`cellPad` button words (down+cross), left stick +32767→255 and −32768→0,
+neutral 128, L2 pressure 255, length 20, release and lifecycle. Log
+`local/ratchet/virtual-pad-selftest-2.log`, sources/binary/manifest in the directory of the same
+name. **This is an input test, not the menu or a physical gamepad.**
+The earlier selftest-1 also verified five error cases (mask out of range,
+missing axis, trailing token, missing opt-in, unknown name without overwriting the
+control file): `virtual-pad-selftest-1/error-checks.json`. The reader has not changed since
+then; the lock/index lifecycle changed and passed selftest-2 again.
 
-## Nová sestava a probíhající skutečná hra
+## New build and the real game in progress
 
-Runtime hash sada odpovídá úspěšné celé sadě 174 testů s povinným Vulkanem
-z 239; další runtime změny nevznikly. Opakování této sady nebylo potřeba.
-Nový profil zkouší skutečný následující běh.
+The runtime hash set corresponds to the successful whole suite of 174 tests with mandatory Vulkan
+from 239; no further runtime changes were made. Repeating this suite was not needed.
+The new profile tests the real following run.
 
 ```bash
 python -m anyps3.build_game local/ratchet/EBOOT.analysis.elf --firmware local/ratchet/firmware-verified/dev_flash/sys/external --key-file local/ratchet/app-key.json --profile profiles/ratchet-acit.json --max-steps 5000000000 -o local/ratchet/native-bundle-244 > local/ratchet/build-244.log 2>&1
@@ -95,56 +95,56 @@ PYTHONPATH=. python local/ratchet/tools/virtual_pad.py build local/ratchet/nativ
 ANYPS3_VIRTUAL_PAD_CONTROL=/home/martink/AnyPS3/local/ratchet/native-virtual-244/control.txt ANYPS3_FRAME_STRIDE=600 PYTHONPATH=. python local/ratchet/run_native.py native-virtual-244 5000000000 > local/ratchet/run-virtual-244.log 2>&1
 ```
 
-`native-bundle-244` obsahuje původní nový build/snapshot, není samostatně
-zkompilovaný ani spuštěný. Zkompilovaný a běžící program je v
+`native-bundle-244` contains the original new build/snapshot, it is not separately
+compiled or run. The compiled and running program is in
 `native-virtual-244`; compiler flags `-O2 -pthread -DANYPS3_VULKAN -lvulkan`.
-Session 60472 potvrzena živá. V 16:42:15 UTC 212 čtení, 10 907 854 bajtů,
-draw 3328, 10 snímků. Skutečná hra hlásí `ports=7 connected=1 backend=SDL2`.
-Hashe wrapper/base/binary a shoda base s originálním `program.cpp` ověřeny.
-Aktuální runtime zdroje a profil odpovídají 244; konečné ověření zatím chybí.
-Překročení `0x53a244`, menu a navigace virtuálním ovladačem zatím neověřeny;
-fyzický gamepad nebyl testován. Běh zatím vykresluje načítací ikonu.
+Session 60472 confirmed alive. At 16:42:15 UTC 212 reads, 10,907,854 bytes,
+draw 3328, 10 frames. The real game reports `ports=7 connected=1 backend=SDL2`.
+The wrapper/base/binary hashes and the match of base with the original `program.cpp` were verified.
+The current runtime sources and profile correspond to 244; the final verification is still missing.
+Passing `0x53a244`, the menu and navigation with the virtual controller are not yet verified;
+a physical gamepad was not tested. The run so far renders the loading icon.
 
-Po dosažení menu lze změnit vstup bez patchování běhu:
+After the menu is reached, the input can be changed without patching the run:
 
 ```bash
 python local/ratchet/tools/virtual_pad.py set local/ratchet/native-virtual-244/control.txt --buttons down
 python local/ratchet/tools/virtual_pad.py set local/ratchet/native-virtual-244/control.txt
 ```
 
-Tyto příkazy zatím v herním běhu nebyly použity; jsou pouze ověřovací nástroj.
-První další akce: pollovat **stejnou session 60472**, číst
+These commands have not been used in the game run so far; they are only a verification tool.
+First next action: poll the **same session 60472**, read
 `python local/ratchet/tools/observe_run.py native-virtual-244 --record`,
-ověřit vlastní konečný `verification.json` spolu s diagnostickým manifestem
-a řešit skutečný další stop. Starý `native-virtual-242` nikdy nebyl spuštěn,
-má vlastní `NOT_RUN.txt` a chybí mu aktuální profil i lifecycle oprava.
+verify the own final `verification.json` together with the diagnostic manifest
+and address the real next stop. The old `native-virtual-242` was never run,
+has its own `NOT_RUN.txt` and lacks both the current profile and the lifecycle fix.
 
-V 16:46:23 UTC 262 čtení, 12 858 941 načtených bajtů, draw 10752,
-17 snímků. `frame-000005.png` vizuálně potvrzuje původní načítací planetu.
-Vlastní `live-identity.json` porovnává původní PT_LOAD, source/profile hashe,
-base překlad s původním bundle 244 a hashe všech diagnostických artefaktů;
-vše souhlasí. Tento živý důkaz neprokazuje menu/nav nebo konečný stop.
+At 16:46:23 UTC 262 reads, 12,858,941 bytes read, draw 10752,
+17 frames. `frame-000005.png` visually confirms the original loading planet.
+The own `live-identity.json` compares the original PT_LOAD, the source/profile hashes,
+the base translation with the original bundle 244 and the hashes of all diagnostic artifacts;
+everything matches. This live evidence does not prove the menu/nav or the final stop.
 
-## Konečný skutečný výsledek 244 (16:59 UTC)
+## Final real result of 244 (16:59 UTC)
 
-**Ověřené:** session 60472 skončila, hra returncode 1. Předchozí stop
-`0x53a244` překročen; hra otevřela oba původní archivy
-`packed/levels/front_end/level_cached.psarc` a `level_uncached.psarc`.
-444 čtení, 17 897 130 bajtů; SPU 0x100 dokončilo 878 746 602 instrukcí.
-15 259 flipů, 30 510 drawů, 33 snímků; host prezentace 0.
-`frame-000033.png` (bezeztrátově převedený poslední PPM) vizuálně stále
-ukazuje původní načítací planetu. Menu a navigace zůstávají neověřené.
+**Verified:** session 60472 ended, game returncode 1. The previous stop
+`0x53a244` was passed; the game opened both original archives
+`packed/levels/front_end/level_cached.psarc` and `level_uncached.psarc`.
+444 reads, 17,897,130 bytes; SPU 0x100 completed 878,746,602 instructions.
+15,259 flips, 30,510 draws, 33 frames; host presentation 0.
+`frame-000033.png` (the last PPM converted losslessly) visually still
+shows the original loading planet. The menu and navigation remain unverified.
 
-Skutečný stop `pc=0x69f2b4`, `lr=0x69f060`, 308 205 078 PPU kroků:
-`FP division by zero is unsupported`. Původní ELF slovo `ed8d3024`
-dělí f13 (`0x4063400000000000`, 154,0) / f6 (`0`, +0,0) do f12,
-jednoduchá přesnost; FPSCR `0x82004000`. Stop pochází z
-`anyps3/floating.py:153`, nikoli z chybějícího statického cíle.
-Další krok: ověřit PPU výsledky/příznaky/exception režim v původních
-manuálech, implementovat s nativními regresemi, nová sestava a skutečný běh.
+Real stop `pc=0x69f2b4`, `lr=0x69f060`, 308,205,078 PPU steps:
+`FP division by zero is unsupported`. The original ELF word `ed8d3024`
+divides f13 (`0x4063400000000000`, 154.0) / f6 (`0`, +0.0) into f12,
+single precision; FPSCR `0x82004000`. The stop comes from
+`anyps3/floating.py:153`, not from a missing static target.
+Next step: verify the PPU results/flags/exception mode in the original
+manuals, implement with native regressions, a new build and a real run.
 
-Vlastní `verification.json` a nezávislé `terminal-identity.json` ověřují
-všech šest artefaktových hashů, tři hashe diagnostického manifestu,
-byte-identický base C++ proti native-bundle-244 a všechny původní PT_LOAD
-bajty proti EBOOT.analysis.elf. Ovladač zůstal neutrální; gamepad navigace
-ani fyzický ovladač nejsou prokázány. Při tomto zápisu není živý herní handle.
+The own `verification.json` and the independent `terminal-identity.json` verify
+all six artifact hashes, three hashes of the diagnostic manifest,
+the byte-identical base C++ against native-bundle-244 and all original PT_LOAD
+bytes against EBOOT.analysis.elf. The controller stayed neutral; gamepad navigation
+and a physical controller are not proven. At the time of this writing there is no live game handle.

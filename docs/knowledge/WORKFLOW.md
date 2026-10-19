@@ -1,27 +1,27 @@
-# Pravidla práce se znalostmi
+# Rules for working with knowledge
 
-## Jak vzniká ověřený záznam
+## How a verified record is created
 
-Každý technický závěr uveď se stavem **fakt (ověřené)**, **odvozené**, **hypotéza**, **rozhodnutí** nebo **otevřená otázka**, v souladu s kořenovým `AGENTS.md`. Připoj rozsah: veřejná architektura CELL, konkrétní referenční implementace, AnyPS3 staticky, nebo konkrétní runtime běh. Shoda dvou emulátorů sama o sobě není důkazem skutečného hardwaru.
+State every technical conclusion with the status **fact (verified)**, **derived**, **hypothesis**, **decision** or **open question**, in line with the root `AGENTS.md`. Attach the scope: public CELL architecture, a specific reference implementation, AnyPS3 statically, or a specific runtime run. Agreement between two emulators is not, by itself, evidence of real hardware.
 
-Fakt z manuálu musí mít titul, verzi, fyzickou PDF stranu, případně tištěnou stranu/sekci, cestu k původnímu PDF a SHA256 z manifestu. Zdrojový fakt má `repo-relative-path:line`, revizi referenčního klonu a vysvětlení, co přesně daný řádek dokládá. Při změně revize znovu vyhledej symbol; neudržuj staré řádky jako domněle platné.
+A fact from a manual must have the title, version, physical PDF page, optionally the printed page/section, the path to the original PDF and the SHA256 from the manifest. A source-code fact has `repo-relative-path:line`, the revision of the reference clone, and an explanation of what exactly the given line demonstrates. When the revision changes, look the symbol up again; do not keep old lines around as presumed valid.
 
-Runtime fakt má reprodukovatelný příkaz, datum, revizi nebo hash změněných souborů, profil/hru bez kopírování chráněných dat, log, exit stav/timeout a relevantní čítače/artefakty. Uveď, zda nastal skutečný guest draw, host prezentace, clear, flip, nebo jen vznikl soubor obrázku. Černý snímek není důkazem vykresleného menu.
+A runtime fact has a reproducible command, date, revision or hash of the changed files, the profile/game without copying protected data, the log, exit status/timeout and relevant counters/artifacts. State whether an actual guest draw, host presentation, clear or flip occurred, or whether only an image file was produced. A black frame is not evidence of a rendered menu.
 
-Hypotéza musí mít důvod, alternativu a další rozlišující test. Povýš ji na fakt jen po získání důkazu. Vyvrácenou hypotézu označ a ponech její stručný důvod, aby ji další běh neopakoval. Chyba veřejného mirroru patří do zdrojového manifestu, nikoli do seznamu příčin selhání hry.
+A hypothesis must have a reason, an alternative and a further distinguishing test. Promote it to a fact only after obtaining evidence. Mark a refuted hypothesis and keep its brief reason so that the next run does not repeat it. An error of a public mirror belongs in the source manifest, not in the list of causes of the game's failure.
 
-## Pracovní smyčka
+## Working loop
 
-1. Přečíst aktuální stav a poslední důkaz, určit nejbližší blokující guest krok.
-2. Najít konkrétní instrukci, HLE funkci, adresu, FIFO metodu nebo chybějící stav. Ověřit manuál, potom relevantní referenční implementaci.
-3. Zapsat hypotézu a očekávanou změnu pozorování. Zvolit malou změnu s jasným ověřením; neobcházet skutečnou guest větev tvrzením, že menu funguje.
-4. Spustit přiměřené testy a skutečný profil/běh, porovnat stejné čítače a výstup.
-5. Zapsat výsledek, původ důkazu, omezení a další krok. Odkázat nový záznam z CURRENT.
+1. Read the current state and the latest evidence, determine the nearest blocking guest step.
+2. Find the specific instruction, HLE function, address, FIFO method or missing state. Verify against the manual, then against the relevant reference implementation.
+3. Write down the hypothesis and the expected change in the observation. Choose a small change with clear verification; do not bypass the real guest branch by claiming that the menu works.
+4. Run appropriate tests and the real profile/run, compare the same counters and output.
+5. Record the result, the origin of the evidence, limitations and the next step. Link the new record from CURRENT.
 
-## Trvalé předání
+## Durable handoff
 
-CURRENT obsahuje jen aktuální cíl, poslední platný důkaz, aktivní otázky a další krok; dlouhé logy patří do artefaktů. Témata CELL/SPU/PPU/RSX obsahují stabilnější závěry a mapu zdrojů. Záznamy jednotlivých experimentů lze ukládat jako `docs/knowledge/experiments/YYYY-MM-DD-short-name.md` a odkazovat je z CURRENT.
+CURRENT contains only the current goal, the last valid evidence, active questions and the next step; long logs belong in artifacts. The CELL/SPU/PPU/RSX topics contain more stable conclusions and a map of sources. Records of individual experiments can be stored as `docs/knowledge/experiments/YYYY-MM-DD-short-name.md` and linked from CURRENT.
 
-Průběžně zapisuj změnu rozhodujícího blokátoru; nečekej až na ukončení modelu. Před předáním odliš provedené změny, skutečně spuštěné ověření a plán. Neuváděj test jako úspěšný pouze proto, že byl připraven. Za konec cíle se počítá původní menu ACIT a ověřená gamepad interakce, nikoli pouhé dosažení bootu, callbacku nebo flipu.
+Record a change of the deciding blocker as you go; do not wait until the model ends. Before a handoff, distinguish the changes made, the verification actually run, and the plan. Do not report a test as successful merely because it was prepared. The end of the goal is counted as the original ACIT menu and verified gamepad interaction, not merely reaching boot, a callback or a flip.
 
-Nezapisuj projektovou znalost do uživatelských systémových memories. Nezahrnuj tajemství, klíče, obsah hry, firmware ani proprietární SDK. Veřejně dostupné manuály v lokální knihovně zůstávají s původním copyrightem; před veřejnou redistribucí posuď jejich vlastní podmínky.
+Do not write project knowledge into the user's system memories. Do not include secrets, keys, game content, firmware or a proprietary SDK. Publicly available manuals in the local library retain their original copyright; assess their own terms before public redistribution.

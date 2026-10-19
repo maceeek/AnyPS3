@@ -1,52 +1,52 @@
-> **Překonáno** předáním [runtime-handoff-237.md](runtime-handoff-237.md); stop `0x1b8` byl vyřešen linkováním PRX import refs. Zachováno jako historický záznam; těžké artefakty běhu 198 zůstaly.
+> **Superseded** by the handoff [runtime-handoff-237.md](runtime-handoff-237.md); the stop `0x1b8` was resolved by linking the PRX import refs. Kept as a historical record; the heavy artifacts of run 198 remain.
 
-# Předání runtime po sestavení 198
+# Runtime handoff after build 198
 
-Datum: 2026-10-14. Původní cíl: původní menu Ratchet & Clank: A Crack in Time a jeho navigace gamepadem. **Cíl není dokončen.** Uživatel povolil skončit po zásadním posunu a dokončení vedlejších dokumentačních úkolů, aby práci převzal další AI agent.
+Date: 2026-10-14. Original goal: the original Ratchet & Clank: A Crack in Time menu and its gamepad navigation. **The goal is not complete.** The user allowed finishing after a major advance and the completion of side documentation tasks, so that another AI agent can take over the work.
 
-## Ověřený posun
+## Verified advance
 
-- SPU již nezastavuje původní pevný limit 10 milionů instrukcí. `ANYPS3_SPU_MAX_STEPS` umožňuje explicitní kladný uint64 rozpočet; výchozí limit zůstává 10 milionů. Nativní test kontroluje překročení staré hranice a zastavení před další instrukcí za novým limitem.
-- PPU aritmetika zachovává NaN payload, znaménko a PowerPC prioritu operandů, tiší signaling NaN a aktualizuje FPSCR. Odčítání nemění znaménko NaN. Přesné původní FSUBS v `0x3acfc0` již běží.
-- Subnormální operandy a výsledky v binary32/binary64 používají celočíselnou aritmetiku a jediné závěrečné zaokrouhlení. Exact subnormal nehlásí UX, tiny inexact hlásí UX/XX. Racionální testy ověřují hraniční hodnoty, midpointy, znaménka a přechod do normálního rozsahu. Původní FSUBS `0 - 2^-142` v `0x3af508` již běží.
-- Další původní callback přes OPD `0xd0af48` (`0x4eb05c`, TOC `0xd34a88`), jeho desetipoložková jump table a čtrnáct metod vtable `0xc38280` jsou ověřené a přeložené předem. Původní herní bajty zůstávají stejné.
-- Sysutil dotaz na počet audio zařízení `get 0x4c05`, délka 8, vrací skutečnou konfiguraci: zatím žádný zvukový backend. `set 0x4c09`, délka 28, vrací explicitní chybu NOT_IMPLEMENTED, nikoli úspěšnou konfiguraci. Původní hra tuto chybu přijala a pokračovala.
-- Původní `TrophyInitThread` (thread 10, OPD `0xd08f60`, entry `0x4c59b8`) již skutečně vykonává instrukce. Dříve byl pouze vytvořen.
+- The SPU no longer stops at the original fixed limit of 10 million instructions. `ANYPS3_SPU_MAX_STEPS` allows an explicit positive uint64 budget; the default limit remains 10 million. A native test checks exceeding the old boundary and stopping before the next instruction past the new limit.
+- PPU arithmetic preserves the NaN payload, sign and PowerPC operand priority, quiets signaling NaNs and updates FPSCR. Subtraction does not change the NaN sign. The exact original FSUBS at `0x3acfc0` now runs.
+- Subnormal operands and results in binary32/binary64 use integer arithmetic and a single final rounding. An exact subnormal does not report UX, a tiny inexact reports UX/XX. Rational tests verify boundary values, midpoints, signs and the transition to the normal range. The original FSUBS `0 - 2^-142` at `0x3af508` now runs.
+- Another original callback via OPD `0xd0af48` (`0x4eb05c`, TOC `0xd34a88`), its ten-entry jump table and the fourteen methods of the vtable `0xc38280` are verified and translated in advance. The original game bytes remain the same.
+- The sysutil query for the number of audio devices `get 0x4c05`, length 8, returns the real configuration: no audio backend yet. `set 0x4c09`, length 28, returns an explicit NOT_IMPLEMENTED error, not a successful configuration. The original game accepted this error and continued.
+- The original `TrophyInitThread` (thread 10, OPD `0xd08f60`, entry `0x4c59b8`) now actually executes instructions. Previously it was only created.
 
-## Poslední autoritativní běh
+## Last authoritative run
 
-Adresář: `local/ratchet/native-bundle-198/`.
+Directory: `local/ratchet/native-bundle-198/`.
 
-- `verification.json`: kontrola původních herních PT_LOAD bajtů, SHA-256 zdrojů/artefaktů, stop a výsledné snímky.
-- `build.json`, `profile.json`, `program.elf`, `program.cpp`, `program`: přesné reprodukovatelné vstupy a AOT výstupy.
-- `stderr.log`, `stdout.log`, `frames/`: skutečný výstup běhu.
-- `local/ratchet/run-198-summary.log`: stručný strojový souhrn.
+- `verification.json`: check of the original game PT_LOAD bytes, SHA-256 of sources/artifacts, the stop and the resulting frames.
+- `build.json`, `profile.json`, `program.elf`, `program.cpp`, `program`: the exact reproducible inputs and AOT outputs.
+- `stderr.log`, `stdout.log`, `frames/`: the real output of the run.
+- `local/ratchet/run-198-summary.log`: a brief machine summary.
 
-PPU dokončilo **118 208 831 kroků**. SPU `0x100` dokončilo **30 465 692 instrukcí**; ostatní kontexty vykonávají původní job manager a čekají na události. RSX dokončilo 1629 FIFO paketů a 4 cleary. Čtyři zachycené snímky 1280 × 720 jsou stále zcela černé; prezentace do okna je nula. **Žádná herní geometrie, menu ani navigace gamepadem nejsou tímto během ověřeny.**
+The PPU completed **118,208,831 steps**. SPU `0x100` completed **30,465,692 instructions**; the other contexts execute the original job manager and wait for events. The RSX completed 1629 FIFO packets and 4 clears. The four captured frames of 1280 × 720 are still completely black; presentation to the window is zero. **No game geometry, menu or gamepad navigation is verified by this run.**
 
-Kód `anyps3/*.py` a `profiles/ratchet-acit.json` byl po běhu porovnán se snapshotem sestavení 198: hashe všech zdrojů a přesné bajty profilu souhlasí. Originální game ELF má SHA-256 `6debdca0f181f35d98ebe23faabe2531b697c558b4e3384b06630173400674c1`. Profil sestavení má SHA-256 `abba22a03a9377653b820a1a9f7833fcf335f742e374a74cd97eff836502d016`.
+The code `anyps3/*.py` and `profiles/ratchet-acit.json` was compared after the run with the snapshot of build 198: the hashes of all sources and the exact bytes of the profile match. The original game ELF has SHA-256 `6debdca0f181f35d98ebe23faabe2531b697c558b4e3384b06630173400674c1`. The build profile has SHA-256 `abba22a03a9377653b820a1a9f7833fcf335f742e374a74cd97eff836502d016`.
 
-PPU počty mezi běhy nejsou deterministický časový měřič: plánování a vblank používají skutečný monotónní čas. Novější běh může mít menší počet kroků při dřívějším naplánování jiného vlákna. Posuzuj dosaženou větev a důkazy, ne pouze vyšší číslo.
+PPU counts between runs are not a deterministic time meter: scheduling and vblank use real monotonic time. A newer run may have a smaller step count when another thread is scheduled earlier. Judge the branch reached and the evidence, not just a higher number.
 
-## Aktuální stop a první další akce
+## Current stop and first next actions
 
-Stop: PC **`0x2011056c`**, LR **`0x20221a98`**, čtení 4 bajtů z nemapované guest adresy **`0x1b8`**. Aktivní je skutečné `TrophyInitThread`, uvnitř původního firmwaru.
+Stop: PC **`0x2011056c`**, LR **`0x20221a98`**, a 4-byte read from the unmapped guest address **`0x1b8`**. The real `TrophyInitThread` is active, inside the original firmware.
 
-**Ověřená stopa:**
+**Verified trail:**
 
-1. `libsysutil_np_trophy` kód v `0x20221a68` načte `r0` ze svého TOC slotu (`r2 - 0x7eec`) a v `0x20221a78` uloží hodnotu do command context `+0x6c`.
-2. Modulový TOC podle relocation reportu je `0x20238360`; slot `0x20230474` v původním relokovaném ELF obsahuje `0x1b8`. Pro tento slot nebyl nalezen záznam v původní PRX relocation tabulce. Sousední sloty relokace mají.
-3. `libsysutil` kód v `0x20110520` načte context `+0x6c` do `r10`, převede jej na `r9` a v `0x2011056c` jej dereferencuje jako OPD před nepřímým voláním.
+1. The `libsysutil_np_trophy` code at `0x20221a68` loads `r0` from its TOC slot (`r2 - 0x7eec`) and at `0x20221a78` stores the value into the command context `+0x6c`.
+2. The module TOC according to the relocation report is `0x20238360`; the slot `0x20230474` in the original relocated ELF contains `0x1b8`. No entry was found for this slot in the original PRX relocation table. The neighboring slots have relocations.
+3. The `libsysutil` code at `0x20110520` loads the context `+0x6c` into `r10`, converts it to `r9` and at `0x2011056c` dereferences it as an OPD before an indirect call.
 
-**Dosud neprokázáno:** proč se konstanta `0x1b8` dostala do pole, které callee používá jako OPD. Kandidáti jsou TOC/ABI při volání napříč moduly, nedokončená inicializace contextu nebo nesprávné předání argumentů. Není to dosud prokázaná chyba PRX relokátoru.
+**Not yet proven:** why the constant `0x1b8` got into the field that the callee uses as an OPD. The candidates are the TOC/ABI during a cross-module call, unfinished initialization of the context, or incorrect argument passing. This is not yet a proven bug of the PRX relocator.
 
-**První další krok:** sledovat skutečný `r2` a argumenty před `0x20221a68` a při vazbě na `libsysutil`, a porovnat originální import/export ABI i inicializaci command contextu. Nepřičítat k `0x1b8` modulový base a nemapovat nulovou stránku jako opravu bez tohoto důkazu. Nevyřazovat trophy vlákno z plánovače.
+**First next step:** trace the real `r2` and the arguments before `0x20221a68` and at the binding to `libsysutil`, and compare the original import/export ABI and the initialization of the command context. Do not add the module base to `0x1b8` and do not map the zero page as a fix without this evidence. Do not remove the trophy thread from the scheduler.
 
-Pro tento účel vzniká samostatný čtecí `diagnostic.cpp` v adresáři 198, který pouze loguje instrukce a vybrané registry threadu 10. Běžné `program.cpp` zůstává beze změny. Stav a výsledek diagnostiky doplňuje poslední oddíl této zprávy; samotná existence zdroje neprokazuje dokončený proces.
+For this purpose a separate read-only `diagnostic.cpp` is being created in directory 198, which only logs instructions and selected registers of thread 10. The regular `program.cpp` remains unchanged. The status and result of the diagnostics are added in the last section of this report; the mere existence of the source does not prove a completed process.
 
-## Reprodukce
+## Reproduction
 
-Z kořene projektu a do dosud nepoužitého adresáře:
+From the project root and into a directory not used so far:
 
 ```bash
 python -m anyps3.build_game local/ratchet/EBOOT.analysis.elf \
@@ -59,37 +59,37 @@ c++ -std=c++17 -Og -Wall -Wextra -Werror -DANYPS3_VULKAN \
 PYTHONPATH=. python local/ratchet/run_native.py native-bundle-199 500000000
 ```
 
-Helper nastavuje skutečný disc/cache/HDD root, ASCII case-fold pouze pro ISO9660 extrakt, Vulkan Lavapipe, validation layer, nový adresář snímků a SPU rozpočet. Kontroluje identitu původních herních segmentů a píše verification report; menu flag je výslovně false, automatická interpretace obsahu menu není implementována. Jeho úspěšný exit může znamenat řádně zdokumentovaný guest stop: čti `returncode` v reportu.
+The helper sets the real disc/cache/HDD root, ASCII case-fold only for the ISO9660 extract, Vulkan Lavapipe, the validation layer, a new frame directory and the SPU budget. It checks the identity of the original game segments and writes a verification report; the menu flag is explicitly false, automatic interpretation of menu content is not implemented. Its successful exit may mean a properly documented guest stop: read `returncode` in the report.
 
-## Testy a omezení
+## Tests and limitations
 
-`ANYPS3_REQUIRE_VULKAN=1 python -m unittest discover -s tests -q` prošlo: **156 testů**, 97.714 s. Log: `local/ratchet/tests-native-198.log`, jeho hash je ve verification reportu. Vulkan byl povinný. Samostatné testy NaN/subnormal i sysutil wire audio chyb jsou rovněž uložené v `local/ratchet/tests-floating-195.log` a `tests-sysutil-197.log`.
+`ANYPS3_REQUIRE_VULKAN=1 python -m unittest discover -s tests -q` passed: **156 tests**, 97.714 s. Log: `local/ratchet/tests-native-198.log`, its hash is in the verification report. Vulkan was mandatory. The separate NaN/subnormal tests and the sysutil wire audio error tests are also saved in `local/ratchet/tests-floating-195.log` and `tests-sysutil-197.log`.
 
-Infinita mimo podporovanou NaN propagaci, overflow, alternativní rounding modes a povolené FP traps nadále explicitně selhávají. Zvukový backend chybí; neznámé služby nejsou simulované úspěšným návratem. SDL2 vstup je ověřený s virtuálním zařízením, nikoli v původním menu. Geometrie/shadery a oknová prezentace stále chybí.
+Infinities beyond the supported NaN propagation, overflow, alternative rounding modes and enabled FP traps continue to fail explicitly. The audio backend is missing; unknown services are not simulated by a successful return. SDL2 input is verified with a virtual device, not in the original menu. Geometry/shaders and window presentation are still missing.
 
-Git metadatový adresář v aktuálním prostředí je prázdný/omezený; `git status` hlásil, že nejde o repozitář. Nebyl vytvořen commit ani nový Git repozitář. Dostupné zdrojové hashe a snapshoty nahrazují chybějící commitovou referenci pro toto předání.
+The Git metadata directory in the current environment is empty/restricted; `git status` reported that it is not a repository. No commit and no new Git repository was created. The available source hashes and snapshots replace the missing commit reference for this handoff.
 
 
-## Dokončená čtecí diagnostika a stav při předání
+## Completed read-only diagnostics and the state at handoff
 
-`diagnostic.cpp` a `diagnostic` byly sestaveny a spuštěny; běh skončil
-nenulovým návratovým kódem 1 na **stejném** čtení `0x1b8` na PC
-`0x2011056c`, při 118 209 228 PPU krocích. Výstupy:
+`diagnostic.cpp` and `diagnostic` were built and run; the run ended
+with a nonzero return code 1 at the **same** read of `0x1b8` at PC
+`0x2011056c`, at 118,209,228 PPU steps. Outputs:
 `diagnostic-stderr.log`, `diagnostic-stdout.log`, `diagnostic-frames/`
-a `diagnostic-verification.json` v adresáři sestavení 198. Poslední soubor
-obsahuje hashe samostatné diagnostiky a logů.
+and `diagnostic-verification.json` in the build 198 directory. The last file
+contains the hashes of the separate diagnostics and the logs.
 
-**Nový přímý důkaz:** trace před `0x20221a68` uvádí skutečný `r2=0x20238360`;
-po této instrukci je `r0=0x1b8` a před `0x20221a78` je tatáž hodnota
-předána do contextu. Nesprávný TOC registr přímo v místě tohoto loadu
-je tedy vyvrácen. Příčina chybného allocator OPD stále není prokázána:
-zkontrolovat původní inicializaci tohoto TOC slotu a command contextu,
-modulový životní cyklus a jeho ABI. Chyba nesmí být maskována.
+**New direct evidence:** the trace before `0x20221a68` shows the real `r2=0x20238360`;
+after this instruction `r0=0x1b8` and before `0x20221a78` the same value is
+passed into the context. An incorrect TOC register directly at the point of this load
+is therefore refuted. The cause of the faulty allocator OPD is still not proven:
+check the original initialization of this TOC slot and of the command context,
+the module lifecycle and its ABI. The bug must not be masked.
 
-Při předání jsou všechny vytvořené build/run/test/diagnostic procesy
-terminální a dokumentační subagent GPT-6.1 Sol dokončil svůj úkol.
-Žádný běh nečeká na další polling. Dokumentace má pět ověřených originálů
-PDF a pět stránkových MD převodů (2755 fyzických stran), platné lokální
-odkazy a manifest SHA-256. Kořenový AGENTS.md je hlavní workflow.
-Práce se pozastavuje pro předání na přání uživatele; původní cíl zůstává
-nedokončený.
+At handoff all created build/run/test/diagnostic processes are
+terminal and the documentation subagent GPT-6.1 Sol has completed its task.
+No run is waiting for further polling. The documentation has five verified original
+PDFs and five page-wise MD conversions (2755 physical pages), valid local
+links and a SHA-256 manifest. The root AGENTS.md is the main workflow.
+The work is paused for handoff at the user's wish; the original goal remains
+incomplete.

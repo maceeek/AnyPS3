@@ -1,68 +1,79 @@
-# AnyPS3: workflow pro agenty
+# AnyPS3: workflow for agents
 
-## Cíl a hranice projektu
+## Project goal and boundaries
 
-Aktuální cíl je **dostat původní Ratchet & Clank: A Crack in Time do menu
-a umožnit jeho navigaci gamepadem**. Zachovej tento cíl i při předání
-mezi modely a běhy. Počet instrukcí, dokončený clear, černý flip nebo
-syntetický test nejsou dosažené menu.
+The current goal is **to get the original Ratchet & Clank: A Crack in Time
+to its menu and make it navigable with a gamepad**. Preserve this goal
+also across handoffs between models and runs. An instruction count, a
+completed clear, a black flip or a synthetic test are not a reached menu.
 
-Projekt používá vlastní statický překlad PPU/SPU a vlastní Vulkan runtime.
-Referenční projekty slouží k rešerši rozhraní a algoritmů. Původní herní
-bajty se nepatchují. Nevkládej náhradní menu, předem rozbalené assety ani
-jiný emulator jako cestu k domnělému splnění cíle.
+The project uses its own static PPU/SPU translation and its own Vulkan
+runtime. Reference projects serve for researching interfaces and
+algorithms. The original game bytes are not patched. Do not insert a
+substitute menu, pre-unpacked assets or another emulator as a route to a
+supposed fulfilment of the goal.
 
-## Na začátku každého běhu
+## At the start of every run
 
-1. Přečti tento soubor, `docs/knowledge/INDEX.md`,
-   `docs/knowledge/CURRENT.md` a `docs/knowledge/HANDOFF.md`.
-   Pro historii použij `docs/menu-progress.md`; nečti všechny staré logy.
-2. Zkontroluj aktuální soubory, profil, poslední ověřené sestavení a jeho
-   `verification.json`. Znalostní báze je rozcestník, ne důkaz současného
-   runtime stavu. Existenci a relevantní obsah odkazů ověř.
-3. Zjisti skutečný stav běžících procesů a dostupných tool/session handles.
-   Živý build nebo run nejprve sleduj; po pouhém timeoutu pozorování ho
-   nerestartuj. Samotný starý log nebo stavový soubor neprokazuje živý proces.
-4. Pokud je k dispozici Git, přečti status a diff, zachovej cizí změny.
-   Prázdná či nepřístupná `.git` není oprávnění inicializovat nový repozitář.
-5. Formuluj další konkrétní překážku z posledního skutečného stopu.
-   Upřednostni její odstranění před nesouvisejícím refaktoringem.
+1. Read this file, `docs/knowledge/INDEX.md`,
+   `docs/knowledge/CURRENT.md` and `docs/knowledge/HANDOFF.md`.
+   For history use `docs/menu-progress.md`; do not read all the old logs.
+2. Check the current files, the profile, the last verified build and its
+   `verification.json`. The knowledge base is an index, not evidence of the
+   current runtime state. Verify that the links exist and what they
+   actually contain.
+3. Determine the actual state of running processes and available
+   tool/session handles. Observe a live build or run first; do not restart
+   it after a mere observation timeout. An old log or status file alone
+   does not prove a live process.
+4. If Git is available, read the status and diff, and preserve changes made
+   by others. An empty or inaccessible `.git` is not permission to
+   initialize a new repository.
+5. Formulate the next concrete blocker from the last actual stop.
+   Prefer removing it over unrelated refactoring.
 
-## Cyklus implementace a důkazů
+## Implementation and evidence cycle
 
-1. **Reprodukce:** otevři poslední stderr/stdout, stav registrů, relevantní
-   původní instrukce a původní ELF/PRX/SPU obraz. Identifikuj skutečné
-   argumenty, adresy, verze a očekávaný výsledek.
-2. **Rešerše:** hledej přes `rg` v lokálních referencích a manuálech.
-   Pro bitové layouty a tabulky kontroluj původní PDF; převod do Markdownu
-   je navigační pomůcka. Přesně rozlišuj firmware 3.01, PowerPC, PS3 Cell,
-   SPU a PowerXCell 8i. NVIDIA NV40/G70 není automaticky totožná s RSX.
-3. **Implementace:** uprav generátor nebo runtime v `anyps3/`.
-   Nepodporované chování nikdy nepřeskakuj. Úspěšný návrat smí potvrzovat
-   pouze provedenou operaci; známá služba může vrátit skutečnou chybu.
-   Neznámý protokol nebo instrukce mají explicitně zastavit běh.
-4. **Statické cíle:** novou nepřímou funkci nebo overlay přidej teprve
-   po ověření původního OPD/kódových bajtů, TOC, rozsahu a identity obrazu.
-   U jump table ověř základ, znaménko/šířku offsetů, počet i všechny cíle.
-   Evidence a původ patří do profilu nebo znalostního záznamu.
-5. **Test:** u změny sémantiky přidej nativní regresní test s nezávislým
-   očekáváním. Ověř endianitu, aliasy, hraniční hodnoty, chyby a stavové
-   příznaky podle relevance. Test nemá pouze kopírovat algoritmus změny.
-6. **Nová sestava:** vždy nový adresář, snapshot profilu a hash zdrojů.
-   Předchozí artefakty nepřepisuj. Jednorázová změna v generovaném C++
-   není trvalá oprava; samostatná diagnostika musí být tak označena.
-7. **Skutečný běh:** vykonej původní hru se skutečnými daty a souborovým
-   úložištěm. Zachovej stderr/stdout, návratový kód, stop a zachycené snímky.
-   Po úpravě nedokazuj postup jen úspěšným sestavením.
-8. **Ověření:** porovnej původní PT_LOAD bajty, hashe artefaktů, skutečný
-   výstup a rozsah testů. Počty clearů/flipů odděl od geometrie, zachycených
-   snímků, prezentace do okna a dosažení menu.
-9. **Zápis:** aktualizuj `CURRENT.md`, vhodný tematický záznam a stručnou
-   historii v `docs/menu-progress.md`. Potom řeš další skutečný stop.
+1. **Reproduction:** open the latest stderr/stdout, register state, the
+   relevant original instructions and the original ELF/PRX/SPU image.
+   Identify the actual arguments, addresses, versions and expected result.
+2. **Research:** search with `rg` in local references and manuals.
+   For bit layouts and tables, check the original PDF; the Markdown
+   conversion is a navigation aid. Distinguish precisely between firmware
+   3.01, PowerPC, PS3 Cell, SPU and PowerXCell 8i. NVIDIA NV40/G70 is not
+   automatically identical to RSX.
+3. **Implementation:** modify the generator or runtime in `anyps3/`.
+   Never skip unsupported behavior. A successful return may only confirm
+   an operation that was actually performed; a known service may return a
+   real error. An unknown protocol or instruction must explicitly stop the
+   run.
+4. **Static targets:** add a new indirect function or overlay only
+   after verifying the original OPD/code bytes, TOC, range and image
+   identity. For jump tables, verify the base, the sign/width of the
+   offsets, the count and all targets. Evidence and provenance belong in
+   the profile or a knowledge record.
+5. **Test:** for a semantics change, add a native regression test with an
+   independent expectation. Verify endianness, aliases, boundary values,
+   errors and status flags as relevant. The test must not merely copy the
+   algorithm of the change.
+6. **New build:** always a new directory, a profile snapshot and the source
+   hash. Do not overwrite previous artifacts. A one-off change in the
+   generated C++ is not a permanent fix; a standalone diagnostic must be
+   labeled as such.
+7. **Real run:** execute the original game with real data and file
+   storage. Preserve stderr/stdout, the return code, the stop and the
+   captured frames. After a modification, do not demonstrate progress
+   merely with a successful build.
+8. **Verification:** compare the original PT_LOAD bytes, artifact hashes,
+   the actual output and the scope of the tests. Keep clear/flip counts
+   separate from geometry, captured frames, presentation to the window
+   and reaching the menu.
+9. **Write-up:** update `CURRENT.md`, a suitable topic record and the brief
+   history in `docs/menu-progress.md`. Then address the next actual stop.
 
-## Standardní příkazy
+## Standard commands
 
-Z kořene projektu, s dostupnými lokálními herními vstupy:
+From the project root, with the local game inputs available:
 
 ```bash
 python -m anyps3.build_game local/ratchet/EBOOT.analysis.elf \
@@ -71,11 +82,11 @@ python -m anyps3.build_game local/ratchet/EBOOT.analysis.elf \
   --profile profiles/ratchet-acit.json --max-steps 500000000 \
   -o local/ratchet/native-bundle-N
 
-# Překlad je rozdělen do jednotek (units.json: anyps3.hpp, program.cpp
-# s runtime a main, ppu-*.cpp, spu-*.cpp); kompilují se paralelně.
+# The translation is split into units (units.json: anyps3.hpp, program.cpp
+# with the runtime and main, ppu-*.cpp, spu-*.cpp); they are compiled in parallel.
 PYTHONPATH=. python local/ratchet/tools/virtual_pad.py build -j 24 \
   local/ratchet/native-bundle-N local/ratchet/native-virtual-N
-# bez obalu virtuálního padu: python -m anyps3.native_build --vulkan local/ratchet/native-bundle-N
+# without the virtual pad wrapper: python -m anyps3.native_build --vulkan local/ratchet/native-bundle-N
 
 ANYPS3_AUDIO_SINK=null ANYPS3_FRAME_STRIDE=600 \
   ANYPS3_VIRTUAL_PAD_CONTROL=$PWD/local/ratchet/native-virtual-N/control.txt \
@@ -84,67 +95,78 @@ ANYPS3_AUDIO_SINK=null ANYPS3_FRAME_STRIDE=600 \
 ANYPS3_REQUIRE_VULKAN=1 python -m unittest discover -s tests -q
 ```
 
-`N` nahraď dosud nepoužitým číslem. Build/compile/test/run výstupy ukládej
-do vlastních logů. Čtecí ověřovací helper `local/ratchet/run_native.py`
-nastavuje skutečný disk, cache, HDD, frame directory a SPU rozpočet.
-Před použitím ověř jeho aktuální obsah. Standardní SPU limit je 10 milionů
-instrukcí na vlákno; `ANYPS3_SPU_MAX_STEPS` explicitně nastavuje jiný
-kladný uint64 rozpočet. Změna limitu není oprava sémantiky ani důkaz menu.
+Replace `N` with a number that has not been used yet. Save the
+build/compile/test/run outputs to their own logs. The read-only
+verification helper `local/ratchet/run_native.py` sets the real disc,
+cache, HDD, frame directory and SPU budget. Verify its current content
+before use. The standard SPU limit is 10 million instructions per thread;
+`ANYPS3_SPU_MAX_STEPS` explicitly sets a different positive uint64 budget.
+Changing the limit is neither a semantic fix nor evidence of the menu.
 
-Spusť cílené testy před drahým herním sestavením. Celou regresní sadu
-spusť po dokončené skupině runtime změn; při změnách RSX/Vulkanu musí
-Vulkan test skutečně běžet. Již úspěšné testy neopakuj bez nové změny,
-selhání nebo konkrétní pochybnosti. Pouhá editace dokumentace nevyžaduje
-kompilaci hry; ověř odkazy, manifesty a dostupnost artefaktů.
+Run targeted tests before an expensive game build. Run the whole
+regression suite after a completed group of runtime changes; for RSX/Vulkan
+changes, the Vulkan test must actually run. Do not repeat already
+successful tests without a new change, a failure or a concrete doubt. A
+mere documentation edit does not require compiling the game; verify links,
+manifests and the availability of artifacts.
 
-## Znalostní báze a dokumentace
+## Knowledge base and documentation
 
-- `docs/knowledge/INDEX.md`: rozcestník a pořadí čtení.
-- `docs/knowledge/CURRENT.md`: současný ověřený stav a první další krok.
-- `docs/knowledge/HANDOFF.md`: předání mezi modely/běhy.
-- `docs/knowledge/WORKFLOW.md`: pravidla znalostních záznamů a dokumentů.
-- `local/reference/cell-docs/`: původní PDF, převody, downloader a manifest.
-- `local/reference/`: skutečně dostupné kopie RPCS3, QEMU, PSL1GHT,
-  envytools a RPCS3 wiki. Jejich přesné cesty eviduje znalostní báze;
-  nepředpokládej, že jsou všechny ve stejné hloubce.
+- `docs/knowledge/INDEX.md`: index and reading order.
+- `docs/knowledge/CURRENT.md`: current verified state and the first next step.
+- `docs/knowledge/HANDOFF.md`: handoff between models/runs.
+- `docs/knowledge/WORKFLOW.md`: rules for knowledge records and documents.
+- `local/reference/cell-docs/`: original PDFs, conversions, downloader and
+  manifest.
+- `local/reference/`: the actually available copies of RPCS3, QEMU,
+  PSL1GHT, envytools and the RPCS3 wiki. Their exact paths are recorded
+  by the knowledge base; do not assume that all of them are at the same
+  depth.
 
-Každý důležitý poznatek uveď jako **ověřené**, **odvozené** nebo
-**hypotéza**. Připoj přesnou verzi zdroje, soubor a řádek nebo PDF stranu,
-konkrétní runtime/test důkaz, omezení a důsledek pro další práci. Ulož
-i vyvrácené hypotézy, pokud zabrání opakování stejné slepé uličky.
-Nenechávej klíčová zjištění jen v chatu či paměti konkrétního modelu.
+State every important finding as **verified**, **derived** or
+**hypothesis**. Attach the exact version of the source, the file and line
+or the PDF page, the concrete runtime/test evidence, the limitations and
+the consequence for further work. Also store refuted hypotheses if they
+prevent repeating the same dead end. Do not leave key findings only in the
+chat or in the memory of a specific model.
 
-U PDF eviduj původní URL, název/verzi z titulní strany, SHA-256, počet
-stran, datum získání a metodu převodu. Zachovej mapování na PDF strany.
-Neoznačuj tutorial jako handbook a nenahrazuj nedostupnou verzi novější
-či starší potichu. Převod textu není přesná rekonstrukce diagramů/tabulek.
+For PDFs, record the original URL, the title/version from the cover page,
+SHA-256, page count, date of acquisition and conversion method. Preserve
+the mapping to PDF pages. Do not label a tutorial as a handbook and do not
+silently replace an unavailable version with a newer or older one. Text
+conversion is not an exact reconstruction of diagrams/tables.
 
-## Subagenti a komunikace
+## Subagents and communication
 
-Izolované dokumentační rešerše lze delegovat subagentovi GPT-6.1 Sol,
-pokud je dostupný. Předej mu konkrétní výstupy, soubory, pravidla a
-vlastnictví cest. Runtime a profil spravuje hlavní agent; dokumentační
-agent nemá současně editovat stejné soubory. Před předáním práce počkej
-na všechny zadané vedlejší úkoly a jejich výsledky ověř.
+Isolated documentation research can be delegated to the GPT-6.1 Sol
+subagent, if available. Give it concrete outputs, files, rules and
+ownership of paths. The runtime and the profile are managed by the main
+agent; the documentation agent must not edit the same files at the same
+time. Before handing over the work, wait for all assigned side tasks and
+verify their results.
 
-Referenční repozitáře neměň bez zvláštního důvodu a čti jejich místní
-`AGENTS.md`, pokud se v nich pohybuješ. Nepřenášej pravidla pro jejich
-upstream contribution na změny vlastního AnyPS3 projektu.
+Do not modify reference repositories without a special reason, and read
+their local `AGENTS.md` if you work inside them. Do not carry over the
+rules for their upstream contributions onto changes to the AnyPS3 project
+itself.
 
-Komunikuj česky, stručně a průběžně. Uváděj zjištěnou překážku, důkaz
-posunu a to, co řeší další krok. Rutinní vratné kroky v autorizovaném
-rozsahu nevyžadují opakované potvrzení.
+Communicate in Czech, concisely and continuously. State the blocker found,
+the evidence of progress and what the next step addresses. Routine
+reversible steps within the authorized scope do not require repeated
+confirmation.
 
-## Dokončení a předání
+## Completion and handoff
 
-Celý cíl je hotový pouze při prokazatelném původním menu hry a
-prokazatelné navigaci gamepadem přes herní vstupní cestu. Samostatný
-test SDL ovladače neprokazuje navigaci menu. Uveď zvlášť virtuální
-ovladač, fyzický gamepad a případné neprovedené ověření.
+The whole goal is done only with a demonstrable original game menu and
+demonstrable gamepad navigation through the game's input path. A
+standalone SDL controller test does not prove menu navigation. State
+separately the virtual controller, the physical gamepad and any
+verification that was not performed.
 
-Když uživatel dovolí skončit po zásadním posunu, dokonči vedlejší úkoly,
-ověř nový běh a před odchodem sepiš: změny, poslední skutečný stop,
-přesné příkazy a artefakty, testy, přetrvávající omezení, živé procesy
-a první další akci. Neschovávej nehotové menu za dílčí milník.
-Nevytvářej z původního cíle užší náhradní cíl. Pozastavení pro předání
-není dokončení; pokračuj či zastav podle posledního pokynu uživatele.
+When the user allows finishing after a major advance, complete the side
+tasks, verify the new run and, before leaving, write up: the changes, the
+last actual stop, the exact commands and artifacts, tests, persisting
+limitations, live processes and the first next action. Do not hide an
+unfinished menu behind a partial milestone. Do not turn the original goal
+into a narrower substitute goal. A pause for handoff is not completion;
+continue or stop according to the user's latest instruction.
