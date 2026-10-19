@@ -287,6 +287,8 @@ def generate_parts(images: tuple[ElfImage,...], overlays: tuple[tuple[tuple[int,
     lines.append(r"""static void spu_step(PpuState& s,NativeSpu::Thread& t,std::uint8_t* ls,unsigned budget=1,std::uint64_t limit=UINT64_MAX,bool trace=false){
     HostAccessContext origin(HostAccessOrigin::Engine::Spu,t.id,t.pc,&t.steps);
     if(!budget)return;
+    // Only spu_prepare binds a thread to a translated image; never run unbound LS.
+    if(t.image_index==UINT32_MAX)throw std::runtime_error("unknown native SPU image");
     if(t.steps>=limit)throw std::runtime_error("SPU execution step limit reached");
     t.block_budget=budget;t.block_limit=limit;t.block_trace=trace || spu_capture.file;t.block_control_exit=false;
     // Budgets below one maximal superblock are exact; scheduler slices may end after a whole block.

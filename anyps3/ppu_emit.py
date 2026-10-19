@@ -63,7 +63,9 @@ CR_SYNC_CALLS = ('fp_compare(', 'fp_move_field(')
 NOTHROW = {'UINT64_C', 'UINT32_C', 'INT64_C', 'INT32_C', 'Wide', 'rotl64', 'rotl32', 'sign_word', 'signed_word',
            'leading_zeroes', 'divide_integer', 'ppu_cmp', 'ppu_crset', 'ppu_bt', 'ppu_sra', 'static_cast',
            '__builtin_bswap16', '__builtin_bswap32', '__builtin_bswap64', 'for', 'if', 'while', 'switch',
-           'sizeof', 'std::atomic_thread_fence', 'timebase_ticks', 'fp_widen', 'vmx_word', 'fp_subtract_operand', 'data'}
+           'sizeof', 'std::atomic_thread_fence', 'timebase_ticks', 'fp_widen', 'vmx_word', 'fp_subtract_operand', 'data',
+           # Pure VMX byte/word helpers (vector.py): no state, no throw.
+           'vmx_logic', 'vmx_select', 'vmx_permute', 'vmx_shift_left_double', 'vmx_merge', 'vmx_word_add', 'vmx_float_compare'}
 TRANSFER_PRIMARY = (16, 18)
 
 HELPERS_CPP = r'''

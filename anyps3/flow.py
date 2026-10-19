@@ -47,7 +47,7 @@ class Operation:
             if self.cpp.endswith(suffix):
                 body = self.cpp[:-len(suffix)]
                 calls = set(re.findall(r'\b([A-Za-z_]\w*)\s*\(', body))
-                if calls - {'UINT64_C', 'UINT32_C', 'INT64_C', 'Wide', 'for', 'if',
+                if calls - {'UINT64_C', 'UINT32_C', 'INT64_C', 'Wide', 'for', 'if', 'vmx_logic',
                             'rotl64', 'rotl32', 'compare', 'record', 'sign_word',
                             'signed_word', 'arithmetic_shift', 'leading_zeroes',
                             'divide_integer'}:
@@ -113,9 +113,7 @@ def lift(word: int, pc: int) -> Operation:
         return Operation(pc,word,('stdcx.' if width==8 else 'stwcx.') if store else ('ldarx' if width==8 else 'lwarx'),body+f' state.pc=0x{next_pc:x};',successors)
     vector_xo=word & 2047
     if op==4 and vector_xo in (1028,1092,1156,1220,1284):
-        a,b=f"state.vr[{ra}][i]",f"state.vr[{rb}][i]"
-        expression={1028:f"{a} & {b}",1092:f"{a} & ~{b}",1156:f"{a} | {b}",1220:f"{a} ^ {b}",1284:f"~({a} | {b})"}[vector_xo]
-        body=f"for (unsigned i=0;i<16;++i) {{ state.vr[{rt}][i] = static_cast<std::uint8_t>({expression}); }}"
+        body=f"vmx_logic<{vector_xo}>(state.vr[{rt}],state.vr[{ra}],state.vr[{rb}]);"
         return Operation(pc,word,'vector_logic',body+f" state.pc = 0x{next_pc:x};",successors)
     if op==31 and xo in (103,359,231,487) and not word & 1:
         base=f"r[{ra}]" if ra else "UINT64_C(0)"
@@ -485,9 +483,17 @@ def lift(word: int, pc: int) -> Operation:
             body += f" record(state, r[{ra}]);"
         mnemonic = ("rldicl", "rldicr", "rldic", "rldimi")[variant]
     elif op in (20, 21, 23):
-        m = mask((word >> 6) & 31, (word >> 1) & 31, 32)
+        mb, me = (word >> 6) & 31, (word >> 1) & 31
         shift = f"(r[{rb}] & 31)" if op == 23 else str(rb)
-        value = f"(rotl32(static_cast<std::uint32_t>(r[{rt}]), {shift}) & {literal(m)})"
+        if mb <= me:
+            m = mask(mb, me, 32)
+            value = f"(rotl32(static_cast<std::uint32_t>(r[{rt}]), {shift}) & {literal(m)})"
+        else:
+            # Book I: r=ROTL32 duplicates the rotated word into both halves and
+            # MASK(MB+32,ME+32) wraps over the whole upper word, which therefore
+            # receives the rotated word (not zero).
+            m = mask(mb + 32, me + 32, 64)
+            value = f"((UINT64_C(0x100000001) * rotl32(static_cast<std::uint32_t>(r[{rt}]), {shift})) & {literal(m)})"
         if op == 20:
             value = f"(r[{ra}] & {literal(~m)}) | {value}"
         body = f"r[{ra}] = {value};"
@@ -581,9 +587,8 @@ constexpr std::uint64_t TIMEBASE_HZ = 79800000;
     return amount ? (value >> amount) | (negative ? UINT64_MAX << (64 - amount) : 0) : value;
 }
 [[maybe_unused]] static unsigned leading_zeroes(std::uint64_t value, unsigned width) {
-    unsigned result = 0;
-    for (unsigned i = width; i && !(value & (UINT64_C(1) << (i - 1))); --i) ++result;
-    return result;
+    if (width == 32) value &= UINT32_MAX;
+    return value ? unsigned(__builtin_clzll(value)) - (64 - width) : width;
 }
 [[maybe_unused]] static bool branch_test(PpuState& state, unsigned bo, unsigned bi) {
     if (!(bo & 4)) --state.ctr;

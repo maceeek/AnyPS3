@@ -28,7 +28,7 @@ def lift_vector(word):
     if vx==0x644 and not d and not a:
         return 'mtvscr',f'state.vscr=vmx_word({reg(b)},3)&0x10001;'
     if vx==0x10a and not a:
-        return 'vrefp',out+f'VmxFloatScope scope(state);for(unsigned i=0;i<4;++i)vmx_word(out,i,vmx_reciprocal(state,vmx_word({reg(b)},i)));'+finish
+        return 'vrefp',f'vmx_estimate_op(state,{reg(d)},{reg(b)},false);'
     # vmule*/vmulo* (AltiVec PEM): products of the even (0,2,..) or odd (1,3,..) n-byte elements
     # in big-endian element order, each stored as a 2n-byte element of the result.
     multiply={0x008:(1,1,0),0x048:(2,1,0),0x108:(1,1,1),0x148:(2,1,1),
@@ -45,8 +45,7 @@ def lift_vector(word):
     merge={0xc:(1,0),0x4c:(2,0),0x8c:(4,0),0x10c:(1,8),0x14c:(2,8),0x18c:(4,8)}
     if vx in merge:
         n,half=merge[vx]
-        body=f'for(unsigned e=0;e<{8//n};++e)for(unsigned j=0;j<{n};++j){{out[2*{n}*e+j]={reg(a)}[{half}+{n}*e+j];out[2*{n}*e+{n}+j]={reg(b)}[{half}+{n}*e+j];}}'
-        return 'vector_merge',out+body+finish
+        return 'vector_merge',f'vmx_merge<{n},{str(bool(half)).lower()}>({reg(d)},{reg(a)},{reg(b)});'
     unpack={0x20e:(1,0),0x28e:(1,8),0x24e:(2,0),0x2ce:(2,8)}
     if vx in unpack and not a:
         n,half=unpack[vx]
@@ -89,25 +88,19 @@ def lift_vector(word):
         body+='if(saturated)state.vscr|=1;'
         return 'vector_pack_saturate',out+body+finish
     if vx==0x14a and not a:
-        return 'vrsqrtefp',out+f'VmxFloatScope scope(state);for(unsigned i=0;i<4;++i)vmx_word(out,i,vmx_reciprocal_root(state,vmx_word({reg(b)},i)));'+finish
+        return 'vrsqrtefp',f'vmx_estimate_op(state,{reg(d)},{reg(b)},true);'
     if vx in (0x40a,0x44a):
-        expr=f'vmx_extreme(vmx_word({reg(a)},i),vmx_word({reg(b)},i),{str(vx==0x40a).lower()})'
-        return ('vmaxfp' if vx==0x40a else 'vminfp'),out+f'VmxFloatScope scope(state);for(unsigned i=0;i<4;++i)vmx_word(out,i,{expr});'+finish
+        return ('vmaxfp' if vx==0x40a else 'vminfp'),f'vmx_extreme_op(state,{reg(d)},{reg(a)},{reg(b)},{str(vx==0x40a).lower()});'
     if vx in (0x30a,0x34a,0x38a,0x3ca):
         if vx in (0x38a,0x3ca):
             body=f'auto status=state.vscr;for(unsigned i=0;i<4;++i)vmx_word(out,i,vmx_to_integer(vmx_word({reg(b)},i),{a},{str(vx==0x3ca).lower()},status));state.vscr=status;'
         else:
-            body=f'VmxFloatScope scope(state);for(unsigned i=0;i<4;++i){{const auto raw=vmx_word({reg(b)},i);'
-            body+=('const bool negative=raw>>31;const std::uint32_t magnitude=negative?0u-raw:raw;' if vx==0x34a else 'const bool negative=false;const auto magnitude=raw;')
-            body+=f'vmx_word(out,i,fp_narrow_exact(fp_pack(state,negative,magnitude,-{a},24)));}}'
+            return 'vector_convert',f'vmx_from_integer_op(state,{reg(d)},{reg(b)},{a},{str(vx==0x34a).lower()});'
         return 'vector_convert',out+body+finish
     if vx in (0xa,0x4a) or word&63 in (46,47):
-        if vx in (0xa,0x4a):
-            expr=f'vmx_add(state,vmx_word({reg(a)},i),vmx_word({reg(b)},i),{str(vx==0x4a).lower()})'
-        else:
-            negative=(word&63)==47
-            expr=f'vmx_fused(state,vmx_word({reg(a)},i),vmx_word({reg(b)},i),vmx_word({reg(c)},i),{str(negative).lower()})'
-        return 'vector_float',out+f'VmxFloatScope scope(state);for(unsigned i=0;i<4;++i)vmx_word(out,i,{expr});'+finish
+        # kind: 0 vaddfp, 1 vsubfp, 2 vmaddfp, 3 vnmsubfp (vC is ignored by 0/1).
+        kind=(1 if vx==0x4a else 0) if vx in (0xa,0x4a) else (3 if (word&63)==47 else 2)
+        return 'vector_float',f'vmx_float_op(state,{reg(d)},{reg(a)},{reg(b)},{reg(c)},{kind});'
     if vx in (0x20c,0x24c,0x28c,0x30c,0x34c,0x38c):
         size=1<<((vx>>6)&3)
         if vx<0x300:
@@ -119,12 +112,10 @@ def lift_vector(word):
         return 'vector_splat',out+body+finish
     if word&63 in (42,43,44):
         kind=word&63
-        if kind==42:expr=f'({reg(a)}[i]&~{reg(c)}[i])|({reg(b)}[i]&{reg(c)}[i])'
-        elif kind==43:expr=f'(({reg(c)}[i]&31)<16?{reg(a)}[{reg(c)}[i]&15]:{reg(b)}[{reg(c)}[i]&15])'
-        else:
-            if c&16:return None
-            expr=f'(i+{c}<16?{reg(a)}[i+{c}]:{reg(b)}[i+{c}-16])'
-        return 'vector_permute_select',out+f'for(unsigned i=0;i<16;++i)out[i]={expr};'+finish
+        if kind==42:return 'vector_permute_select',f'vmx_select({reg(d)},{reg(a)},{reg(b)},{reg(c)});'
+        if kind==43:return 'vector_permute_select',f'vmx_permute({reg(d)},{reg(a)},{reg(b)},{reg(c)});'
+        if c&16:return None
+        return 'vector_permute_select',f'vmx_shift_left_double<{c}>({reg(d)},{reg(a)},{reg(b)});'
     saturating={0x200:(1,0,'+'),0x240:(2,0,'+'),0x280:(4,0,'+'),0x300:(1,1,'+'),0x340:(2,1,'+'),0x380:(4,1,'+'),
                 0x600:(1,0,'-'),0x640:(2,0,'-'),0x700:(1,1,'-'),0x740:(2,1,'-'),0x780:(4,1,'-')}
     if vx in saturating:
@@ -140,6 +131,8 @@ def lift_vector(word):
         # vsubuws: unsigned word subtract saturating at 0, sets VSCR[SAT] (AltiVec PEM).
         body=out+'bool saturated=false;'+f'for(unsigned i=0;i<4;++i){{const auto x=vmx_word({reg(a)},i),y=vmx_word({reg(b)},i);saturated|=x<y;vmx_word(out,i,x<y?0u:x-y);}}'
         return 'vsubuws',body+'if(saturated)state.vscr|=1;'+finish
+    if vx in (0x80,0x480):
+        return 'vector_word_arithmetic',f'vmx_word_add({reg(d)},{reg(a)},{reg(b)},{str(vx==0x480).lower()});'
     if vx in (0x80,0x480,0x184,0x284,0x384):
         left=f'vmx_word({reg(a)},i)';right=f'vmx_word({reg(b)},i)'
         expression={0x80:f'{left}+{right}',0x480:f'{left}-{right}',0x184:f'{left}<<({right}&31)',
@@ -150,7 +143,9 @@ def lift_vector(word):
         left=f'vmx_word({reg(a)},i)';right=f'vmx_word({reg(b)},i)'
         if kind==0x386:left=f'static_cast<std::int32_t>({left})';right=f'static_cast<std::int32_t>({right})'
         match=f'{left}{"==" if kind==0x86 else ">"}{right}'
-        if kind in (0xc6,0x1c6,0x2c6):match=f'vmx_compare({left},{right},{kind})'
+        if kind in (0xc6,0x1c6,0x2c6):
+            call=f'vmx_float_compare<{kind}>({reg(d)},{reg(a)},{reg(b)})'
+            return 'vector_word_compare',(f'const unsigned cr6={call};state.cr=(state.cr&~UINT32_C(0xf0))|(cr6<<4);' if vx&0x400 else f'(void){call};')
         body=out+'unsigned yes=0;'+f'for(unsigned i=0;i<4;++i){{bool match={match};yes+=match;vmx_word(out,i,match?UINT32_MAX:0);}}'
         body+=('state.cr=(state.cr&~UINT32_C(0xf0))|((yes==4?8u:yes==0?2u:0u)<<4);' if vx&0x400 else '(void)yes;')
         return 'vector_word_compare',body+finish
@@ -241,5 +236,217 @@ struct VmxFloatScope {
     const std::uint64_t value=exponent>32?UINT64_MAX:exponent>=23?mantissa<<(exponent-23):mantissa>>(23-exponent);
     if(value>limit){status|=1;return negative?0x80000000:std::uint32_t(limit);}
     return negative?0u-std::uint32_t(value):std::uint32_t(value);
+}
+
+// ---- VMX host SIMD fast paths -----------------------------------------------
+// Vector registers stay big-endian byte arrays. Byte-order operations (vperm,
+// vsel, vsldoi, merges, logic) work on that order directly; word arithmetic
+// swaps each 32-bit lane to host order and back. Float paths compute IEEE
+// binary32 on the host only when the result is provably the bit pattern of the
+// exact per-lane implementation above: Java mode, host RN with FTZ=DAZ=0 and
+// all traps masked, and only finite inputs (zero/denormal allowed). NaN and
+// infinity operands, and vmaddfp without hardware FMA, take the exact path.
+using VmxReg=std::array<std::uint8_t,16>;
+#if defined(__SSE2__) && !defined(ANYPS3_VMX_FORCE_SCALAR)
+#include <emmintrin.h>
+#if defined(__SSSE3__)
+#include <tmmintrin.h>
+#endif
+#if defined(__FMA__) || defined(__AVX2__)
+#include <immintrin.h>
+#endif
+#define ANYPS3_VMX_SIMD 1
+[[gnu::always_inline]] static inline __m128i vmx_ld(const VmxReg& r){return _mm_loadu_si128(reinterpret_cast<const __m128i*>(r.data()));}
+[[gnu::always_inline]] static inline void vmx_st(VmxReg& r,__m128i v){_mm_storeu_si128(reinterpret_cast<__m128i*>(r.data()),v);}
+[[gnu::always_inline]] static inline __m128i vmx_swap32(__m128i v){
+#if defined(__SSSE3__)
+    return _mm_shuffle_epi8(v,_mm_setr_epi8(3,2,1,0,7,6,5,4,11,10,9,8,15,14,13,12));
+#else
+    v=_mm_or_si128(_mm_slli_epi16(v,8),_mm_srli_epi16(v,8));
+    return _mm_shufflehi_epi16(_mm_shufflelo_epi16(v,0xb1),0xb1);
+#endif
+}
+[[gnu::always_inline]] static inline __m128 vmx_ldf(const VmxReg& r){return _mm_castsi128_ps(vmx_swap32(vmx_ld(r)));}
+[[gnu::always_inline]] static inline void vmx_stf(VmxReg& r,__m128 v){vmx_st(r,vmx_swap32(_mm_castps_si128(v)));}
+// Lanes whose exponent is all ones (NaN or infinity), as a 4-bit mask.
+[[gnu::always_inline]] static inline int vmx_special(__m128 v){
+    const __m128i e=_mm_set1_epi32(0x7f800000);
+    return _mm_movemask_ps(_mm_castsi128_ps(_mm_cmpeq_epi32(_mm_and_si128(_mm_castps_si128(v),e),e)));
+}
+[[gnu::always_inline]] static inline bool vmx_host_ready(const PpuState& s){
+    return !(s.vscr&0x10000) && (_mm_getcsr()&0xffc0u)==0x1f80u;
+}
+#endif
+[[gnu::noinline,gnu::cold]] static void vmx_float_exact(PpuState& state,VmxReg& d,const VmxReg& a,const VmxReg& b,const VmxReg& c,unsigned kind){
+    VmxReg out{};VmxFloatScope scope(state);
+    for(unsigned i=0;i<4;++i)vmx_word(out,i,kind<2?vmx_add(state,vmx_word(a,i),vmx_word(b,i),kind==1)
+                                              :vmx_fused(state,vmx_word(a,i),vmx_word(b,i),vmx_word(c,i),kind==3));
+    d=out;
+}
+// kind 0 vaddfp, 1 vsubfp, 2 vmaddfp (vA*vC+vB), 3 vnmsubfp -(vA*vC-vB).
+[[maybe_unused]] static inline void vmx_float_op(PpuState& state,VmxReg& d,const VmxReg& a,const VmxReg& b,const VmxReg& c,unsigned kind){
+#if defined(ANYPS3_VMX_SIMD)
+    if(__builtin_expect(vmx_host_ready(state),1)){
+        const __m128 x=vmx_ldf(a),y=vmx_ldf(b);
+        if(kind<2){
+            if(!(vmx_special(x)|vmx_special(y))){vmx_stf(d,kind?_mm_sub_ps(x,y):_mm_add_ps(x,y));return;}
+        }
+#if defined(__FMA__)
+        else{
+            const __m128 z=vmx_ldf(c);
+            if(!(vmx_special(x)|vmx_special(y)|vmx_special(z))){
+                // vnmsubfp negates the rounded vA*vC-vB (sign of an exact zero included).
+                vmx_stf(d,kind==2?_mm_fmadd_ps(x,z,y):_mm_xor_ps(_mm_fmsub_ps(x,z,y),_mm_set1_ps(-0.0f)));return;}
+        }
+#endif
+    }
+#endif
+    vmx_float_exact(state,d,a,b,c,kind);
+}
+[[gnu::noinline,gnu::cold]] static void vmx_estimate_exact(PpuState& state,VmxReg& d,const VmxReg& b,bool root){
+    VmxReg out{};VmxFloatScope scope(state);
+    for(unsigned i=0;i<4;++i)vmx_word(out,i,root?vmx_reciprocal_root(state,vmx_word(b,i)):vmx_reciprocal(state,vmx_word(b,i)));
+    d=out;
+}
+// vrefp = RN(1/b); vrsqrtefp = RN(1/RN(sqrt(b))), both binary32 (see vmx_reciprocal*).
+[[maybe_unused]] static inline void vmx_estimate_op(PpuState& state,VmxReg& d,const VmxReg& b,bool root){
+#if defined(ANYPS3_VMX_SIMD)
+    if(__builtin_expect(vmx_host_ready(state),1)){
+        const __m128 x=vmx_ldf(b);
+        // vrsqrtefp: negative nonzero operands produce the exact path's default NaN.
+        const int negative=_mm_movemask_ps(_mm_castsi128_ps(_mm_cmpgt_epi32(_mm_castps_si128(x),_mm_set1_epi32(int(0x80000000u)))))&
+                           _mm_movemask_ps(x);
+        if(!vmx_special(x) && !(root && negative)){
+            vmx_stf(d,_mm_div_ps(_mm_set1_ps(1.0f),root?_mm_sqrt_ps(x):x));return;}
+    }
+#endif
+    vmx_estimate_exact(state,d,b,root);
+}
+[[gnu::noinline,gnu::cold]] static void vmx_extreme_exact(PpuState& state,VmxReg& d,const VmxReg& a,const VmxReg& b,bool maximum){
+    VmxReg out{};VmxFloatScope scope(state);
+    for(unsigned i=0;i<4;++i)vmx_word(out,i,vmx_extreme(vmx_word(a,i),vmx_word(b,i),maximum));
+    d=out;
+}
+[[maybe_unused]] static inline void vmx_extreme_op(PpuState& state,VmxReg& d,const VmxReg& a,const VmxReg& b,bool maximum){
+#if defined(ANYPS3_VMX_SIMD)
+    if(__builtin_expect(vmx_host_ready(state),1)){
+        const __m128 x=vmx_ldf(a),y=vmx_ldf(b);
+        // Without NaNs, max(+0,-0)=+0 and min(+0,-0)=-0 follow from combining both operand orders.
+        const __m128i nan=_mm_set1_epi32(0x7f800000);
+        const __m128i xm=_mm_and_si128(_mm_castps_si128(x),_mm_set1_epi32(0x7fffffff)),ym=_mm_and_si128(_mm_castps_si128(y),_mm_set1_epi32(0x7fffffff));
+        if(!_mm_movemask_ps(_mm_castsi128_ps(_mm_or_si128(_mm_cmpgt_epi32(xm,nan),_mm_cmpgt_epi32(ym,nan))))){
+            vmx_stf(d,maximum?_mm_and_ps(_mm_max_ps(x,y),_mm_max_ps(y,x)):_mm_or_ps(_mm_min_ps(x,y),_mm_min_ps(y,x)));return;}
+    }
+#endif
+    vmx_extreme_exact(state,d,a,b,maximum);
+}
+[[gnu::noinline,gnu::cold]] static void vmx_from_integer_exact(PpuState& state,VmxReg& d,const VmxReg& b,unsigned scale,bool sign){
+    VmxReg out{};VmxFloatScope scope(state);
+    for(unsigned i=0;i<4;++i){const auto raw=vmx_word(b,i);const bool negative=sign && (raw>>31);
+        const std::uint32_t magnitude=negative?0u-raw:raw;
+        vmx_word(out,i,fp_narrow_exact(fp_pack(state,negative,magnitude,-int(scale),24)));}
+    d=out;
+}
+// vcfsx/vcfux: RN(integer * 2^-scale); the power-of-two scaling is exact (|x|>=2^-31).
+[[maybe_unused]] static inline void vmx_from_integer_op(PpuState& state,VmxReg& d,const VmxReg& b,unsigned scale,bool sign){
+#if defined(ANYPS3_VMX_SIMD)
+    if(__builtin_expect(vmx_host_ready(state),1)){
+        const __m128i v=vmx_swap32(vmx_ld(b));
+        if(sign){vmx_stf(d,_mm_mul_ps(_mm_cvtepi32_ps(v),_mm_set1_ps(std::ldexp(1.0f,-int(scale)))));return;}
+        const __m128i biased=_mm_xor_si128(v,_mm_set1_epi32(int(0x80000000u)));
+        const __m128d two31=_mm_set1_pd(2147483648.0),factor=_mm_set1_pd(std::ldexp(1.0,-int(scale)));
+        const __m128d lo=_mm_mul_pd(_mm_add_pd(_mm_cvtepi32_pd(biased),two31),factor);
+        const __m128d hi=_mm_mul_pd(_mm_add_pd(_mm_cvtepi32_pd(_mm_unpackhi_epi64(biased,biased)),two31),factor);
+        vmx_stf(d,_mm_movelh_ps(_mm_cvtpd_ps(lo),_mm_cvtpd_ps(hi)));return;
+    }
+#endif
+    vmx_from_integer_exact(state,d,b,scale,sign);
+}
+// vcmpeqfp/vcmpgefp/vcmpgtfp as integer comparisons: no MXCSR dependence. Returns
+// the CR6 nibble (all true 8, none 2). NaN lanes compare false; +0 equals -0.
+template<unsigned kind>[[maybe_unused]] static inline unsigned vmx_float_compare(VmxReg& d,const VmxReg& a,const VmxReg& b){
+#if defined(ANYPS3_VMX_SIMD)
+    const __m128i x=vmx_swap32(vmx_ld(a)),y=vmx_swap32(vmx_ld(b)),abs=_mm_set1_epi32(0x7fffffff),inf=_mm_set1_epi32(0x7f800000);
+    const __m128i xm=_mm_and_si128(x,abs),ym=_mm_and_si128(y,abs);
+    const __m128i ordered=_mm_andnot_si128(_mm_or_si128(_mm_cmpgt_epi32(xm,inf),_mm_cmpgt_epi32(ym,inf)),_mm_set1_epi32(-1));
+    // Sign-magnitude to two's complement order; both zeros map to 0.
+    const __m128i xk=_mm_xor_si128(xm,_mm_srai_epi32(x,31)),yk=_mm_xor_si128(ym,_mm_srai_epi32(y,31));
+    const __m128i xo=_mm_sub_epi32(xk,_mm_srai_epi32(x,31)),yo=_mm_sub_epi32(yk,_mm_srai_epi32(y,31));
+    const __m128i equal=_mm_cmpeq_epi32(xo,yo),greater=_mm_cmpgt_epi32(xo,yo);
+    const __m128i match=_mm_and_si128(ordered,kind==0xc6?equal:kind==0x2c6?greater:_mm_or_si128(equal,greater));
+    vmx_st(d,match);
+    const int bits=_mm_movemask_ps(_mm_castsi128_ps(match));
+    return bits==15?8u:bits==0?2u:0u;
+#else
+    VmxReg out{};unsigned yes=0;
+    for(unsigned i=0;i<4;++i){const bool m=vmx_compare(vmx_word(a,i),vmx_word(b,i),kind);yes+=m;vmx_word(out,i,m?UINT32_MAX:0);}
+    d=out;return yes==4?8u:yes==0?2u:0u;
+#endif
+}
+[[maybe_unused]] static inline void vmx_select(VmxReg& d,const VmxReg& a,const VmxReg& b,const VmxReg& c){
+#if defined(ANYPS3_VMX_SIMD)
+    const __m128i m=vmx_ld(c);vmx_st(d,_mm_or_si128(_mm_andnot_si128(m,vmx_ld(a)),_mm_and_si128(m,vmx_ld(b))));
+#else
+    VmxReg out{};for(unsigned i=0;i<16;++i)out[i]=(a[i]&~c[i])|(b[i]&c[i]);d=out;
+#endif
+}
+// vperm: byte i = (vA||vB)[vC[i]&31], in big-endian byte order.
+[[maybe_unused]] static inline void vmx_permute(VmxReg& d,const VmxReg& a,const VmxReg& b,const VmxReg& c){
+#if defined(ANYPS3_VMX_SIMD) && defined(__SSSE3__)
+    const __m128i control=vmx_ld(c),index=_mm_and_si128(control,_mm_set1_epi8(15));
+    const __m128i from_b=_mm_cmpeq_epi8(_mm_and_si128(control,_mm_set1_epi8(16)),_mm_set1_epi8(16));
+    const __m128i x=_mm_shuffle_epi8(vmx_ld(a),index),y=_mm_shuffle_epi8(vmx_ld(b),index);
+    vmx_st(d,_mm_or_si128(_mm_andnot_si128(from_b,x),_mm_and_si128(from_b,y)));
+#else
+    VmxReg out{};for(unsigned i=0;i<16;++i)out[i]=(c[i]&31)<16?a[c[i]&15]:b[c[i]&15];d=out;
+#endif
+}
+template<unsigned shift>[[maybe_unused]] static inline void vmx_shift_left_double(VmxReg& d,const VmxReg& a,const VmxReg& b){
+    static_assert(shift<16,"vsldoi shift");
+#if defined(ANYPS3_VMX_SIMD) && defined(__SSSE3__)
+    if constexpr(shift==0)vmx_st(d,vmx_ld(a));
+    else vmx_st(d,_mm_alignr_epi8(vmx_ld(b),vmx_ld(a),shift));
+#else
+    VmxReg out{};for(unsigned i=0;i<16;++i)out[i]=i+shift<16?a[i+shift]:b[i+shift-16];d=out;
+#endif
+}
+// vmrgh*/vmrgl*: interleave n-byte elements of the high (bytes 0..7) or low half.
+template<unsigned n,bool low>[[maybe_unused]] static inline void vmx_merge(VmxReg& d,const VmxReg& a,const VmxReg& b){
+#if defined(ANYPS3_VMX_SIMD)
+    const __m128i x=vmx_ld(a),y=vmx_ld(b);__m128i r;
+    if constexpr(n==1)r=low?_mm_unpackhi_epi8(x,y):_mm_unpacklo_epi8(x,y);
+    else if constexpr(n==2)r=low?_mm_unpackhi_epi16(x,y):_mm_unpacklo_epi16(x,y);
+    else r=low?_mm_unpackhi_epi32(x,y):_mm_unpacklo_epi32(x,y);
+    vmx_st(d,r);
+#else
+    VmxReg out{};constexpr unsigned half=low?8:0;
+    for(unsigned e=0;e<8/n;++e)for(unsigned j=0;j<n;++j){out[2*n*e+j]=a[half+n*e+j];out[2*n*e+n+j]=b[half+n*e+j];}
+    d=out;
+#endif
+}
+// vadduwm/vsubuwm: modular 32-bit lanes.
+[[maybe_unused]] static inline void vmx_word_add(VmxReg& d,const VmxReg& a,const VmxReg& b,bool subtract){
+#if defined(ANYPS3_VMX_SIMD)
+    const __m128i x=vmx_swap32(vmx_ld(a)),y=vmx_swap32(vmx_ld(b));
+    vmx_st(d,vmx_swap32(subtract?_mm_sub_epi32(x,y):_mm_add_epi32(x,y)));
+#else
+    VmxReg out{};for(unsigned i=0;i<4;++i)vmx_word(out,i,subtract?vmx_word(a,i)-vmx_word(b,i):vmx_word(a,i)+vmx_word(b,i));d=out;
+#endif
+}
+// vand/vandc/vor/vxor/vnor (op = VX field).
+template<unsigned op>[[maybe_unused]] static inline void vmx_logic(VmxReg& d,const VmxReg& a,const VmxReg& b){
+#if defined(ANYPS3_VMX_SIMD)
+    const __m128i x=vmx_ld(a),y=vmx_ld(b);__m128i r;
+    if constexpr(op==1028)r=_mm_and_si128(x,y);
+    else if constexpr(op==1092)r=_mm_andnot_si128(y,x);
+    else if constexpr(op==1156)r=_mm_or_si128(x,y);
+    else if constexpr(op==1220)r=_mm_xor_si128(x,y);
+    else r=_mm_xor_si128(_mm_or_si128(x,y),_mm_set1_epi32(-1));
+    vmx_st(d,r);
+#else
+    VmxReg out{};
+    for(unsigned i=0;i<16;++i)out[i]=static_cast<std::uint8_t>(op==1028?a[i]&b[i]:op==1092?a[i]&~b[i]:op==1156?a[i]|b[i]:op==1220?a[i]^b[i]:~(a[i]|b[i]));
+    d=out;
+#endif
 }
 '''
