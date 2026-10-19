@@ -109,7 +109,8 @@ class SpuFastBlockTests(unittest.TestCase):
             words += [word, STOP1]
         img = image(words, base)
         body = HARNESS + r'''
- NativeSpu::Thread proto;std::vector<std::uint8_t> original(0x40000);
+ // spu_step refuses threads no spu_prepare bound to a translated image; these hand-built threads use image 0.
+ NativeSpu::Thread proto;proto.image_index=0;std::vector<std::uint8_t> original(0x40000);
  for(unsigned i=0;i<original.size();++i)original[i]=std::uint8_t(i*29+7);
  const std::uint8_t code[]={''' + ','.join(map(str, img.data)) + r'''};
  std::copy_n(code,sizeof(code),original.data()+''' + str(base) + r''');
@@ -155,7 +156,8 @@ class SpuFastBlockTests(unittest.TestCase):
             words += seq + [STOP1]
         img = image(words, base)
         body = HARNESS + r'''
- NativeSpu::Thread proto;std::vector<std::uint8_t> original(0x40000);
+ // spu_step refuses threads no spu_prepare bound to a translated image; these hand-built threads use image 0.
+ NativeSpu::Thread proto;proto.image_index=0;std::vector<std::uint8_t> original(0x40000);
  for(unsigned i=0;i<original.size();++i)original[i]=std::uint8_t(i*31+5);
  const std::uint8_t code[]={''' + ','.join(map(str, img.data)) + r'''};
  std::copy_n(code,sizeof(code),original.data()+''' + str(base) + r''');
