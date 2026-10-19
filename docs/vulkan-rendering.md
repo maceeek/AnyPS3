@@ -1,11 +1,11 @@
-# First Image Operation via Vulkan
+# First image operation via Vulkan
 
 AnyPS3 uses a single graphics backend: Vulkan. We are not developing our own
 software rasterizer. Without an available GPU, the same code can be executed
 on the CPU by the Mesa Lavapipe driver. This does not change the static
 PPU/SPU recompilation and does not attach the RPCS3 backend.
 
-## First Verified Scope (build 123)
+## First verified scope (build 123)
 
 On 2026-10-14 a real Vulkan render pass ran through Lavapipe; the reported
 device was `llvmpipe (LLVM 23.1.1, 256 bits)`, Mesa 26.2.4. A synthetic RSX
@@ -41,7 +41,7 @@ contains the segment check and the hashes of the sources, the built program, the
 ELF and the logs. The Vulkan device was not yet created in this run; the pixel
 path is verified by the separate diagnostic FIFO above.
 
-## Reproduction Without Game Data
+## Reproduction without game data
 
 On CachyOS/Arch:
 
@@ -77,7 +77,7 @@ Without development headers or a usable device, the integration test is
 explicitly skipped; with `ANYPS3_REQUIRE_VULKAN=1` a missing device is an error.
 The test does not skip compilation failures or incorrect image output.
 
-## Extension for a Real Game Clear (build 131)
+## Extension for a real game clear (build 131)
 
 The game has already performed its own clear of the 960 × 704 surface through
 Vulkan. The color and depth surfaces use tiled addressing and two horizontal
@@ -103,7 +103,7 @@ also compares the whole captured frame with the actually rendered pixels of the
 diagnostic and verifies that an output failure does not release the waiting
 consumer.
 
-## Backend Limitations
+## Backend limitations
 
 The supported clear uses an ARGB8 buffer A and/or Z24S8 in local VRAM, one or
 two samples and a zero surface-clip origin. Scissor, pitch and offset are
