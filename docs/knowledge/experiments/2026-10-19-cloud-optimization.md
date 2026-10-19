@@ -75,7 +75,47 @@ out by hand, the architecture definition, or the exact implementation as oracle 
 
 1. **Unbound image stop** (`spu.py` `spu_step`, `1f2e4b2`): a thread that `spu_prepare` never bound stops with
    "unknown native SPU image" (restores `test_par1`/`test_par2`, the SPUFAST 421 regression).
-2. *SPU agent results (quantum, constant-time reservation check, polling-loop parking): see below once integrated.*
+2. **Pool-lane slice 4096** (`par_worker.py` `NativeSpuWorker::lane_budget`, Sonnet SPU agent): a pool lane
+   free-runs between coordinator ticks; requests of at least the PPU tick budget (1024) now run 4096-instruction
+   slices (smaller requests stay exact for stepping tests). The lane loop reads the host clock only with
+   `ANYPS3_PERF_REPORT=1`. **Verified:** `tests/test_spu_pool_quantum.py`, test_par2 (its `worker_ns>0` assertion
+   now expects 0 with the report off). Agent micro-benchmark: empty lane loop 103 → 59 ns per quantum, AOT compute
+   loop +3.4% instructions/s.
+3. **Exact reservation-lost filter** (`par_wait.py` `ReservationNotifications::touched`, `spu.py`
+   `spu_collect_events`): `notify()`, which every version bump (`bump_scalar`, `bump_parallel`) and map-epoch change
+   already calls, also increments one of 4096 cache-line-padded per-line-hash counters or a global counter. An SPU
+   samples the counters before a successful `reservation_token` compare and skips the full compare (reader
+   admission, stripe lock, tracking lookup) while they are unchanged for the same granule and memory. **Derived
+   (main-agent review):** exact — the writer bumps the version under the stripe lock and publishes afterwards, the
+   reader samples before its locked compare, so in every interleaving either the compare sees the new version or the
+   next sample differs; collisions only force a full compare. A line covered by a synchronous host-access observer
+   (RSX/GPU coherence materializes deferred writes during the compare) always takes the full compare.
+   **Verified:** `tests/test_spu_reservation_filter.py` (every writer kind, same-bucket/neighbour lines, skewed
+   granules, map epoch, observers, concurrent oracles; fails with a filter that ignores the counters),
+   test_par9_coordinator (now expects one compare for an unchanged unobserved line, +10 with an observer).
+   Agent micro-benchmark: held reservation without writer 70.7 → 10.1 ns per check; writer side unchanged.
+   Limitation: a future version bump that bypasses `notify()` would break the filter silently (test_par4 pins that
+   every current bump notifies).
+4. **Busy-poll parking** (`spu.py` `spu_poll_note`, `spu_lane_prepare_wait`; pool lanes only): a lane that repeats
+   GETLLAR of a line whose reservation is still intact, or `rchcnt` of channel 0 returning 0, at the same site with
+   an identical register file/fpscr and only idempotent channel traffic in between, spins 50 µs and then throws
+   `SpuBlocked` from the poll instruction before any side effect. The wait arms the line watch, mailbox/signal hooks,
+   the decrementer deadline and a timeout of 100 µs doubling to 1.6 ms; the retry executes the poll for real, so
+   results never change, only timing. `ANYPS3_SPU_POLL_PARK=0` disables it. **Verified:**
+   `tests/test_spu_pool_poll.py` (15 cases: every wake source, timeout wake, CPU while parked, loops that must not
+   park, the real pool, group terminate). Agent micro-benchmark: a GETLLAR or `rchcnt` poller with a writer every
+   ~5 ms used 2.05 s → 0.14 s CPU per 2 s. **Hypothesis:** the level's CellSpursKernel0 (SPU 0x100), which burns a
+   whole core in a wait loop ([FAST record](2026-10-19-fast-wave.md#state-at-the-end-of-the-session-2026-10-19-2200-and-the-first-next-actions)),
+   matches one of the two patterns; unverified without the game. **Risk:** a poll loop whose only changing state is
+   a counter in local store (registers identical at the poll site) would be slowed by the park timeout.
+5. `tests/test_spufast_blocks.py`: the sweeps bind their threads to image 0 (the unbound-image stop of item 1 made
+   all 4 fail on `1f2e4b2`).
+
+**Open (agent finding, not done):** `getllar` ~180 ns, `putllc` ~130 ns, `reservation_token` ~65 ns single-threaded;
+each `getllar`/`putllc` allocates a `std::vector<HostSpan>` with shared_ptr copies (`parallel_spans`), `LineLocks`
+two more vectors, and `track_reservation` runs twice per `getllar` with a hash lookup and `weak_ptr::lock` each.
+A single-line allocation-free fast path in `runtime.py`/`par_memory.py` would speed the PUTLLUC completion writes
+that sit on the main thread's critical path.
 
 ### RSX
 
