@@ -43,8 +43,11 @@ static void batch_oracle(unsigned samples){
  s.z.front=s.z.back={VK_STENCIL_OP_KEEP,VK_STENCIL_OP_KEEP,VK_STENCIL_OP_INCREMENT_AND_CLAMP,VK_COMPARE_OP_EQUAL,255,255,2};
  draw(0x3f400000); // blue rejected by depth, stencil=3
  words.fill(0);data.assign(16,0); // Later host mutations cannot change recorded generations.
- assert(b->render_passes==(samples==1?1:3*samples));assert(b->render_pass_reuses==(samples==1?2:0));
+ // Plane 0 of all three draws shares one pass; planes >=1 are deferred as runs
+ // and recorded (one pass per plane) when the transfer below ends that pass.
+ assert(b->render_passes==1 && b->render_pass_reuses==2 && b->plane_draws.size()==(samples==1?0u:3u));
  const auto rgba=vk.graphics_transfer(*b,color,VK_IMAGE_ASPECT_COLOR_BIT,4);
+ assert(b->render_passes==samples && b->plane_draws.empty());
  const auto z=vk.graphics_transfer(*b,depth,VK_IMAGE_ASPECT_DEPTH_BIT,4);
  const auto stencil=vk.graphics_transfer(*b,depth,VK_IMAGE_ASPECT_STENCIL_BIT,1);
  assert(!b->active_framebuffer);vk.graphics_finish(*b);assert(b->upload_commands==1);

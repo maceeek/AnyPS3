@@ -74,6 +74,8 @@ public:
         auto begin()const{return owners.begin();}auto end()const{return owners.end();}
     };
     using GraphicsImagePins=GraphicsPins<GraphicsImage>;
+    // Push constants of every graphics draw (vertex and fragment stages).
+    struct GraphicsPush{float width,height,x,y;unsigned plane,layers;float shifts[8];};
     struct GraphicsBatch {
         NativeVulkan* owner;
         VkBuffer buffer=VK_NULL_HANDLE,data_buffer=VK_NULL_HANDLE;VkDeviceMemory memory=VK_NULL_HANDLE,data_memory=VK_NULL_HANDLE;void* map=nullptr;
@@ -105,6 +107,19 @@ public:
         std::vector<VkBufferCopy> uploads;
         VkFramebuffer active_framebuffer=VK_NULL_HANDLE;
         std::uint64_t render_passes=0,render_pass_reuses=0,upload_commands=0;
+        // MSAA plane runs: while consecutive draws keep plane 0's pass on one
+        // attachment set, their planes >=1 are recorded later, one pass per
+        // plane, when that pass ends (graphics_end_pass). Planes are distinct
+        // images; each plane keeps the original draw order, and every command
+        // outside a pass (copy, barrier, clear, submit) ends the pass first.
+        struct PlaneDraw {
+            VkPipeline pipeline;VkPipelineLayout layout;VkDescriptorSet set;std::uint32_t offset;
+            std::array<GraphicsPush,4> push;std::array<unsigned,22> dynamic;
+            unsigned vertices,instances,first_vertex,query;bool indexed;VkDeviceSize index_offset;VkQueryControlFlags query_flags;
+        };
+        std::vector<PlaneDraw> plane_draws;std::array<VkFramebuffer,4> plane_framebuffers{};
+        VkRenderPass plane_pass=VK_NULL_HANDLE;VkExtent2D plane_extent{};unsigned plane_count=0;
+        std::uint64_t plane_deferred=0;
         VkPipeline bound_graphics_pipeline=VK_NULL_HANDLE;
         bool dynamic_valid=false;
         std::array<unsigned,22> dynamic_state{};
@@ -179,9 +194,46 @@ public:
 private:
     VkPhysicalDeviceFeatures graphics_features{};VkPhysicalDeviceSubgroupProperties graphics_subgroups{};
     VkPhysicalDeviceProperties graphics_properties{};
+    // Dynamic state words (graphics_draw): 0-1 viewport extent, 2-5 scissor,
+    // 6-11 stencil compare/write/reference front and back, 12-15 blend
+    // constants, 16-17 depth bias, 18-19 depth bounds (float bits).
+    static void graphics_emit_dynamic(VkCommandBuffer command,const std::array<unsigned,22>& d,const std::array<unsigned,22>* previous){
+        auto changed=[&](unsigned first,unsigned count){return !previous || !std::equal(d.begin()+first,d.begin()+first+count,previous->begin()+first);};
+        if(changed(0,2)){VkViewport viewport{0,0,float(d[0]),float(d[1]),0,1};vkCmdSetViewport(command,0,1,&viewport);}
+        if(changed(2,4)){VkRect2D scissor{{int(d[2]),int(d[3])},{d[4],d[5]}};vkCmdSetScissor(command,0,1,&scissor);}
+        for(unsigned face=0;face<2;++face){const auto mask=face?VK_STENCIL_FACE_BACK_BIT:VK_STENCIL_FACE_FRONT_BIT;
+            if(changed(6+face*3,1))vkCmdSetStencilCompareMask(command,mask,d[6+face*3]);
+            if(changed(7+face*3,1))vkCmdSetStencilWriteMask(command,mask,d[7+face*3]);
+            if(changed(8+face*3,1))vkCmdSetStencilReference(command,mask,d[8+face*3]);}
+        float f[8];std::memcpy(f,d.data()+12,sizeof(f));
+        if(changed(12,4))vkCmdSetBlendConstants(command,f);
+        if(changed(16,2))vkCmdSetDepthBias(command,f[4],0,f[5]);
+        if(changed(18,2))vkCmdSetDepthBounds(command,f[6],f[7]);
+    }
+    static void graphics_replay_planes(GraphicsBatch& b){
+        for(unsigned plane=1;plane<b.plane_count;++plane){
+            VkRenderPassBeginInfo pass{};pass.sType=VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;pass.renderPass=b.plane_pass;
+            pass.framebuffer=b.plane_framebuffers[plane];pass.renderArea={{0,0},b.plane_extent};
+            vkCmdBeginRenderPass(b.command,&pass,VK_SUBPASS_CONTENTS_INLINE);++b.render_passes;::RsxPerfCounters::add(::RsxPerfCounters::render_passes);
+            const std::array<unsigned,22>* previous=b.dynamic_valid?&b.dynamic_state:nullptr;
+            for(const auto& d:b.plane_draws){
+                vkCmdBeginQuery(b.command,b.occlusion,d.query+plane,d.query_flags);
+                if(b.bound_graphics_pipeline!=d.pipeline){vkCmdBindPipeline(b.command,VK_PIPELINE_BIND_POINT_GRAPHICS,d.pipeline);b.bound_graphics_pipeline=d.pipeline;++b.pipeline_binds;}
+                vkCmdBindDescriptorSets(b.command,VK_PIPELINE_BIND_POINT_GRAPHICS,d.layout,0,1,&d.set,1,&d.offset);
+                vkCmdPushConstants(b.command,d.layout,VK_SHADER_STAGE_VERTEX_BIT|VK_SHADER_STAGE_FRAGMENT_BIT,0,sizeof(GraphicsPush),&d.push[plane]);
+                graphics_emit_dynamic(b.command,d.dynamic,previous);previous=&d.dynamic;
+                if(d.indexed){vkCmdBindIndexBuffer(b.command,b.data_buffer,d.index_offset,VK_INDEX_TYPE_UINT32);vkCmdDrawIndexed(b.command,d.vertices,d.instances,d.first_vertex,0,0);}
+                else vkCmdDraw(b.command,d.vertices,d.instances,d.first_vertex,0);
+                vkCmdEndQuery(b.command,b.occlusion,d.query+plane);
+            }
+            b.dynamic_state=b.plane_draws.back().dynamic;b.dynamic_valid=true;
+            vkCmdEndRenderPass(b.command);::RsxPerfCounters::add(::RsxPerfCounters::pass_ends);
+        }
+        b.plane_draws.clear();b.plane_count=0;
+    }
     static void graphics_end_pass(GraphicsBatch& b){
-        if(!b.active_framebuffer)return;
-        vkCmdEndRenderPass(b.command);b.active_framebuffer=VK_NULL_HANDLE;::RsxPerfCounters::add(::RsxPerfCounters::pass_ends);
+        if(b.active_framebuffer){vkCmdEndRenderPass(b.command);b.active_framebuffer=VK_NULL_HANDLE;::RsxPerfCounters::add(::RsxPerfCounters::pass_ends);}
+        if(!b.plane_draws.empty())graphics_replay_planes(b);
     }
     static void graphics_barrier(GraphicsBatch& b){
         graphics_end_pass(b);
@@ -195,6 +247,7 @@ private:
         if(b.owner!=this || b.failed)throw std::runtime_error("RSX graphics batch owner/failure");
         if(b.recording)return;
         if(b.submitted || b.completion)throw std::runtime_error("RSX graphics begin before retirement/reset");
+        if(!b.plane_draws.empty())throw std::runtime_error("RSX graphics deferred MSAA planes outlived their batch");
         VkCommandBufferBeginInfo i{};i.sType=VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;i.flags=VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
         check(vkBeginCommandBuffer(b.command,&i),"graphics begin");b.recording=true;++graphics_recordings;
         if(b.queries)vkCmdResetQueryPool(b.command,b.queries,0,4096);
@@ -590,6 +643,14 @@ public:
         // a layered framebuffer. Per plane the primitive order is unchanged;
         // planes are distinct layers, so their relative order is unobservable.
         const unsigned passes=layered?1:s.samples;graphics_last_queries=multiview?s.samples:passes;
+        // Plane runs (GraphicsBatch::PlaneDraw): planes >=1 of a per-plane draw
+        // are recorded after plane 0's pass. ANYPS3_RSX_PLANE_RUNS=0 records
+        // every plane immediately (one pass switch per plane).
+        static const bool plane_runs=[]{const char* v=std::getenv("ANYPS3_RSX_PLANE_RUNS");
+            if(v && std::strcmp(v,"0") && std::strcmp(v,"1")){throw std::runtime_error("invalid ANYPS3_RSX_PLANE_RUNS");}
+            return !v || !std::strcmp(v,"1");}();
+        const bool defer_planes=plane_runs && passes>1;
+        typename GraphicsBatch::PlaneDraw deferred{};std::array<VkFramebuffer,4> plane_fb{};
         for(unsigned layer=0;layer<passes;++layer){
             std::array<VkImageView,5> views{};unsigned view_count=0;for(unsigned i=0;i<s.colors;++i)views[view_count++]=layered?graphics_attachment_array(*colors[i]):colors[i]->views[layer];
             if(depth)views[view_count++]=layered?graphics_attachment_array(*depth):depth->views[layer];
@@ -607,8 +668,16 @@ public:
                 if(b.framebuffers.size()>=framebuffer_limit)b.framebuffers.erase(lru_entry(b.framebuffers));
                 b.framebuffer_pins.push_back(entry);b.framebuffers.emplace(std::move(framebuffer_key),std::move(entry));++b.framebuffer_misses;::RsxPerfCounters::add(::RsxPerfCounters::framebuffer_misses);}
             VkRenderPassBeginInfo pass{};pass.sType=VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;pass.renderPass=p.pass;pass.framebuffer=framebuffer;pass.renderArea={{0,0},{s.width,s.height}};
+            // Push constants: sample location P is evaluated by moving the
+            // geometry by .5-P. Do not translate the viewport: negative viewport
+            // origins need a Vulkan 1.1 extension. VS subtracts this offset in
+            // clip coordinates.
+            GraphicsPush push{float(s.width),float(s.height),positions[layer][0]-.5f,positions[layer][1]-.5f,layer,layered?s.samples:1u,{}};
+            for(unsigned n=0;n<4;++n){push.shifts[2*n]=positions[n][0]-.5f;push.shifts[2*n+1]=positions[n][1]-.5f;}
+            if(defer_planes && layer){plane_fb[layer]=framebuffer;deferred.push[layer]=push;continue;}
             // Framebuffer identity includes each layer view, extent, attachment
-            // count and formats. Never reorder draws or MSAA planes to merge.
+            // count and formats. Draw order is kept within each plane; planes
+            // are distinct images and may be recorded as runs (PlaneDraw).
             if(b.active_framebuffer!=framebuffer){
                 graphics_end_pass(b);
                 vkCmdBeginRenderPass(b.command,&pass,VK_SUBPASS_CONTENTS_INLINE);
@@ -618,12 +687,7 @@ public:
             vkCmdBeginQuery(b.command,b.occlusion,query+layer,graphics_features.occlusionQueryPrecise?VK_QUERY_CONTROL_PRECISE_BIT:0);
             if(b.bound_graphics_pipeline!=p.pipeline){vkCmdBindPipeline(b.command,VK_PIPELINE_BIND_POINT_GRAPHICS,p.pipeline);b.bound_graphics_pipeline=p.pipeline;++b.pipeline_binds;}
             const auto dynamic_at=static_cast<std::uint32_t>(at);vkCmdBindDescriptorSets(b.command,VK_PIPELINE_BIND_POINT_GRAPHICS,p.layout,0,1,&set,1,&dynamic_at);
-            // Sample location P is evaluated by moving the geometry by .5-P.
-            // Do not translate the viewport: negative viewport origins need a
-            // Vulkan 1.1 extension. VS subtracts this offset in clip coordinates.
-            struct Push{float width,height,x,y;unsigned plane,layers;float shifts[8];} push{float(s.width),float(s.height),positions[layer][0]-.5f,positions[layer][1]-.5f,layer,layered?s.samples:1u,{}};
-            for(unsigned n=0;n<4;++n){push.shifts[2*n]=positions[n][0]-.5f;push.shifts[2*n+1]=positions[n][1]-.5f;}
-            vkCmdPushConstants(b.command,p.layout,VK_SHADER_STAGE_VERTEX_BIT|VK_SHADER_STAGE_FRAGMENT_BIT,0,sizeof(Push),&push);
+            vkCmdPushConstants(b.command,p.layout,VK_SHADER_STAGE_VERTEX_BIT|VK_SHADER_STAGE_FRAGMENT_BIT,0,sizeof(GraphicsPush),&push);
             // Dynamic state survives render-pass boundaries and compute binds,
             // but never command-buffer reset. Compare exact float bits so NaNs
             // and signed zero cannot manufacture a false state-cache hit.
@@ -651,6 +715,19 @@ public:
             if(data.size()>15 && data[15]==1){vkCmdBindIndexBuffer(b.command,b.data_buffer,at+std::uint64_t(data[13])*4,VK_INDEX_TYPE_UINT32);vkCmdDrawIndexed(b.command,vertices,instances,first_vertex,0,0);}
             else vkCmdDraw(b.command,vertices,instances,first_vertex,0);
             vkCmdEndQuery(b.command,b.occlusion,query+layer);
+            if(defer_planes){deferred.pipeline=p.pipeline;deferred.layout=p.layout;deferred.set=set;deferred.offset=dynamic_at;deferred.dynamic=dynamic;
+                deferred.vertices=vertices;deferred.instances=instances;deferred.first_vertex=first_vertex;deferred.query=query;
+                deferred.indexed=data.size()>15 && data[15]==1;deferred.index_offset=deferred.indexed?at+std::uint64_t(data[13])*4:0;
+                deferred.query_flags=graphics_features.occlusionQueryPrecise?VK_QUERY_CONTROL_PRECISE_BIT:0;}
+        }
+        if(defer_planes){
+            // A run keeps one framebuffer per plane; anything else ends it first
+            // (this also ends the pass holding this draw's plane 0).
+            bool same=b.plane_count==passes && b.plane_extent.width==s.width && b.plane_extent.height==s.height;
+            for(unsigned layer=1;layer<passes && same;++layer)same=b.plane_framebuffers[layer]==plane_fb[layer];
+            if(!b.plane_draws.empty() && !same)graphics_end_pass(b);
+            if(b.plane_draws.empty()){b.plane_framebuffers=plane_fb;b.plane_pass=p.pass;b.plane_extent={s.width,s.height};b.plane_count=passes;}
+            b.plane_draws.push_back(deferred);++b.plane_deferred;
         }
         b.visibility_count+=(multiview?s.samples:passes)-1;graphics_stamp(b,0,true);
         // Keep the existing logical readback accounting at record time. The
