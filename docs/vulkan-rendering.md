@@ -1,46 +1,49 @@
-# První obrazová operace přes Vulkan
+# First image operation via Vulkan
 
-AnyPS3 používá jeden grafický backend: Vulkan. Vlastní softwarový rasterizér
-nevyvíjíme. Bez dostupného GPU lze stejný kód vykonat ovladačem Mesa Lavapipe
-na CPU. To nemění statickou rekompilaci PPU/SPU a nepřipojuje backend RPCS3.
+AnyPS3 uses a single graphics backend: Vulkan. We are not developing our own
+software rasterizer. Without an available GPU, the same code can be executed
+on the CPU by the Mesa Lavapipe driver. This does not change the static
+PPU/SPU recompilation and does not attach the RPCS3 backend.
 
-## První ověřený rozsah (sestavení 123)
+## First verified scope (build 123)
 
-2026-10-14 proběhl skutečný Vulkan render pass přes Lavapipe, hlášené zařízení
-`llvmpipe (LLVM 23.1.1, 256 bits)`, Mesa 26.2.4. Syntetický proud RSX FIFO
-provedl pět příkazů `NV4097_CLEAR_SURFACE`. Backend nahrál původní obsah VRAM
-do obrazu RGBA8, vykonal `vkCmdClearAttachments`, počkal na fence a přečetl
-výsledek zpět do big-endian ARGB8 ve VRAM.
+On 2026-10-14 a real Vulkan render pass ran through Lavapipe; the reported
+device was `llvmpipe (LLVM 23.1.1, 256 bits)`, Mesa 26.2.4. A synthetic RSX
+FIFO stream executed five `NV4097_CLEAR_SURFACE` commands. The backend uploaded
+the original VRAM contents into an RGBA8 image, executed `vkCmdClearAttachments`,
+waited for the fence and read the result back into big-endian ARGB8 in VRAM.
 
-Diagnostika porovnala **všech 57 600 pixelů** plochy 320 × 180 včetně alfa
-kanálu. Ověřila také ořez obdélníku na pravém a dolním okraji, zachování
-paddingu řádků a paměti mimo plochu, nulové/prázdné čištění a odmítnutí
-nepodporovaných příkazů bez posunu GET či změny pixelů. Validační vrstva
-Khronos se zapnutou kontrolou synchronizace nehlásila chyby ani varování.
+The diagnostic compared **all 57,600 pixels** of the 320 × 180 surface,
+including the alpha channel. It also verified the clipping of the rectangle at
+the right and bottom edges, the preservation of row padding and of memory
+outside the surface, zero/empty clears, and the rejection of unsupported
+commands without advancing GET or changing pixels. The Khronos validation layer
+with synchronization checking enabled reported neither errors nor warnings.
 
-Výstup obsahuje tři barevné obdélníky a malý oříznutý obdélník na tmavém
-pozadí. Jde o **diagnostický obrazec, nikoli snímek Ratcheta**. Není to důkaz
-vykreslení trojúhelníku, překladu RSX shaderů ani prezentace do okna.
-PPM vzniká z přečtené VRAM, nikoli z referenčního výpočtu očekávaných pixelů.
+The output contains three colored rectangles and a small clipped rectangle on a
+dark background. It is a **diagnostic pattern, not a frame of Ratchet**. It is
+not evidence of triangle rendering, of RSX shader translation or of
+presentation to the window. The PPM is produced from the VRAM that was read
+back, not from a reference computation of the expected pixels.
 
-Artefakty aktuálního ověření jsou v ignorovaném `local/vulkan-milestone/`:
-`rsx-vulkan-validated.ppm`, `rsx-vulkan.png`, `validated.stdout.log`,
-`validated.stderr.log`, `tests-targeted.log` a `tests-full.log`.
-Celá sada prošla: **128 testů**, včetně Vulkan testu vyžadovaného přes
-`ANYPS3_REQUIRE_VULKAN=1` (bez přeskočených testů).
+The artifacts of the current verification are in the ignored
+`local/vulkan-milestone/`: `rsx-vulkan-validated.ppm`, `rsx-vulkan.png`,
+`validated.stdout.log`, `validated.stderr.log`, `tests-targeted.log` and
+`tests-full.log`. The whole suite passed: **128 tests**, including the Vulkan
+test required via `ANYPS3_REQUIRE_VULKAN=1` (no skipped tests).
 
-Také skutečný Ratchet byl znovu sestaven s `-DANYPS3_VULKAN -lvulkan`
-(`local/ratchet/native-bundle-123`). Běh dosáhl stejných 102 817 041 kroků PPU,
-24 360 dokončených SPU instrukcí a 331 RSX paketů jako sestavení 121; zastavil
-se na `GDAT initGameData`. Hlásí `rendered clears=0 presented_frames=0`.
-Původní herní load segmenty zůstaly beze změny. `verification.json` obsahuje
-kontrolu segmentů a hashe zdrojů, sestaveného programu, ELF a logů.
-Vulkan zařízení se v tomto běhu ještě nevytvořilo; cesta pixelů je ověřena
-samostatným diagnostickým FIFO výše.
+The real Ratchet was also rebuilt with `-DANYPS3_VULKAN -lvulkan`
+(`local/ratchet/native-bundle-123`). The run reached the same 102,817,041 PPU
+steps, 24,360 completed SPU instructions and 331 RSX packets as build 121; it
+stopped at `GDAT initGameData`. It reports `rendered clears=0 presented_frames=0`.
+The original game load segments remained unchanged. `verification.json`
+contains the segment check and the hashes of the sources, the built program, the
+ELF and the logs. The Vulkan device was not yet created in this run; the pixel
+path is verified by the separate diagnostic FIFO above.
 
-## Reprodukce bez herních dat
+## Reproduction without game data
 
-Na CachyOS/Arch:
+On CachyOS/Arch:
 
 ```bash
 sudo pacman -Syu vulkan-headers vulkan-validation-layers vulkan-tools vulkan-swrast
@@ -53,15 +56,16 @@ VK_INSTANCE_LAYERS=VK_LAYER_KHRONOS_validation VK_LAYER_VALIDATE_SYNC=1 \
   build/rsx-vulkan build/rsx-vulkan.ppm
 ```
 
-Zdroj i výsledný PPM vyžadují nový název; existující snímek se nepřepisuje.
-PNG v místních artefaktech je bezeztrátový převod tohoto PPM.
-Bez `VK_DRIVER_FILES` backend preferuje dostupné diskrétní, následně
-integrované GPU. GPU musí být dostupné procesu a musí mít funkční Vulkan ICD.
-Aktuální pracovní sandbox nevidí `/dev/dri`; hardwarová cesta zde ověřena není.
-Backend nevyžaduje X11, Wayland ani rozšíření pro swapchain.
+Both the source and the resulting PPM require a new name; an existing frame is
+not overwritten. The PNG in the local artifacts is a lossless conversion of this
+PPM. Without `VK_DRIVER_FILES`, the backend prefers an available discrete GPU,
+then an integrated one. The GPU must be available to the process and must have a
+working Vulkan ICD. The current working sandbox does not see `/dev/dri`; the
+hardware path is not verified here. The backend does not require X11, Wayland or
+swapchain extensions.
 
-Samotný `vulkaninfo` se v tomto sandboxu pokoušel připojit k nedostupnému
-displeji. Pro headless diagnostiku zde funguje:
+`vulkaninfo` on its own tried to connect to an unavailable display in this
+sandbox. For headless diagnostics the following works here:
 
 ```bash
 env -u DISPLAY -u WAYLAND_DISPLAY \
@@ -69,53 +73,56 @@ env -u DISPLAY -u WAYLAND_DISPLAY \
 ANYPS3_REQUIRE_VULKAN=1 python -m unittest tests.test_vulkan -v
 ```
 
-Bez vývojových hlaviček nebo použitelného zařízení se integrační test
-výslovně přeskočí; při `ANYPS3_REQUIRE_VULKAN=1` je chybějící zařízení chyba.
-Test nepřeskakuje selhání kompilace ani nesprávný obrazový výstup.
+Without development headers or a usable device, the integration test is
+explicitly skipped; with `ANYPS3_REQUIRE_VULKAN=1` a missing device is an error.
+The test does not skip compilation failures or incorrect image output.
 
-## Rozšíření pro skutečný herní clear (sestavení 131)
+## Extension for a real game clear (build 131)
 
-Hra již provedla vlastní čištění plochy 960 × 704 přes Vulkan. Barevná
-a hloubková plocha používají dlaždicové adresování a dva horizontální
-vzorky. Podporujeme úplné masky `0xf0`, `0x03` a `0xf3`; Z24S8 se při
-čištění přenáší jako přesná 32bitová hodnota přes RGBA8, zatím bez
-hloubkového testování. Adresování respektuje pitch a banku. Plná sada
-v tomto bodě prošla se 133 testy; rozšířený Vulkan test kontroluje také
-Z24S8, oba vzorky, scissor a nezměněné okolní bajty.
+The game has already performed its own clear of the 960 × 704 surface through
+Vulkan. The color and depth surfaces use tiled addressing and two horizontal
+samples. We support the complete masks `0xf0`, `0x03` and `0xf3`; Z24S8 is
+transferred during clearing as an exact 32-bit value via RGBA8, so far without
+depth testing. Addressing respects pitch and bank. The full suite at this point
+passed with 133 tests; the extended Vulkan test also checks Z24S8, both
+samples, scissor and unchanged surrounding bytes.
 
-Pro podporované komprimovatelné dlaždice uchováváme nekomprimované
-hodnoty; nejde o dekodér komprimovaných dat. Pozdější čtení, blity
-a vykreslování musí tuto reprezentaci respektovat. Přehled dalšího
-postupu je v [postupu směrem k menu](menu-progress.md).
+For supported compressible tiles we keep the uncompressed values; this is not a
+decoder of compressed data. Later reads, blits and rendering must respect this
+representation. An overview of the further progress is in
+[progress toward the menu](menu-progress.md).
 
-Sestavení 138 dále dokončilo čtyři skutečné herní flipy. Headless sink
-vybírá buffer určený příkazem hry, převádí jeho dlaždicové X8R8G8B8 pixely,
-provede Vulkan upload/readback a uloží nový PPM pod `ANYPS3_FRAME_DIR`.
-Teprve po úspěšném fence a zápisu aktualizuje stav flipu a pošle povolenou
-událost původnímu firmwaru. Snímky jsou zatím celé černé. Nevzniklo okno
-ani swapchain; čítač `captured_frames` je oddělen od `presented_frames`.
-Test porovnává také celý zachycený snímek se skutečně vykreslenými pixely
-diagnostiky a ověřuje, že selhání výstupu neuvolní čekajícího konzumenta.
+Build 138 further completed four real game flips. The headless sink selects the
+buffer designated by the game's command, converts its tiled X8R8G8B8 pixels,
+performs the Vulkan upload/readback and stores a new PPM under
+`ANYPS3_FRAME_DIR`. Only after a successful fence and write does it update the
+flip state and send the permitted event to the original firmware. The frames are
+so far entirely black. No window or swapchain was created; the
+`captured_frames` counter is kept separate from `presented_frames`. The test
+also compares the whole captured frame with the actually rendered pixels of the
+diagnostic and verifies that an output failure does not release the waiting
+consumer.
 
-## Omezení backendu
+## Backend limitations
 
-Podporované čištění používá ARGB8 buffer A a/nebo Z24S8 v lokální VRAM,
-jeden nebo dva vzorky a nulový počátek surface clip. Scissor, pitch a
-offset se respektují. Částečné masky kanálů či stencil masky, jiné formáty,
-MRT a main-memory povrchy explicitně selhávají. Stejně tak kreslení,
-upload shaderů a blity. Podpora dvou vzorků při čištění není podpora MSAA
-při kreslení geometrie.
+The supported clear uses an ARGB8 buffer A and/or Z24S8 in local VRAM, one or
+two samples and a zero surface-clip origin. Scissor, pitch and offset are
+respected. Partial channel masks or stencil masks, other formats, MRT and
+main-memory surfaces explicitly fail. The same applies to drawing, shader
+uploads and blits. Support for two samples during clearing is not MSAA support
+for geometry drawing.
 
-Vulkan je volitelný při sestavení generovaného programu přes
-`-DANYPS3_VULKAN` a `-lvulkan`. Bez něj pokračují dosavadní CPU/IPC testy,
-ale neprázdné čištění skončí explicitní chybou. Vytvoření Vulkan zařízení
-je odloženo na první podporované neprázdné čištění.
+Vulkan is optional when building the generated program, via
+`-DANYPS3_VULKAN` and `-lvulkan`. Without it, the existing CPU/IPC tests
+continue, but a non-empty clear ends with an explicit error. Creation of the
+Vulkan device is deferred until the first supported non-empty clear.
 
-Každé čištění nyní alokuje přechodné prostředky a synchronně kopíruje
-povrch tam i zpět. Je to ověřitelný základ správnosti, nikoli výkonný renderer.
-Další práce: trvalé GPU povrchy a jejich koherence s VRAM, převod RSX
-shaderů na SPIR-V, draw calls a swapchain pro zobrazení v okně.
+Each clear now allocates transient resources and synchronously copies the
+surface there and back. This is a verifiable baseline of correctness, not a
+performant renderer. Further work: persistent GPU surfaces and their coherence
+with VRAM, conversion of RSX shaders to SPIR-V, draw calls and a swapchain for
+display in a window.
 
-Technické podklady: místní RPCS3 `gcm_enums.h` a `rsx_decode.h` pro rozložení
-registrů; [Vulkan v ArchWiki](https://wiki.archlinux.org/title/Vulkan),
-[ovladače Mesa](https://docs.mesa3d.org/systems.html) a hlavičky Vulkan.
+Technical sources: local RPCS3 `gcm_enums.h` and `rsx_decode.h` for the
+register layout; [Vulkan in the ArchWiki](https://wiki.archlinux.org/title/Vulkan),
+[Mesa drivers](https://docs.mesa3d.org/systems.html) and the Vulkan headers.

@@ -1,92 +1,92 @@
-# Ratchet & Clank: A Crack in Time — kompletní disk a paměťový runtime
+# Ratchet & Clank: A Crack in Time — complete disc and memory runtime
 
-Datum: 2026-10-13. Navazuje na [první milník](ratchet-acit-milestone.md).
+Date: 2026-10-13. Follows the [first milestone](ratchet-acit-milestone.md).
 
-Download doběhl. Celý obraz prošel CRC, všech 811 souborů je rozbaleno
-a první přeložená funkce skutečně čtoucí data hry byla sestavena a spuštěna
-nativně. Hra zatím nenaběhne; volání funkcí a systémové služby nejsou hotové.
+The download finished. The whole image passed the CRC, all 811 files are extracted,
+and the first translated function that actually reads game data was built and run
+natively. The game does not start yet; function calls and system services are not finished.
 
-## Integrita a extrakce
+## Integrity and extraction
 
-| Položka | Ověřený výsledek |
+| Item | Verified result |
 |---|---|
-| ZIP | 20 806 818 527 bajtů, platný čitelný centrální adresář, 2 položky |
-| ISO | 24 772 083 712 bajtů, CRC32 `7b8065f1` odpovídá ZIP |
-| README v ZIP | CRC ověřeno samostatným přečtením přes `zipfile` |
-| Extrakce ISO | 811 souborů, 0 chybějících, 24 767 909 758 bajtů |
-| Srovnání s částečnou extrakcí | SHA-256 všech 661 dříve získaných souborů souhlasí |
-| Nově získané soubory | 150, včetně `DEBUG.DAT` a dalších videí/dat |
+| ZIP | 20,806,818,527 bytes, valid readable central directory, 2 entries |
+| ISO | 24,772,083,712 bytes, CRC32 `7b8065f1` matches the ZIP |
+| README in the ZIP | CRC verified by a separate read via `zipfile` |
+| ISO extraction | 811 files, 0 missing, 24,767,909,758 bytes |
+| Comparison with the partial extraction | SHA-256 of all 661 previously obtained files match |
+| Newly obtained files | 150, including `DEBUG.DAT` and other videos/data |
 
-Kontrola CRC ISO proběhla během úplné dekomprese nástrojem `recover-zip`.
-Čtení centrálního adresáře a README bylo ověřeno navíc přes standardní
-knihovnu Pythonu. Samotný `recover-zip` dál kontroluje pouze ISO položku,
-proto v jeho reportu zůstává `source_archive_complete: null`.
-Souhrn obou kontrol je v `local/ratchet/complete-verification.json`.
+The ISO CRC check took place during the full decompression by the `recover-zip` tool.
+Reading the central directory and the README was additionally verified via the standard
+Python library. `recover-zip` itself still checks only the ISO entry,
+so its report keeps `source_archive_complete: null`.
+A summary of both checks is in `local/ratchet/complete-verification.json`.
 
-EBOOT i analytický ELF mají stejné hashe jako v prvním milníku. Profil
-BCES00511 01.00 zůstává platný. Omezení rekonstrukce SELF a neověřeného
-ECDSA podpisu popsaná v prvním milníku se nemění.
+The EBOOT and the analysis ELF have the same hashes as in the first milestone. The profile
+BCES00511 01.00 remains valid. The limitations of the SELF reconstruction and of the unverified
+ECDSA signature described in the first milestone do not change.
 
-`DEBUG.DAT` má 502 843 bajtů a začíná `IGHW`. Jednoduchý průchod nalezl
-15 299 tisknutelných ASCII řetězců délky alespoň 5, mezi nimi názvy tříd,
-enumů a objektů. To je vodítko pro další rozbor dat; zatím nemáme ověřenou
-vazbu těchto názvů na adresy PPU funkcí ani parser celého formátu.
+`DEBUG.DAT` is 502,843 bytes and begins with `IGHW`. A simple pass found
+15,299 printable ASCII strings of length at least 5, among them names of classes,
+enums and objects. This is a lead for further analysis of the data; so far we have no verified
+link between these names and the addresses of PPU functions, nor a parser of the whole format.
 
-## Nová implementace
+## New implementation
 
-Překladač podporuje D-form instrukce `lwz`, `lbz`, `lhz`, `lha`, `stw`,
-`stb`, `sth`, jejich update varianty a DS-form `ld`, `ldu`, `lwa`, `std`,
-`stdu`. Neplatné update operandy a rezervované DS varianty odmítá.
+The translator supports the D-form instructions `lwz`, `lbz`, `lhz`, `lha`, `stw`,
+`stb`, `sth`, their update variants and the DS-form `ld`, `ldu`, `lwa`, `std`,
+`stdu`. It rejects invalid update operands and reserved DS variants.
 
-Generovaný C++ paměťový runtime načte PT_LOAD segmenty z původního ELF,
-doplní BSS nulami a vytvoří 1MiB zásobník s počátečním SP `0xd00fff00`.
-Big-endian přístupy kontrolují rozsahy a práva; adresa hry nikdy není přímo
-hostitelský ukazatel. Zápis do spustitelných segmentů, překryvy mapování,
-přístupy přes hranici segmentu a mapa přes 512 MiB se odmítají. Paměťové
-chyby uvádějí adresu vykonávané instrukce.
+The generated C++ memory runtime loads the PT_LOAD segments from the original ELF,
+fills BSS with zeros and creates a 1 MiB stack with the initial SP `0xd00fff00`.
+Big-endian accesses check ranges and permissions; a game address is never directly
+a host pointer. Writes to executable segments, mapping overlaps,
+accesses across a segment boundary and a map over 512 MiB are rejected. Memory
+errors report the address of the executed instruction.
 
-Program vyžaduje ELF jako argument. Před načtením porovná velikost a CRC32
-se vstupem při generování. CRC slouží proti neúmyslné záměně, není podpisem
-ani kryptografickým ověřením. Bezpaměťové demo nadále funguje bez argumentu.
-Zásobník je testovací; nemá argumenty procesu, TLS ani inicializaci enginu.
+The program requires the ELF as an argument. Before loading it compares the size and CRC32
+with the input at generation time. The CRC serves against accidental mix-ups, it is not a signature
+or a cryptographic verification. The memoryless demo still works without an argument.
+The stack is for testing; it has no process arguments, TLS or engine initialization.
 
-## Nativní důkaz na skutečné funkci
+## Native evidence on a real function
 
-| Položka | Hodnota |
+| Item | Value |
 |---|---|
 | OPD | `0x00d2bec8` |
-| Kód | `0x009011b8` |
+| Code | `0x009011b8` |
 | TOC | `0x00d34a88` |
-| Instrukce | `lwz r3,-6352(r2); blr` |
-| Čtená adresa | `0x00d331b8` |
-| Bajty v ELF | `00 de 50 d8` |
-| Očekávané a skutečné r3 | `14569688` (`0x00de50d8`) |
-| Návratový kód nativního programu | 0 |
+| Instructions | `lwz r3,-6352(r2); blr` |
+| Address read | `0x00d331b8` |
+| Bytes in the ELF | `00 de 50 d8` |
+| Expected and actual r3 | `14569688` (`0x00de50d8`) |
+| Return code of the native program | 0 |
 
-Očekávaná hodnota byla nezávisle přečtena z mapování ELF v Pythonu a porovnána
-s výstupem nativního programu. Jde o izolovanou dvouinstrukční funkci nad
-počátečními daty ELF, nikoli o běh enginu nebo důkaz funkčnosti načteného objektu.
+The expected value was independently read from the ELF mapping in Python and compared
+with the output of the native program. This is an isolated two-instruction function over the
+initial ELF data, not an engine run or evidence that a loaded object works.
 
-Statický průchod nyní přijímá 2 971 z 34 512 unikátních vstupů z OPD
-(dříve 1 370), při limitu 256 instrukcí. Počet zahrnuje triviální funkce
-a neověřuje platnost argumentů ani běhového stavu. Není to procento hratelnosti.
+The static pass now accepts 2,971 of 34,512 unique entries from the OPD
+(previously 1,370), with a limit of 256 instructions. The count includes trivial functions
+and does not verify the validity of arguments or runtime state. It is not a percentage of playability.
 
-Překlad startu nyní projde přes první `lwz`, `stdu` a `std`, ale zastaví se na:
+The translation of the startup now passes the first `lwz`, `stdu` and `std`, but stops at:
 
 ```text
 0x0001029c: 0x48000115 — bl 0x000103b0
 ```
 
-Celý start se negeneroval ani nespouštěl. Další konkrétní úkol je LR,
-volání/návraty, následně podmíněné větvení a první skutečně dosažená služba.
+The whole startup was neither generated nor run. The next concrete task is LR,
+calls/returns, then conditional branching and the first service actually reached.
 
-## Ověření a opakování
+## Verification and repetition
 
-Všech **54 testů prošlo**. Paměťové testy sestavují a spouštějí syntetické
-programy pro endianitu, nulování BSS, šířky a znaménka loadů, update formy,
-záporný DS displacement, zachování starého SP při `stdu`, neplatné mapování,
-přístupová práva a záměnu vstupního ELF. Vybrané opkódy byly navíc ověřeny
-lokálním LLVM assemblerem. Nativní sestavení používá C++17,
+All **54 tests passed**. The memory tests build and run synthetic
+programs for endianness, BSS zeroing, load widths and signs, update forms,
+negative DS displacement, preservation of the old SP at `stdu`, invalid mappings,
+access permissions and a mix-up of the input ELF. Selected opcodes were additionally verified
+by the local LLVM assembler. The native build uses C++17,
 `-O2 -Wall -Wextra -Werror`.
 
 ```bash
@@ -96,7 +96,7 @@ python3 -m anyps3 inspect local/ratchet/EBOOT.analysis.elf \
 ./local/ratchet/leaf-memory-verified local/ratchet/EBOOT.analysis.elf
 ```
 
-Pro nový překlad použijte nové výstupní jméno:
+For a new translation use a new output name:
 
 ```bash
 python3 -m anyps3 recompile local/ratchet/EBOOT.analysis.elf \
@@ -106,18 +106,18 @@ c++ -std=c++17 -O2 -Wall -Wextra -Werror \
 ./local/ratchet/leaf-memory-new local/ratchet/EBOOT.analysis.elf
 ```
 
-| Lokální artefakt | Obsah |
+| Local artifact | Content |
 |---|---|
-| `local/ratchet/disc.complete.iso` | Kompletní ISO, ověřené CRC |
-| `local/ratchet/game-complete/` | Kompletní extrakce s manifestem a SHA-256 každého souboru |
-| `local/ratchet/complete-verification.json` | Souhrn integrity a srovnání s částečnou extrakcí |
-| `local/ratchet/recovery-complete.json` | Ověření dekomprese a CRC ISO položky |
-| `local/ratchet/disc-inventory-complete.json` | Kompletní inventář ISO |
-| `local/ratchet/analysis-memory.json` | Nový statický průchod EBOOT |
-| `local/ratchet/native-memory-verification.json` | Porovnání očekávané a nativně načtené hodnoty |
-| `local/ratchet/leaf-memory-verified.cpp`, `leaf-memory-verified` | Generovaný kód a nativní program |
-| `local/ratchet/debug-strings.txt` | Pomocný výpis řetězců DEBUG.DAT |
-| `local/ratchet/tests-memory.log` | Výsledky celé testovací sady |
+| `local/ratchet/disc.complete.iso` | Complete ISO, CRC verified |
+| `local/ratchet/game-complete/` | Complete extraction with a manifest and the SHA-256 of every file |
+| `local/ratchet/complete-verification.json` | Summary of integrity and the comparison with the partial extraction |
+| `local/ratchet/recovery-complete.json` | Verification of the decompression and of the CRC of the ISO entry |
+| `local/ratchet/disc-inventory-complete.json` | Complete ISO inventory |
+| `local/ratchet/analysis-memory.json` | New static pass of the EBOOT |
+| `local/ratchet/native-memory-verification.json` | Comparison of the expected and the natively loaded value |
+| `local/ratchet/leaf-memory-verified.cpp`, `leaf-memory-verified` | Generated code and native program |
+| `local/ratchet/debug-strings.txt` | Auxiliary dump of the strings of DEBUG.DAT |
+| `local/ratchet/tests-memory.log` | Results of the whole test suite |
 
-Herní data, lokální parametry klíče, odvozený kód a velké obrazy zůstávají
-v ignorované složce `local/`. Původní archiv ani částečná extrakce se neměnily.
+The game data, local key parameters, derived code and large images remain
+in the ignored folder `local/`. The original archive and the partial extraction were not modified.

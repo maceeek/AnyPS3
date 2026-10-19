@@ -1,524 +1,525 @@
-# Postup směrem k menu
+# Progress toward the menu
 
-Cíl: původní menu Ratchet & Clank: A Crack in Time a navigace gamepadem.
-Menu zatím dosaženo není. PPU/SPU nadále běží výhradně ze statického překladu;
-Vulkan backend je vlastní, RPCS3 slouží pouze jako místní technická reference.
+Goal: the original menu of Ratchet & Clank: A Crack in Time and navigation with a gamepad.
+The menu has not yet been reached. The PPU/SPU continue to run exclusively from static translation;
+the Vulkan backend is our own, RPCS3 serves only as a local technical reference.
 
-## Herní data a životní cyklus vlákna
+## Game data and thread lifecycle
 
-Sestavení 124–127 ze dne 2026-10-14 překročila původní blokaci
-`GDAT initGameData`. Původní firmware postupně:
+Builds 124–127 of 2026-10-14 got past the original blockage at
+`GDAT initGameData`. The original firmware successively:
 
-1. Otevřel relaci služby s existujícím paměťovým kontejnerem. Nativní služba
-   rezervuje skutečných 64 KiB pracovního prostoru z jeho rozpočtu; kontejner
-   po dobu relace nelze zrušit.
-2. Vyžádal `getGameDataStat` pro `BCES00511`. Služba čte skutečnou existenci
-   metadat a volné místo pod explicitním `ANYPS3_HDD_ROOT`. Pro nové herní
-   úložiště vrací odpovídající stav a cesty. Interní wire struktura má 0x1450
-   bajtů, veřejný callback 0x1448; převod provádí původní firmware.
-3. Zavolal původní herní callback `0x66dc78` přes OPD `0xd18230`. Tento
-   callback byl předem zahrnut do statického překladu, pouze po kontrole
-   identity ELF a skutečného deskriptoru. Callback převezme cesty a volné
-   místo a sám vrátí `OK_CANCEL`; služba nepředstírá vytvoření dat.
-4. Uzavřel relaci přes `endGameData` a uvolnil její rozpočet.
-5. Dokončil `SysUtilThread()` přes `sys_ppu_thread_exit`. Runtime uvolní
-   vlastněný zásobník/TLS a zachová návratový stav pro `sys_ppu_thread_join`.
-   Hlavní vlákno skutečně provedlo join a pokračovalo v grafické inicializaci.
+1. Opened a service session with an existing memory container. The native service
+   reserves a real 64 KiB of working space from its budget; the container
+   cannot be released for the duration of the session.
+2. Requested `getGameDataStat` for `BCES00511`. The service reads the real existence of the
+   metadata and the free space under the explicit `ANYPS3_HDD_ROOT`. For a new game
+   storage it returns the corresponding state and paths. The internal wire structure has 0x1450
+   bytes, the public callback 0x1448; the conversion is performed by the original firmware.
+3. Called the original game callback `0x66dc78` via OPD `0xd18230`. This
+   callback was included in the static translation in advance, only after checking the
+   ELF identity and the real descriptor. The callback takes over the paths and the free
+   space and itself returns `OK_CANCEL`; the service does not pretend to create data.
+4. Closed the session via `endGameData` and released its budget.
+5. Finished `SysUtilThread()` via `sys_ppu_thread_exit`. The runtime releases the
+   owned stack/TLS and preserves the return status for `sys_ppu_thread_join`.
+   The main thread actually performed the join and continued with graphics initialization.
 
-Dosud je podporovaný dotaz na nové úložiště bez PARAM.SFO, bez výpočtu
-velikosti a bez chybového dialogu. Existující metadata, jejich aktualizace
-a další režimy stále explicitně selhávají. Adresářové symlinky a průchod
-mimo připojený kořen se odmítají. Žádná podpora neznámých požadavků se
-nesimuluje úspěšným návratem.
+Supported so far is the query for a new storage without PARAM.SFO, without computing the
+size and without an error dialog. Existing metadata, their update
+and other modes still fail explicitly. Directory symlinks and traversal
+outside the mounted root are rejected. No support for unknown requests is
+simulated by a successful return.
 
-Pro další reprodukci je kromě disku a cache potřeba:
+For further reproduction, in addition to the disk and cache, the following is needed:
 
 ```bash
 mkdir -p local/ratchet/hdd0
 export ANYPS3_HDD_ROOT=local/ratchet/hdd0
 ```
 
-## Grafické příkazy
+## Graphics commands
 
-Sestavení 128 překročilo 348 paketů RSX. Konstanty vertex shaderu se
-ukládají bitově přesně do 512 čtyřsložkových registrů, s respektováním
-`TRANSFORM_CONSTANT_LOAD` i neinkrementujících FIFO zápisů. Následující
-invalidace vertex cache uchovává generaci invalidace; zatím neexistuje
-cache vykreslených vertexů.
+Build 128 got past 348 RSX packets. The vertex shader constants are
+stored bit-exactly into 512 four-component registers, respecting
+`TRANSFORM_CONSTANT_LOAD` and also non-incrementing FIFO writes. The subsequent
+vertex cache invalidation preserves the invalidation generation; there is as yet no
+cache of rendered vertices.
 
-Sestavení 131 provedlo první skutečný herní `CLEAR_SURFACE` přes Vulkan:
-960 × 704, dva horizontální vzorky, ARGB8 a Z24S8, maska `0xf3`.
-Dlaždicové adresování obou ploch respektuje pitch a banku. Clear ukládá
-plnou hodnotu Z24S8 bitově přesně přes RGBA8 attachment; nejde zatím
-o podporu hloubkového testování při kreslení. Komprimovatelné plochy
-udržujeme v nekomprimované reprezentaci, komprimovaná data nedekódujeme.
+Build 131 performed the first real game `CLEAR_SURFACE` through Vulkan:
+960 × 704, two horizontal samples, ARGB8 and Z24S8, mask `0xf3`.
+The tiled addressing of both surfaces respects the pitch and the bank. The clear stores
+the full Z24S8 value bit-exactly through an RGBA8 attachment; this is not yet
+support for depth testing during drawing. Compressible surfaces
+are kept in an uncompressed representation, compressed data is not decoded.
 
-Převod adres dlaždic byl porovnán s místní referencí pro 20 kombinací
-pitch/banky. Testy ověřují také dva vzorky, scissor, Z24S8 a zachování
-okolní paměti. Celá sada v tomto bodě: 133 testů, všechny prošly, Vulkan
-byl povinný; obrazový test prošel i s kontrolou synchronizace Khronos.
+The tile address conversion was compared with the local reference for 20 combinations of
+pitch/bank. The tests also verify two samples, scissor, Z24S8 and preservation of the
+surrounding memory. The whole suite at this point: 133 tests, all passed, Vulkan
+was mandatory; the image test passed also with the Khronos synchronization check.
 
-Běh 131 se následně zastavil na `GET_REPORT` (`0x1800`, hodnota
-`0x02020a00`) po 408 paketech RSX a 102 838 528 krocích PPU.
-`rendered clears=1 presented_frames=0`: skutečná GPU operace, dosud žádná
-herní geometrie, prezentovaný snímek ani menu. Samostatný
-[Vulkan obrazový test](vulkan-rendering.md) zůstává diagnostikou.
+Run 131 then stopped at `GET_REPORT` (`0x1800`, value
+`0x02020a00`) after 408 RSX packets and 102,838,528 PPU steps.
+`rendered clears=1 presented_frames=0`: a real GPU operation, as yet no
+game geometry, presented frame or menu. The standalone
+[Vulkan image test](vulkan-rendering.md) remains a diagnostic.
 
-## Reporty, fronta a časování výstupu
+## Reports, queue and output timing
 
-Následující běhy doplnily GPU reporty v lokální reportové oblasti, VRAM
-a mapované hlavní paměti. Zapisují skutečný monotónní čas a hodnoty čítačů;
-po resetu a bez podporovaných draw calls jsou čítače nulové.
+Subsequent runs added GPU reports in the local report area, VRAM
+and mapped main memory. They write real monotonic time and counter values;
+after reset and without supported draw calls the counters are zero.
 
-`DRIVER_QUEUE` zpracuje skutečný display buffer a pošle pouze povolené
-události původnímu firmwaru. Nepotvrzuje tím dokončený flip. Vblank vychází
-ze skutečného monotónního času, při 60000/1001 Hz podle video konfigurace.
-Původní herní callback `0x661730` (OPD `0xd17890`) je přeložen předem.
-Celá sada po těchto změnách prošla: 136 testů včetně povinného Vulkan testu.
+`DRIVER_QUEUE` processes the real display buffer and sends only permitted
+events to the original firmware. It does not thereby confirm a completed flip. Vblank is derived
+from real monotonic time, at 60000/1001 Hz according to the video configuration.
+The original game callback `0x661730` (OPD `0xd17890`) is translated in advance.
+The whole suite passed after these changes: 136 tests including the mandatory Vulkan test.
 
-Sestavení 136 ukázalo čekání na zařízení `device+0x30`. Místní reference
-v `NV47/HW/nv406e.cpp` tento registr označuje jako synchronizaci display
-queue a bezpodmínečně přepisuje release nuly na jedničku. Naše implementace
-potvrzení váže na dosud nepotvrzenou generaci skutečně zpracované fronty.
-Jde o model protokolu odvozený z FIFO a reference, zatím neověřený na PS3
-hardwaru; nejde o zápis do samostatného semaforu dokončení flipu.
+Build 136 showed a wait on the device `device+0x30`. The local reference
+in `NV47/HW/nv406e.cpp` designates this register as display queue synchronization
+and unconditionally overwrites a release of zero with one. Our implementation binds the
+acknowledgement to a not-yet-acknowledged generation of the actually processed queue.
+This is a protocol model derived from the FIFO and the reference, not yet verified on PS3
+hardware; it is not a write to a separate flip-completion semaphore.
 
-## První skutečné výměny bufferů
+## First real buffer swaps
 
-Sestavení 138 dokončilo čtyři herní flipy střídající buffery 1 a 2.
-Výstupní sink načetl jejich skutečný obsah 1280 × 720 přes Vulkan,
-počkal na fence, zapsal PPM a teprve poté oznámil dokončení firmwaru.
-Všechny čtyři snímky jsou černé (všech 2 764 800 RGB bajtů každého
-snímku je nulových). Nejde o menu ani důkaz kreslení geometrie.
+Build 138 completed four game flips alternating buffers 1 and 2.
+The output sink loaded their real 1280 × 720 content via Vulkan,
+waited for the fence, wrote a PPM and only then reported completion to the firmware.
+All four frames are black (all 2,764,800 RGB bytes of each
+frame are zero). This is neither the menu nor evidence of geometry drawing.
 
-Reprodukce používá navíc `ANYPS3_FRAME_DIR`, ukazující na existující prázdný
-adresář. Soubory `frame-000001.ppm` atd. se nikdy nepřepisují; diagnostický
-limit je 256 snímků. Chybějící výstup, chyba Vulkanu nebo zápisu nepotvrdí
-flip a neuvolní jeho semafor. Jde o headless výstup, nikoli swapchain do
-okna: diagnostika odděluje `captured_frames` od `presented_frames=0`.
+The reproduction additionally uses `ANYPS3_FRAME_DIR`, pointing to an existing empty
+directory. Files `frame-000001.ppm` etc. are never overwritten; the diagnostic
+limit is 256 frames. Missing output, a Vulkan error or a write error does not confirm the
+flip and does not release its semaphore. This is headless output, not a swapchain to a
+window: the diagnostics separate `captured_frames` from `presented_frames=0`.
 
-Běh 139 překročil původní virtuální metodu `0x32bb74` a zastavil se při
-volání `cellSysmoduleInitialize`. Export byl ověřen přímo v původním
-firmwaru 3.01: funkce na offsetu `0x312c` pouze vrací nulu. Obsluha tohoto
-exportu proto nepředstírá načtení dalších modulů; ty nadále vyžadují
-skutečné obrazy a jejich statický překlad.
+Run 139 got past the original virtual method `0x32bb74` and stopped at the
+call of `cellSysmoduleInitialize`. The export was verified directly in the original
+firmware 3.01: the function at offset `0x312c` merely returns zero. The handler of this
+export therefore does not pretend to load further modules; those continue to require
+real images and their static translation.
 
-## Inicializace správce souborů
+## File manager initialization
 
-Běhy 142–145 načetly skutečný `libio` (ID 23), spustily jeho původní
-`module_start` a vytvořily herní `TrophyInitThread`. Dosažené vtable
-správce stavu a alokátoru byly ověřeny proti původním OPD v EBOOT a
-přidány mezi vstupy statického překladu.
+Runs 142–145 loaded the real `libio` (ID 23), started its original
+`module_start` and created the game `TrophyInitThread`. The reached vtables
+of the state manager and the allocator were verified against the original OPDs in the EBOOT and
+added among the inputs of the static translation.
 
-`lightweight_sync.py` poskytuje vytvoření, zrušení, signal, broadcast
-a nekonečné čekání pro lehké podmínkové proměnné. Čekání uvolní vlastněný
-mutex, po signálu jej musí znovu získat a obnoví původní hloubku rekurze.
-Blokované vlákno nesmí dokončit wait, dokud jiný vlastník mutex neuvolní.
-Testy pokrývají tento souběh, FIFO/priority výběr, nepersistentní signál
-a odmítnutí zrušení používané podmínky. Timeouty zůstávají explicitně
-nepodporované.
+`lightweight_sync.py` provides creation, destruction, signal, broadcast
+and infinite wait for lightweight condition variables. A wait releases the owned
+mutex, after the signal it must reacquire it and restores the original recursion depth.
+A blocked thread must not complete the wait until another owner releases the mutex.
+The tests cover this race, FIFO/priority selection, a non-persistent signal
+and rejection of destroying a condition in use. Timeouts remain explicitly
+unsupported.
 
-Sestavení 145 dosáhlo původního FILE-output callbacku `0x9098e8` při
-102 888 256 krocích PPU. Stále jsou zachyceny čtyři černé snímky.
-`local/ratchet/native-bundle-145/verification.json` ověřuje zachování
-všech původních PT_LOAD bajtů, hashe programu a snímků. Novější sestavení
-uchovávají i přesný použitý `profile.json` a hashe zdrojů při generování.
-Celá sada zde prošla se 139 testy a povinným Vulkan backendem.
-Následující běh 146 už vypsal původní hlášku `FIOS 1.3.1 initialized`
-a vstoupil do backendu souborových operací.
+Build 145 reached the original FILE-output callback `0x9098e8` at
+102,888,256 PPU steps. Four black frames are still captured.
+`local/ratchet/native-bundle-145/verification.json` verifies preservation of
+all original PT_LOAD bytes, the hashes of the program and of the frames. Newer builds
+also retain the exact `profile.json` used and the source hashes at generation time.
+The whole suite passed here with 139 tests and the mandatory Vulkan backend.
+The following run 146 already printed the original message `FIOS 1.3.1 initialized`
+and entered the file operations backend.
 
-## První nativní souborové operace
+## First native file operations
 
-Běhy 147–155 staticky přeložily dosažené callbacky FIOS, včetně jeho
-mediálních pracovníků a plánovače. Pracovní vlákna skutečně čekají na
-lehké podmínce a po signálu zpracují požadavek. `sys_process_is_stack`
-klasifikuje adresy podle horních čtyř bitů (`0xd`), jak očekává knihovna.
+Runs 147–155 statically translated the reached FIOS callbacks, including its
+media workers and scheduler. The worker threads really wait on a
+lightweight condition and process a request after the signal. `sys_process_is_stack`
+classifies addresses by the upper four bits (`0xd`), as the library expects.
 
-Sestavení 157 provedlo skutečný `stat("/dev_hdd1")`. Sestavení 159 potom
-otevřelo/vytvořilo `cache.idx` a `cache.dat` v unikátním adresáři cache
-a původní hra vypsala `Creating new disk-based cache files`. V tomto bodě
-ještě neproběhlo načítání herních assetů. Identita původních PT_LOAD bajtů
-a čtyři stále černé snímky jsou ověřeny v
+Build 157 performed a real `stat("/dev_hdd1")`. Build 159 then
+opened/created `cache.idx` and `cache.dat` in a unique cache directory
+and the original game printed `Creating new disk-based cache files`. At this point
+the loading of game assets had not yet taken place. The identity of the original PT_LOAD bytes
+and the four still-black frames are verified in
 `local/ratchet/native-bundle-159/verification.json`.
 
-`native_fs.py` poskytuje guest deskriptory 3–255, skutečné open/read/write,
-close, seek a stat/fstat. `/dev_bdvd` je pouze pro čtení, `/dev_hdd1` je
-session cache a `/dev_hdd0` explicitní zapisovatelný kořen. Symlinky a
-`..` se odmítají, neexistující soubory vracejí chybu. Zvláštní dotaz
-firmwaru `fcntl 0xc0000006` vrací vložený ENOTSUP; firmware sám použije
-běžné LV2 operace. Rozšířené/šifrované otevření a neznámé fcntl stále
-končí diagnostikou. Jeden přenos má diagnostický limit 16 MiB.
+`native_fs.py` provides guest descriptors 3–255, real open/read/write,
+close, seek and stat/fstat. `/dev_bdvd` is read-only, `/dev_hdd1` is the
+session cache and `/dev_hdd0` an explicit writable root. Symlinks and
+`..` are rejected, nonexistent files return an error. The special query of the
+firmware `fcntl 0xc0000006` returns an embedded ENOTSUP; the firmware itself uses
+the ordinary LV2 operations. Extended/encrypted open and unknown fcntl still
+end with a diagnostic. A single transfer has a diagnostic limit of 16 MiB.
 
-Další běh doplnil `_sys_strncmp` a dosáhl dotazu na geometrii úložiště.
-Velikosti sektorů/bloků odpovídají konfiguraci PS3 mountu; volné místo
-se zjišťuje ze skutečného hostitelského úložiště.
+A further run added `_sys_strncmp` and reached a query for the storage geometry.
+The sector/block sizes correspond to the configuration of the PS3 mount; free space
+is determined from the real host storage.
 
-Sestavení 161 už zapsalo po 512 bajtech do obou souborů cache. Původní
-SPURS následně načetl další firmware overlay (EA `0x20266b00`, LS `0xa00`,
-7456 bajtů). Běhy 163–166 doplnily skutečně dosažené SPU posuny celého
-128bitového registru, SUMB a MPYU. Testy kontrolují hranice počtů bitů,
-unsigned aritmetiku a překrývající se zdrojové/cílové registry.
+Build 161 already wrote 512 bytes each into both cache files. The original
+SPURS subsequently loaded another firmware overlay (EA `0x20266b00`, LS `0xa00`,
+7456 bytes). Runs 163–166 added the actually reached SPU shifts of a whole
+128-bit register, SUMB and MPYU. The tests check the boundaries of bit counts,
+unsigned arithmetic and overlapping source/destination registers.
 
-V běhu 166 SPURS přes DMA načetl také spustitelný segment původního
-herního SPU ELF na EA `0xbf4480` (entry LS `0x3050`, kód EA `0xbf4580`,
-LS `0x3000`, délka `0x8c20`). Segment je zahrnut do dalšího AOT sestavení
-po ověření ELF a hashe; neznámá instrukce nebo změna jejího slova stále
-zastaví běh. Celá sada v bodě 166 prošla: **145 testů**, Vulkan povinný.
-`native-bundle-166/verification.json` zachovává důkazy o tomto běhu.
-Výstup zůstává na čtyřech černých snímcích, bez menu a bez herní geometrie.
+In run 166 SPURS also loaded via DMA the executable segment of the original
+game SPU ELF at EA `0xbf4480` (entry LS `0x3050`, code EA `0xbf4580`,
+LS `0x3000`, length `0x8c20`). The segment is included in the next AOT build
+after verifying the ELF and the hash; an unknown instruction or a change of its word still
+stops the run. The whole suite at point 166 passed: **145 tests**, Vulkan mandatory.
+`native-bundle-166/verification.json` retains the evidence of this run.
+The output remains at four black frames, with no menu and no game geometry.
 
-Sestavení 171 už vykonalo původní herní SPU kód (dosažené LS `0x9c58`).
-Další běhy doplnily halfword posuny/rotace a aritmetiku, zbývající varianty
-quadword posunů a FSCRRD/FSCRWR se skutečným stavem každého vlákna a maskami
-rezervovaných bitů. Nepodporované aritmetické FP instrukce nadále selhávají.
-SPU emitter používá menší nativní funkce po stránkách, stejně jako PPU;
-výběr stále pouze volá předem přeložený blok a ověřuje původní slovo.
+Build 171 already executed the original game SPU code (reached LS `0x9c58`).
+Further runs added halfword shifts/rotations and arithmetic, the remaining variants
+of quadword shifts and FSCRRD/FSCRWR with the real state of each thread and masks
+of reserved bits. Unsupported arithmetic FP instructions continue to fail.
+The SPU emitter uses smaller native functions per page, just like the PPU;
+the selection still only calls a pre-translated block and verifies the original word.
 
-Běh 174 dosáhl 103 219 646 PPU kroků. Herní SPU po 27 500 instrukcích
-čeká na další událost. FIOS zapsal čtrnáct bloků po 64 KiB do indexu
-cache a skutečně prověřil neexistující adresář instalace pod `/dev_hdd0`.
-Následují původní funkce `fios::dearchiver`; první čtení archivu hry
-v tomto bodě ještě není doloženo. Celá sada v bodě 173 měla 147 testů,
-nový test FPSCR navíc prošel samostatně. Běh 174 má vlastní
-`verification.json`, všechny čtyři zachycené snímky jsou nadále černé.
+Run 174 reached 103,219,646 PPU steps. The game SPU waits for another
+event after 27,500 instructions. FIOS wrote fourteen 64 KiB blocks into the index of the
+cache and really probed a nonexistent installation directory under `/dev_hdd0`.
+The original `fios::dearchiver` functions follow; the first read of the game archive
+is not yet evidenced at this point. The whole suite at point 173 had 147 tests,
+the new FPSCR test additionally passed separately. Run 174 has its own
+`verification.json`, all four captured frames are still black.
 
-Sada v bodě 177 prošla se 148 testy a povinným Vulkanem. Běh 178 doložil
-první pokus o otevření `packed/game/game.psarc` z disku. Náš extraktor
-však používá primární ISO9660 jména, která jsou v tomto obrazu velkými
-písmeny. Pro tuto konkrétní reprezentaci disku je potřeba:
+The suite at point 177 passed with 148 tests and the mandatory Vulkan. Run 178 evidenced the
+first attempt to open `packed/game/game.psarc` from the disc. Our extractor,
+however, uses primary ISO9660 names, which in this image are in capital
+letters. For this particular disc representation the following is needed:
 
 ```bash
 export ANYPS3_DISC_CASEFOLD=1
 ```
 
-Jde o explicitní adaptaci hostitelských názvů, nikoli změnu herního kódu
-nebo obecné tvrzení o chování PS3 filesystémů. Přesný název má přednost,
-jednoznačný ASCII case-fold umožní otevřít existující soubor. Kolize
-zastaví běh, symlinky a průchod mimo kořen se dál odmítají. HDD a cache
-zůstávají citlivé na velikost písmen. Cílená sada šesti FS testů prošla.
+This is an explicit adaptation of host names, not a change of the game code
+or a general claim about the behavior of PS3 filesystems. The exact name takes precedence,
+an unambiguous ASCII case-fold allows opening an existing file. A collision
+stops the run, symlinks and traversal outside the root continue to be rejected. HDD and cache
+remain case-sensitive. A targeted suite of six FS tests passed.
 
-**Běh 179 poprvé skutečně otevřel a četl herní archiv**
-`/dev_bdvd/PS3_GAME/USRDIR/packed/game/game.psarc`. Původní FIOS parser
-načetl 32bajtovou hlavičku `PSAR` a 68 bajtů indexu, poté zavolal původní
-porovnávací funkci při řazení záznamů. Její OPD `0xd1f150` odkazuje na
-`0x717558`; následující sestavení ji zahrnuje do AOT. Nejde zatím o
-načtení textur ani vykreslené menu. Report běhu 179 obsahuje hash archivu,
-záznam čtení, zachování původních herních segmentů a čtyři černé snímky.
+**Run 179 for the first time really opened and read the game archive**
+`/dev_bdvd/PS3_GAME/USRDIR/packed/game/game.psarc`. The original FIOS parser
+loaded the 32-byte `PSAR` header and 68 bytes of the index, then called the original
+comparison function when sorting the entries. Its OPD `0xd1f150` refers to
+`0x717558`; the following build includes it in the AOT. This is not yet
+the loading of textures or a rendered menu. The report of run 179 contains the archive hash, a
+record of the reads, preservation of the original game segments and four black frames.
 
-Běhy 180–182 dokončily čtení celého archivu GAME.PSARC (19 811 bajtů)
-a zápis do skutečné cache. V `cache.dat` začíná archiv na offsetu 512
-a jeho bajty se přesně shodují s původním souborem. Doplněny jsou skutečné
-`fsync`/`fdatasync` a PPU MCRF s testem všech dvojic CR polí.
+Runs 180–182 completed the reading of the whole archive GAME.PSARC (19,811 bytes)
+and writing into the real cache. In `cache.dat` the archive starts at offset 512
+and its bytes exactly match the original file. Added are real
+`fsync`/`fdatasync` and PPU MCRF with a test of all pairs of CR fields.
 
-Běhy 183–184 předaly komprimovaný blok původnímu SPU programu. Nativně
-přeložená dekomprese už vykonává tabulkové operace a celočíselné násobení;
-její dokončení a výstup zatím nejsou ověřeny. Limit 100 000 SPU instrukcí
-zastavil běh v LS `0x8928`, proto má následující sestavení diagnostický
-strop 10 milionů instrukcí na SPU vlákno. Podrobné trasování se zapíná
-`ANYPS3_SPU_TRACE=1`; DMA, čekání a chyby se logují i bez něj.
+Runs 183–184 handed a compressed block to the original SPU program. The natively
+translated decompression already executes table operations and integer multiplication;
+its completion and output are not yet verified. A limit of 100,000 SPU instructions
+stopped the run at LS `0x8928`, therefore the following build has a diagnostic
+cap of 10 million instructions per SPU thread. Detailed tracing is enabled
+with `ANYPS3_SPU_TRACE=1`; DMA, waits and errors are logged even without it.
 
-Celá sada v bodě 183 prošla se 150 testy a povinným Vulkanem. Následující
-samostatný test násobení kontroluje znaménka, horní/dolní poloviny,
-akumulaci a aliasy registrů. Zobrazení nadále tvoří čtyři černé snímky.
+The whole suite at point 183 passed with 150 tests and the mandatory Vulkan. The subsequent
+standalone multiplication test checks signs, upper/lower halves,
+accumulation and register aliases. The display continues to consist of four black frames.
 
-Celá sada v bodě 185 prošla se **151 testy**. Další sestavení doplnila
-čtení SPU stavu (dosud neizolovaná vlákna s vypnutými přerušeními),
-větvení s vypnutím přerušení a skutečné mailbox události SPU → PPU.
-Povolení přerušení, izolované SPU a neznámé mailbox příkazy stále selhávají.
-Plná fronta pozastaví odesílatele a zachová jeho zprávu pro opakování;
-nepřipojený port vrací ENOTCONN u požadavku s odpovědí.
+The whole suite at point 185 passed with **151 tests**. Further builds added
+reads of the SPU status (so far non-isolated threads with interrupts disabled),
+branches with interrupt disable and real mailbox events SPU → PPU.
+Interrupt enabling, isolated SPUs and unknown mailbox commands still fail.
+A full queue suspends the sender and preserves its message for retry;
+an unconnected port returns ENOTCONN for a request with a reply.
 
-Běh 188 přenesl první 64KiB blok dekomprese zpět do hlavní paměti,
-doručil osm událostí přes port 17 a dosáhl **109 994 752 PPU kroků**.
-Hra už otevřela také `global_cached.psarc` a `global_uncached.psarc`.
-SPU dokončilo přes 7,85 milionu instrukcí; následující stop je při DMA
-na nerozpoznaný nebo rozdělený paměťový rozsah. Samotné počty DMA nejsou
-důkazem správných rozbalených bajtů. Vzor `game.toc` má 136 620 bajtů,
+Run 188 transferred the first 64 KiB block of the decompression back into main memory,
+delivered eight events through port 17 and reached **109,994,752 PPU steps**.
+The game has already also opened `global_cached.psarc` and `global_uncached.psarc`.
+The SPU completed over 7.85 million instructions; the following stop is at a DMA
+to an unrecognized or split memory range. The DMA counts alone are not
+evidence of correct unpacked bytes. The reference `game.toc` has 136,620 bytes,
 SHA-256 `b540c6930178ed93d1850c7210069dd612df73a17a5cde49f42ad9693630c08d`;
-nezávislé porovnání s nativním výstupem dosud zbývá.
-Report `native-bundle-188/verification.json` potvrzuje zachování původních
-herních segmentů a stále pouze čtyři černé snímky.
+an independent comparison with the native output is still outstanding.
+The report `native-bundle-188/verification.json` confirms preservation of the original
+game segments and still only four black frames.
 
-**Milník 190: výstup SPU dekomprese je ověřený bajt po bajtu.**
-Diagnostický čtecí pozorovatel zachytil všech 136 620 bajtů `game.toc`
-po třetí SPU události. Shodují se s nezávislým zlib dekódováním archivu
-a s výše uvedeným hashem. Runtime také zvládá DMA přes sousední paměťová
-mapování; před kopírováním ověří celý rozsah a oprávnění. Herní běh překročil
-dřívější chybu na `0x409fee80 + 0x4000` a dosáhl 110 610 176 PPU kroků.
-Aktuální stop je diagnostický limit 10 milionů instrukcí SPU, nikoli menu.
-Celá sada prošla se **153 testy** a povinným Vulkanem.
-Souhrn, omezení a reprodukce jsou v [milníku načítání](ratchet-acit-loading-milestone.md).
-
-
-## Pokračování po SPU rozpočtu a floating point
-
-Běh 191 používá explicitní `ANYPS3_SPU_MAX_STEPS=500000000` místo
-výchozího limitu 10 milionů instrukcí na vlákno. Rozpočet přijímá pouze
-kladné desítkové uint64 hodnoty; nula, znaménka, přetečení a nečíselné
-vstupy se odmítají. Nativní test vykoná původně přeloženou smyčku přes
-starou hranici a ověří stop před instrukcí překračující nový rozpočet.
-
-První SPU v běhu 191 dokončilo 30 455 452 instrukcí a čeká na událost.
-PPU dosáhlo 115 888 424 kroků a zastavilo se na `FSUBS` v `0x3acfc0`:
-původní hra načetla single-precision NaN `0xffffffff`. Podpora NaN nyní
-zachovává payload, znaménko a prioritu operandů, tiší signaling NaN a
-nastavuje VXSNAN/VX/FX, FPRF a FI/FR. Odčítání nemění znaménko vstupního
-NaN. Test obsahuje přesné instrukční slovo z tohoto stopu.
-
-Běh 192 tento stop překročil a dosáhl callbacku přes OPD `0xd0af48`:
-kód `0x4eb05c`, TOC `0xd34a88`. Jeho desetipoložková tabulka relativních
-větví v `0x4eb088` i cíle byly ověřeny proti původnímu ELF a zahrnuty do
-statického překladu. Běh 193 pak zastavilo další `FSUBS` v `0x3af508`:
-`0 - 2^-142`, tedy přesný záporný binary32 subnormální výsledek.
-
-Runtime nově podporuje subnormální operandy i výsledky. Před závěrečným
-zaokrouhlením posune nezakulacený significand a zachová sticky remainder;
-nejde o dvojí zaokrouhlení. Exact subnormal nenastavuje UX, tiny inexact
-nastavuje UX a XX. FPRF rozlišuje znaménko, nulu a subnormální výsledek.
-Racionální referenční testy zahrnují obě přesnosti, nejmenší hodnoty,
-midpointy, přechod do normálního rozsahu a podepsanou nulu.
-Priorita NaN a detekce tininess před zaokrouhlením byly porovnány také
-s [primárním zdrojem QEMU PPC](https://github.com/qemu/qemu/blob/master/target/ppc/cpu_init.c).
-Infinita bez podporované NaN propagace, overflow, alternativní rounding
-mode a povolené FP traps stále explicitně selhávají.
-
-Celá sada po NaN změnách prošla se 155 testy a povinným Vulkanem;
-rozšířené racionální testy subnormálních hodnot prošly samostatně.
-Běhy 191–193 mají vlastní `verification.json` s kontrolou původních
-PT_LOAD bajtů a hashi artefaktů. Nadále zachycují čtyři černé snímky.
-Menu ani navigace gamepadem tím ještě nejsou ověřeny.
+**Milestone 190: the output of the SPU decompression is verified byte by byte.**
+A diagnostic read observer captured all 136,620 bytes of `game.toc`
+after the third SPU event. They match an independent zlib decoding of the archive
+and the above hash. The runtime also handles DMA across adjacent memory
+mappings; before copying it verifies the whole range and permissions. The game run got past
+the earlier error at `0x409fee80 + 0x4000` and reached 110,610,176 PPU steps.
+The current stop is the diagnostic limit of 10 million SPU instructions, not the menu.
+The whole suite passed with **153 tests** and the mandatory Vulkan.
+The summary, limitations and reproduction are in the [loading milestone](ratchet-acit-loading-milestone.md).
 
 
-Běh 194 překročil i subnormální `FSUBS` a dosáhl 117 709 281 PPU kroků.
-Dosažený herní objekt s vtable `0xc38280` má čtrnáct původních OPD;
-slot 2 odkazuje přes `0xcdbe00` na `0x2e8814`. Sestavení 195 zahrnuje
-celou ověřenou tabulku, včetně všech kódových cílů, bez změny bajtů hry.
+## Continuation after the SPU budget and floating point
 
-Běh 195 se zastavil na interním sysutil parametru `0x4c05`, délka 8.
-Původní firmware export `cellAudioOutGetNumberOfDevice` (NID `0xe5e2b09d`,
-kód `0x2011949c`) sestavuje právě tento dotaz a čte počet zařízení z druhého
-slova odpovědi. Nativní runtime nemá nakonfigurovaný zvukový backend, proto
-vrací počet nula; neplatný výstup vrací `0x8002b242`. Běh 196 tento dotaz
-překročil a dosáhl 117 861 953 kroků, potom požádal o `set 0x4c09`, délka 28.
-Export `cellAudioOutConfigure` (NID `0x4692ab35`) byl ověřen ve stejném
-firmwaru; pro chybějící backend runtime vrací explicitní NOT_IMPLEMENTED,
-pro sekundární výstup UNSUPPORTED_AUDIO_OUT. Nepotvrzuje konfiguraci ani
-přehrávání. Původní firmware i hra rozhodují, jak s chybou naložit.
+Run 191 uses an explicit `ANYPS3_SPU_MAX_STEPS=500000000` instead of
+the default limit of 10 million instructions per thread. The budget accepts only
+positive decimal uint64 values; zero, signs, overflow and non-numeric
+inputs are rejected. A native test executes the originally translated loop across the
+old boundary and verifies a stop before the instruction that exceeds the new budget.
 
-Celá sada v bodě 196 prošla se **156 testy**, Vulkan povinný. Následující
-cílený test ověřuje i chybu audio konfigurace a správné jméno `set`
-v odpovědi. Běhy 194–196 zachovávají původní PT_LOAD bajty a stále pouze
-čtyři černé snímky; aktuální důkazy jsou ve vlastních `verification.json`.
+The first SPU in run 191 completed 30,455,452 instructions and waits for an event.
+The PPU reached 115,888,424 steps and stopped at `FSUBS` in `0x3acfc0`:
+the original game loaded a single-precision NaN `0xffffffff`. NaN support now
+preserves the payload, sign and operand priority, quiets a signaling NaN and
+sets VXSNAN/VX/FX, FPRF and FI/FR. Subtraction does not change the sign of the input
+NaN. The test contains the exact instruction word from this stop.
+
+Run 192 got past this stop and reached a callback via OPD `0xd0af48`:
+code `0x4eb05c`, TOC `0xd34a88`. Its ten-item table of relative
+branches at `0x4eb088` and the targets were verified against the original ELF and included in
+the static translation. Run 193 was then stopped by another `FSUBS` at `0x3af508`:
+`0 - 2^-142`, i.e. an exact negative binary32 subnormal result.
+
+The runtime now supports subnormal operands and results. Before the final
+rounding it shifts the unrounded significand and keeps the sticky remainder;
+this is not double rounding. An exact subnormal does not set UX, a tiny inexact
+sets UX and XX. FPRF distinguishes sign, zero and subnormal result.
+The rational reference tests cover both precisions, the smallest values,
+midpoints, the transition to the normal range and signed zero.
+NaN priority and detection of tininess before rounding were also compared
+with the [primary source QEMU PPC](https://github.com/qemu/qemu/blob/master/target/ppc/cpu_init.c).
+Infinities without supported NaN propagation, overflow, alternative rounding
+modes and enabled FP traps still fail explicitly.
+
+The whole suite after the NaN changes passed with 155 tests and the mandatory Vulkan;
+the extended rational tests of subnormal values passed standalone.
+Runs 191–193 have their own `verification.json` with a check of the original
+PT_LOAD bytes and artifact hashes. They continue to capture four black frames.
+Neither the menu nor gamepad navigation is thereby verified yet.
 
 
-Běh 197 prokazuje, že původní hra převzala chybu audio konfigurace
-`0x8002b240` a pokračovala. PPU skutečně naplánovalo `TrophyInitThread`,
-pro který další sestavení zahrnuje ověřený OPD `0xd08f60`/entry `0x4c59b8`.
-Běh 198 už vykonává toto původní vlákno; stop je v původním `libsysutil`
-na PC `0x2011056c`, LR `0x20221a98`, čtení z neplatného OPD `0x1b8`.
-Nejde už o chybějící statický vstup. PPU dokončilo 118 208 831 kroků,
-SPU `0x100` 30 465 692 instrukcí. Plná sada prošla se 156 testy a povinným
-Vulkanem v 97.714 s. Původní herní PT_LOAD bajty i aktuální zdroje/profil
-souhlasí se snapshotem sestavení 198; čtyři snímky zůstávají černé.
+Run 194 got past even the subnormal `FSUBS` and reached 117,709,281 PPU steps.
+The reached game object with vtable `0xc38280` has fourteen original OPDs;
+slot 2 refers via `0xcdbe00` to `0x2e8814`. Build 195 includes
+the whole verified table, including all code targets, without changing the game bytes.
 
-Požadované předání mezi modely upravuje kořenový [AGENTS.md](../AGENTS.md).
-[Znalostní báze](knowledge/INDEX.md) obsahuje lokální CELL/SPU/PPU/RSX
-reference, původní PDF a stránkové Markdown převody s manifestem.
-[Runtime předání 198](knowledge/runtime-handoff-198.md) uvádí přesné
-artefakty, reprodukci a první další diagnostickou akci. Menu a navigace
-gamepadem nadále nejsou dosažené; dokumentační milník není jejich náhrada.
+Run 195 stopped at the internal sysutil parameter `0x4c05`, length 8.
+The original firmware export `cellAudioOutGetNumberOfDevice` (NID `0xe5e2b09d`,
+code `0x2011949c`) assembles precisely this query and reads the device count from the second
+word of the response. The native runtime has no configured audio backend, therefore it
+returns count zero; an invalid output returns `0x8002b242`. Run 196 got past this query
+and reached 117,861,953 steps, then asked for `set 0x4c09`, length 28.
+The export `cellAudioOutConfigure` (NID `0x4692ab35`) was verified in the same
+firmware; for a missing backend the runtime returns an explicit NOT_IMPLEMENTED,
+for a secondary output UNSUPPORTED_AUDIO_OUT. It does not confirm configuration or
+playback. The original firmware and the game decide how to handle the error.
+
+The whole suite at point 196 passed with **156 tests**, Vulkan mandatory. The subsequent
+targeted test also verifies the audio configuration error and the correct name `set`
+in the response. Runs 194–196 preserve the original PT_LOAD bytes and still only
+four black frames; the current evidence is in their own `verification.json`.
 
 
-2026-10-14 (199–204): PRX import refs linkovány, nativní trophy služba (NPTR), SPU běží během PPU spánku; stop 204 = nepřeložená vtable metoda `0x3304b4`, vtable `0xc3c428` přidána do profilu, build 205 čeká. Menu/gamepad nedosaženy.
+Run 197 proves that the original game took over the audio configuration error
+`0x8002b240` and continued. The PPU actually scheduled `TrophyInitThread`,
+for which the next build includes the verified OPD `0xd08f60`/entry `0x4c59b8`.
+Run 198 already executes this original thread; the stop is in the original `libsysutil`
+at PC `0x2011056c`, LR `0x20221a98`, a read from the invalid OPD `0x1b8`.
+This is no longer a missing static entry. The PPU completed 118,208,831 steps,
+SPU `0x100` 30,465,692 instructions. The full suite passed with 156 tests and the mandatory
+Vulkan in 97.714 s. The original game PT_LOAD bytes and the current sources/profile
+match the snapshot of build 198; the four frames remain black.
 
-2026-10-14 (216–237): RSX software renderer, první guest-renderovaný snímek (bundle 228, ikona načítání), tisíce flipů načítací obrazovky; běh 237 přerušen pro předání. Menu/gamepad nedosaženy. Viz docs/knowledge/runtime-handoff-237.md.
+The requested handoff between models is governed by the root [AGENTS.md](../AGENTS.md).
+The [knowledge base](knowledge/INDEX.md) contains local CELL/SPU/PPU/RSX
+references, original PDFs and page-by-page Markdown conversions with a manifest.
+[Runtime handoff 198](knowledge/runtime-handoff-198.md) lists the exact
+artifacts, reproduction and the first next diagnostic action. The menu and gamepad
+navigation are still not reached; a documentation milestone is not a substitute for them.
 
-2026-10-14 (238): zdroje/profil/artefakty 237 ověřeny proti hashům, nová sestava 238
-úspěšně zkompilována a spuštěna s rozpočty 5 mld. Původní načítací ikona vizuálně
-potvrzena, čtení pokračuje; běh je při zápisu živý, bez konečného ověření.
-Menu/gamepad nedosaženy. Viz [záznam 238](knowledge/experiments/2026-10-14-loading-238.md).
 
-2026-10-14 (238–240): 238 skutečně překročil starý SPU limit (755 M SPU, 274 M PPU),
-načetl 16,46 MB a zastavil na nepřeloženém `0x962700`. Ověřena původní 14slotová
-vtable `0xc53248`, OPD/TOC/kódové rozsahy a rozšířen profil. Renderer jednou
-vyhodnocuje konstantní MOV shader při zachování všech pixelových operací;
-174 testů s povinným Vulkanem OK, syntetické měření ~2,28× rychlejší.
-239 zkompilováno, nespouštěno; nové 240 obsahuje i ověřenou tabulku a skutečná
-hra běží v session 63143. Načítací ikona po změně vizuálně ověřena,
-původní PT_LOAD a nové zdrojové/profilové hashe souhlasí. Překročení nového
-stopu/menu/gamepad zatím neověřeny. Viz [240](knowledge/experiments/2026-10-14-vtable-240.md).
+2026-10-14 (199–204): PRX import refs linked, native trophy service (NPTR), SPU runs during PPU sleep; stop 204 = untranslated vtable method `0x3304b4`, vtable `0xc3c428` added to the profile, build 205 pending. Menu/gamepad not reached.
 
-2026-10-14 (240–242): 240 dokončil první iteraci loaderu a zastavil na druhém typu
-`0x9626a4`, vtable `0xc53208`. Původní šestipoložkový konstruktor ověřil všech
-šest vtables (85 OPD slots); profil rozšířen o druhou a čtyři zbývající tabulky
-s přesným původem. Runtime nezměněn od 174 testů s Vulkanem. 241 je živý v session
-55131; 242 zkompilované, hra ještě nespouštěna. Menu/gamepad neověřeny.
-Viz [241/242](knowledge/experiments/2026-10-14-loader-vtables-241-242.md).
+2026-10-14 (216–237): RSX software renderer, first guest-rendered frame (bundle 228, loading icon), thousands of flips of the loading screen; run 237 interrupted for handoff. Menu/gamepad not reached. See docs/knowledge/runtime-handoff-237.md.
 
-2026-10-14 (konec 241, běh 242): 241 potvrdil první dvě iterace loaderu a zastavil
-na třetím typu `0x962404`, který už širší profil 242 obsahuje. PT_LOAD a vlastní
-hash ověření 241 prošlo; po jeho konci spuštěno 242 v session 31385. Cíl původního
-menu a navigace gamepadem zůstává neověřený, hra 242 je živá.
+2026-10-14 (238): sources/profile/artifacts of 237 verified against hashes, new build 238
+successfully compiled and started with budgets of 5 billion. The original loading icon visually
+confirmed, reading continues; the run is live at the time of writing, without final verification.
+Menu/gamepad not reached. See [record 238](knowledge/experiments/2026-10-14-loading-238.md).
 
-2026-10-14 (242–244): 242 prošlo readiness třetího typu a zastavilo v jeho těle
-na callbacku `0x53a244`. Ověřena původní registrace sedmi callbacků, rozšířen
-profil. 243 předčasně zahájeno a přerušeno před hrou; 244 správně sestaveno
-a skutečná hra běží v diagnostickém SDL obalu `native-virtual-244`, session 60472,
-connected=1. Nativní virtuální input test (buttons/axes/pressure) a chyby protokolu
-ověřeny; původní překlad/ELF nezměněny a hashovány. Menu ani virtuální/fyzická
-navigace ještě nejsou prokázány. Viz [244](knowledge/experiments/2026-10-14-virtual-pad-and-callbacks-244.md).
+2026-10-14 (238–240): 238 actually got past the old SPU limit (755 M SPU, 274 M PPU),
+loaded 16.46 MB and stopped at the untranslated `0x962700`. The original 14-slot
+vtable `0xc53248`, OPD/TOC/code ranges verified and the profile extended. The renderer
+evaluates a constant MOV shader once while preserving all pixel operations;
+174 tests with mandatory Vulkan OK, synthetic measurement ~2.28× faster.
+239 compiled, not run; the new 240 also contains the verified table and the real
+game is running in session 63143. The loading icon visually verified after the change,
+the original PT_LOAD and the new source/profile hashes match. Getting past the new
+stop/menu/gamepad not yet verified. See [240](knowledge/experiments/2026-10-14-vtable-240.md).
 
-2026-10-14 (konec 244): hra překročila callbackový stop a otevřela oba front_end
-archivy. 444 čtení / 17 897 130 bajtů, 878,75 M SPU instrukcí; skutečný stop
-`0x69f2b4` po 308,21 M PPU krocích: nepodporované FP dělení 154,0 / +0,0.
-Session 60472 ukončena, hra returncode 1. PT_LOAD, artefaktové a diagnostické
-hashe nezávisle ověřeny. Poslední snímek je stále načítací planeta; menu/nav
-nedosaženy. Další krok: PPU division-by-zero sémantika a nativní regrese.
+2026-10-14 (240–242): 240 completed the first iteration of the loader and stopped at the second type
+`0x9626a4`, vtable `0xc53208`. The original six-item constructor verified all
+six vtables (85 OPD slots); the profile extended by the second and the four remaining tables
+with exact provenance. Runtime unchanged since 174 tests with Vulkan. 241 is live in session
+55131; 242 compiled, game not yet started. Menu/gamepad not verified.
+See [241/242](knowledge/experiments/2026-10-14-loader-vtables-241-242.md).
 
-2026-10-14 (245): FP dělení nulou vrací architektonické nekonečno s FPSCR;
-navazující odečítání s nekonečnem podporováno. Nativní regrese vykonává přesnou
-původní pětici instrukcí a ověřuje guest uloženou hodnotu 0,75, flags, endianitu
-a aliasy; šest FP testů a všech 175 testů s Vulkanem OK. Nové 245 kompilováno,
-ELF/source/profile/base/manifest ověřeny a původní hra živá v session 6682
-(`native-virtual-245`). Profil nezměněn, pad neutrální; menu/nav zatím neověřeny.
-Viz [245](knowledge/experiments/2026-10-14-fp-zero-divide-245.md).
+2026-10-14 (end of 241, run 242): 241 confirmed the first two iterations of the loader and stopped
+at the third type `0x962404`, which the broader profile 242 already contains. PT_LOAD and its own
+hash verification of 241 passed; after its end 242 was started in session 31385. The goal of the original
+menu and gamepad navigation remains unverified, game 242 is live.
 
-2026-10-14 (konec 245, nové 246): skutečná hra 245 vykonala podporované
-zero-divide (FPSCR ZX) a zastavila na interním switch případu 13 `0x69dd30`.
-Konečné původní PT_LOAD/artifact/base/manifest ověření OK, poslední snímek
-stále loading planeta. Ověřena celá původní 14entry tabulka `0x69db38`,
-unsigned-byte bound, signed-relative offsets a všech 12 různých cílů.
-Profil +12 seeds, runtime shodný s testovaným 245. Nové 246 zkompilováno,
-input identity ověřena a skutečná hra živá v session 6422, pad neutrální.
-Menu/nav stále neprokázány. Viz [246](knowledge/experiments/2026-10-14-byte-switch-246.md).
+2026-10-14 (242–244): 242 passed the readiness of the third type and stopped in its body
+at the callback `0x53a244`. The original registration of seven callbacks verified, profile
+extended. 243 started prematurely and aborted before the game; 244 built correctly
+and the real game runs in the diagnostic SDL wrapper `native-virtual-244`, session 60472,
+connected=1. The native virtual input test (buttons/axes/pressure) and protocol errors
+verified; the original translation/ELF unchanged and hashed. The menu and virtual/physical
+navigation are not yet proven. See [244](knowledge/experiments/2026-10-14-virtual-pad-and-callbacks-244.md).
 
-2026-10-14 (předání 246): uživatel zrušil automatický cíl a požádal o předání.
-246 ukončeno Ctrl-C (session 6422 exit 130, guest rc neznámý) při 266 čteních /
-13 048 193 bajtech, 17 captures, stále loading planeta. Žádný nový sémantický
-stop, case 13 ještě neověřen. Interruption manifest nezávisle ověřuje PT_LOAD,
-source/profile/base/diagnostické hashe, logy a captures; logy po konci nerostou.
-Žádný živý námi zadaný build/run handle. Menu/nav nesplněny. Úplné ověřované
-[předání 246](knowledge/runtime-handoff-246.md), aktuální CURRENT/HANDOFF/INDEX
-aktualizovány; další běh teprve po pověření, nový nepoužitý adresář 247.
+2026-10-14 (end of 244): the game got past the callback stop and opened both front_end
+archives. 444 reads / 17,897,130 bytes, 878.75 M SPU instructions; actual stop
+`0x69f2b4` after 308.21 M PPU steps: unsupported FP division 154.0 / +0.0.
+Session 60472 terminated, game returncode 1. PT_LOAD, artifact and diagnostic
+hashes independently verified. The last frame is still the loading planet; menu/nav
+not reached. Next step: PPU division-by-zero semantics and a native regression.
 
-## 247–255 (2026-10-14 večer, Claude Opus 5.5 + codex GPT-6.1 Sol subagenti)
+2026-10-14 (245): FP division by zero returns an architectural infinity with FPSCR;
+subsequent subtraction with infinity supported. The native regression executes the exact
+original five instructions and verifies the guest-stored value 0.75, flags, endianness
+and aliases; six FP tests and all 175 tests with Vulkan OK. New 245 compiled,
+ELF/source/profile/base/manifest verified and the original game live in session 6682
+(`native-virtual-245`). Profile unchanged, pad neutral; menu/nav not yet verified.
+See [245](knowledge/experiments/2026-10-14-fp-zero-divide-245.md).
 
-247 prošlo case 13; překlad všech 34 512 OPD funkcí z původní `.opd` (2,75 M instrukcí),
-detektor switchů 159→337/363 + 23 tabulek rekonstruovaných subagentem, nové PPU/VMX/FP instrukce,
-split-safe FS/memcpy, libc, cellAudio (null sink), trylock/atexit/malloc, SDL okno (`ANYPS3_PRESENT=sdl`),
-~2–5× rychlejší `GuestMemory`. Nejdále 252/253: 541 M kroků, 67 snímků, stále načítací planeta;
-stop 253 = nepřeložený SPU job CollNarrow. 255 (s SPU overlayi) nedokompilováno — kompilace
-jediné ~458MB TU je hlavní brzda. Viz [záznam](knowledge/experiments/2026-10-14-full-opd-coverage-247-250.md).
-Menu ani navigace gamepadem zatím nedosaženy.
+2026-10-14 (end of 245, new 246): the real game 245 executed the supported
+zero-divide (FPSCR ZX) and stopped at the internal switch case 13 `0x69dd30`.
+Final original PT_LOAD/artifact/base/manifest verification OK, last frame
+still the loading planet. The whole original 14-entry table `0x69db38`,
+the unsigned-byte bound, signed-relative offsets and all 12 distinct targets verified.
+Profile +12 seeds, runtime identical to the tested 245. New 246 compiled,
+input identity verified and the real game live in session 6422, pad neutral.
+Menu/nav still not proven. See [246](knowledge/experiments/2026-10-14-byte-switch-246.md).
 
-## 256–260 (2026-10-15, Claude Opus 5.5 + codex GPT-6.1 Sol subagenti)
+2026-10-14 (handoff 246): the user cancelled the automatic goal and requested a handoff.
+246 terminated with Ctrl-C (session 6422 exit 130, guest rc unknown) at 266 reads /
+13,048,193 bytes, 17 captures, still the loading planet. No new semantic
+stop, case 13 not yet verified. The interruption manifest independently verifies PT_LOAD,
+source/profile/base/diagnostic hashes, logs and captures; logs do not grow after the end.
+No live build/run handle issued by us. Menu/nav not fulfilled. Full verifiable
+[handoff 246](knowledge/runtime-handoff-246.md), current CURRENT/HANDOFF/INDEX
+updated; the next run only upon authorization, a new unused directory 247.
 
-Generovaný překlad rozdělen do 193 paralelních jednotek (`units.json`; build ~4 min místo nedokončitelné
-LTO TU). 256 prošlo CollNarrow, stop na chybějícím jobu CollBroad → profil 257 odvozuje 138 SPU jobů z původních
-datových odkazů. 257 stop: `lwarx` na konci segmentu libio → PPU rezervace jen přes čtené bajty (258).
-258 stop: `sys_config_open` z nativního libio (cellKb/cellMouse) → HLE Kb/Mouse bez zařízení
-a `cellPadSetActDirect` bez aktuátoru (260). Codex: `_sys_*printf`, bitově shodné zrychlení RSX draw.
-**260 nejdále: 1 214 M PPU kroků za ~11 min**, stále načítací planeta; stop na SPU FP instrukci
-(`fcgt`), statický sken našel tisíce chybějících SPU FP instrukcí — implementace delegována.
-Viz [záznam 256–260](knowledge/experiments/2026-10-15-split-units-256.md). Menu ani navigace gamepadem zatím nedosaženy.
+## 247–255 (2026-10-14 evening, Claude Opus 5.5 + codex GPT-6.1 Sol subagents)
 
-## 261–284 (2026-10-15, Claude Opus 5.5 + codex GPT-6.1 Sol subagenti)
+247 passed case 13; translation of all 34,512 OPD functions from the original `.opd` (2.75 M instructions),
+switch detector 159→337/363 + 23 tables reconstructed by a subagent, new PPU/VMX/FP instructions,
+split-safe FS/memcpy, libc, cellAudio (null sink), trylock/atexit/malloc, SDL window (`ANYPS3_PRESENT=sdl`),
+~2–5× faster `GuestMemory`. Furthest 252/253: 541 M steps, 67 frames, still the loading planet;
+stop 253 = untranslated SPU job CollNarrow. 255 (with SPU overlays) not fully compiled — compilation of
+a single ~458 MB TU is the main brake. See [record](knowledge/experiments/2026-10-14-full-opd-coverage-247-250.md).
+Neither the menu nor gamepad navigation reached yet.
 
-Plošný přístup místo čekání na jednotlivé stopy: statický sken 99 chybějících syscallů
-a paralelní agenti FS/SYNC/SPU/RSXNET/SAVE/IMPORTS3/VSHUI/RSXSWEEP. Doplněno: 42 SPU FP instrukcí
-(frest/frsqest LUT z RPCS3, odvozené), DMA listy, okno SPU skupin, SPU modulová tabulka, `_sys_heap_*`,
-NPMG/NPDR offline (chybějící EDAT → ENOENT), trofeje (NPTR), atexit jako guest volání, ESRCH pro
-ukončené vlákno (283), NV4097 semafory 0x1d70/0x1d74 (284), RSX rasterizace 3–5× rychleji
-(~24 M kroků/s). **284: 1 034 M kroků, stop `nonempty RSX image transfer requires a native blitter`**
-(NV3089), stále načítací planeta. Po 284: RSXSWEEP (NV0039/NV3089/NV308A + 272 metod, 373 testů OK),
-VSH dialogy MSGD/savedata ovládané padem, vmule/vmulo, mmapper metadata. Viz
-[záznam 256–284](knowledge/experiments/2026-10-15-split-units-256.md). Menu ani navigace zatím nedosaženy.
+## 256–260 (2026-10-15, Claude Opus 5.5 + codex GPT-6.1 Sol subagents)
+
+The generated translation split into 193 parallel units (`units.json`; build ~4 min instead of an unfinishable
+LTO TU). 256 passed CollNarrow, stop at the missing job CollBroad → profile 257 derives 138 SPU jobs from the original
+data references. 257 stop: `lwarx` at the end of the libio segment → PPU reservation only over the bytes read (258).
+258 stop: `sys_config_open` from native libio (cellKb/cellMouse) → HLE Kb/Mouse without devices
+and `cellPadSetActDirect` without an actuator (260). Codex: `_sys_*printf`, bit-identical RSX draw speedup.
+**260 furthest: 1,214 M PPU steps in ~11 min**, still the loading planet; stop at an SPU FP instruction
+(`fcgt`), a static scan found thousands of missing SPU FP instructions — implementation delegated.
+See [record 256–260](knowledge/experiments/2026-10-15-split-units-256.md). Neither the menu nor gamepad navigation reached yet.
+
+## 261–284 (2026-10-15, Claude Opus 5.5 + codex GPT-6.1 Sol subagents)
+
+A blanket approach instead of waiting for individual stops: a static scan of 99 missing syscalls
+and parallel agents FS/SYNC/SPU/RSXNET/SAVE/IMPORTS3/VSHUI/RSXSWEEP. Added: 42 SPU FP instructions
+(frest/frsqest LUT from RPCS3, derived), DMA lists, SPU group window, SPU module table, `_sys_heap_*`,
+NPMG/NPDR offline (missing EDAT → ENOENT), trophies (NPTR), atexit as guest calls, ESRCH for a
+terminated thread (283), NV4097 semaphores 0x1d70/0x1d74 (284), RSX rasterization 3–5× faster
+(~24 M steps/s).
+**284: 1,034 M steps, stop `nonempty RSX image transfer requires a native blitter`**
+(NV3089), still the loading planet. After 284: RSXSWEEP (NV0039/NV3089/NV308A + 272 methods, 373 tests OK),
+VSH dialogs MSGD/savedata controlled by the pad, vmule/vmulo, mmapper metadata. See
+[record 256–284](knowledge/experiments/2026-10-15-split-units-256.md). Neither the menu nor navigation reached yet.
 
 ## 285–311 (2026-10-15/16, Claude Opus 5.5 + codex GPT-6.1 Sol)
 
-Podrobnosti v [záznamu 256–305](knowledge/experiments/2026-10-15-split-units-256.md) a
-[záznamu 311](knowledge/experiments/2026-10-16-oom-alias-fps-311.md). 296–298: první původní obrazovky
-front-endu a navigace virtuálním padem (titulky YES/NO). 302–306: dvě HW vlákna PPU, nové SPU joby, GPU
-renderer (Vulkan graphics) na RTX 4070 SUPER. **309: původní hlavní menu, virtuální šipka dolů NEW GAME → LOAD,
-START přečten** (snímky `native-virtual-309/evidence-mainmenu-*.ppm`), ~0,7 FPS. 310/311 (RSXVK6/7) se zasekly na
-načítání; 311 způsobil OOM celé session — příčina: NVIDIA kompilace 125kB fragment shaderu (emulace quadu).
-Běží RSXVK9 (přímý GLSL jako RPCS3). Cílové FPS ani fyzický gamepad zatím neověřeny.
+Details in [record 256–305](knowledge/experiments/2026-10-15-split-units-256.md) and
+[record 311](knowledge/experiments/2026-10-16-oom-alias-fps-311.md). 296–298: first original screens of the
+front end and navigation by the virtual pad (subtitles YES/NO). 302–306: two HW PPU threads, new SPU jobs, GPU
+renderer (Vulkan graphics) on the RTX 4070 SUPER. **309: original main menu, virtual down arrow NEW GAME → LOAD,
+START read** (frames `native-virtual-309/evidence-mainmenu-*.ppm`), ~0.7 FPS. 310/311 (RSXVK6/7) got stuck on
+loading; 311 caused an OOM of the entire session — cause: NVIDIA compilation of a 125 kB fragment shader (quad emulation).
+RSXVK9 is running (direct GLSL like RPCS3). Target FPS and physical gamepad not yet verified.
 
 ## 312–323 (2026-10-16, Claude Opus 5.5 + codex GPT-6.1 Sol)
 
-Podrobnosti v [záznamu 311](knowledge/experiments/2026-10-16-oom-alias-fps-311.md). Cílové FPS hry ověřeno za běhu:
-**59,94** (VSYNC bez stropu). Výkon původního hlavního menu: 309 ~0,7 → 316c ~1,7 → 317 5,9 → 318 6,1–6,4 →
-319 9,75–9,99 → 320 11,0–11,3 → **322 15,66 FPS** (titulka za ~2 min místo ~15). Hlavní kroky: přímý GLSL bez
-explozí kompilace (RSXVK9), GPU dekódování textur/RTT/VP (RSXVK10–11), per-thread `usleep`, rychlé SPU bloky a FP/DMA
-(SPUBLOCK, SPUPERF), persistentní ochrana stránek (RSXVK12), zarovnané guest backingy (320), odložené labely/reporty
-(RSXVK13), `-march=native`. Navigace virtuálním padem DOWN → LOAD ověřena v 318–322. Zjištěno: GPU běží v P8
-(210–285 MHz) kvůli bursty zátěži; konzervativní paralelní SPU worker (PAR1) je ve hře pomalejší. Běží PAR2 (paměť
-bez zámku, vlákno na SPU) a RSXVK14 (Vulkan pipelining). Fyzický gamepad není připojen.
+Details in [record 311](knowledge/experiments/2026-10-16-oom-alias-fps-311.md). Target FPS of the game verified at runtime:
+**59.94** (VSYNC without a cap). Performance of the original main menu: 309 ~0.7 → 316c ~1.7 → 317 5.9 → 318 6.1–6.4 →
+319 9.75–9.99 → 320 11.0–11.3 → **322 15.66 FPS** (title screen in ~2 min instead of ~15). Main steps: direct GLSL without
+compilation explosions (RSXVK9), GPU texture decoding/RTT/VP (RSXVK10–11), per-thread `usleep`, fast SPU blocks and FP/DMA
+(SPUBLOCK, SPUPERF), persistent page protection (RSXVK12), aligned guest backings (320), deferred labels/reports
+(RSXVK13), `-march=native`. Navigation by the virtual pad DOWN → LOAD verified in 318–322. Found: the GPU runs in P8
+(210–285 MHz) due to bursty load; the conservative parallel SPU worker (PAR1) is slower in the game. PAR2 (lock-free
+memory, a thread per SPU) and RSXVK14 (Vulkan pipelining) are running. Physical gamepad is not connected.
 
 ## 324–331 (2026-10-17, Claude Opus 5.5 + codex GPT-6.1 Sol)
 
-Podrobnosti v [záznamu 311](knowledge/experiments/2026-10-16-oom-alias-fps-311.md). Souběžná architektura podle Cellu:
-SPU vlákno pro každé SPU (`ANYPS3_SPU_THREADS=1`, PAR2–PAR5, parkování blokujících kanálů), paměť bez globálního
-zámku (atomická guest slova, rezervace přes 128B verze, page broker), herní RSX worker (`ANYPS3_RSX_WORKER=1`,
-PAR6–PAR7), Vulkan renderer s timeline submity, průběžnými submity a compute dekódováním textur (RSXVK14–19).
-Sériový režim 326 → 331: 24,4 → 25,8 FPS; **plně paralelní 331tw: původní menu 38–40 FPS**, navigace DOWN → LOAD
-virtuálním padem ověřena. Cíl 59,94 FPS zatím nedosažen; fyzický gamepad nepřipojen.
+Details in [record 311](knowledge/experiments/2026-10-16-oom-alias-fps-311.md). Concurrent architecture modeled on the Cell:
+one SPU thread per SPU (`ANYPS3_SPU_THREADS=1`, PAR2–PAR5, parking of blocking channels), memory without a global
+lock (atomic guest words, reservations via 128 B versions, page broker), game RSX worker (`ANYPS3_RSX_WORKER=1`,
+PAR6–PAR7), Vulkan renderer with timeline submits, continuous submits and compute texture decoding (RSXVK14–19).
+Serial mode 326 → 331: 24.4 → 25.8 FPS; **fully parallel 331tw: original menu 38–40 FPS**, navigation DOWN → LOAD
+by the virtual pad verified. Target 59.94 FPS not yet reached; physical gamepad not connected.
 
 ## 332–337 (2026-10-17, Claude Opus 5.5 + codex GPT-6.1 Sol)
 
-Podrobnosti v [záznamu 332+](knowledge/experiments/2026-10-17-menu-fps-332.md). Herní profily po vláknech (eu-stack,
-`profile_menu.sh`, `stall_probe.sh`, `nav_check.sh`) ukázaly, že hlavní vlákno trávilo jen 3 % v přeloženém PPU kódu:
-PAR9 (levný koordinátor, blokování bez výjimek), PAR10 (asymetrické hazardy, PPU 16,9 → 5,6 ns/instr v syntetice),
-RSXVK20/20b (GPU cleary, jeden claim pro povrchy, neblokující labely), oprava O(S²) `GpuPages::commit_spans`
-(~25s zástavy), PAR11 (metadata bez brány/membarrier, CPU dirty bez RPC) a RSXVK21 (FIFO závod s CPU clearem,
-stabilní watche, RTT reuse). **337: původní menu 57,5–59,5 FPS (plný takt 59,94 Hz ve většině intervalů), RSX
-vlákno 6 ms/snímek, navigace virtuálním padem 10/10.** Zdánlivá ztráta stisků byla auto-repeat hry při 1s držení.
-Fyzický gamepad nepřipojen.
+Details in [record 332+](knowledge/experiments/2026-10-17-menu-fps-332.md). Per-thread game profiles (eu-stack,
+`profile_menu.sh`, `stall_probe.sh`, `nav_check.sh`) showed that the main thread spent only 3 % in translated PPU code:
+PAR9 (cheap coordinator, blocking without exceptions), PAR10 (asymmetric hazards, PPU 16.9 → 5.6 ns/instr in the synthetic test),
+RSXVK20/20b (GPU clears, one claim for surfaces, non-blocking labels), fix of the O(S²) `GpuPages::commit_spans`
+(~25 s stalls), PAR11 (metadata without gate/membarrier, CPU dirty without RPC) and RSXVK21 (FIFO race with CPU clear,
+stable watches, RTT reuse). **337: original menu 57.5–59.5 FPS (full 59.94 Hz rate in most intervals), RSX
+thread 6 ms/frame, navigation by the virtual pad 10/10.** The apparent loss of presses was the game's auto-repeat at a 1 s hold.
+Physical gamepad not connected.
 
-## 338–345 (2026-10-17 večer, Claude Opus 5.5 + codex GPT-6.1 Sol)
+## 338–345 (2026-10-17 evening, Claude Opus 5.5 + codex GPT-6.1 Sol)
 
-Podrobnosti v [záznamu 338+](knowledge/experiments/2026-10-17-ingame-338.md). Build 338 (PAR12) byl nepřeložitelný
-(> 10 GB na TU, OOM shodil session) → 339 (rychlá cesta out-of-line, menu PPU 11,1 ms/snímek). Za menu: NEW GAME →
-původní výběr obtížnosti a jasu → systémový dialog uložení. SAVEFULL (codex) + integrace: schéma podle firmware, overlay
-dialogů, hook padu, oprava mapování podmínek kanálu (PacketWrite čekal na 0x86000500), povinný `elmProgress` →
-**první skutečný save na HDD** (344), boot ListAutoLoad a **LOAD ze systémového seznamu** (345, USRI getStat).
-Okno: FIFO → MAILBOX, menu v okně 20 → 59,9 FPS. Úvodní filmeček běží 8–9 FPS (SPU) → SPUPERF2; na jeho konci
-`SPU code differs from static image/overlays` (SPU kód mimo statický obraz) → SPUDYN. Gamepad: virtuální i jaderný
-uinput (evdev → SDL → cellPad) ověřen v menu; fyzický HW nepřipojen. Zvuk: hra hlásí 0 zařízení; vývoj jen tiše
-(absolutní pravidlo: z PC nikdy slyšitelný zvuk) → AUDIOFULL2.
+Details in [record 338+](knowledge/experiments/2026-10-17-ingame-338.md). Build 338 (PAR12) could not be compiled
+(> 10 GB per TU, OOM took down the session) → 339 (fast path out-of-line, menu PPU 11.1 ms/frame). Beyond the menu: NEW GAME →
+original difficulty and brightness selection → system save dialog. SAVEFULL (codex) + integration: schema per the firmware, dialog
+overlay, pad hook, fix of the channel condition mapping (PacketWrite waited for 0x86000500), mandatory `elmProgress` →
+**first real save to HDD** (344), boot ListAutoLoad and **LOAD from the system list** (345, USRI getStat).
+Window: FIFO → MAILBOX, menu in the window 20 → 59.9 FPS. The intro clip runs at 8–9 FPS (SPU) → SPUPERF2; at its end
+`SPU code differs from static image/overlays` (SPU code outside the static image) → SPUDYN. Gamepad: virtual and kernel
+uinput (evdev → SDL → cellPad) verified in the menu; physical HW not connected. Sound: the game reports 0 devices; development only silently
+(absolute rule: never any audible sound from the PC) → AUDIOFULL2.
 
-**2026-10-17/18 — hratelná úroveň a výkon (builds 359–374):** LOAD → `great_clock_a` → hratelná úroveň, Clank ovládán
-virtuálním i uinput gamepadem (363). Výkon úrovně: ~1,5 FPS (359) → 4,6–5,3 (369) → 9,1 (372/373, PAR14 deadlock fix,
-PPUGEN1 bloky) → **~10 FPS (374, PAR15 selektivní SPU RPC + PROF1 vestavěný sampler)**; cíl 59,94. Snímek ≈ PPU 50 ms
-+ RSX 55 ms bez překryvu → PIPE1, PPU paměťové helpery ~35 % → PPUMEM1, CPU RSX → RSXVK22 v24. Detail
+**2026-10-17/18 — playable level and performance (builds 359–374):** LOAD → `great_clock_a` → playable level, Clank controlled
+by the virtual and the uinput gamepad (363). Level performance: ~1.5 FPS (359) → 4.6–5.3 (369) → 9.1 (372/373, PAR14 deadlock fix,
+PPUGEN1 blocks) → **~10 FPS (374, PAR15 selective SPU RPC + PROF1 built-in sampler)**; target 59.94. A frame ≈ PPU 50 ms
++ RSX 55 ms without overlap → PIPE1, PPU memory helpers ~35 % → PPUMEM1, CPU RSX → RSXVK22 v24. Detail
 `docs/knowledge/experiments/2026-10-17-ingame-338.md`.
-Konec 2026-10-18: **377 ~14,8 FPS v úrovni** (RSXVK22 v24 CPU RSX −42 %, SPUDYN2 relokovaný SPU kód místo interpretu,
-oprava souběžného `sys_ppu_thread_exit`). Hra čeká ~36 % času na engine counter (0x696c10, `usleep(30)`) → PIPE1.
-Původní označení jako RSX fence nebylo doložené; PIPE2 následně určil SPU producenty group2 a4.
+End of 2026-10-18: **377 ~14.8 FPS in the level** (RSXVK22 v24 CPU RSX −42 %, SPUDYN2 relocated SPU code instead of an interpreter,
+fix of the concurrent `sys_ppu_thread_exit`). The game waits ~36 % of the time on an engine counter (0x696c10, `usleep(30)`) → PIPE1.
+The original designation as an RSX fence was not evidenced; PIPE2 subsequently identified SPU producers group2 and 4.
 
 
-**2026-10-19 — pokračování379+:** původní377 artefakty/source/PT_LOAD znovu ověřeny;
-379 =377+HLEFAST1, build rc0 a source shoda, původní úroveň14,64 FPS/120s.
-380 =379+oprava timeru a atexit testu, **15,02 FPS/134s**, původní úroveň a virtuální pohyb zachyceny.
-Oba běhy po měření ukončeny SIGKILL, verification−9/stop null/PT_LOAD obě shody;60 FPS nedosaženo.
-PIPE2 prokazuje group2 i4 engine completion counter jako SPU MFC PUTLLUC.
-Ve380 group4 vykonává původní mikroprogram0x27, všech5264B ověřeno proti EBOOT;
-úplná vazba na dominantní27ms čekání zůstává otevřená.
-Potvrzená oprava plánovače: audio100µs nesmí překrýt dřívější PPU timer;11 nativních scénářů PASS.
-Zastaralý atexit test nově kontroluje správné blokování wait_kind13 a zachování stavu,2/2PASS.
-SPUFP2 dodávka27 cílených testů PASS, PPUMEM2 dokončené izolované testy/sanitizéry; oba neintegrované,
-herní přínos neověřen. Celá sada sloučeného380 neprovedena. Toto kolo končí pro pokračování v jiném AI prostředí.
-Viz [záznam379+](knowledge/experiments/2026-10-19-performance-379.md).
-Před finálním předáním dokončena vyžádaná [rešerše PS3 rekompilací](knowledge/experiments/2026-10-19-web-ps3-recomp.md):
-6 konkrétních portů včetně Drakengard3 a Soulcalibur II HD,5 oblastí pro další obecné optimalizace,
-34 veřejných podkladů ověřeno; žádný jejich kód se v tomto kole neintegroval.
+**2026-10-19 — continuation 379+:** original 377 artifacts/source/PT_LOAD re-verified;
+379 = 377 + HLEFAST1, build rc0 and source match, original level 14.64 FPS/120 s.
+380 = 379 + timer fix and atexit test, **15.02 FPS/134 s**, original level and virtual movement captured.
+Both runs terminated by SIGKILL after the measurement, verification −9/stop null/PT_LOAD both match; 60 FPS not reached.
+PIPE2 proves group2 and 4 engine completion counter to be an SPU MFC PUTLLUC.
+In 380 group4 executes the original microprogram 0x27, all 5264 B verified against the EBOOT;
+the full link to the dominant 27 ms wait remains open.
+Confirmed scheduler fix: audio 100 µs must not mask an earlier PPU timer; 11 native scenarios PASS.
+The obsolete atexit test now checks correct blocking of wait_kind 13 and state preservation, 2/2 PASS.
+SPUFP2 delivery 27 targeted tests PASS, PPUMEM2 completed isolated tests/sanitizers; both not integrated,
+game benefit not verified. The whole suite of the merged 380 not run. This round ends for continuation in another AI environment.
+See [record 379+](knowledge/experiments/2026-10-19-performance-379.md).
+Before the final handoff, the requested [research of PS3 recompilations](knowledge/experiments/2026-10-19-web-ps3-recomp.md) was completed:
+6 specific ports including Drakengard3 and Soulcalibur II HD, 5 areas for further general optimizations,
+34 public sources verified; none of their code was integrated in this round.
 
-## 2026-10-19 odpoledne — vlna FAST (Claude Opus 5.5)
+## 2026-10-19 afternoon — FAST wave (Claude Opus 5.5)
 
-Goal uživatele: hra na 60 FPS s rezervou. Ověřeno, že úroveň běží v herním režimu 0 (cíl 59,94 FPS, žádný strop).
-Výchozí měření novým `measure_level.sh`: build 380 **14,25 FPS** v `great_clock_a`. Tři subagenti (PPU překlad+paměť,
-SPU bloky+FP, RSX cena draw) v izolovaných stromech. Viz [záznam FAST](knowledge/experiments/2026-10-19-fast-wave.md).
+User goal: the game at 60 FPS with headroom. Verified that the level runs in game mode 0 (target 59.94 FPS, no cap).
+Baseline measurement with the new `measure_level.sh`: build 380 **14.25 FPS** in `great_clock_a`. Three subagents (PPU translation+memory,
+SPU blocks+FP, RSX draw cost) in isolated trees. See [FAST record](knowledge/experiments/2026-10-19-fast-wave.md).
 
-Konec session 2026-10-19 ~22:00: integrace 386 = 21,35 FPS, **460 (386 + RSX2) = 22,59 FPS** v původní úrovni
-(PPU 2,06 → 0,42 ns/instr, SPU 12,6 → 2,2 ns/instr, RSX worker 38,7 → 28,3 ms/snímek). 60 FPS nedosaženo;
-další postup v [záznamu FAST](knowledge/experiments/2026-10-19-fast-wave.md).
+End of session 2026-10-19 ~22:00: integration 386 = 21.35 FPS, **460 (386 + RSX2) = 22.59 FPS** in the original level
+(PPU 2.06 → 0.42 ns/instr, SPU 12.6 → 2.2 ns/instr, RSX worker 38.7 → 28.3 ms/frame). 60 FPS not reached;
+further progress in the [FAST record](knowledge/experiments/2026-10-19-fast-wave.md).

@@ -12,7 +12,7 @@ protocols stop the program explicitly; they are never silently skipped or faked.
 
 [Knowledge base](docs/knowledge/INDEX.md) · [current state](docs/knowledge/CURRENT.md) ·
 [architecture](docs/architecture.md) · [progress log](docs/menu-progress.md) ·
-[agent workflow](AGENTS.md) (project documentation is written in Czech)
+[agent workflow](AGENTS.md)
 
 ## Status
 

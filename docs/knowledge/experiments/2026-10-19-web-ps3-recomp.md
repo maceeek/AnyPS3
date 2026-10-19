@@ -1,179 +1,179 @@
-# Veřejné PS3 → PC rekompilace a relevance pro AnyPS3
+# Public PS3 → PC recompilations and their relevance for AnyPS3
 
-Datum rešerše: **2026-10-19**. Dokumentační úkol; žádný cizí port nebyl sestaven
-ani spuštěn a žádná změna runtime/profilu AnyPS3 nebyla provedena.
+Research date: **2026-10-19**. A documentation task; no foreign port was built
+or run and no change to the AnyPS3 runtime/profile was made.
 
-**Výsledek: ano, existují veřejné PS3 statické rekompilace s vydanými balíčky
-a doloženými autorskými zprávami o skutečné hře. Nejsilnější nález je
-Drakengard 3 Recompiled; dalším je Soulcalibur II HD Online.** Není správné
-zaměňovat je s porty Xbox 360. Hratelná část a vydaná alpha však nejsou
-důkaz bezchybného průchodu celé hry.
+**Result: yes, public static PS3 recompilations exist with released packages
+and documented author reports about a real game. The strongest finding is
+Drakengard 3 Recompiled; another is Soulcalibur II HD Online.** It is incorrect
+to confuse them with Xbox 360 ports. A playable part and a released alpha are, however, not
+evidence of a flawless run through the entire game.
 
-## Jak číst důkazy
+## How to read the evidence
 
-- **Ověřené zde:** existující veřejný repozitář, konkrétní zdrojový soubor,
-  licence, pevný Git SHA a metadata release z GitHub API.
-- **Tvrzení autora:** dosažená herní scéna, FPS a rozsah testů publikovaný
-  v primárním README, technickém záznamu nebo release notes. Tento průzkum
-  jejich běh nezávisle nereprodukoval.
-- **Odvozené / hypotéza:** možné využití v AnyPS3. Žádná níže uvedená
-  optimalizace není důkazem zrychlení Ratcheta.
+- **Verified here:** an existing public repository, a specific source file,
+  the license, a fixed Git SHA and release metadata from the GitHub API.
+- **Author's claim:** the reached game scene, FPS and scope of tests published
+  in the primary README, technical record or release notes. This survey did not
+  independently reproduce their run.
+- **Derived / hypothesis:** possible use in AnyPS3. None of the optimizations
+  listed below is evidence of a Ratchet speedup.
 
-Hledání pokrylo `PS3Recomp`, `CellRecomp`, PlayStation 3 static recompilation,
-konkrétní hry a navazující repozitáře. Katalogy a sociální výsledky sloužily
-jen k nalezení primárních zdrojů; závěry níže stojí na repozitářích a jejich
-releases. Samostatný ověřitelný projekt `CellRecomp` s hotovým PS3 portem
-se v tomto rozsahu nenašel. To není důkaz, že žádný další projekt neexistuje.
+The search covered `PS3Recomp`, `CellRecomp`, PlayStation 3 static recompilation,
+specific games and follow-up repositories. Catalogs and social results served
+only to locate primary sources; the conclusions below rest on the repositories and their
+releases. A separate verifiable project `CellRecomp` with a finished PS3 port
+was not found in this scope. That is not evidence that no other project exists.
 
-## Konkrétní porty
+## Specific ports
 
-Všechny řádky v této tabulce vycházejí z **PS3 verze**, nikoli z verze Xbox.
-PPU = PowerPC CPU, SPU = Cell lokální programy, RSX = původní grafická cesta.
-Uvedené herní výsledky jsou **tvrzení autora**, veřejnost kódu a revize byly ověřeny.
+All rows in this table are based on the **PS3 version**, not the Xbox version.
+PPU = PowerPC CPU, SPU = Cell local programs, RSX = original graphics path.
+The game results listed are **author's claims**; the public availability of the code and the revisions were verified.
 
-| Projekt a původní hra | Skutečně popsaný stav a omezení | Architektura / host | Veřejný kód a licence |
+| Project and original game | Actually described state and limitations | Architecture / host | Public code and license |
 | --- | --- | --- | --- |
-| [Drakengard 3 Recompiled](https://github.com/soyjxck/dod3-recomp), **BLUS31197 + update 1.01** | Vydaná **v0.2.5-alpha** pro Windows, v0.2.4-alpha pro Mac. Autor uvádí první kapitolu, boj a hub, 60 FPS ve 4K na RTX4090/i9-13900K a 60 FPS/1080p na M1 Pro. Pozdější kapitoly nové generace překladu nejsou prošlé. Windows10 oprava ověřena simulací přísnějších copy pravidel na Windows11, nikoli přímo na Windows10. | PPU+SPU → C++; HLE knihovny; RSX → D3D12 / Metal. Vulkan experimentální a pomalejší. Windows x64/AVX2, macOS arm64. | **MIT**, generátor/runtime i nativní části veřejné, vlastní hra nutná. [README v pevném SHA](https://github.com/soyjxck/dod3-recomp/blob/96df4c364a20c306724a48886a43f8f14ce5bedd/README.md), [release](https://github.com/soyjxck/dod3-recomp/releases/tag/v0.2.5-alpha). |
-| [Soulcalibur II HD Online](https://github.com/n0madic/Soulcalibur2HD-recomp), **NPUB31366**, 01.00/01.01 | Vydaný launcher **v0.1.0**; autor popisuje běžný boj na Macu a na Windows/Arc140V po sestavení shaderů 60 FPS. Linux pouze softwarový Vulkan (~10 FPS), skutečný Linux GPU neověřen. Online nefunguje; občasný chybný přechodový snímek, A/V a dekódovací omezení. | PPU+5 SPU programů → C/C++ až na uživatelově PC; ps3recomp; Metal / Vulkan, SDL. Windows, macOS arm64, omezený Linux. | Zdroj **GPL-2.0-or-later**, celek binárky **GPL-3.0-or-later** kvůli kombinaci s Apache2 částmi; přesně rozlišeno v README. Kód/patches/launcher veřejné, nikoli vygenerovaná hra. [Pevná revize README](https://github.com/n0madic/Soulcalibur2HD-recomp/blob/be2dd0640bc0e7486c4a3a47d027bd643fd0cd90/README.md), [release](https://github.com/n0madic/Soulcalibur2HD-recomp/releases/tag/v0.1.0). |
-| [The Simpsons Arcade Game PS3](https://github.com/sp00nznet/simpsonsarcade-ps3), **NPUB30563** | Autor uvádí intro, menu, ukládání, Stage1 dál, pad a online kooperaci; 35–57 FPS ve hře, 60 v menu. Zdrojový build, neověřen průchod celé hry; při propadu FPS mezery ve zvuku. | Staticky přeložen PS3 PPU/SPU obal; RSX → D3D12, Windows/clang-cl. **Uvnitř jde o rekompilovaný PS3 arcade emulator:** původní 6809 arkádový kód se nadále interpretuje z ROM. | **MIT** ověřena v LICENSE. Konfigurace, runner a relift tooling veřejné; potřebuje vlastní PSN data a zachycení dynamicky skládaných SPU jobů. [Pevné README](https://github.com/sp00nznet/simpsonsarcade-ps3/blob/5371f2575b9dc9d2a7d2c3c615e4072bb85a9800/README.md). |
-| [Yakuza: Dead Souls Recompiled](https://github.com/canersaka/Yakuza-Dead-Souls-Recompiled), **BLUS30826 v1.00** | Výslovně WIP. Autor uvádí úvod → New Game → gameplay, kancelářový tutorial 30 FPS, zalidněný venkovní začátek ~20 FPS. Hotový bezchybný port ani binární release tím doložen není. | PPU, shader PRX i SPU → C++; vlastní HLE/SPURS; RSX VP/FP → HLSL/D3D12, Windows x64. | **MIT**, veřejný fork runtime, liftery i herní runner. Herní C++ se generuje z vlastní kopie. [Pevné README](https://github.com/canersaka/Yakuza-Dead-Souls-Recompiled/blob/95135736b2e20ecf19e67457bbabc2926c3b355f/README.md). |
-| [God of War II HD](https://github.com/andrebrumdev/gow2-recomp), **NPUA80491** | Autor uvádí Rhodes 45–60 FPS, boj s Kolosem hratelný s chybou kostní matice; zvuk má časovací omezení. Uvedené další mobilní platformy jsou experiment. | PPU+7 SPU programů → C/C++, ps3recomp fork; Metal/MSL, VideoToolbox, CoreAudio; Apple Silicon. | **MIT**, veřejný setup kit, hranice funkcí, patche, testovací skripty; bez herních bajtů. [Pevné README](https://github.com/andrebrumdev/gow2-recomp/blob/a787912c7b2e2f61bb387c9c22722a93e6c5ee3c/README.md). |
-| [Tornado Outbreak](https://github.com/sp00nznet/tornado), **BLUS30371** | Úvod → New Game/save → první úroveň `jb_intro`, pohyb tornáda, 10–16 FPS. **Po pár sekundách bílý přechod nezmizí.** Doložený herní milník, nikoli doporučení hotového portu. | PPU+malý raw-SPU memcpy program a Wwise SPURS joby; ps3recomp, D3D12/Windows. | **MIT**, runner a build/relift nástroje veřejné. [Pevné README](https://github.com/sp00nznet/tornado/blob/2cc6c0fb660b62aab235e06ac8e0fa64106ec265/README.md). |
+| [Drakengard 3 Recompiled](https://github.com/soyjxck/dod3-recomp), **BLUS31197 + update 1.01** | Released **v0.2.5-alpha** for Windows, v0.2.4-alpha for Mac. The author reports the first chapter, combat and hub, 60 FPS at 4K on RTX 4090/i9-13900K and 60 FPS/1080p on M1 Pro. Later chapters of the new generation of the translation have not been worked through. The Windows 10 fix was verified by simulating stricter copy rules on Windows 11, not directly on Windows 10. | PPU+SPU → C++; HLE libraries; RSX → D3D12 / Metal. Vulkan experimental and slower. Windows x64/AVX2, macOS arm64. | **MIT**, generator/runtime and native parts are public, your own copy of the game is required. [README at a fixed SHA](https://github.com/soyjxck/dod3-recomp/blob/96df4c364a20c306724a48886a43f8f14ce5bedd/README.md), [release](https://github.com/soyjxck/dod3-recomp/releases/tag/v0.2.5-alpha). |
+| [Soulcalibur II HD Online](https://github.com/n0madic/Soulcalibur2HD-recomp), **NPUB31366**, 01.00/01.01 | Released launcher **v0.1.0**; the author describes regular combat on Mac and, on Windows/Arc140V after building the shaders, 60 FPS. Linux only software Vulkan (~10 FPS), a real Linux GPU is not verified. Online does not work; an occasional faulty transition frame, A/V and decoding limitations. | PPU+5 SPU programs → C/C++ only on the user's PC; ps3recomp; Metal / Vulkan, SDL. Windows, macOS arm64, limited Linux. | Source **GPL-2.0-or-later**, the binary as a whole **GPL-3.0-or-later** because of the combination with Apache 2 parts; distinguished exactly in the README. Code/patches/launcher public, not the generated game. [Fixed README revision](https://github.com/n0madic/Soulcalibur2HD-recomp/blob/be2dd0640bc0e7486c4a3a47d027bd643fd0cd90/README.md), [release](https://github.com/n0madic/Soulcalibur2HD-recomp/releases/tag/v0.1.0). |
+| [The Simpsons Arcade Game PS3](https://github.com/sp00nznet/simpsonsarcade-ps3), **NPUB30563** | The author reports intro, menu, saving, Stage 1 onward, pad and online co-op; 35–57 FPS in game, 60 in the menu. Source build, a run through the entire game is not verified; when FPS drops, gaps in the audio. | Statically translated PS3 PPU/SPU wrapper; RSX → D3D12, Windows/clang-cl. **Inside it is a recompiled PS3 arcade emulator:** the original 6809 arcade code continues to be interpreted from ROM. | **MIT** verified in LICENSE. Configuration, runner and relift tooling public; it needs the user's own PSN data and the capture of dynamically assembled SPU jobs. [Fixed README](https://github.com/sp00nznet/simpsonsarcade-ps3/blob/5371f2575b9dc9d2a7d2c3c615e4072bb85a9800/README.md). |
+| [Yakuza: Dead Souls Recompiled](https://github.com/canersaka/Yakuza-Dead-Souls-Recompiled), **BLUS30826 v1.00** | Explicitly WIP. The author reports intro → New Game → gameplay, office tutorial 30 FPS, a crowded outdoor start ~20 FPS. This evidences neither a finished flawless port nor a binary release. | PPU, shader PRX and SPU → C++; own HLE/SPURS; RSX VP/FP → HLSL/D3D12, Windows x64. | **MIT**, public fork of the runtime, lifters and the game runner. The game C++ is generated from the user's own copy. [Fixed README](https://github.com/canersaka/Yakuza-Dead-Souls-Recompiled/blob/95135736b2e20ecf19e67457bbabc2926c3b355f/README.md). |
+| [God of War II HD](https://github.com/andrebrumdev/gow2-recomp), **NPUA80491** | The author reports Rhodes 45–60 FPS, the fight with the Colossus playable with a bone-matrix error; audio has timing limitations. The other mobile platforms listed are an experiment. | PPU+7 SPU programs → C/C++, ps3recomp fork; Metal/MSL, VideoToolbox, CoreAudio; Apple Silicon. | **MIT**, public setup kit, function boundaries, patches, test scripts; no game bytes. [Fixed README](https://github.com/andrebrumdev/gow2-recomp/blob/a787912c7b2e2f61bb387c9c22722a93e6c5ee3c/README.md). |
+| [Tornado Outbreak](https://github.com/sp00nznet/tornado), **BLUS30371** | Intro → New Game/save → first level `jb_intro`, tornado movement, 10–16 FPS. **After a few seconds the white transition does not disappear.** A documented game milestone, not a recommendation of a finished port. | PPU + a small raw-SPU memcpy program and Wwise SPURS jobs; ps3recomp, D3D12/Windows. | **MIT**, runner and build/relift tools public. [Fixed README](https://github.com/sp00nznet/tornado/blob/2cc6c0fb660b62aab235e06ac8e0fa64106ec265/README.md). |
 
-**Ověřené:** GitHub API skutečně vrací assets Drakengard3 a Soulcalibur2HD;
-nejde jen o odkaz na budoucí release. Drakengard3 v0.2.5-alpha publikován
+**Verified:** the GitHub API really returns the assets of Drakengard3 and Soulcalibur2HD;
+it is not just a link to a future release. Drakengard3 v0.2.5-alpha published
 2026-10-16, SHA `96df4c364a20c306724a48886a43f8f14ce5bedd`, asset
-`dod3-recomp-v0.2.5-alpha-win64.zip`. Autorem uvedený SHA256 zipu:
+`dod3-recomp-v0.2.5-alpha-win64.zip`. SHA256 of the zip stated by the author:
 `62fad10015b95a482b5f720263cb67cef4066439ae1432a91485a2b53f55f535`.
-Binárka nebyla stažena ani ověřena. Soulcalibur v0.1.0 publikován
-2026-10-16: Windows x86_64, Linux x86_64 a macOS arm64 balíčky.
+The binary was neither downloaded nor verified. Soulcalibur v0.1.0 published
+2026-10-16: Windows x86_64, Linux x86_64 and macOS arm64 packages.
 
-Další relevantní, ale slabší důkazy: [inFamous autorův PR287](https://github.com/sp00nznet/ps3recomp/pull/287)
-popisuje gameplay na úplné LLE větvi; [Killzone3 autorův technický issue214](https://github.com/sp00nznet/ps3recomp/issues/214)
-popisuje první úroveň a desítky obecných oprav (BCUS98234, PPU+SPU/Havok,
-RSX deferred, Windows build pod Protonem). Nejde o ověřenou dostupnost hotových
-portů. Naopak [juans-collab/infamous-2-recomp](https://github.com/juans-collab/infamous-2-recomp)
-sám výslovně říká **Not playable**; pouhý název portu není důkaz.
+Further relevant but weaker evidence: [inFamous author's PR287](https://github.com/sp00nznet/ps3recomp/pull/287)
+describes gameplay on a full LLE branch; [Killzone3 author's technical issue214](https://github.com/sp00nznet/ps3recomp/issues/214)
+describes the first level and dozens of general fixes (BCUS98234, PPU+SPU/Havok,
+RSX deferred, Windows build under Proton). It is not verified availability of finished
+ports. Conversely, [juans-collab/infamous-2-recomp](https://github.com/juans-collab/infamous-2-recomp)
+itself explicitly says **Not playable**; a port's name alone is not evidence.
 
-## Společný základ a pevné revize
+## Common foundation and fixed revisions
 
-**Ověřené:** [sp00nznet/ps3recomp](https://github.com/sp00nznet/ps3recomp)
-je veřejný **MIT** toolkit s PPU/SPU liftery, memory/LV2/HLE runtime a vlastní
-RSX implementací. **v0.15.0** vyšla 2026-10-16; čtený upstream strom:
+**Verified:** [sp00nznet/ps3recomp](https://github.com/sp00nznet/ps3recomp)
+is a public **MIT** toolkit with PPU/SPU lifters, a memory/LV2/HLE runtime and its own
+RSX implementation. **v0.15.0** was released 2026-10-16; the upstream tree read:
 `39a36296511c445707adabcd312f0b740cfbd694`. [Release notes](https://github.com/sp00nznet/ps3recomp/releases/tag/v0.15.0)
-oddělují sjednocené opravy od odložené změny memory domains #296, která
-rozbíjela boot VF5. Release SDK není release každé hry.
+separate the consolidated fixes from the deferred memory domains change #296, which
+broke the VF5 boot. A release SDK is not a release of every game.
 
-Drakengard3 používá jiný [soyjxck/ps3recomp fork](https://github.com/soyjxck/ps3recomp),
-gitlink přesně **`bbcf9a53c7efef9fe7ca84c058f0292ed998d0cb`**. Nezaměňovat jeho
-`ppu_vm_fast.h` či `rsx_vulkan_engine.c` s dnešním upstreamem, který má
-`rsx_vulkan_backend.c` a jinou strukturu. Údaje v různých dokumentech mohou
-pocházet z různých stadií: například starší části `PPU_RECOMP.md` stále
-popisují počáteční Uncharted boot, zatímco sekce o lokálních registrech
-už měří Drakengard3. Rozhodující je konkrétní implementace a revize.
+Drakengard3 uses a different [soyjxck/ps3recomp fork](https://github.com/soyjxck/ps3recomp),
+gitlink exactly **`bbcf9a53c7efef9fe7ca84c058f0292ed998d0cb`**. Do not confuse its
+`ppu_vm_fast.h` or `rsx_vulkan_engine.c` with today's upstream, which has
+`rsx_vulkan_backend.c` and a different structure. The data in various documents may
+come from different stages: for example, the older parts of `PPU_RECOMP.md` still
+describe the initial Uncharted boot, while the section about local registers
+already measures Drakengard3. The decisive thing is the specific implementation and revision.
 
-## Pět oblastí pro navazující práci v AnyPS3
+## Five areas for follow-up work in AnyPS3
 
-Pořadí vychází z lokálního [měření379+](2026-10-19-performance-379.md):
-PPU memory ~35 % CPU, group4 single FP ~28 %, CPU část RSX ~40 ms.
-PIPE2 ukázal producenta engine counteru přes SPU PUTLLUC; samotná podobnost
-s cizím čekáním na RSX fence z něj RSX problém nedělá.
+The ordering is based on the local [measurement 379+](2026-10-19-performance-379.md):
+PPU memory ~35% CPU, group4 single FP ~28%, CPU part of RSX ~40 ms.
+PIPE2 showed the producer of the engine counter through SPU PUTLLUC; mere similarity
+to a foreign wait for an RSX fence does not make it an RSX problem.
 
-### 1. PPU page fast path a slučování paměťových kontrol
+### 1. PPU page fast path and merging of memory checks
 
-**Ověřený kód:** [fork/runtime/ppu/ppu_vm_fast.h](https://github.com/soyjxck/ps3recomp/blob/bbcf9a53c7efef9fe7ca84c058f0292ed998d0cb/runtime/ppu/ppu_vm_fast.h)
-ř.1–48, 83–151 a 167–248; [ppu_vm_page.h](https://github.com/soyjxck/ps3recomp/blob/bbcf9a53c7efef9fe7ca84c058f0292ed998d0cb/runtime/ppu/ppu_vm_page.h).
-64KiB stránkové příznaky rozhodují o krátké cestě; rezervace, MMIO, sledování
-a diagnostika mají pomalou cestu. Stack/prolog a souvislý běh přístupů sdílí kontrolu.
-**Tvrzení autora v komentáři:** varianta s několika větvemi byla o9–11 % CPU
-horší než volání helperu, přestože měla méně instrukcí.
-**Hypotéza:** velmi relevantní pro PPUMEM2, nejprve porovnat jeho epochy s touto
-stránkovou reprezentací. **Nepřebírat přímo:** flat mapping, volatile přístupy
-a host race/lifetime model nejsou důkaz bezpečnosti pro AnyPS3. Nutné zachovat
-unmap, dirty tracking a PPU/SPU reservations i jejich souběh.
+**Verified code:** [fork/runtime/ppu/ppu_vm_fast.h](https://github.com/soyjxck/ps3recomp/blob/bbcf9a53c7efef9fe7ca84c058f0292ed998d0cb/runtime/ppu/ppu_vm_fast.h)
+lines 1–48, 83–151 and 167–248; [ppu_vm_page.h](https://github.com/soyjxck/ps3recomp/blob/bbcf9a53c7efef9fe7ca84c058f0292ed998d0cb/runtime/ppu/ppu_vm_page.h).
+64 KiB page flags decide on the short path; reservations, MMIO, watching
+and diagnostics have a slow path. Stack/prolog and a contiguous run of accesses share a check.
+**Author's claim in a comment:** a variant with several branches was 9–11% CPU
+worse than a helper call, even though it had fewer instructions.
+**Hypothesis:** very relevant for PPUMEM2, first compare its epochs with this
+page representation. **Do not adopt directly:** flat mapping, volatile accesses
+and the host race/lifetime model are not evidence of safety for AnyPS3. Unmap,
+dirty tracking and PPU/SPU reservations and their concurrency must be preserved.
 
-### 2. Registry v lokálech a přesné dirty/liveness analýzy překladače
+### 2. Registers in locals and precise dirty/liveness analyses of the translator
 
-**Ověřený kód:** [fork/tools/ppu_nv_dirty.py](https://github.com/soyjxck/ps3recomp/blob/bbcf9a53c7efef9fe7ca84c058f0292ed998d0cb/tools/ppu_nv_dirty.py)
-ř.1–89, [PPU_RECOMP.md sekce91–183](https://github.com/soyjxck/ps3recomp/blob/bbcf9a53c7efef9fe7ca84c058f0292ed998d0cb/docs/PPU_RECOMP.md#registers-in-locals---nonvolatile-locals).
-PPU GPR/FPR/VMX a oddělené CR/XER lokály se ukládají při volání jen pokud
-jsou změněné a potřebné; call graph má explicitní ABI hranice a ověřovací režim.
-**Tvrzení autora:** vydání0.2.4 snížilo CPU dvou hlavních vláken na Windows
-asi o třetinu; není to izolovaný výsledek jediné transformace.
-**Hypotéza:** adaptovat do `anyps3` generátoru až po kontrole jeho současných
-bloků. Pozor na scheduler preemption, HLE callbacky, mid-function vstupy a
-uložení stavu před stopem; pravidla AnyPS3 mohou vyžadovat více writebacků.
+**Verified code:** [fork/tools/ppu_nv_dirty.py](https://github.com/soyjxck/ps3recomp/blob/bbcf9a53c7efef9fe7ca84c058f0292ed998d0cb/tools/ppu_nv_dirty.py)
+lines 1–89, [PPU_RECOMP.md section 91–183](https://github.com/soyjxck/ps3recomp/blob/bbcf9a53c7efef9fe7ca84c058f0292ed998d0cb/docs/PPU_RECOMP.md#registers-in-locals---nonvolatile-locals).
+PPU GPR/FPR/VMX and separate CR/XER locals are saved on a call only if
+they are changed and needed; the call graph has explicit ABI boundaries and a verification mode.
+**Author's claim:** release 0.2.4 reduced the CPU of the two main threads on Windows
+by about a third; it is not an isolated result of a single transformation.
+**Hypothesis:** adapt into the `anyps3` generator only after checking its current
+blocks. Beware scheduler preemption, HLE callbacks, mid-function entries and
+state saving before a stop; AnyPS3 rules may require more writebacks.
 
-### 3. Přesné SPU FP rychlé cesty a nezávislý oracle
+### 3. Exact SPU FP fast paths and an independent oracle
 
-**Ověřený kód:** [upstream/runtime/spu/spu_helpers.h](https://github.com/sp00nznet/ps3recomp/blob/39a36296511c445707adabcd312f0b740cfbd694/runtime/spu/spu_helpers.h)
-ř.570–624 a následující NEON část; [spu_float_referee.py](https://github.com/sp00nznet/ps3recomp/blob/39a36296511c445707adabcd312f0b740cfbd694/runtime/spu/tests/spu_float_referee.py).
-Normální operandy používají double mezivýsledek a kontrolovanou truncation,
-nepříznivé lane přesný fallback. [PR287](https://github.com/sp00nznet/ps3recomp/pull/287)
-byl sloučen 2026-10-16, merge `41c19c8`; testy interpretu/lifteru porovnávají
-s RPCS3 a případné float rozdíly adjudikuje exact arithmetic.
-**Hypotéza:** oracle a hraniční případy pomohou SPUFP2. Hlásené1,6–4× se
-týká **ARM NEON**, nelze slibovat na našem x86. MXCSR/extended-range/zero
-semantiku je třeba dál prokázat proti manuálu a našim testům.
+**Verified code:** [upstream/runtime/spu/spu_helpers.h](https://github.com/sp00nznet/ps3recomp/blob/39a36296511c445707adabcd312f0b740cfbd694/runtime/spu/spu_helpers.h)
+lines 570–624 and the following NEON part; [spu_float_referee.py](https://github.com/sp00nznet/ps3recomp/blob/39a36296511c445707adabcd312f0b740cfbd694/runtime/spu/tests/spu_float_referee.py).
+Normal operands use a double intermediate result and a controlled truncation,
+unfavorable lanes an exact fallback. [PR287](https://github.com/sp00nznet/ps3recomp/pull/287)
+was merged 2026-10-16, merge `41c19c8`; the interpreter/lifter tests compare
+against RPCS3 and any float differences are adjudicated by exact arithmetic.
+**Hypothesis:** the oracle and edge cases will help SPUFP2. The reported 1.6–4× applies
+to **ARM NEON**, it cannot be promised on our x86. MXCSR/extended-range/zero
+semantics still need to be proven against the manual and our tests.
 
-### 4. Write-watch cache a dávkování RSX práce
+### 4. Write-watch cache and batching of RSX work
 
-**Ověřený kód:** [fork/runtime/platform/vm_watch.c](https://github.com/soyjxck/ps3recomp/blob/bbcf9a53c7efef9fe7ca84c058f0292ed998d0cb/runtime/platform/vm_watch.c)
-a [fork/libs/video/rsx_vulkan_engine.c](https://github.com/soyjxck/ps3recomp/blob/bbcf9a53c7efef9fe7ca84c058f0292ed998d0cb/libs/video/rsx_vulkan_engine.c)
-ř.1–33: sběr draw records, staging chunks, společný rendering pass, timeline
-semaphore. [Technický záznam Drakengard3](https://github.com/soyjxck/dod3-recomp/blob/96df4c364a20c306724a48886a43f8f14ce5bedd/docs/TECHNICAL.md#rendering)
-popisuje validaci texture/vertex cache pomocí zápisů a subalokace.
-**Hypotéza:** zmenšit práci na CPU RSX threadu, ne zaměnit ji s GPU časem.
-Fork Vulkan je zde **Windows-only**; upstream Linux
+**Verified code:** [fork/runtime/platform/vm_watch.c](https://github.com/soyjxck/ps3recomp/blob/bbcf9a53c7efef9fe7ca84c058f0292ed998d0cb/runtime/platform/vm_watch.c)
+and [fork/libs/video/rsx_vulkan_engine.c](https://github.com/soyjxck/ps3recomp/blob/bbcf9a53c7efef9fe7ca84c058f0292ed998d0cb/libs/video/rsx_vulkan_engine.c)
+lines 1–33: collection of draw records, staging chunks, a common rendering pass, timeline
+semaphore. [Drakengard3 technical record](https://github.com/soyjxck/dod3-recomp/blob/96df4c364a20c306724a48886a43f8f14ce5bedd/docs/TECHNICAL.md#rendering)
+describes validation of the texture/vertex cache via writes and suballocation.
+**Hypothesis:** reduce the work on the CPU RSX thread, do not confuse it with GPU time.
+The fork's Vulkan is here **Windows-only**; upstream Linux
 [rsx_vulkan_backend.c](https://github.com/sp00nznet/ps3recomp/blob/39a36296511c445707adabcd312f0b740cfbd694/libs/video/rsx_vulkan_backend.c)
-je přímější POSIX reference. Nejdřív audit existující AnyPS3 cache, guest DMA,
-readback a fence pořadí; přenos celého backendu nedává smysl.
+is a more direct POSIX reference. First audit the existing AnyPS3 cache, guest DMA,
+readback and fence ordering; transferring the whole backend makes no sense.
 
-### 5. SPURS admission, persistent workery a wake-up invarianty
+### 5. SPURS admission, persistent workers and wake-up invariants
 
-**Ověřený kód:** [upstream/libs/spurs/cellSpurs.c](https://github.com/sp00nznet/ps3recomp/blob/39a36296511c445707adabcd312f0b740cfbd694/libs/spurs/cellSpurs.c)
-ř.1660–1767; [PR291](https://github.com/sp00nznet/ps3recomp/pull/291).
-Koordinátor přiděluje práci persistent workerům s limitem počtu SPU a
-workload contention, odděluje kontexty DMA a rezervace.
-**Hypotéza:** použitelné jako kontrola producent/consumer hladovění a
-ztraceného probuzení. U Ratcheta nejprve určit guest job a kritickou cestu
-PUTLLUC counteru. Náš skutečný LLE SPU job manager není jejich HLE scheduler;
-jeho nahrazení není obecná optimalizace. Zvýšení počtu workerů bez měření
-ani odstranění polling smyčky není podložená oprava.
+**Verified code:** [upstream/libs/spurs/cellSpurs.c](https://github.com/sp00nznet/ps3recomp/blob/39a36296511c445707adabcd312f0b740cfbd694/libs/spurs/cellSpurs.c)
+lines 1660–1767; [PR291](https://github.com/sp00nznet/ps3recomp/pull/291).
+The coordinator assigns work to persistent workers with a limit on the number of SPUs and
+workload contention, separates DMA contexts and reservations.
+**Hypothesis:** usable as a check for producer/consumer starvation and
+lost wakeup. For Ratchet, first determine the guest job and the critical path
+of the PUTLLUC counter. Our real LLE SPU job manager is not their HLE scheduler;
+replacing it is not a general optimization. Increasing the number of workers without measurement
+or removing a polling loop is not a well-founded fix.
 
-## Co nepřenášet a co nebyl PS3 výsledek
+## What not to adopt and what was not a PS3 result
 
-**Ověřené:** Drakengard3 kromě obecného runtime obsahuje game-specific hooks,
-upravený limiter, náhrady vybraných SPU úloh, přepsané menu/Unreal bytecode
-a asset overlay ([TECHNICAL.md](https://github.com/soyjxck/dod3-recomp/blob/96df4c364a20c306724a48886a43f8f14ce5bedd/docs/TECHNICAL.md#the-settings-menu)).
-Jeho celkové FPS nelze připisovat pouze statickému překladu a tyto náhrady
-nejsou vhodnou cestou ke splnění podmínek AnyPS3. Relevantní jsou obecné
-algoritmy a testovací metodika výše.
+**Verified:** Drakengard3 contains, besides the general runtime, game-specific hooks,
+a modified limiter, replacements of selected SPU tasks, rewritten menu/Unreal bytecode
+and an asset overlay ([TECHNICAL.md](https://github.com/soyjxck/dod3-recomp/blob/96df4c364a20c306724a48886a43f8f14ce5bedd/docs/TECHNICAL.md#the-settings-menu)).
+Its overall FPS cannot be attributed solely to static translation, and these replacements
+are not a suitable way to meet the AnyPS3 conditions. The general
+algorithms and the test methodology above are relevant.
 
-[UnleashedRecomp](https://github.com/hedge-dev/UnleashedRecomp) opravdu portuje
-**Xbox360** Sonic Unleashed: Xenon PowerPC přes
-[XenonRecomp](https://github.com/hedge-dev/XenonRecomp), Xenos shadery přes
-XenosRecomp; GPL3. Neřeší Cell SPU ani RSX. N64Recomp zase řeší MIPS N64.
-Tyto úspěchy nejsou důkaz úspěšné PS3 rekompilace. [RPCS3](https://github.com/RPCS3/rpcs3)
-je PS3 emulator s JIT/AOT a nejvyspělejší behaviorální reference; není
-samostatný statický herní port. Licence RPCS3 je kombinace GPL2-only a dalších
-licencí podle souboru, nikoli MIT. Tvrzení upstreamu o clean-room původu
-neodstraňuje potřebu ověřit licenci konkrétní přebírané revize; PR287 sám
-zmiňuje odstranění staršího GPL-derived float kódu.
+[UnleashedRecomp](https://github.com/hedge-dev/UnleashedRecomp) really ports
+**Xbox 360** Sonic Unleashed: Xenon PowerPC via
+[XenonRecomp](https://github.com/hedge-dev/XenonRecomp), Xenos shaders via
+XenosRecomp; GPL3. It does not address Cell SPU or RSX. N64Recomp in turn addresses MIPS N64.
+These successes are not evidence of a successful PS3 recompilation. [RPCS3](https://github.com/RPCS3/rpcs3)
+is a PS3 emulator with JIT/AOT and the most mature behavioral reference; it is not
+a standalone static game port. The RPCS3 license is a combination of GPL2-only and other
+licenses by file, not MIT. The upstream's claim of clean-room origin
+does not remove the need to verify the license of the specific adopted revision; PR287 itself
+mentions the removal of older GPL-derived float code.
 
-## Artefakty a další první akce
+## Artifacts and the next first action
 
-Čtené veřejné soubory a GitHub API odpovědi jsou v
-`local/ratchet/codex/web-ps3-recomp/`, inventář `manifest.json` zahrnuje SHA256,
-URL a revize; `validation.json` kontroluje inventář a odkazy lokálních artefaktů.
-Žádné herní soubory, releasové binárky ani firmware se nestahovaly. Žádné
-testy, instalace, buildy ani herní běhy nebyly pro tuto rešerši zapotřebí.
+The public files read and the GitHub API responses are in
+`local/ratchet/codex/web-ps3-recomp/`, the inventory `manifest.json` includes SHA256,
+URLs and revisions; `validation.json` checks the inventory and the links of the local artifacts.
+No game files, release binaries or firmware were downloaded. No
+tests, installations, builds or game runs were necessary for this research.
 
-**První další akce v rámci této rešerše:** porovnat oddělený PPUMEM2
-kandidát s `ppu_vm_fast.h`/`ppu_vm_page.h` a navrhnout jediný izolovaný
-prototyp minimalizace per-access kontrol se zachováním současných souběžných
-invariantů. Změřit stejnou `great_clock_a` scénu; syntetický ns/access údaj
-sám o sobě nestačí. SPUFP2 oracle je další přímá cesta. **Pořadí skutečné
-implementace určuje hlavní [HANDOFF](../HANDOFF.md): nejprve malý SPUFP2
-kandidát; PPUMEM2 odděleně kvůli jeho hot-tracked regresi.** Rešerše samotná
-nezměnila skutečný stav cíle 60 FPS ani nerozhodla o integraci kandidátů.
+**First next action within this research:** compare the separate PPUMEM2
+candidate with `ppu_vm_fast.h`/`ppu_vm_page.h` and propose a single isolated
+prototype of minimizing per-access checks while preserving the current concurrency
+invariants. Measure the same `great_clock_a` scene; a synthetic ns/access figure
+alone is not enough. The SPUFP2 oracle is another direct path. **The order of the actual
+implementation is determined by the main [HANDOFF](../HANDOFF.md): first a small SPUFP2
+candidate; PPUMEM2 separately because of its hot-tracked regression.** The research alone
+did not change the actual state of the 60 FPS goal nor did it decide on the integration of the candidates.

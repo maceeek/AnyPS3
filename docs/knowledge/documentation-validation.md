@@ -1,21 +1,21 @@
-# Ověření dokumentace a lokální knihovny
+# Documentation and local library validation
 
-Datum: 2026-10-14. Rozsah: pouze dokumentační knihovna a báze znalostí; žádná runtime změna ani nové spuštění hry tímto dokumentačním agentem.
+Date: 2026-10-14. Scope: only the documentation library and the knowledge base; no runtime change and no new game run by this documentation agent.
 
-## Výsledek
+## Result
 
-Pět skutečných originálních PDF zachováno v `local/reference/cell-docs/pdf/`; pět převodů v `md/`. SPU ISA v1.2 má 279, Architecture v1.02 358, Registers v1.5 357, Handbook v1.1 877 a PowerXCell Handbook v1.11 884 fyzických stran: celkem 2755.
+Five actual original PDFs are preserved in `local/reference/cell-docs/pdf/`; five conversions in `md/`. SPU ISA v1.2 has 279, Architecture v1.02 358, Registers v1.5 357, Handbook v1.1 877 and PowerXCell Handbook v1.11 884 physical pages: 2755 in total.
 
-- U všech pěti souborů ověřena `%PDF` signature, validní `pdfinfo`, titul/verze/datum z titulní strany a původní copyright.
-- SHA256 originálu i převodu znovu spočítán a porovnán s [manifestem](../../local/reference/cell-docs/manifest.json).
-- Počet stran `pdftotext` odpovídá `pdfinfo`; MD obsahuje přesnou nepřerušenou posloupnost `PDF page 1` až `PDF page N`.
-- Žádné prázdné extrahované stránky, NUL nebo U+FFFD; krátké přechodové/titulní strany zaznamenány v [quality.json](../../local/reference/cell-docs/quality.json).
-- Ručně kontrolovány titulní strany, obsahy/navigace, reprezentativní instrukční/register/chapter stránky a konce dokumentů. Graficky porovnány SPU248, Registers98 a Handbook446; bitové diagramy a tabulky se musí interpretovat z PDF, superscripty se mohou při extrakci zploštit.
-- Syntax downloaderu a converteru ověřena Python AST parserem. Konverze skutečně proběhla, nikoli pouze připravena.
-- Tematické odkazy a line reference ověřeny v aktuálních referenčních checkoutech; revize jsou v [SOURCES.md](SOURCES.md).
+- For all five files, the `%PDF` signature, a valid `pdfinfo`, the title/version/date from the cover page, and the original copyright were verified.
+- The SHA256 of the original and of the conversion was recomputed and compared with the [manifest](../../local/reference/cell-docs/manifest.json).
+- The `pdftotext` page count matches `pdfinfo`; the MD contains the exact uninterrupted sequence `PDF page 1` through `PDF page N`.
+- No empty extracted pages, NUL or U+FFFD; short transitional/title pages are recorded in [quality.json](../../local/reference/cell-docs/quality.json).
+- Cover pages, tables of contents/navigation, representative instruction/register/chapter pages and document endings were checked manually. SPU248, Registers98 and Handbook446 were compared graphically; bit diagrams and tables must be interpreted from the PDF, and superscripts may be flattened during extraction.
+- The syntax of the downloader and converter was verified with the Python AST parser. The conversion actually ran; it was not merely prepared.
+- Topic links and line references were verified in the current reference checkouts; the revisions are in [SOURCES.md](SOURCES.md).
 
-## Výslovná omezení
+## Explicit limitations
 
-Registers v1.5.1 nebyla získána; knihovna uchovává explicitně označenou v1.5. Odkaz wiki na tutorial v2.0 není vydáván za stažený Handbook v2.0. PowerXCell supplement je oddělen od PS3 CELL. Textový převod nereprodukuje obrázky, diagramy ani přesnou strukturu tabulek. Původní copyright zůstává zachován.
+Registers v1.5.1 was not obtained; the library keeps the explicitly labelled v1.5. The wiki link to tutorial v2.0 is not passed off as the downloaded Handbook v2.0. The PowerXCell supplement is kept separate from PS3 CELL. The text conversion does not reproduce images, diagrams or the exact table structure. The original copyright is preserved.
 
-CURRENT používá lokálně přečtený verification.json a test log sestavy198; hlubší diagnózu TOC předal koordinátor a je označena odvozeně. Menu a navigace gamepadem jsou stále neověřené. Runtime předání spravuje koordinátor. Konečná kontrola všech lokálních odkazů prošla včetně jeho existujícího runtime-handoff-198.md; všech deset PDF/MD hashů znovu odpovídá manifestu.
+CURRENT uses the locally read verification.json and the test log of build 198; the deeper TOC diagnosis was handed over by the coordinator and is marked as derived. The menu and gamepad navigation are still unverified. The runtime handoff is maintained by the coordinator. The final check of all local links passed, including its existing runtime-handoff-198.md; all ten PDF/MD hashes again match the manifest.

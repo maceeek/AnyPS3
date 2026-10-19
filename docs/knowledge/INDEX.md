@@ -1,36 +1,36 @@
-# Projektová báze znalostí AnyPS3
+# AnyPS3 project knowledge base
 
-Toto je verzovatelný vstupní bod pro další model, nový běh i člověka. Stav cíle a runtime důkazy čti v [CURRENT.md](CURRENT.md), pravidla zápisu v [WORKFLOW.md](WORKFLOW.md), předání v [HANDOFF.md](HANDOFF.md). Záznam v dokumentaci sám o sobě neověřuje funkci emulátoru.
+This is the version-controlled entry point for the next model, a new run and a human. Read the goal state and runtime evidence in [CURRENT.md](CURRENT.md), the writing rules in [WORKFLOW.md](WORKFLOW.md), the handoff in [HANDOFF.md](HANDOFF.md). A record in the documentation does not, by itself, verify the emulator's function.
 
-Nejnovější stav a předání: [CURRENT.md](CURRENT.md) a [HANDOFF.md](HANDOFF.md)
-(2026-10-19: build380, původní úroveň `great_clock_a`15,02 FPS, pohyb virtuálním padem,
-ukončeno pro předání na pokyn uživatele;60 FPS nedosaženo, fyzický gamepad neověřen).
-[Výsledky379–380 a další postup](experiments/2026-10-19-performance-379.md),
-[webová rešerše skutečných PS3 recomp projektů](experiments/2026-10-19-web-ps3-recomp.md).
-**2026-10-19 odpoledne: vlna FAST (cíl 60 FPS v úrovni, režim hry 0 ověřen, výchozí 14,25 FPS):**
-[záznam FAST](experiments/2026-10-19-fast-wave.md).
+Latest state and handoff: [CURRENT.md](CURRENT.md) and [HANDOFF.md](HANDOFF.md)
+(2026-10-19: build 380, original level `great_clock_a` at 15.02 FPS, movement with the virtual pad,
+ended for handoff on user instruction; 60 FPS not reached, physical gamepad not verified).
+[Results 379–380 and next steps](experiments/2026-10-19-performance-379.md),
+[web research of real PS3 recomp projects](experiments/2026-10-19-web-ps3-recomp.md).
+**2026-10-19 afternoon: FAST wave (target 60 FPS in the level, game mode 0 verified, default 14.25 FPS):**
+[FAST record](experiments/2026-10-19-fast-wave.md).
 
-## Orientace
+## Orientation
 
-| Oblast | Přehled | Co hledat |
+| Area | Overview | What to look for |
 | --- | --- | --- |
-| CELL a MFC | [CELL.md](CELL.md) | lokální vs hlavní paměť, DMA, synchronizace, veřejné manuály |
-| SPU | [SPU.md](SPU.md) | ISA, kanály, mailbox, tag completion, instrukční reference |
-| PPU | [PPU.md](PPU.md) | registry, ABI/OPD, PowerPC reference, HLE hranice |
-| RSX | [RSX.md](RSX.md) | FIFO, metody, draw, shadery, surface/flip, NV40/RSX rozdíly |
-| Původ zdrojů | [SOURCES.md](SOURCES.md) | skutečné cesty, revize, manifest manuálů, omezení |
+| CELL and MFC | [CELL.md](CELL.md) | local vs main memory, DMA, synchronization, public manuals |
+| SPU | [SPU.md](SPU.md) | ISA, channels, mailbox, tag completion, instruction reference |
+| PPU | [PPU.md](PPU.md) | registers, ABI/OPD, PowerPC reference, HLE boundaries |
+| RSX | [RSX.md](RSX.md) | FIFO, methods, draw, shaders, surface/flip, NV40/RSX differences |
+| Source provenance | [SOURCES.md](SOURCES.md) | actual paths, revisions, manual manifest, limitations |
 
-## Rychlý začátek dalšího běhu
+## Quick start for the next run
 
-1. Přečti kořenový `AGENTS.md`, tuto stránku a CURRENT. Respektuj poslední instrukce uživatele a skutečný stav pracovního stromu.
-2. Otevři [../menu-progress.md](../menu-progress.md) pro aktuální přehled ACIT a odkazované logy. Stárnoucí informaci ověř v posledním skutečném běhu; nepovažuj číslo běhu z jiného modelu za automaticky aktuální.
-3. Vyber jednu konkrétní otevřenou otázku. Před změnou napiš hypotézu a důkaz, který ji potvrdí nebo vyvrátí.
-4. Po ověření aktualizuj CURRENT a příslušnou tematickou stránku nebo samostatný záznam. Zapiš příkaz, zdrojový stav, profil a cesty artefaktů.
+1. Read the root `AGENTS.md`, this page and CURRENT. Respect the user's latest instructions and the actual state of the working tree.
+2. Open [../menu-progress.md](../menu-progress.md) for the current ACIT overview and the referenced logs. Verify aging information in the last real run; do not treat a run number from another model as automatically current.
+3. Pick one specific open question. Before making a change, write down the hypothesis and the evidence that will confirm or refute it.
+4. After verification, update CURRENT and the relevant topic page or a separate record. Write down the command, source state, profile and artifact paths.
 
-## Prohledávání
+## Searching
 
-Z kořene projektu: `rg -n 'tag|mailbox|DMA' docs/knowledge local/reference/cell-docs/md`.
-Pro přesnou instrukci použij `rg -n 'Shuffle Bytes|Read Channel' local/reference/cell-docs/md`.
-MD manuálů má nadpis `PDF page N` pro každou fyzickou stránku; grafické tabulky a bitové diagramy ověř v PDF.
+From the project root: `rg -n 'tag|mailbox|DMA' docs/knowledge local/reference/cell-docs/md`.
+For an exact instruction use `rg -n 'Shuffle Bytes|Read Channel' local/reference/cell-docs/md`.
+The manuals' MD has a `PDF page N` heading for each physical page; verify graphical tables and bit diagrams in the PDF.
 
-PDF a odvozené MD patří do lokální knihovny `local/reference/cell-docs/`; jejich existenci a verzi potvrzuje manifest a kontrola titulní strany. Lokální referenční klony nejsou automaticky součástí verzované báze znalostí.
+PDFs and derived MD belong in the local library `local/reference/cell-docs/`; their existence and version are confirmed by the manifest and a check of the cover page. Local reference clones are not automatically part of the version-controlled knowledge base.

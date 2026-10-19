@@ -1,248 +1,247 @@
-# Architektura a vývoj AnyPS3
+# Architecture and development of AnyPS3
 
-## Cíl a ověřený stav
+## Goal and verified state
 
-Cílem je převod kódu PS3 na nativní programy PC s kompatibilními systémovými
-službami. První integrační cíl je Ratchet & Clank: A Crack in Time.
-Předběžná cílová platforma je Linux x86-64; uživatel zatím platformu nepotvrdil.
-K datu 2026-10-14 je analyzovaný EBOOT vydání BCES00511 01.00, získaný
-z nyní kompletního ISO s ověřenou CRC. Máme mapu importů, první nativně spuštěné
-jednoduché funkce, paměťový runtime a částečně vykonaný staticky přeložený start procesu.
-Hra jako celek zatím nenaběhne. Viz
-[výsledky a omezení](ratchet-acit-startup.md).
+The goal is to convert PS3 code into native PC programs with compatible system
+services. The first integration target is Ratchet & Clank: A Crack in Time.
+The tentative target platform is Linux x86-64; the user has not yet confirmed the platform.
+As of 2026-10-14, the analyzed EBOOT is of release BCES00511 01.00, obtained
+from the now complete ISO with a verified CRC. We have an import map, the first natively executed
+simple functions, a memory runtime and a partially executed statically translated process start.
+The game as a whole does not start yet. See
+[results and limitations](ratchet-acit-startup.md).
 
-Základní ověřovací průchod je:
+The basic verification pass is:
 
 ```mermaid
 flowchart LR
-    A[Syntetický PPU ELF] --> B[Kontrola hlaviček a segmentů]
-    B --> C[PS3 OPD: kód a TOC]
-    C --> D[Překlad dosažitelných instrukcí do C++]
-    D --> E[Hostitelský kompilátor C++]
-    E --> F[Nativní testovací program: r3=42]
+    A[Synthetic PPU ELF] --> B[Header and segment check]
+    B --> C[PS3 OPD: code and TOC]
+    C --> D[Translation of reachable instructions to C++]
+    D --> E[Host C++ compiler]
+    E --> F[Native test program: r3=42]
 ```
 
-Instrukce se překládají před spuštěním. Výsledný program neobsahuje smyčku
-dekódující původní instrukce. Registry jsou však stále explicitním stavem PPU;
-takový výstup není rekonstrukcí původního zdrojového kódu hry.
+Instructions are translated before execution. The resulting program contains no loop
+that decodes the original instructions. The registers are, however, still an explicit PPU state;
+such output is not a reconstruction of the game's original source code.
 
-## Rozšířený start procesu
+## Extended process start
 
-`program.py` staví statický graf včetně podmíněných větví a volání. `flow.py`
-převádí každou instrukci do C++; přepínač adres za běhu vybírá již přeložený
-blok. `startup.py` připravuje ABI vstupu a TLS, `services.py` implementuje
-vyjmenované systémové služby a `floating.py` přesné celočíselné FP výpočty
-pro podporované normální hodnoty a zaokrouhlování. Neexistuje interpreter
-ani překlad nových instrukcí za běhu. Diagnostický režim končí na neznámém
-bloku, instrukci nebo službě. Explicitní statické cíle v profilu pouze
-rozšiřují překládaný graf; nenahrazují skutečné rozhodování původního programu.
+`program.py` builds a static graph including conditional branches and calls. `flow.py`
+converts each instruction to C++; an address switch selects the already translated
+block at run time. `startup.py` prepares the entry ABI and TLS, `services.py` implements
+the enumerated system services and `floating.py` exact integer FP computations
+for supported normal values and rounding. There is no interpreter
+and no translation of new instructions at run time. The diagnostic mode ends at an unknown
+block, instruction or service. Explicit static targets in the profile only
+extend the translated graph; they do not replace the actual decision-making of the original program.
 
-`mmapper.py` spravuje rezervace virtuálních adres a sdílené fyzické uložení.
-`kernel_sync.py` a `events.py` poskytují stavové mutexy, podmínky, semafory
-a FIFO fronty. `threads.py` přepíná skutečné PPU kontexty, včetně samostatných
-registrů a TLS; čekání bez timeoutu u podporovaných objektů uvolňuje procesor.
-Exit vedlejšího vlákna uvolňuje jeho zásobník a TLS; join čeká na skutečný
-exit a převezme 64bitový návratový stav. Plánování při inicializaci modulů
-a zbývající operace životního cyklu vláken zatím chybí.
+`mmapper.py` manages virtual address reservations and shared physical storage.
+`kernel_sync.py` and `events.py` provide stateful mutexes, conditions, semaphores
+and FIFO queues. `threads.py` switches real PPU contexts, including separate
+registers and TLS; waits without a timeout on supported objects release the processor.
+The exit of a secondary thread releases its stack and TLS; join waits for the actual
+exit and takes over the 64-bit return state. Scheduling during module initialization
+and the remaining thread lifecycle operations are still missing.
 
-`sysutil_transport.py` obsluhuje `CMND connect`, dotaz na konfiguraci
-videovýstupu, jeho změnu na 720p, jazyk a potvrzovací tlačítko a `GDAT` metadata startu.
-`native_fs.py` čte skutečný PARAM.SFO z explicitně připojeného adresáře disku.
-Odpovědi jsou serializované do sdílených kruhových bufferů a původní firmware
-je skutečně parsuje. GDAT navíc podporuje relaci a dotaz na nové herní
-úložiště pod `ANYPS3_HDD_ROOT`, účtuje pracovní paměť kontejneru a vrací
-skutečné volné místo hostitele. Existující uložená metadata a další rodiny
-požadavků explicitně selhávají. Konfigurace
-videovýstupu sama nevytváří framebuffer ani renderer.
+`sysutil_transport.py` handles `CMND connect`, the query for the video output
+configuration, its change to 720p, the language and the confirmation button, and the `GDAT` start metadata.
+`native_fs.py` reads a real PARAM.SFO from an explicitly attached disc directory.
+Responses are serialized into shared ring buffers and the original firmware
+actually parses them. In addition, GDAT supports a session and a query for a new game
+storage under `ANYPS3_HDD_ROOT`, accounts the container's working memory and returns the
+actual free space of the host. Existing stored metadata and other request families
+fail explicitly. The video output configuration
+by itself creates neither a framebuffer nor a renderer.
 
-`spu.py` staticky překládá vybranou celočíselnou ISA SPU, kanály a DMA do C++.
-`spu_runtime.py` importuje metadata obrazu a vytváří skupiny, vlákna a jejich
-256KiB lokální paměť. Bootstrap i blok později načtený DMA mají předem
-přeložené operace; kontrola původních slov odmítne změněný kód. Atomické DMA
-sleduje rezervace sdílené paměti včetně zápisů přes alias. SPU běží
-v kooperativních kvantech společně s PPU; čekání na ztrátu rezervace jej
-uspí a skutečný zápis paměti probudí. Mailbox podporuje odeslání skutečné
-události do připojené PPU fronty, odpověď a opakování při plné frontě.
-DMA může překročit sousední mapování; celý rozsah se ověří před kopírováním.
-Další události a úplný životní cyklus vláken chybí.
-Pět herních pracovních SPU nyní vykonává i původní správce úloh
-z EBOOT, načítaný DMA. Překrývající se overlaye se překládají předem;
-dvojice adresy a přesného původního slova vybírá známou přeloženou variantu.
-Neznámé slovo nadále končí chybou. SNR podporuje skutečná oznámení z PPU,
-režim přepsání/OR a blokující čtení. Skupina typu `0x18` rezervuje fyzické
-SPU bez účtování neexistujícího kontextu do hlavní paměti.
-Statické cíle firmwaru i obrazy SPU v profilu vyžadují shodu SHA-256.
+`spu.py` statically translates the selected integer SPU ISA, channels and DMA to C++.
+`spu_runtime.py` imports image metadata and creates groups, threads and their
+256 KiB local memory. Both the bootstrap and a block loaded later by DMA have pre-translated
+operations; a check of the original words rejects changed code. Atomic DMA
+tracks reservations of shared memory, including writes through an alias. The SPU runs
+in cooperative quanta together with the PPU; waiting for the loss of a reservation puts it
+to sleep and an actual memory write wakes it. The mailbox supports sending a real
+event to an attached PPU queue, a response and a retry when the queue is full.
+DMA may cross adjacent mappings; the entire range is verified before copying.
+Further events and the complete thread lifecycle are missing.
+The five game worker SPUs now also run the original task manager
+from the EBOOT, loaded by DMA. Overlapping overlays are pre-translated;
+the pair of address and exact original word selects a known translated variant.
+An unknown word still ends with an error. SNR supports real notifications from the PPU,
+overwrite/OR mode and blocking reads. A group of type `0x18` reserves a physical
+SPU without accounting a nonexistent context into main memory.
+Static firmware targets and SPU images in the profile require a SHA-256 match.
 
-`native_pad.py` poskytuje omezené rozhraní `cellPad` přes skutečné SDL2.
-Zařízení, tlačítka, analogové osy, připojení a odpojení pocházejí od hostitele;
-bez připojeného ovladače hlásí nula zařízení. Pohyb a vibrace nejsou podporované.
+`native_pad.py` provides a limited `cellPad` interface over real SDL2.
+Devices, buttons, analog axes, connection and disconnection originate from the host;
+with no controller connected it reports zero devices. Motion and vibration are not supported.
 
-`native_fs.py` připojuje také systémovou cache k explicitně zadanému
-`ANYPS3_CACHE_ROOT`. První připojení vytvoří soukromý hostitelský adresář,
-opakované připojení stejného ID zachová data a vymazání skutečně odstraní
-obsah. Cache mezi procesy zatím nepřetrvává. Veřejné API `cellSysCacheMount`
-a `cellSysCacheClear` používá tuto nativní službu; interní VSH `cacheInit`
-se tím neoznačuje za implementovaný. Paměťové kontejnery v `mmapper.py`
-rezervují rozpočet, vykazují dostupnou paměť a vracejí ji po zrušení.
+`native_fs.py` also attaches the system cache to the explicitly specified
+`ANYPS3_CACHE_ROOT`. The first attach creates a private host directory,
+repeated attach of the same ID keeps the data and clearing actually removes
+the content. The cache does not yet persist between processes. The public API `cellSysCacheMount`
+and `cellSysCacheClear` uses this native service; the internal VSH `cacheInit`
+is not thereby considered implemented. Memory containers in `mmapper.py`
+reserve a budget, report available memory and return it after cancellation.
 
-Souborové LV2 služby mapují mounty na explicitní kořeny a vlastní oddělené
-guest deskriptory. Open/read/write/seek/stat používají skutečné hostitelské
-soubory; disk je jen pro čtení. Hodnoty velikostí a volného místa pocházejí
-z hostitele, sektor a blok z konfigurace PS3 mountu. Symlinky a průchod
-`..` se odmítají. Neznámé operace se nezaměňují za úspěch.
+The LV2 file services map mounts to explicit roots and own separate
+guest descriptors. Open/read/write/seek/stat use real host
+files; the disc is read-only. Size and free-space values come
+from the host, sector and block from the PS3 mount configuration. Symlinks and `..`
+traversal are rejected. Unknown operations are not mistaken for success.
 
-`lightweight_sync.py` zajišťuje čekání a probouzení lehkých podmínkových
-proměnných. Čekání uvolní mutex a po signálu musí znovu získat vlastnictví
-včetně původní rekurze. Původní FIOS plánovač a pracovní vlákna používají
-tento mechanismus; časově omezená čekání zatím nejsou implementována.
+`lightweight_sync.py` provides waiting and waking of lightweight condition
+variables. A wait releases the mutex and after the signal must reacquire ownership,
+including the original recursion. The original FIOS scheduler and worker threads use
+this mechanism; timed waits are not yet implemented.
 
-`rsx.py` mapuje VRAM, sdílené I/O, DMA řídicí oblast a zprávy zařízení.
-Čte skutečný FIFO proud s GET/PUT, větvením, semafory a referencemi. Ukládá
-vyjmenované konfigurační registry, popisy displejových bufferů, dlaždic a Z-cull.
-Původní GCM firmware provádí svou inicializaci. `vulkan.py` poskytuje volitelný
-Vulkan backend pro úplné barevné ARGB8 a bitově přesné Z24S8 čištění
-v lokální VRAM. `rsx_surface.py` řeší dlaždicové adresování a dva vzorky
-při čištění. Používá skutečný render pass a readback s kontrolou pixelů;
-stejnou cestu lze vykonat na CPU přes Lavapipe. Vlastní softwarový renderer
-nevzniká. [Ověření a reprodukce](vulkan-rendering.md).
-Neznámý příkaz, kreslení geometrie, neprázdný blit a nepodporovaný druh čištění
-zastaví běh. Shadery, dekódování komprimovaných dat a prezentace do okna
-zatím chybí. `rsx_display.py` poskytuje headless flip do skutečného PPM
-snímku; při neúspěchu výstupu se flip nepotvrdí. GPU reporty uchovávají
-hodnoty a monotónní časové značky;
-prázdné čítače odpovídají dosavadnímu běhu bez geometrie. Fronta display
-bufferů oznamuje připravenost původnímu firmwaru. Vblank vychází ze
-skutečného monotónního času při 60000/1001 Hz a není potvrzením prezentace.
+`rsx.py` maps VRAM, shared I/O, the DMA control area and device messages.
+It reads the actual FIFO stream with GET/PUT, branching, semaphores and references. It stores
+the enumerated configuration registers and descriptions of display buffers, tiles and Z-cull.
+The original GCM firmware performs its initialization. `vulkan.py` provides an optional
+Vulkan backend for full-colour ARGB8 and bit-exact Z24S8 clears
+in local VRAM. `rsx_surface.py` handles tiled addressing and two samples
+during clears. It uses a real render pass and a readback with pixel verification;
+the same path can be executed on the CPU through Lavapipe. No custom software renderer
+is being created. [Verification and reproduction](vulkan-rendering.md).
+An unknown command, geometry drawing, a non-empty blit and an unsupported kind of clear
+stop the run. Shaders, decoding of compressed data and presentation to the window
+are still missing. `rsx_display.py` provides a headless flip into a real PPM
+frame; if the output fails, the flip is not confirmed. GPU reports retain
+values and monotonic timestamps;
+empty counters correspond to the run so far without geometry. The display
+buffer queue reports readiness to the original firmware. Vblank is derived from
+real monotonic time at 60000/1001 Hz and is not a confirmation of presentation.
 
-`vector.py` překládá další VMX operace s endianitou vektorů, aliasy registrů,
-CR6 a VSCR. Podporovaná FP aritmetika používá celočíselné zaokrouhlování
-bez změny skalárního FPSCR; `floating.py` provádí sloučené násobení a sčítání
-s jediným zaokrouhlením. `vrefp` nyní počítá přesně zaokrouhlenou reciprokou
-hodnotu, takže poslední bity nemusí odpovídat odhadové tabulce Cell.
-Nejde o ověření bitové shody všech matematických rutin s PS3. Nepodporované
-podnormální výsledky, přetečení a režim VMX non-Java stále zastavují běh.
+`vector.py` translates further VMX operations with vector endianness, register aliases,
+CR6 and VSCR. Supported FP arithmetic uses integer rounding
+without changing the scalar FPSCR; `floating.py` performs fused multiply-add
+with a single rounding. `vrefp` now computes an exactly rounded reciprocal,
+so the last bits may not match the Cell estimate table.
+This is not verification of bit-exactness of all math routines with the PS3. Unsupported
+subnormal results, overflow and the VMX non-Java mode still stop the run.
 
-Následující původní podmnožina popisuje jednoduchý příkaz `recompile`.
+The following original subset describes the simple `recompile` command.
 
-## Rozdělení kódu
+## Code layout
 
-| Soubor | Odpovědnost |
+| File | Responsibility |
 |---|---|
-| `anyps3/elf.py` | Hlavičky, segmenty, virtuální čtení, vstupní deskriptor, report |
-| `anyps3/archive.py`, `anyps3/disc.py` | Obnova ISO, inventář, extrakce a evidence neúplných dat |
-| `anyps3/sfo.py`, `anyps3/self_file.py` | Identita hry a ověřená rekonstrukce load segmentů SELF |
-| `anyps3/analysis.py` | Sekce, OPD, importy, SPU a první překážky překladu |
-| `anyps3/ppu.py` | Dekódování podmnožiny instrukcí, dosažitelnost, generování C++ |
-| `anyps3/runtime.py` | Generovaný C++ runtime: segmenty, BSS, zásobník, endianita a kontrola přístupů |
-| `anyps3/demo.py` | Reprodukovatelný původní testovací ELF |
-| `anyps3/profile.py` | Ověření identity vstupu podle explicitního SHA-256 |
-| `anyps3/cli.py` | CLI a zápis nových výstupů |
-| `tests/test_anyps3.py` | Negativní testy parseru a skutečné sestavení/spuštění výstupu |
+| `anyps3/elf.py` | Headers, segments, virtual reads, entry descriptor, report |
+| `anyps3/archive.py`, `anyps3/disc.py` | ISO recovery, inventory, extraction and records of incomplete data |
+| `anyps3/sfo.py`, `anyps3/self_file.py` | Game identity and verified reconstruction of SELF load segments |
+| `anyps3/analysis.py` | Sections, OPD, imports, SPU and the first translation blockers |
+| `anyps3/ppu.py` | Decoding of an instruction subset, reachability, C++ generation |
+| `anyps3/runtime.py` | Generated C++ runtime: segments, BSS, stack, endianness and access checks |
+| `anyps3/demo.py` | Reproducible original test ELF |
+| `anyps3/profile.py` | Verification of input identity by an explicit SHA-256 |
+| `anyps3/cli.py` | CLI and writing of new outputs |
+| `tests/test_anyps3.py` | Negative parser tests and real build/run of the output |
 
-Inspekce a překlad používají pouze standardní knihovnu Pythonu. Volitelná
-extrakce SELF potřebuje `cryptography` a explicitní soubor klíče.
-První překlad do C++ umožňuje
-ověřovat chování bez instalace LLVM SDK. Po rozšíření backendu lze rozhodnout,
-zda zůstat u C++ nebo přejít na LLVM IR; nynější kód nás k backendu neváže.
+Inspection and translation use only the Python standard library. Optional
+SELF extraction needs `cryptography` and an explicit key file.
+The first translation to C++ makes it possible
+to verify behaviour without installing the LLVM SDK. After the backend is extended, we can decide
+whether to stay with C++ or move to LLVM IR; the current code does not tie us to a backend.
 
-## Pravidla správnosti
+## Correctness rules
 
-- Virtuální adresy se převádějí přes `PT_LOAD`, nikdy nepoužívají přímo jako
-  offset v souboru. Velikost segmentu v paměti není velikost jeho dat v souboru.
-- Inspekce nemapuje guest paměť a nealokuje velikosti deklarované v `p_memsz`.
-  Samotný vstupní soubor se zatím čte celý do paměti.
-- Kód se smí číst pouze z jednoznačně mapovaného, souborově podloženého
-  spustitelného segmentu. BSS se nesmí pokládat za nuly obsahující instrukce.
-- PPU vstupní deskriptor je interpretován explicitně jako dvě 32bitová slova.
-  Nesnažíme se heuristicky zaměňovat jeho adresu s adresou instrukce.
-- Celočíselná aritmetika používá 64bitové bezznaménkové hodnoty pro definované
-  přetečení. Znaménkové immediate se rozšíří před převodem na tuto hodnotu.
-- Nepodporovaná dosažitelná instrukce či nepodporovaný vedlejší efekt zastaví
-  překlad. Není dovoleno nahrazovat neznámé chování prázdným tělem či úspěchem.
-- V této podmnožině má instrukce nejvýše jednoho následníka. Překladač sleduje
-  skoky, zastaví cykly při analýze a vyžaduje dosažitelný návrat. Nenachází ani
-  neslibuje hranice všech funkcí v binárce.
-- Vygenerování zdroje proběhne až po úspěšné analýze celého dosažitelného kódu.
-  Zápis používá výhradní vytvoření souboru; vstup ani staré výstupy se nepřepisují.
-- Shoda hashů potvrzuje pouze identitu konkrétní binárky, nikoli její hratelnost.
+- Virtual addresses are converted through `PT_LOAD`, never used directly as
+  a file offset. The size of a segment in memory is not the size of its data in the file.
+- Inspection does not map guest memory and does not allocate the sizes declared in `p_memsz`.
+  The input file itself is still read into memory in full.
+- Code may be read only from an unambiguously mapped, file-backed
+  executable segment. BSS must not be taken as zeros containing instructions.
+- The PPU entry descriptor is interpreted explicitly as two 32-bit words.
+  We do not try to heuristically confuse its address with the address of an instruction.
+- Integer arithmetic uses 64-bit unsigned values for defined
+  overflow. Signed immediates are extended before conversion to this value.
+- An unsupported reachable instruction or an unsupported side effect stops
+  the translation. Replacing unknown behaviour with an empty body or with success is not allowed.
+- In this subset an instruction has at most one successor. The translator follows
+  jumps, stops cycles during analysis and requires a reachable return. It neither finds nor
+  promises the boundaries of all functions in the binary.
+- Source generation happens only after a successful analysis of the entire reachable code.
+  Writing uses exclusive file creation; neither the input nor old outputs are overwritten.
+- A hash match confirms only the identity of the specific binary, not its playability.
 
-## Další milníky
+## Next milestones
 
-### 1. Paměť a řízení toku — bez dumpu
+### 1. Memory and control flow — without a dump
 
-Guest paměť s big-endian přístupy, kontrolou mapování, syntetickým zásobníkem
-a základními D/DS-form load/store už funguje. V `recompile-program` jsou nyní také CR, porovnání,
-podmíněné skoky, LR/CTR a volání/vracení.
-Podporu zavádět po instrukcích s ověřením pozorovatelných výsledků.
-Akceptace: původní testovací ELF s cyklem, voláním a prací s pamětí vrátí
-správný výsledek; nepodporované formy nadále selžou s adresou.
+Guest memory with big-endian accesses, mapping checks, a synthetic stack
+and basic D/DS-form load/store already works. `recompile-program` now also has CR, comparisons,
+conditional jumps, LR/CTR and call/return.
+Introduce support instruction by instruction, with verification of observable results.
+Acceptance: the original test ELF with a loop, a call and memory operations returns
+the correct result; unsupported forms continue to fail with an address.
 
-### 2. Ověření existujícího backendu — bez dumpu
+### 2. Verification of the existing backend — without a dump
 
-Stáhnout a připnout konkrétní revizi ps3recomp, zreprodukovat jeho build
-a testy na našem systému. Porovnat správnost překladače na společných
-syntetických vektorech, zejména atomiky, endianitu, VMX a floating point.
-Teprve poté rozhodnout o adaptéru či převzetí vybraných částí a jejich licencích.
-Současný malý překladač je ověřovací základ, nikoli závazek znovu napsat celý
-existující projekt. Síťový přístup ze shellu k GitHubu selhal na DNS; ps3recomp zatím není
-stažený ani sestavený. Uživatel mezitím dodal referenční zdrojáky RPCS3 do
-`local/reference/rpcs3` (revize `ffba2bf09ef3980638f9327b25240d81414034ab`).
-RPCS3 slouží k lokálnímu čtení ABI a ISA, jeho backend se nepoužívá.
+Download and pin a specific revision of ps3recomp, reproduce its build
+and tests on our system. Compare the translator's correctness on shared
+synthetic vectors, especially atomics, endianness, VMX and floating point.
+Only then decide on an adapter or on taking over selected parts and their licences.
+The current small translator is a verification baseline, not a commitment to rewrite the whole
+existing project. Network access from the shell to GitHub failed on DNS; ps3recomp has not yet been
+downloaded or built. Meanwhile the user supplied the RPCS3 reference sources into
+`local/reference/rpcs3` (revision `ffba2bf09ef3980638f9327b25240d81414034ab`).
+RPCS3 serves for local reading of the ABI and ISA; its backend is not used.
 
-### 3. Importy a systémové služby
+### 3. Imports and system services
 
-Inspekce sekcí a importů/NID už funguje na skutečném EBOOT. Offline relokace vybraných PRX a vazba jejich exportů už funguje
-v diagnostickém společném obrazu. Doplnit obecný životní cyklus modulů
-a další systémová volání. Zavést registr skutečně
-implementovaných služeb a diagnostiku chybějící knihovny, NID a adresy volání.
-Akceptace: syntetický program zavolá implementovanou službu; neznámý import
-skončí konkrétní chybou. Úspěšný stub není implementace služby.
+Inspection of sections and imports/NIDs already works on the real EBOOT. Offline relocation of selected PRXs and binding of their exports already works
+in the diagnostic combined image. Add a general module lifecycle
+and further system calls. Introduce a registry of actually
+implemented services and diagnostics of a missing library, NID and call address.
+Acceptance: a synthetic program calls an implemented service; an unknown import
+ends with a specific error. A successful stub is not an implementation of a service.
 
-### 4. SPU — bez dumpu
+### 4. SPU — without a dump
 
-Identifikace SPU ELF, statický bootstrap, lokální paměť, vybrané kanály,
-DMA a atomické rezervace již mají nativní testy a první průchod ve firmwaru.
-Doplnit další události, mailboxy a úplný životní cyklus vláken.
-Paměťová kopie samotná nezajišťuje pořadí ani dokončení DMA.
-Akceptace: PPU předá data SPU úloze a správně převezme výsledek.
+Identification of the SPU ELF, static bootstrap, local memory, selected channels,
+DMA and atomic reservations already have native tests and a first pass in the firmware.
+Add further events, mailboxes and the complete thread lifecycle.
+A memory copy by itself does not ensure the order or completion of DMA.
+Acceptance: the PPU hands data to an SPU task and correctly takes over the result.
 
-### 5. RSX — bez dumpu
+### 5. RSX — without a dump
 
-Testovat malé proudy grafických příkazů a původní jednoduché shadery.
-Akceptace: známý framebuffer nebo trojúhelník přes Vulkan, s kontrolou
-výsledného obrazu. Otevřené okno ani úspěšná kompilace shaderu nestačí.
-První část splňuje diagnostický framebuffer s RSX clear příkazy a kontrolou
-všech pixelů přes Lavapipe; trojúhelníky a RSX shadery zbývají.
+Test small streams of graphics commands and the original simple shaders.
+Acceptance: a known framebuffer or triangle via Vulkan, with verification
+of the resulting image. An open window or a successful shader compilation is not enough.
+The first part is met by a diagnostic framebuffer with RSX clear commands and verification of
+all pixels through Lavapipe; triangles and RSX shaders remain.
 
-### 6. Integrace Ratcheta — probíhá
+### 6. Ratchet integration — in progress
 
-Vydání, verze, hashe, importy, vložené SPU a první překážka překladu jsou
-zaznamenány. Start procesu už prochází voláními, TLS a konstruktory. Přesnou aktuální
-překážku zaznamenává [zpráva o nativním startu](ratchet-acit-startup.md).
-Podle skutečného běhu
-postupovat přes první obraz, menu a ovladatelnou scénu ke zvuku a ukládání.
-Každý milník musí být reprodukovatelný pro daný hash vstupu.
-Výkon porovnávat až při shodném chování; statická rekompilace sama
-nezaručuje zrychlení proti RPCS3.
+The release, versions, hashes, imports, embedded SPUs and the first translation blocker are
+recorded. Process start already passes through calls, TLS and constructors. The exact current
+blocker is recorded in the [native start report](ratchet-acit-startup.md).
+Following the real run, proceed through the first image, the menu and a controllable scene to sound and saving.
+Every milestone must be reproducible for the given input hash.
+Compare performance only once behaviour matches; static recompilation by itself
+does not guarantee a speedup over RPCS3.
 
-## Technické zdroje
+## Technical sources
 
-Odkazy byly použity pro návrh a ověření formátů, ne pro kopírování implementace.
+The links were used to design and verify formats, not to copy an implementation.
 
 - [ELF header, System V ABI](https://refspecs.linuxfoundation.org/elf/gabi4+/ch4.eheader.html)
-  a [program headers](https://refspecs.linuxfoundation.org/elf/gabi4+/ch5.pheader.html):
-  rozložení hlaviček, segmentů a jejich význam.
+  and [program headers](https://refspecs.linuxfoundation.org/elf/gabi4+/ch5.pheader.html):
+  layout of headers and segments and their meaning.
 - [RPCS3 PPUOpcodes.h](https://github.com/RPCS3/rpcs3/blob/master/rpcs3/Emu/Cell/PPUOpcodes.h):
-  pole instrukcí a opkódy PPU. Lokální LLVM assembler sloužil k nezávislé
-  kontrole binárních testovacích vektorů.
+  instruction fields and PPU opcodes. The local LLVM assembler was used for independent
+  verification of the binary test vectors.
 - [RPCS3 PPUInterpreter.cpp](https://github.com/RPCS3/rpcs3/blob/master/rpcs3/Emu/Cell/PPUInterpreter.cpp):
-  kontrola DS displacementu a pořadí paměťové operace a změny registru v update formách.
+  verification of the DS displacement and of the order of the memory operation and register change in the update forms.
 - [ps3recomp ppu_loader.py](https://github.com/sp00nznet/ps3recomp/blob/master/tools/ppu_loader.py):
-  PS3 deskriptor `{u32 code, u32 toc}` a význam vstupní adresy.
+  the PS3 descriptor `{u32 code, u32 toc}` and the meaning of the entry address.
 - [AnyPS5 architecture](https://github.com/boykopovar/AnyPS5/blob/main/docs/dev/ARCHITECTURE.md):
-  inspirace oddělením převodu binárky od implementace systémových knihoven.
-- [ps3recomp](https://github.com/sp00nznet/ps3recomp): kandidát na rozsáhlejší
-  rekompilační a runtime backend. Jeho stav pro naši hru dosud není ověřený.
+  inspiration from separating the conversion of the binary from the implementation of system libraries.
+- [ps3recomp](https://github.com/sp00nznet/ps3recomp): a candidate for a more extensive
+  recompilation and runtime backend. Its state for our game has not been verified yet.
 
-Dokumentace upstream projektů může za kódem zaostávat. Převzetí backendu
-musí vycházet z konkrétní revize, opakovatelného sestavení a testů.
+Documentation of upstream projects may lag behind the code. Adopting a backend
+must be based on a specific revision, a repeatable build and tests.

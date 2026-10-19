@@ -1,180 +1,180 @@
-# Předání AnyPS3 po 246
+# AnyPS3 handoff after 246
 
-**Pozor: pozdější změny sdíleného workspace.** Při závěrečné kontrole se po 17:52 UTC změnily `anyps3/build_game.py`, `anyps3/program.py` a profil (nové `static_opd_section`); objevily se i artefakty `native-virtual-247`. Tyto změny nejsou prací tohoto běhu a nejsou ověřené našimi 175 testy. Zachovány bez zásahu. Hashe/testy tohoto předání se vztahují ke snapshotu 246, současný worktree už není totožný. Přesná odlišnost: `local/ratchet/handoff-246-worktree-drift.json`. Číslo 247 již není volné. Nejprve ověřit pozdější změny a stav případných cizích procesů; naše session 6422 je ukončená.
+**Warning: later changes to the shared workspace.** During the final check, after 17:52 UTC, `anyps3/build_game.py`, `anyps3/program.py` and the profile changed (new `static_opd_section`); `native-virtual-247` artifacts also appeared. These changes are not the work of this run and are not verified by our 175 tests. Left untouched. The hashes/tests of this handoff refer to snapshot 246; the current worktree is no longer identical. Exact difference: `local/ratchet/handoff-246-worktree-drift.json`. The number 247 is no longer free. First verify the later changes and the state of any foreign processes; our session 6422 is terminated.
 
-2026-10-14, Codex. Uživatel zrušil aktivní automatický cíl a požádal o ukončení
-práce a úplné předání jinému AI agentovi. **Původní menu Ratchet & Clank:
-A Crack in Time ani navigace gamepadem nejsou dosažené.** Při případném
-pokračování zachovat celý původní cíl, neoznačit loading obrazovku za menu.
+2026-10-14, Codex. The user cancelled the active automatic goal and asked to end
+the work and hand it over completely to another AI agent. **The original menu of Ratchet & Clank:
+A Crack in Time and gamepad navigation have not been reached.** If work
+continues, preserve the entire original goal; do not label the loading screen as the menu.
 
-## Stav, od kterého pokračovat
+## State to continue from
 
-**Poslední skutečný sémantický stop:** `local/ratchet/native-virtual-245`,
-`pc=0x69dd30`, `lr=0x69dabc`, CTR `0x69dd30`, 308 156 479 PPU kroků,
-`target has no statically translated block`. Je to případ 13 původního
-čtrnáctipoložkového přepínače. Registr r0=r27=13, r7=`0x69db38`,
+**Last actual semantic stop:** `local/ratchet/native-virtual-245`,
+`pc=0x69dd30`, `lr=0x69dabc`, CTR `0x69dd30`, 308,156,479 PPU steps,
+`target has no statically translated block`. It is case 13 of the original
+fourteen-item switch. Registers r0=r27=13, r7=`0x69db38`,
 r10=`0x34`, r3=r6=`0x1f8`, TOC r2=`0xd34a88`, r30=`0xcacf80`.
-FPSCR `0x86002000` obsahuje sticky ZX: původní hra skutečně vykonala
-podporované FP dělení nulou. Konkrétní předchozí FP PC není přímo trasované.
-Vlastní `verification.json` a nezávislý `terminal-identity.json` ověřeny.
+FPSCR `0x86002000` contains the sticky ZX: the original game really executed a
+supported FP division by zero. The specific preceding FP PC is not directly traced.
+Its own `verification.json` and the independent `terminal-identity.json` were verified.
 
-**Připravená oprava tohoto stopu:** profil 246 obsahuje přesně ověřenou tabulku
-`0x69db38`, count 14, dispatch `0x69db34`, 12 různých cílových bloků a 12
-nových seeds. Základ/TOC, unsigned-byte bound 13, signed big-endian int32
-offsety i všechny původní executable cíle ověřeny. Případ 13 `0x69dd30`
-je přeložený v novém C++, **jeho vykonání hrou 246 ale ještě neověřeno**.
+**Prepared fix for this stop:** profile 246 contains the exactly verified table
+`0x69db38`, count 14, dispatch `0x69db34`, 12 distinct target blocks and 12
+new seeds. The base/TOC, the unsigned-byte bound 13, the signed big-endian int32
+offsets and all original executable targets were verified. Case 13 `0x69dd30`
+is translated in the new C++, **but its execution by game 246 is not yet verified**.
 
-**Nejnovější hra 246 byla přerušena na pokyn uživatele.** Session 6422 ukončena
-Ctrl-C, wrapper exit 130. Přímý guest returncode nebyl zaznamenán, nelze
-jej zaměnit za 130. Žádný `STOP pc=...`, žádný normální `verification.json`.
-Poslední stav: 266 čtení, 13 048 193 bajtů, draw 11520, 17 captures;
-poslední snímek `native-virtual-246/frame-000017.png` stále načítací planeta.
-Ovladač po celou dobu neutrální, hra hlásila `connected=1 backend=SDL2`.
+**The latest game 246 run was interrupted on user instruction.** Session 6422 was terminated
+with Ctrl-C, wrapper exit 130. The direct guest return code was not recorded and cannot
+be confused with 130. No `STOP pc=...`, no normal `verification.json`.
+Last state: 266 reads, 13,048,193 bytes, draw 11520, 17 captures;
+the last captured frame `native-virtual-246/frame-000017.png` is still the loading planet.
+The controller was neutral the whole time; the game reported `connected=1 backend=SDL2`.
 
-`native-virtual-246/interruption.json` nezávisle ověřuje původní PT_LOAD,
-vstupní a diagnostické hashe, současné source/profile, byte-identický base C++,
-zachované logy a všechny 17 PPM. Je to **ověření přerušeného běhu**, nikoli
-normální terminální runtime nebo menu důkaz. `TERMINATED.txt` označuje přerušení.
+`native-virtual-246/interruption.json` independently verifies the original PT_LOAD,
+the input and diagnostic hashes, the current source/profile, the byte-identical base C++,
+the preserved logs and all 17 PPMs. It is a **verification of the interrupted run**, not a normal
+terminal runtime or menu evidence. `TERMINATED.txt` marks the interruption.
 
-**Žádný námi zadaný build/run handle už není živý.** 6422 exit 130;
-65441/34840 kompilace/build 246 exit 0; 6682 hra 245 ukončena;
-50860/10130 kompilace/testy 245 exit 0. Staré pozorovací exec cells jsou
-dokončené; žádný subagent nebyl zadán. `get_goal` při předání vrátil `goal=null`.
-Samostatný shell `ps` v tomto prostředí má vlastní PID namespace a není
-spolehlivým důkazem stavu jiných tool sessions. Nepoužívat staré logs jako
-náhradu živého handle. Git metadata jsou prázdná/nepoužitelná; žádný nový
-repozitář ani commit nevznikl.
+**No build/run handle that we started is live any more.** 6422 exit 130;
+65441/34840 compilation/build 246 exit 0; 6682 game 245 terminated;
+50860/10130 compilation/tests 245 exit 0. The old observation exec cells are
+finished; no subagent was assigned. `get_goal` returned `goal=null` at the handoff.
+A separate shell `ps` in this environment has its own PID namespace and is not
+reliable evidence of the state of other tool sessions. Do not use old logs as a
+substitute for a live handle. The Git metadata is empty/unusable; no new
+repository or commit was created.
 
-## Co bylo změněno od 237
+## What has changed since 237
 
-### Runtime a testy
+### Runtime and tests
 
-1. `anyps3/rsx_draw.py`: jednoinstrukční FP MOV z inline konstanty vyhodnotí
-   jednou přes stávající interpreter. Zachová coverage/top-left, clipping,
-   depth/alpha, blending, masky a skutečné guest zápisy; ostatní shadery
-   obecnou cestou. Nativní regrese `tests/test_rsx.py:250` ověřuje nezávislé
-   barvy a pixely i obecnou větev. Syntetický benchmark 20 drawů 1024×512:
-   611 131 → 267 785 µs, ~2,28×. **Není to rychlost celé hry.**
-2. `anyps3/floating.py`: division a add/sub podporují infinities, finite/zero
-   nastaví ZX a XOR znaménko, 0/0 a Infinity/Infinity nastaví VXZDZ/VXIDI,
-   protilehlé infinities při add/sub VXISI. Správné FR/FI/FPRF, sticky FX
-   při přechodu konkrétního exception bitu 0→1. Původní finite algoritmus
-   nezměněn; unsupported rounding/NI/enabled traps dál explicitně zastavují.
-   **Další instrukce s infinities nejsou tímto obecně vyřešeny.**
-3. `tests/test_floating.py:34`: literální IEEE/FPSCR vektory, oba precision
-   režimy, znaménka, subnormal/zero, NaN precedence, invalid případy, sticky
-   flags, record CR1, destination aliases, odmítnutí unsupported modes bez
-   změny stavu. Přesná původní pětice FRSP/FDIVS/FSUB/FSEL/STFS z
-   `0x69f2b0..0x69f2c0` správně uloží guest big-endian `0x3f400000` (0,75).
-   Před opravou stejný test selhal na původním division-by-zero stopu.
+1. `anyps3/rsx_draw.py`: a single-instruction FP MOV from an inline constant is evaluated
+   once through the existing interpreter. It preserves coverage/top-left, clipping,
+   depth/alpha, blending, masks and actual guest writes; other shaders go
+   through the general path. The native regression `tests/test_rsx.py:250` verifies independent
+   colors and pixels as well as the general branch. Synthetic benchmark of 20 draws at 1024×512:
+   611,131 → 267,785 µs, ~2.28×. **This is not the speed of the whole game.**
+2. `anyps3/floating.py`: division and add/sub support infinities; finite/zero
+   sets ZX and the sign XOR, 0/0 and Infinity/Infinity set VXZDZ/VXIDI,
+   opposite infinities in add/sub set VXISI. Correct FR/FI/FPRF, sticky FX
+   on the 0→1 transition of the specific exception bit. The original finite algorithm is
+   unchanged; unsupported rounding/NI/enabled traps still stop explicitly.
+   **Other instructions with infinities are not generally solved by this.**
+3. `tests/test_floating.py:34`: literal IEEE/FPSCR vectors, both precision
+   modes, signs, subnormal/zero, NaN precedence, invalid cases, sticky
+   flags, record CR1, destination aliases, rejection of unsupported modes without
+   changing state. The exact original sequence of five FRSP/FDIVS/FSUB/FSEL/STFS from
+   `0x69f2b0..0x69f2c0` correctly stores the guest big-endian `0x3f400000` (0.75).
+   Before the fix, the same test failed on the original division-by-zero stop.
 
-Původní PPU/SPU bajty, ELF ani herní assety nebyly patchovány. Nevkládal se
-náhradní menu ani cizí emulator. Renderer zůstává vlastní software RSX
-implementací s vlastním Vulkan readback runtime.
+The original PPU/SPU bytes, the ELF and the game assets were not patched. No
+substitute menu or foreign emulator was inserted. The renderer remains our own software RSX
+implementation with our own Vulkan readback runtime.
 
-### Profil a původ statických cílů
+### Profile and origin of static targets
 
-| Sestavení | Ověřený původ | Nové seeds |
+| Build | Verified origin | New seeds |
 | --- | --- | ---: |
-| 240 | vtable `0xc53248`, 14 původních OPD, TOC `0xd34a88` | 14 |
-| 241 | vtable `0xc53208`, 14 OPD | 11 |
-| 242 | původní šestipoložkový ctor `0x57765c`, čtyři zbývající vtables | 42 |
-| 244 | sedm původních registrací callbacků `0x32c40c..0x32c464` | 7 |
-| 246 | interní byte-indexed switch `0x69db38`, 14 slots / 12 targets | 12 |
+| 240 | vtable `0xc53248`, 14 original OPDs, TOC `0xd34a88` | 14 |
+| 241 | vtable `0xc53208`, 14 OPDs | 11 |
+| 242 | original six-item ctor `0x57765c`, four remaining vtables | 42 |
+| 244 | seven original callback registrations `0x32c40c..0x32c464` | 7 |
+| 246 | internal byte-indexed switch `0x69db38`, 14 slots / 12 targets | 12 |
 
-Celkem **86 jedinečných nových profile seeds proti snapshotu 237**. Počet
-seeds není počet nově vykonaných funkcí ani důkaz dokončení celého loaderu.
-Šest vtables: `0xc53248`, `0xc53208`, `0xc53140`, `0xc531c8`, `0xc53188`,
-`0xc53100`; celkem 85 ověřených OPD slots z původního konstruktoru.
-Sedm callbacků: `0x53a244`, `0x53a644`, `0x53a520`, `0x53be88`,
-`0x94f3b4`, `0x4ec0f4`, `0x4ebecc`, instalované do loader control blocku
-`0xf46da4`. Podrobné load/store/OPD/TOC/kódové evidence níže.
+In total **86 unique new profile seeds against snapshot 237**. The number of
+seeds is not the number of newly executed functions nor evidence that the whole loader is complete.
+Six vtables: `0xc53248`, `0xc53208`, `0xc53140`, `0xc531c8`, `0xc53188`,
+`0xc53100`; 85 verified OPD slots in total from the original constructor.
+Seven callbacks: `0x53a244`, `0x53a644`, `0x53a520`, `0x53be88`,
+`0x94f3b4`, `0x4ec0f4`, `0x4ebecc`, installed into the loader control block
+`0xf46da4`. Detailed load/store/OPD/TOC/code evidence below.
 
-### Virtuální gamepad a lokální nástroje
+### Virtual gamepad and local tools
 
-`local/ratchet/tools/virtual_pad.py`: explicitní SDL2 diagnostický obal.
-Kopíruje původní translation byteově do `program.base.cpp`, přes macro
-přejmenuje host main a připojí skutečné SDL virtuální zařízení. Původní
-`NativePad` a guest `cellPad` rozhraní zůstávají vstupní cestou. Thread SDL
-lock, stable instance-ID cleanup, atomický control file; chyby explicitně
-zastavují, nevymýšlí neutralizaci ani připojený fyzický ovladač.
+`local/ratchet/tools/virtual_pad.py`: an explicit SDL2 diagnostic wrapper.
+It copies the original translation byte for byte into `program.base.cpp`, renames the host main
+via a macro and attaches a real SDL virtual device. The original
+`NativePad` and guest `cellPad` interfaces remain the input path. Thread SDL
+lock, stable instance-ID cleanup, atomic control file; errors stop
+explicitly, it does not invent neutralization or a connected physical controller.
 
-Control formát `mask LX LY RX RY LT RT`, neutral
-`0 0 0 0 0 -32768 -32768`. Názvy down/up/left/right, cross/circle/square/
-triangle, start/select, l1/r1/l3/r3. Samostatné nativní testy ověřily down+cross,
-stick ±32767/−32768 a neutral 128, L2 pressure 255, big-endian data délky 20,
-release a lifecycle; pět chybných vstupních případů. **Menu navigace neověřena,
-fyzický gamepad neověřen.** Běhy 244–246 pouze neutrální, v jejich menu zatím
-nebyla provedena žádná sekvence tlačítek.
+Control format `mask LX LY RX RY LT RT`, neutral
+`0 0 0 0 0 -32768 -32768`. Names down/up/left/right, cross/circle/square/
+triangle, start/select, l1/r1/l3/r3. Separate native tests verified down+cross,
+stick ±32767/−32768 and neutral 128, L2 pressure 255, big-endian data of length 20,
+release and lifecycle; five erroneous input cases. **Menu navigation not verified,
+physical gamepad not verified.** Runs 244–246 were neutral only; no button
+sequence has been performed in their menu yet.
 
-Další lokální nástroje/evidence: `observe_run.py` (čte log, sám neprokazuje
-živý proces), `verify_loader_vtables.py`, `verify_loader_callbacks.py`,
+Other local tools/evidence: `observe_run.py` (reads the log, does not by itself
+prove a live process), `verify_loader_vtables.py`, `verify_loader_callbacks.py`,
 `add_vtable.py`, `add_jump_table.py`, `benchmark_constant_draw.py`,
-`ppm2png.py` a `rsx_vp_disasm.py`. Reference repozitáře nebyly změněny.
+`ppm2png.py` and `rsx_vp_disasm.py`. The reference repositories were not changed.
 
-## Skutečné běhy a neúspěšné pokusy
+## Real runs and unsuccessful attempts
 
-| Běh | Výsledek | PPU kroky | Čtení / bajty | Snímky |
+| Run | Result | PPU steps | Reads / bytes | Captured frames |
 | --- | --- | ---: | --- | ---: |
-| 238 | nepřeložené `0x962700`, LR `0x577e00`, game rc 1 | 274 293 424 | 355 / 16 463 030 | 211 |
-| 239 | zkompilované, hra nespouštěna; `NOT_RUN.txt` | — | — | — |
-| 240 | druhý typ `0x9626a4`, LR `0x577e00`, r31=4, rc 1 | 274 249 019 | 355 / 16 463 030 | 28 |
-| 241 | třetí typ `0x962404`, LR `0x577e00`, r31=8, rc 1 | 274 258 927 | 355 / 16 463 030 | 28 |
-| 242 | allocation callback `0x53a244`, LR `0x57a7e0`, rc 1 | 274 257 993 | 355 / 16 463 030 | 28 |
-| 243 | předčasný build se starým profilem přerušen, wrapper 130; hra neběžela | — | — | — |
-| 244 | unsupported FP zero-divide `0x69f2b4`, LR `0x69f060`, rc 1 | 308 205 078 | 444 / 17 897 130 | 33 |
-| 245 | nový interní case `0x69dd30`, LR `0x69dabc`, rc 1 | 308 156 479 | 444 / 17 897 130 | 33 |
-| 246 | uživatelské přerušení Ctrl-C, wrapper 130, guest rc neznámý | neznámé | 266 / 13 048 193 | 17 |
+| 238 | untranslated `0x962700`, LR `0x577e00`, game rc 1 | 274,293,424 | 355 / 16,463,030 | 211 |
+| 239 | compiled, game not run; `NOT_RUN.txt` | — | — | — |
+| 240 | second type `0x9626a4`, LR `0x577e00`, r31=4, rc 1 | 274,249,019 | 355 / 16,463,030 | 28 |
+| 241 | third type `0x962404`, LR `0x577e00`, r31=8, rc 1 | 274,258,927 | 355 / 16,463,030 | 28 |
+| 242 | allocation callback `0x53a244`, LR `0x57a7e0`, rc 1 | 274,257,993 | 355 / 16,463,030 | 28 |
+| 243 | premature build with the old profile interrupted, wrapper 130; game did not run | — | — | — |
+| 244 | unsupported FP zero-divide `0x69f2b4`, LR `0x69f060`, rc 1 | 308,205,078 | 444 / 17,897,130 | 33 |
+| 245 | new internal case `0x69dd30`, LR `0x69dabc`, rc 1 | 308,156,479 | 444 / 17,897,130 | 33 |
+| 246 | user interruption Ctrl-C, wrapper 130, guest rc unknown | unknown | 266 / 13,048,193 | 17 |
 
-244/245 otevřely oba původní `packed/levels/front_end/level_{cached,uncached}.psarc`.
-SPU 0x100 v obou 878 746 602 instrukcí, waiting event, bez sémantického SPU stopu.
-245: 15 252 flipů / 30 496 drawů / prezentace do okna 0. Všechny vizuálně
-ověřené poslední obrazy stále loading planeta. Captures/clear/flips nejsou menu.
-239 nebylo herně spuštěno; testovaná optimalizace skutečně použita od 240 dál.
-`native-virtual-242` zkompilované staré diagnostické zařízení, hra nikdy
-nespuštěna, `NOT_RUN.txt`; nepoužívat místo aktuálního 246.
+244/245 opened both original `packed/levels/front_end/level_{cached,uncached}.psarc`.
+SPU 0x100 in both 878,746,602 instructions, waiting event, no semantic SPU stop.
+245: 15,252 flips / 30,496 draws / presentation to the window 0. All visually
+verified last images are still the loading planet. Captures/clears/flips are not the menu.
+239 was not run in the game; the tested optimization has actually been used from 240 onward.
+`native-virtual-242` is a compiled old diagnostic device, the game was never
+run, `NOT_RUN.txt`; do not use it in place of the current 246.
 
-## Testy a zdrojová identita
+## Tests and source identity
 
-| Ověření | Výsledek / log |
+| Verification | Result / log |
 | --- | --- |
-| RSX cílené 239 | 6 testů OK, 10,481 s; `tests-rsx-239.log` |
-| Celá sada 239 | 174 OK, 205,634 s, Vulkan required, bez skips; `tests-native-239.log` |
-| FP nový test před opravou | očekávané selhání původního stopu; `tests-fp-245-before.log` |
-| FP finální 245 | 6 OK, 10,194 s; `tests-fp-245-final.log` |
-| Celá sada 245 | **175 OK**, 202,918 s, Vulkan required, bez skips; `tests-native-245.log`, `tests-native-245-result.json` |
-| Virtuální pad | `virtual-pad-selftest-2.log`, manifest/zdroje/binárka v `virtual-pad-selftest-2/` |
-| Pad chyby | 5 případů; `virtual-pad-selftest-1/error-checks.json` |
+| RSX targeted 239 | 6 tests OK, 10.481 s; `tests-rsx-239.log` |
+| Full suite 239 | 174 OK, 205.634 s, Vulkan required, no skips; `tests-native-239.log` |
+| FP new test before the fix | expected failure at the original stop; `tests-fp-245-before.log` |
+| FP final 245 | 6 OK, 10.194 s; `tests-fp-245-final.log` |
+| Full suite 245 | **175 OK**, 202.918 s, Vulkan required, no skips; `tests-native-245.log`, `tests-native-245-result.json` |
+| Virtual pad | `virtual-pad-selftest-2.log`, manifest/sources/binary in `virtual-pad-selftest-2/` |
+| Pad errors | 5 cases; `virtual-pad-selftest-1/error-checks.json` |
 
-Od úspěšné celé sady 245 žádná runtime sémantická změna; 246 má shodné source
-hashe. Tests neopakovat bez změny nebo konkrétní pochybnosti. Pouhé dokončení
-dokumentace nevyžaduje další build/test. Hash inventář všech anyps3 zdrojů,
-testů a použitých helperů: `local/ratchet/handoff-246-source-hashes.json`.
+No runtime semantic change since the successful full suite 245; 246 has identical source
+hashes. Do not repeat tests without a change or a concrete doubt. Merely finishing
+the documentation does not require another build/test. Hash inventory of all anyps3 sources,
+tests and helpers used: `local/ratchet/handoff-246-source-hashes.json`.
 
-| Soubor / obraz | SHA256 |
+| File / image | SHA256 |
 | --- | --- |
-| Původní `EBOOT.analysis.elf` | `6debdca0f181f35d98ebe23faabe2531b697c558b4e3384b06630173400674c1` |
+| Original `EBOOT.analysis.elf` | `6debdca0f181f35d98ebe23faabe2531b697c558b4e3384b06630173400674c1` |
 | `profiles/ratchet-acit.json` | `ab6d1c4fe7067ae93608ede9b034f261334e8ad1c88ba36ba714b1a34bb81db7` |
 | `anyps3/rsx_draw.py` | `70ef9fff4439764ce625009fc90ce582fec28499ee0e3d1faf4b0c79fc825fec` |
 | `anyps3/floating.py` | `e295daf36fc5155ae1d357931e6102322c28a67b939eacbdc37542bf2597dcab` |
 
-Normální `run_native.py` verification hash neobsahuje base C++; vždy navíc
-ověřit `diagnostic-manifest.json` a base proti původnímu bundle translation.
-Menu flags v helperu jsou pevně false; při skutečném menu nestačí přepnout
-flag, je třeba doložit původní viditelný obsah a změny navigace přes `cellPad`.
+The normal `run_native.py` verification hash does not include the base C++; always
+additionally verify `diagnostic-manifest.json` and the base against the original bundle translation.
+The menu flags in the helper are hard-coded false; with a real menu it is not enough to flip the
+flag, you must demonstrate the original visible content and the navigation changes via `cellPad`.
 
-## První další akce a příkazy pro nový nepoužitý N
+## First next actions and commands for a new unused N
 
-1. Po novém uživatelském pověření přečíst AGENTS, INDEX, CURRENT, toto předání;
-   zkontrolovat aktuální soubory/hashe/profil/handles. **Teď žádný živý běh není.**
-2. V novém adresáři znovu vykonat původní hru s připraveným profilem 246.
-   Číslo zvolit podle aktuálních artefaktů; 247 je již obsazené.
-   Předchozí `frames/` se nepřepisují: helper vyžaduje nový adresář.
-3. Potvrdit průchod case 13 a řešit další skutečný stop. Načítání v našich
-   posledních bězích trvalo zhruba desítky minut; nepřerušovat po pouhém
-   timeoutu pozorování. Rozpočet zůstává 5 mld. PPU/SPU, není opravou ISA.
+1. After a new user authorization, read AGENTS, INDEX, CURRENT, this handoff;
+   check the current files/hashes/profile/handles. **There is no live run now.**
+2. In a new directory, execute the original game again with the prepared profile 246.
+   Choose the number according to the current artifacts; 247 is already taken.
+   Previous `frames/` are not overwritten: the helper requires a new directory.
+3. Confirm the passage of case 13 and address the next actual stop. Loading in our
+   last runs took roughly tens of minutes; do not interrupt after a mere
+   observation timeout. The budget remains 5 billion PPU/SPU, which is not an ISA fix.
 
-N níže nahradit skutečně volným číslem až po kontrole pozdějších změn. Šablona nebyla provedena.
+Replace N below with an actually free number only after checking later changes. The template was not executed.
 
 ```bash
 python -m anyps3.build_game local/ratchet/EBOOT.analysis.elf --firmware local/ratchet/firmware-verified/dev_flash/sys/external --key-file local/ratchet/app-key.json --profile profiles/ratchet-acit.json --max-steps 5000000000 -o local/ratchet/native-bundle-N > local/ratchet/build-N.log 2>&1
@@ -183,65 +183,65 @@ ANYPS3_VIRTUAL_PAD_CONTROL=/home/martink/AnyPS3/local/ratchet/native-virtual-N/c
 python local/ratchet/tools/observe_run.py native-virtual-N --record
 ```
 
-Wrapper kompiluje `c++ -std=c++17 -O2 -Wall -Wextra -Werror -pthread
--DANYPS3_VULKAN ... -lvulkan`, do `native-virtual-N/program`; původní
-`native-bundle-N` obsahuje generované C++/ELF/profile/build, nemá vlastní
-zkompilovaný program. `run_native.py` aktuálně nastaví skutečný disc
-`game-complete`, cache, HDD, SPU budget, Lavapipe a Vulkan validation.
-Jeho obsah znovu ověřit. Zachovat stdout/stderr/returncode/stop/captures.
+The wrapper compiles `c++ -std=c++17 -O2 -Wall -Wextra -Werror -pthread
+-DANYPS3_VULKAN ... -lvulkan` into `native-virtual-N/program`; the original
+`native-bundle-N` contains the generated C++/ELF/profile/build and has no
+compiled program of its own. `run_native.py` currently sets the real disc
+`game-complete`, cache, HDD, SPU budget, Lavapipe and Vulkan validation.
+Re-verify its content. Preserve stdout/stderr/returncode/stop/captures.
 
-Po skutečném menu lze tlačítka poslat přes SDL a pak uvolnit (příkazy zatím
-nebyly v herním menu provedeny):
+Once the real menu is reached, buttons can be sent through SDL and then released (the commands
+have not yet been executed in the game menu):
 
 ```bash
 python local/ratchet/tools/virtual_pad.py set local/ratchet/native-virtual-N/control.txt --buttons down
 python local/ratchet/tools/virtual_pad.py set local/ratchet/native-virtual-N/control.txt
 ```
 
-Doložit změnu výběru v původním menu, návrat/aktivaci podle potřeby, původ
-inputu a before/after snímky. Oddělit virtuální navigaci, fyzický gamepad
-a prezentaci do okna. **Window presentation backend stále chybí**, nynější
-Vulkan cesta je headless scanout/readback/capture. Zvukový backend také chybí.
-Další omezení shaderů/textur/stencil/MRT jsou v starším RSX experimentu.
+Demonstrate the change of selection in the original menu, return/activation as needed, the origin of the
+input and before/after captured frames. Separate virtual navigation, the physical gamepad
+and presentation to the window. **The window presentation backend is still missing**; the current
+Vulkan path is headless scanout/readback/capture. The audio backend is also missing.
+Further limitations of shaders/textures/stencil/MRT are in the older RSX experiment.
 
-## Poslední rozpracovaná rešerše – nepoužít jako hotovou opravu
+## Last in-progress research – do not use as a finished fix
 
-Read-only scan 64 přeložených původních BCTR našel další byte-shift patterns;
-`local/ratchet/translated-byte-switch-candidates-246.json` je pouze katalog
-**hypotéz/kandidátů**, bez změny profilu/generátoru. Není úplně prokázaný
-TOC/register flow ani správný počet všech jeho tabulek.
+A read-only scan of 64 translated original BCTRs found further byte-shift patterns;
+`local/ratchet/translated-byte-switch-candidates-246.json` is only a catalog of
+**hypotheses/candidates**, with no change to the profile/generator. The TOC/register flow
+is not fully proven, nor is the correct count of all its tables.
 
-| Dispatch / kandidátní table | Kandidátní count | Stav |
+| Dispatch / candidate table | Candidate count | Status |
 | --- | ---: | --- |
-| `0x50c774` / `0x50c778` | 6 | cíle v 246 nepřeložené, další ověření nutné |
-| `0x50d810` / `0x50d814` | 5 | totéž |
-| `0x7d87a4` / `0x7d87a8` | 5 | totéž |
-| `0x9b52fc` / `0x9b5300` | 10 | totéž |
-| `0x5f99a8`, `0x6dc070`, `0x90acd8`, `0x91628c` | neprokázaný | regex/pattern sám nestačí |
+| `0x50c774` / `0x50c778` | 6 | targets untranslated in 246, further verification needed |
+| `0x50d810` / `0x50d814` | 5 | same |
+| `0x7d87a4` / `0x7d87a8` | 5 | same |
+| `0x9b52fc` / `0x9b5300` | 10 | same |
+| `0x5f99a8`, `0x6dc070`, `0x90acd8`, `0x91628c` | unproven | a regex/pattern alone is not enough |
 
-Známé `0x69db38` a starší `0x90a294` už v profilu jsou. Automatický detector
-zůstává strict canonical `rldic`; nebyl rozšířen na `rlwinm`. Tyto kandidáty
-nepřidávat bez ověření původních guard/base/offset/count/targets a identity.
+The known `0x69db38` and the older `0x90a294` are already in the profile. The automatic detector
+remains strict canonical `rldic`; it was not extended to `rlwinm`. Do not add these candidates
+without verifying the original guard/base/offset/count/targets and identity.
 
-## Rozcestník důkazů a historie
+## Index of evidence and history
 
-- [238: původní skutečný stop a SPU](experiments/2026-10-14-loading-238.md)
-- [239: renderer, benchmark, testy](experiments/2026-10-14-constant-fragment-239.md)
-- [240: první vtable](experiments/2026-10-14-vtable-240.md)
-- [241/242: šest vtables](experiments/2026-10-14-loader-vtables-241-242.md)
-- [244: callbacky, virtual pad, skutečný FP stop](experiments/2026-10-14-virtual-pad-and-callbacks-244.md)
-- [245: FP sémantika a regrese](experiments/2026-10-14-fp-zero-divide-245.md)
-- [246: table a přerušení](experiments/2026-10-14-byte-switch-246.md)
-- [Předchozí posun 198–237](runtime-handoff-237.md), [stručná historie](../menu-progress.md)
-- [RSX sémantika a omezení](experiments/2026-10-14-rsx-software-draw.md),
-  [PRX/trophy/PPU detaily](experiments/2026-10-14-prx-import-references.md)
-- [Primární zdroje, přesné cesty a revize referencí](SOURCES.md)
+- [238: original actual stop and SPU](experiments/2026-10-14-loading-238.md)
+- [239: renderer, benchmark, tests](experiments/2026-10-14-constant-fragment-239.md)
+- [240: first vtable](experiments/2026-10-14-vtable-240.md)
+- [241/242: six vtables](experiments/2026-10-14-loader-vtables-241-242.md)
+- [244: callbacks, virtual pad, actual FP stop](experiments/2026-10-14-virtual-pad-and-callbacks-244.md)
+- [245: FP semantics and regressions](experiments/2026-10-14-fp-zero-divide-245.md)
+- [246: table and interruption](experiments/2026-10-14-byte-switch-246.md)
+- [Previous progress 198–237](runtime-handoff-237.md), [brief history](../menu-progress.md)
+- [RSX semantics and limitations](experiments/2026-10-14-rsx-software-draw.md),
+  [PRX/trophy/PPU details](experiments/2026-10-14-prx-import-references.md)
+- [Primary sources, exact paths and revisions of the references](SOURCES.md)
 
-Evidence soubory v `local/ratchet/`: `target-240-evidence.txt`,
+Evidence files in `local/ratchet/`: `target-240-evidence.txt`,
 `target-241-evidence.txt`, `loader-vtables-242-evidence.json`,
 `target-244-evidence.json`, `target-245-evidence.json`, `target-246-evidence.json`.
-Původní firmware 3.01 a herní obrazy musí zůstat stejné; žádné tiché záměny.
-Primární PDF knihovna eviduje verze/hash/page mapping. Book I v2.02 byl
-při FP rešerši dostupný přes web, lokální download selhal DNS a screenshoty
-většinou cache miss; **neexistuje nový lokální Book I PDF hash**. Nepřebírat
-novější Power ISA nebo PowerXCell detaily jako automaticky platné pro PS3.
+The original firmware 3.01 and the game images must stay the same; no silent substitutions.
+The primary PDF library records versions/hash/page mapping. Book I v2.02 was
+available via the web during the FP research; the local download failed on DNS and the screenshots
+were mostly cache misses; **there is no new local Book I PDF hash**. Do not adopt
+newer Power ISA or PowerXCell details as automatically valid for the PS3.
