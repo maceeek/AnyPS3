@@ -15,6 +15,14 @@ Subagents: Sonnet only (user instruction); one SPU agent in an isolated git work
   in `/opt/gcc15`, wrapper `/usr/local/bin/g++-15` (sysroot `/`, host include/lib paths, static libstdc++/libgcc,
   appends `-lSPIRV-Tools-opt -lSPIRV-Tools` after `-lglslang` because Ubuntu's glslang is static); `c++` points to it.
   perf: `/usr/lib/linux-tools-6.8.0-147/perf`. PowerPC encodings: `llvm-mc --triple=powerpc64-unknown-linux-gnu`.
+- **Verified (toolchain pitfall, fixed in the runtime):** the conda-forge libstdc++ is built against an old glibc
+  sysroot without `pthread_cond_clockwait`, so `std::condition_variable` waits on `system_clock` and converts a
+  steady time point. `wait_until(steady_clock::time_point::max())` overflows into the past, times out at once and
+  the RSX owner thread (`rsx_worker.py` `RsxOwnerQueue::launch`) spun at 100% CPU without serving the queued
+  request (gdb: main thread in `RsxOwnerQueue::await` from `rsx_worker_start`, owner thread in
+  `steady_clock::now`/`system_clock::now`). test_par6 hung in 6 of 8 cases. The owner loop now waits without a
+  timeout when there is no deadline, like `par_worker.py` already did for SPU lanes. Same semantics; it matters
+  for any toolchain whose condition variable lacks a steady-clock wait.
 - Lavapipe executes command buffers synchronously on the submitting thread, so RSX wall time per draw includes
   driver rasterization; host code is separated with perf symbol attribution (`anyps3`/libc vs `libvulkan_lvp`).
 

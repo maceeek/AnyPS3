@@ -107,7 +107,11 @@ struct RsxOwnerQueue {
                 {std::unique_lock<std::mutex> lock(mutex);const auto seen=generation;
                     if(queue.empty() && !closing){lock.unlock();if(service)service();
                         const auto until=deadline?deadline():std::chrono::steady_clock::time_point::max();lock.lock();
-                        changed.wait_until(lock,until,[&]{return closing || !queue.empty() || generation!=seen;});}
+                        // No deadline: wait without a timeout. A libstdc++ condition_variable without
+                        // pthread_cond_clockwait waits on system_clock and converts the steady time point;
+                        // time_point::max() then overflows into the past and the owner would spin.
+                        const auto ready=[&]{return closing || !queue.empty() || generation!=seen;};
+                        if(until==std::chrono::steady_clock::time_point::max())changed.wait(lock,ready);else changed.wait_until(lock,until,ready);}
                     if(closing && queue.empty())break;
                     if(queue.empty())continue;
                     request=queue.front();queue.pop_front();++generation;changed.notify_all();}
