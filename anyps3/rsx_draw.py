@@ -55,8 +55,57 @@ CPP = r'''
 // guest translation. This does not change their semantics.
 #pragma GCC push_options
 #pragma GCC optimize("O2")
+#if defined(__SSSE3__) && defined(__SSE4_1__)
+#include <immintrin.h>
+#endif
 namespace rsxdraw {
 using Vec4=std::array<float,4>;
+// Big-endian index decode: out[i]=raw+base, or UINT32_MAX for the restart value
+// when restart is enabled. largest/any cover the unrestarted raw values only,
+// for the caller's overflow check. Width is 2 or 4 bytes.
+[[maybe_unused]] static void decode_indices(const std::uint8_t* in,std::uint32_t* out,unsigned count,unsigned width,bool restart,
+        std::uint32_t restart_index,std::uint32_t base,std::uint32_t& largest,bool& any){
+    unsigned i=0;
+#if defined(__SSSE3__) && defined(__SSE4_1__)
+    __m128i maxv=_mm_setzero_si128(),seen=_mm_setzero_si128();
+    const __m128i basev=_mm_set1_epi32(int(base)),restartv=_mm_set1_epi32(int(restart_index)),ones=_mm_set1_epi32(-1);
+    auto lanes=[&](__m128i x,std::uint32_t* to){
+        if(restart){const __m128i hit=_mm_cmpeq_epi32(x,restartv);
+            _mm_storeu_si128(reinterpret_cast<__m128i*>(to),_mm_or_si128(_mm_add_epi32(x,basev),hit));
+            maxv=_mm_max_epu32(maxv,_mm_andnot_si128(hit,x));seen=_mm_or_si128(seen,_mm_andnot_si128(hit,ones));}
+        else{_mm_storeu_si128(reinterpret_cast<__m128i*>(to),_mm_add_epi32(x,basev));maxv=_mm_max_epu32(maxv,x);seen=ones;}
+    };
+    if(width==2){
+        const __m128i low=_mm_setr_epi8(1,0,-1,-1,3,2,-1,-1,5,4,-1,-1,7,6,-1,-1),high=_mm_setr_epi8(9,8,-1,-1,11,10,-1,-1,13,12,-1,-1,15,14,-1,-1);
+        for(;i+8<=count;i+=8){const __m128i v=_mm_loadu_si128(reinterpret_cast<const __m128i*>(in+2*i));
+            lanes(_mm_shuffle_epi8(v,low),out+i);lanes(_mm_shuffle_epi8(v,high),out+i+4);}
+    }else{
+        const __m128i swap=_mm_setr_epi8(3,2,1,0,7,6,5,4,11,10,9,8,15,14,13,12);
+        for(;i+4<=count;i+=4)lanes(_mm_shuffle_epi8(_mm_loadu_si128(reinterpret_cast<const __m128i*>(in+4*i)),swap),out+i);
+    }
+    alignas(16) std::uint32_t m[4];_mm_store_si128(reinterpret_cast<__m128i*>(m),maxv);
+    largest=std::max(std::max(m[0],m[1]),std::max(m[2],m[3]));any=!_mm_testz_si128(seen,seen);
+#else
+    largest=0;any=false;
+#endif
+    for(;i<count;++i){
+        const std::uint32_t raw=width==2?(std::uint32_t(in[2*i])<<8|in[2*i+1]):(std::uint32_t(in[4*i])<<24|std::uint32_t(in[4*i+1])<<16|std::uint32_t(in[4*i+2])<<8|in[4*i+3]);
+        if(restart && raw==restart_index){out[i]=UINT32_MAX;continue;}
+        largest=std::max(largest,raw);any=true;out[i]=raw+base;
+    }
+}
+// Minimum and maximum over every index of n triangles (n may be zero).
+[[maybe_unused]] static void index_extent(const std::array<std::uint32_t,3>* t,std::size_t n,unsigned& lo,unsigned& hi){
+    static_assert(sizeof(std::array<std::uint32_t,3>)==12,"packed triangle indices");
+    std::size_t v=0;const std::size_t values=3*n;
+#if defined(__SSSE3__) && defined(__SSE4_1__)
+    if(values>=8){const auto* bytes=reinterpret_cast<const char*>(t);__m128i minv=_mm_set1_epi32(-1),maxv=_mm_setzero_si128();
+        for(;v+4<=values;v+=4){const __m128i x=_mm_loadu_si128(reinterpret_cast<const __m128i*>(bytes+4*v));minv=_mm_min_epu32(minv,x);maxv=_mm_max_epu32(maxv,x);}
+        alignas(16) std::uint32_t a[4],b[4];_mm_store_si128(reinterpret_cast<__m128i*>(a),minv);_mm_store_si128(reinterpret_cast<__m128i*>(b),maxv);
+        for(unsigned k=0;k<4;++k){lo=std::min(lo,a[k]);hi=std::max(hi,b[k]);}}
+#endif
+    for(;v<values;++v){const auto id=t[v/3][v%3];lo=std::min(lo,id);hi=std::max(hi,id);}
+}
 ''' + PERF_CPP + r'''
 // One pool per calling host thread; workers never enter GuestMemory. The caller
 // participates as stripe 0. Jobs finish before draw-owned references expire.
@@ -1223,7 +1272,8 @@ static void rsx_execute_draw(PpuState& s){
 #else
     constexpr bool graphics_backend=false;
 #endif
-    const unsigned requested_threads=draw_thread_count();
+    // The thread count only splits CPU rasterization; the GPU path never reads it.
+    const unsigned requested_threads=graphics_backend?1u:draw_thread_count();
     PerfDraw perf;if(host_stats().enabled)++host_stats().draws;::RsxPerfCounters::add(::RsxPerfCounters::draws);
     HostPhase host_phase(HostStage::indices);
     // ---- indices
@@ -1257,13 +1307,9 @@ static void rsx_execute_draw(PpuState& s){
             m.range(address,count*width,false).read(0,bytes.data(),count*width);
             // Same values/errors as the per-element loop: decode into place,
             // checking overflow on the unrestarted maximum only.
-            const auto at=indices.size();indices.resize(at+count);auto* out=indices.data()+at;const auto* in=bytes.data();
+            const auto at=indices.size();indices.resize(at+count);
             std::uint32_t largest=0;bool any=false;
-            for(unsigned i=0;i<count;++i){
-                const std::uint32_t raw=width==2?(std::uint32_t(in[2*i])<<8|in[2*i+1]):(std::uint32_t(in[4*i])<<24|std::uint32_t(in[4*i+1])<<16|std::uint32_t(in[4*i+2])<<8|in[4*i+3]);
-                if(restart && raw==restart_index){out[i]=UINT32_MAX;continue;}
-                largest=std::max(largest,raw);any=true;out[i]=raw+base_index;
-            }
+            decode_indices(bytes.data(),indices.data()+at,count,width,restart,restart_index,base_index,largest,any);
             if(any && std::uint64_t(largest)+base_index>=UINT32_MAX)throw std::runtime_error("RSX vertex index overflow");
         }
     }else if(!draw.immediate_vertices.empty()){

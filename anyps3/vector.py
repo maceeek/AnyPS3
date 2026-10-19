@@ -161,7 +161,7 @@ CPP=r'''
 }
 struct VmxFloatScope {
     PpuState& state;std::uint32_t saved;
-    explicit VmxFloatScope(PpuState& s):state(s),saved(s.fpscr){
+    explicit VmxFloatScope(PpuState& s):state(s),saved((fp_materialize(s),s.fpscr)){
         if(s.vscr&0x10000)throw std::runtime_error("VMX non-Java arithmetic mode unsupported");
         s.fpscr=0;
     }

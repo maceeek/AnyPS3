@@ -572,7 +572,7 @@ static bool rsx_run_impl(PpuState& s,unsigned budget,bool idle_poll=false){
                         if(!rsx_diag_skip()){
                         std::fprintf(stderr,"RSX unsupported method=%04x io=%08x header=%08x count=%u value=%08" PRIx64 "\n",reg,get,header,count,m.load(rsx_address(gpu,get+4+i*4),4));
                         // Diagnostic snapshot of retained state for the next implementation step.
-                        for(const auto& [r,v]:std::map<std::uint32_t,std::uint32_t>(gpu.registers.begin(),gpu.registers.end()))
+                        for(const auto& [r,v]:std::map<std::uint32_t,std::uint32_t>(std::as_const(gpu).registers.begin(),std::as_const(gpu).registers.end()))
                             std::fprintf(stderr,"RSX state %04x=%08x\n",r,v);
                         for(unsigned w=0;w<gpu.transform_program.size();w+=4)if(gpu.transform_program_written[w])
                             std::fprintf(stderr,"RSX vp[%u]=%08x %08x %08x %08x\n",w/4,gpu.transform_program[w],gpu.transform_program[w+1],gpu.transform_program[w+2],gpu.transform_program[w+3]);
@@ -648,7 +648,7 @@ static bool rsx_run_impl(PpuState& s,unsigned budget,bool idle_poll=false){
                         const std::uint64_t word=std::uint64_t(rsx_reg(gpu,0x1e9c))*4+((method-0xb80)/4)%4+i;
                         if(word>=gpu.transform_program.size())throw std::runtime_error("RSX transform program upload outside 544 instructions");
                         gpu.transform_program.write(word,value);gpu.transform_program_written.write(word,true);
-                        if(i+1==count){gpu.registers[0x1e9c]+=(count+((method-0xb80)/4)%4)/4;++gpu.transform_program_generation;}
+                        if(i+1==count){gpu.registers.write(0x1e9c,rsx_reg(gpu,0x1e9c)+(count+((method-0xb80)/4)%4)/4);++gpu.transform_program_generation;}
                         continue;
                     }
                     if(reg>=0x1f00 && reg<=0x1f7c){
@@ -707,7 +707,7 @@ static bool rsx_run_impl(PpuState& s,unsigned budget,bool idle_poll=false){
                         rsx_release_semaphore(s,address,stored,true);
                     }else if(reg==0x50)m.store(gpu.dma+0x48,4,value);
                     else if(reg==0x100 || reg==0x110 || reg==0x1d94){/* NOP / idle / clear already executed. */}
-                    else gpu.registers[reg]=value;
+                    else gpu.registers.write(reg,value);
                 }
                 gpu.packet_index=0;
                 next+=count*4;

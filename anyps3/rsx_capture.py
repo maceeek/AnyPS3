@@ -73,7 +73,7 @@ static void rsx_capture_failed(PpuState& s,const std::exception& error){
     for(auto& z:g.zculls){number(z.bound);number(z.width);number(z.height);number(z.start);number(z.offset);number(z.region_word);number(z.offset_word);number(z.status_word);}
     count=g.registers.size();number(count);if(count>65536)throw std::runtime_error("RSX capture register count limit");
     if(out)for(const auto& r:g.registers){auto key=r.first,value=r.second;number(key);number(value);}
-    else{g.registers.clear();for(std::uint64_t i=0;i<count;++i){unsigned key=0,value=0;number(key);number(value);g.registers[key]=value;}}
+    else{g.registers.clear();for(std::uint64_t i=0;i<count;++i){unsigned key=0,value=0;number(key);number(value);g.registers.write(key,value);}}
     for(unsigned i=0;i<g.transform_program.size();++i){auto v=std::as_const(g).transform_program[i];number(v);if(in)g.transform_program.write(i,v);}
     for(unsigned i=0;i<g.transform_program_written.size();++i){auto v=std::as_const(g).transform_program_written[i];number(v);if(in)g.transform_program_written.write(i,v);}
     for(unsigned i=0;i<g.transform_constants.size();++i){auto v=std::as_const(g).transform_constants[i];number(v);if(in)g.transform_constants.write(i,v);}

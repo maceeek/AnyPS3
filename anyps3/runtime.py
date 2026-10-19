@@ -76,6 +76,9 @@ MEMORY_CPP = r'''
 #include <exception>
 
 #if defined(__linux__)
+#if defined(__SSE2__)
+#include <emmintrin.h>
+#endif
 #include <sys/mman.h>
 #include <sys/syscall.h>
 #include <unistd.h>

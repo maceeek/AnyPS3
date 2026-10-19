@@ -261,7 +261,7 @@ def lift(word: int, pc: int) -> Operation:
             raise AnyPS3Error(f"Reserved mffs operand at 0x{pc:08x}.")
         name = {846:'fcfid',814:'fctid',815:'fctidz',583:'mffs',14:'fctiw',15:'fctiwz'}[xo]
         expression = (f"fp_from_integer(state, state.fpr[{rb}])" if xo == 846 else
-                      f"fp_to_integer(state, state.fpr[{rb}], {32 if xo in (14,15) else 64}, {'true' if xo in (15,815) else 'false'})" if xo in (14,15,814,815) else "state.fpscr")
+                      f"fp_to_integer(state, state.fpr[{rb}], {32 if xo in (14,15) else 64}, {'true' if xo in (15,815) else 'false'})" if xo in (14,15,814,815) else "fp_read_fpscr(state)")
         body = f"state.fpr[{rt}] = {expression};"
         if word & 1:
             body += " state.cr = (state.cr & ~UINT32_C(0x0f000000)) | ((state.fpscr >> 4) & 0x0f000000);"
@@ -281,7 +281,7 @@ def lift(word: int, pc: int) -> Operation:
             body += " state.cr = (state.cr & ~UINT32_C(0x0f000000)) | ((state.fpscr >> 4) & 0x0f000000);"
         return Operation(pc,word,'frsqrte' if op == 63 else 'fres',body+f" state.pc = 0x{next_pc:x};",successors)
     if op == 63 and xo == 12 and not ra:
-        body = (f"fp_mode(state); std::uint64_t special; if (fp_round_single_special(state, state.fpr[{rb}], special)) state.fpr[{rt}] = special; "
+        body = (f"fp_materialize(state); fp_mode(state); std::uint64_t special; if (fp_round_single_special(state, state.fpr[{rb}], special)) state.fpr[{rt}] = special; "
                 f"else {{ const auto value = fp_parts(state.fpr[{rb}]); state.fpr[{rt}] = fp_pack(state, value.sign, value.significand, value.exponent - 52, 24); }}")
         if word & 1:
             body += " state.cr = (state.cr & ~UINT32_C(0x0f000000)) | ((state.fpscr >> 4) & 0x0f000000);"
@@ -289,7 +289,7 @@ def lift(word: int, pc: int) -> Operation:
     if op in (59, 63) and (xo & 31) == 22:
         if ra or (word >> 6) & 31:
             raise AnyPS3Error(f"Reserved fsqrt operand at 0x{pc:08x}.")
-        body = f"state.fpr[{rt}] = fp_sqrt(state, state.fpr[{rb}], {24 if op == 59 else 53});"
+        body = f"state.fpr[{rt}] = fp_sqrt_lazy(state, state.fpr[{rb}], {24 if op == 59 else 53});"
         if word & 1:
             body += " state.cr = (state.cr & ~UINT32_C(0x0f000000)) | ((state.fpscr >> 4) & 0x0f000000);"
         return Operation(pc,word,'fsqrts' if op == 59 else 'fsqrt',body+f" state.pc = 0x{next_pc:x};",successors)
@@ -301,7 +301,7 @@ def lift(word: int, pc: int) -> Operation:
         # once to binary32 (implementation behaviour; Book I leaves
         # non-single-representable inputs undefined).
         body=''
-        body+=f"state.fpr[{rt}]=fp_fused(state,state.fpr[{ra}],state.fpr[{rc}],{addend},{24 if op==59 else 53},{'true' if variant>=30 else 'false'});"
+        body+=f"state.fpr[{rt}]=fp_fused_lazy(state,state.fpr[{ra}],state.fpr[{rc}],{addend},{24 if op==59 else 53},{'true' if variant>=30 else 'false'});"
         if word&1:body+=" state.cr = (state.cr & ~UINT32_C(0x0f000000)) | ((state.fpscr >> 4) & 0x0f000000);"
         return Operation(pc,word,{28:'fmsub',29:'fmadd',30:'fnmsub',31:'fnmadd'}[variant]+('s' if op==59 else ''),body+f" state.pc = 0x{next_pc:x};",successors)
     if op in (59,63) and (xo & 31) in (18, 20, 21, 25):
@@ -311,7 +311,7 @@ def lift(word: int, pc: int) -> Operation:
         right = f"state.fpr[{rc if variant == 25 else rb}]"
         if variant == 20:
             right = f"fp_subtract_operand({right})"
-        helper = {18:'fp_divide',20:'fp_add',21:'fp_add',25:'fp_multiply'}[variant]
+        helper = {18:'fp_divide_lazy',20:'fp_add_lazy',21:'fp_add_lazy',25:'fp_multiply_lazy'}[variant]
         body = ''
         body += f"state.fpr[{rt}] = {helper}(state, state.fpr[{ra}], {right}, {24 if op==59 else 53});"
         if word & 1:

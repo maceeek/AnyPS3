@@ -32,7 +32,10 @@ static void graphics_differential(){
   if(mode>=32)for(auto* state:{&cpu,&gpu}){if(mode==32)customize(*state,22);texture_fp(*state);}
   setenv("ANYPS3_RSX_BACKEND","cpu",1);unsetenv("ANYPS3_RSX_VK_TEST");rsx_execute_draw(cpu);
   setenv("ANYPS3_RSX_BACKEND","gpu",1);rsx_execute_draw(gpu);
-  if(mode!=12 && !gpu.rsx.renderer->graphics_draws)throw std::runtime_error("no HW draw mode="+std::to_string(mode));
+  // Mode 16 needs the optional depthBounds feature; without it the explicit
+  // CPU fallback draws and the differential below still compares it.
+  const bool device_mode=mode!=12 && (mode!=16 || gpu.rsx.renderer->graphics_depth_bounds());
+  if(device_mode && !gpu.rsx.renderer->graphics_draws)throw std::runtime_error("no HW draw mode="+std::to_string(mode));
   const unsigned aa=(cpu.rsx.registers[0x208]>>12)&15,nx=aa?2:1,ny=aa>=4?2:1;
   const auto color=gpu.rsx.registers[0x208]&31;
   const unsigned sw=128*nx,sh=128*ny,db=((gpu.rsx.registers[0x208]>>5)&7)==1?2:4;

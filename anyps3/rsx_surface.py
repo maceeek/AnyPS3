@@ -100,11 +100,11 @@ static std::uint64_t rsx_address(const NativeRsx& gpu,std::uint32_t offset); // 
 #endif
         ));
         for(unsigned reg:{0x208u,0x200u,0x204u,0x220u,0x2b8u,0x3b0u,0x32cu,0x1d98u,0x1d9cu,0x194u,0x198u,0x20cu,0x22cu,0x210u,0x214u})
-            std::fprintf(stderr," r%x=%x",reg,gpu.registers.count(reg)?gpu.registers.at(reg):0u);
+            std::fprintf(stderr," r%x=%x",reg,gpu.registers.count(reg)?std::as_const(gpu).registers.at(reg):0u);
         std::fputc('\n',stderr);
     }
     auto state=[&](unsigned reg,unsigned reset=0u){
-        const auto it=gpu.registers.find(reg);return it==gpu.registers.end()?reset:it->second;
+        const auto& bank=std::as_const(gpu).registers;const auto it=bank.find(reg);return it==bank.end()?reset:it->second;
     };
     if(mask&~0xf3u)throw std::runtime_error("unsupported RSX clear mask bits");
     // These registers have a decoder but neither reference backend implements

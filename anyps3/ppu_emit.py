@@ -67,8 +67,20 @@ NOTHROW = {'UINT64_C', 'UINT32_C', 'INT64_C', 'INT32_C', 'Wide', 'rotl64', 'rotl
            # Pure VMX byte/word helpers (vector.py): no state, no throw.
            'vmx_logic', 'vmx_select', 'vmx_permute', 'vmx_shift_left_double', 'vmx_merge', 'vmx_word_add', 'vmx_float_compare'}
 TRANSFER_PRIMARY = (16, 18)
+# Cell/PowerPC priority and dispatch-delay hints, all architectural no-ops:
+# or 1,1,1 / or 6,6,6 (low / medium-low thread priority) and or 28..31,28..31,28..31
+# (db8cyc..db16cyc). Guest wait loops are built from them.
+SPIN_HINTS = frozenset(0x7C000378 | (n << 21) | (n << 16) | (n << 11) for n in (1, 6, 28, 29, 30, 31))
 
 HELPERS_CPP = r'''
+// A block containing a guest spin hint issues one host spin-wait hint: the
+// guest delay/priority request becomes a pause instead of vanishing, so wait
+// loops leave the SMT sibling (SPU lanes, RSX worker) its pipeline share.
+#if defined(__x86_64__) || defined(__i386__)
+#define ANYPS3_SPIN_HINT() __builtin_ia32_pause()
+#else
+#define ANYPS3_SPIN_HINT() ((void)0)
+#endif
 // PPUFAST local-register forms of the flow.py CR/XER/CTR helpers.
 [[maybe_unused,gnu::always_inline]] static inline unsigned ppu_cmp(std::uint64_t a,std::uint64_t b,bool wide,bool signed_compare,std::uint64_t xer){
     if(!wide){a&=UINT32_MAX;b&=UINT32_MAX;}
@@ -246,6 +258,8 @@ class PageEmitter:
         else:
             code.append(f"    if(__builtin_expect(steps_v>UINT64_C({limit}),0)){{state.pc=0x{first.address:x};state.steps=steps_v;ppu_step_limit();}}"
                         if limit >= 0 else f"    state.pc=0x{first.address:x};state.steps=steps_v;ppu_step_limit();")
+        if any(inst.word in SPIN_HINTS for inst in block):
+            code.append("    ANYPS3_SPIN_HINT();")
         locals_ = {'lr_l', 'gpr1', 'gpr3'} if self.options.trace and self.options.gpr_locals else set()
         out, tail = [], None
 
@@ -305,6 +319,9 @@ class PageEmitter:
                 return f"goto ppu_{target:x};"
             return f"@@XFER_{target:x}@@"
         if indirect:
+            # A target in this page re-enters the page's own dispatch switch; it
+            # resolves heads and missing blocks exactly as ppu_dispatch would.
+            code.append(f"    if((pc_v>>12)==0x{inst.address >> 12:x}u)goto ppu_dispatch_local;")
             code.append("    {state.steps=steps_v;state.pc=pc_v;[[gnu::musttail]] return ppu_dispatch(state);}")
         elif primary == 18:
             code.append("    " + transfer(inst.successors[0]))
@@ -344,7 +361,7 @@ class PageEmitter:
             return f"{{pc_v=0x{target:x};goto out;}}"
         for number, code in sorted(self.pages.items()):
             code['body'] = [re.sub(r'@@XFER_([0-9a-f]+)@@', xfer, line) for line in code['body']]
-            missing = (f"    default: state.steps=steps_v;"
+            missing = (f"    default: state.pc=pc_v;state.steps=steps_v;"
                        f"if(steps_v>=UINT64_C({self.options.max_steps}))throw std::runtime_error(\"execution step limit reached\");"
                        f"state.steps=steps_v+1;throw std::runtime_error(\"target has no statically translated block\");")
             result.append((number, '\n'.join([
@@ -352,6 +369,7 @@ class PageEmitter:
                 '    [[maybe_unused]] auto& r=state.r;',
                 '    std::uint64_t steps_v=state.steps;[[maybe_unused]] const std::uint64_t slice_v=state.ppu_slice_end;[[maybe_unused]] const bool trace_v=state.ppu_trace;',
                 '    std::uint32_t pc_v=state.pc;[[maybe_unused]] bool slow=false;',
+                '    ppu_dispatch_local: __attribute__((unused));',
                 '    switch (pc_v) {', *code['cases'], missing, '    }',
                 *code['body'],
                 '    out: __attribute__((unused)); state.steps=steps_v;state.pc=pc_v;return;',

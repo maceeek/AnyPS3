@@ -465,6 +465,11 @@ def compose_execution(source):
     return source.replace('    auto& supervisor=s.supervisor;', '''    if((s.process.spu_worker.enabled || s.process.rsx_worker.enabled) && request.engine==ExecutionEngine::Audio && !s.audio.running){
         s.supervisor.next_sequence();audio_run_inline(s);return {false,true};
     }
+    // Running audio mixes only once its period tick is due (audio_advance); the
+    // entry loop and scheduler poll far more often. Skip the engine wrapper
+    // (pump/service/scopes) until then; SPU and RSX keep their own polling.
+    if((s.process.spu_worker.enabled || s.process.rsx_worker.enabled) && request.engine==ExecutionEngine::Audio && timebase_ticks()<s.audio.next_tick)
+        return {false,true};
     if(s.process.spu_worker.enabled && request.engine==ExecutionEngine::Spu)return spu_worker_request(s,request.budget);
     if(s.process.rsx_worker.enabled && request.engine==ExecutionEngine::Rsx)return rsx_worker_request(s,request.budget);
     rsx_worker_pump(s);

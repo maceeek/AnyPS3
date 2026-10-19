@@ -509,6 +509,18 @@ TYPES = RESERVATION_WAIT_TYPES + r'''
     using AtomicWord=std::uint64_t __attribute__((__may_alias__));
     using AtomicHalf=std::uint16_t __attribute__((__may_alias__));
     using AtomicInt=std::uint32_t __attribute__((__may_alias__));
+    // An 8-byte-aligned quadword: atomic_read's same two 8-byte atomic loads,
+    // but one 16-byte store into the private destination, so a following
+    // 16-byte vector load of it is store-forwarded instead of stalling.
+    static void atomic_read16(const std::uint8_t* p,std::uint8_t (&out)[16]){
+        const auto low=__atomic_load_n(reinterpret_cast<const AtomicWord*>(p),__ATOMIC_ACQUIRE);
+        const auto high=__atomic_load_n(reinterpret_cast<const AtomicWord*>(p+8),__ATOMIC_ACQUIRE);
+#if defined(__SSE2__)
+        _mm_storeu_si128(reinterpret_cast<__m128i*>(out),_mm_set_epi64x(static_cast<long long>(high),static_cast<long long>(low)));
+#else
+        std::memcpy(out,&low,8);std::memcpy(out+8,&high,8);
+#endif
+    }
     static void atomic_read(const std::uint8_t* p,std::uint8_t* out,unsigned n){
         while(n){
             if(n>=8 && !(reinterpret_cast<std::uintptr_t>(p)&7)){

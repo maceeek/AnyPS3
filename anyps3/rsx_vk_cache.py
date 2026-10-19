@@ -182,8 +182,10 @@ private:
     }
 public:
     void compile_stats_print(bool force=false){
-        const auto* a=std::getenv("ANYPS3_RSX_FALLBACK_STATS"),*b=std::getenv("ANYPS3_RSX_HOST_PROFILE");
-        if((!a || std::strcmp(a,"1")) && (!b || std::strcmp(b,"1")))return;
+        // Called on every pipeline cache hit (every draw): read the switches once.
+        static const bool enabled=[]{const auto* a=std::getenv("ANYPS3_RSX_FALLBACK_STATS"),*b=std::getenv("ANYPS3_RSX_HOST_PROFILE");
+            return (a && !std::strcmp(a,"1")) || (b && !std::strcmp(b,"1"));}();
+        if(!enabled)return;
         if(!force && elapsed_ns(compile_printed_at)<UINT64_C(2000000000))return;
         compile_printed_at=std::chrono::steady_clock::now();save_pipeline_cache();const auto& c=compile_stats;
         print_resource_stats();

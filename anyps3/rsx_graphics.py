@@ -157,12 +157,24 @@ void main(){C q[1];bool front=w[11]!=0u || gl_FrontFacing;
  // Coverage/depth are per sample; RSX reference shades at pixel center.
  // Explicit interpolation restores the center after the coverage-plane shift.
  q[0].input_[0]=vec4(gl_FragCoord.xy,gl_FragCoord.zw-dFdx(gl_FragCoord.zw)*shift.x-dFdy(gl_FragCoord.zw)*shift.y);
- for(uint i=1u;i<=13u;++i){uint o=i<=2u?i:i==3u?5u:i<=11u?i+3u:i==12u?15u:6u;
-  if((R(0x142cu)&1u)!=0u && !front && i<=2u)o+=2u;
-  vec4 center=interpolateAtOffset(varying_[o],-shift);q[0].input_[i]=i==3u?vec4(center.x,0,0,0):center;
-  if(i>=4u && (R(0xb40u+4u*(i-4u))&1u)!=0u){q[0].input_[i].z=0;q[0].input_[i].w=1.0/q[0].input_[0].w;}}
- q[0].input_[14]=vec4(front?1:-1,0,0,0);
 )GLSL";
+    // Interpolate only inputs that some instruction reads (every source of an
+    // FP instruction addresses the same input, d bits 13..16; the conservative
+    // rule of rsx_execute_draw's used_inputs). The others stay vec4(0) and are
+    // never observed, so the result is unchanged; fog reads input 3 only when
+    // an instruction does. Input 0 (position) and 14 (facing) are always set.
+    unsigned used_inputs=0;
+    for(const auto& i:fp)if((i.s0&3)==1 || (i.s1&3)==1 || (i.s2&3)==1)used_inputs|=1u<<((i.d>>13)&15);
+    for(unsigned i=1;i<=13;++i)if((used_inputs>>i)&1){
+        const unsigned o=i<=2?i:i==3?5:i<=11?i+3:i==12?15:6;const auto n=std::to_string(i);
+        // Two-sided colors (inputs 1/2) select the back varyings at run time.
+        const auto center=i<=2?"((R(0x142cu)&1u)!=0u && !front?interpolateAtOffset(varying_["+std::to_string(o+2)+"],-shift):interpolateAtOffset(varying_["+std::to_string(o)+"],-shift))"
+                              :"interpolateAtOffset(varying_["+std::to_string(o)+"],-shift)";
+        init+=" {vec4 center="+center+";q[0].input_["+n+"]="+(i==3?"vec4(center.x,0,0,0)":"center")+";";
+        if(i>=4)init+="if((R("+rsxvk::u(0xb40+4*(i-4))+")&1u)!=0u){q[0].input_["+n+"].z=0;q[0].input_["+n+"].w=1.0/q[0].input_[0].w;}";
+        init+="}\n";
+    }
+    init+=" q[0].input_[14]=vec4(front?1:-1,0,0,0);\n";
     source+=init+scalar_locals();
     std::string line_init=R"GLSL(
  uint meta=w[10]+primitive_*208u;vec4 segment=load4(meta);vec2 center=gl_FragCoord.xy;
@@ -449,7 +461,7 @@ struct IndexBounds {
     std::vector<std::pair<unsigned,std::pair<unsigned,unsigned>>> modulo;
     explicit IndexBounds(const std::vector<std::array<unsigned,3>>& input,const DeviceGeometry* sequence=nullptr):indices(input),device(sequence){
         if(device){const auto b=device->bounds(1,false);lo=b.first;hi=b.second;return;}
-        for(const auto& tri:indices)for(auto id:tri){lo=std::min(lo,id);hi=std::max(hi,id);}
+        index_extent(indices.data(),indices.size(),lo,hi);
     }
     std::pair<unsigned,unsigned> get(unsigned frequency,bool mod){
         if(device)return device->bounds(frequency,mod);
@@ -763,11 +775,19 @@ struct Session {
     std::array<std::uint64_t,32> register_presence{};
     std::uint64_t register_blocks_rebuilt=0;
     std::array<std::uint64_t,32> register_versions{};
+    // Bank epochs at the last refresh (RsxRegisters change tracking). A block
+    // whose epoch is unchanged and that was never mutably borrowed holds the
+    // same presence and values; every other block is compared by value.
+    std::array<std::uint64_t,32> register_epochs{};std::uint64_t register_identity=0;
     void refresh_registers(){
         const auto& bank=std::as_const(state.rsx).registers;const Reg r{state.rsx};
-        const bool fresh=register_prefix.empty();if(fresh)register_prefix.assign(2576,0);
+        const bool fresh=register_prefix.empty() || register_identity!=bank.identity;if(fresh)register_prefix.assign(2576,0);
+        register_identity=bank.identity;
         static constexpr std::pair<unsigned,unsigned> defaults[]={{0xa6c,0x207},{0x394,0},{0x398,0x3f800000},{0x368,0x1d01},{0x1834,0x901},{0x388,0x3f800000},{0x308,0x207},{0x324,0x01010101},{0x378,0x1503},{0x1d7c,0xffff0000}};
         for(unsigned block=0;block<32;++block){const auto* source=bank.values.data()+block*64;auto* previous=register_values.data()+block*64;
+            const bool tracked=!fresh && !bank.block_exposed(block) && register_epochs[block]==bank.epochs[block];
+            register_epochs[block]=bank.epochs[block];
+            if(tracked)continue;
             if(!fresh && register_presence[block]==bank.written[block] && !std::memcmp(source,previous,64*sizeof(*source)))continue;
             ++register_blocks_rebuilt;++register_versions[block];std::copy_n(source,64,previous);register_presence[block]=bank.written[block];
             for(unsigned i=0;i<64;++i)register_prefix[16+block*64+i]=(bank.written[block]&(UINT64_C(1)<<i))?source[i].second:0;

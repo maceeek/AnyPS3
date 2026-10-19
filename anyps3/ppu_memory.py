@@ -91,7 +91,10 @@ template<class S> [[gnu::always_inline]] inline bool ppu_try_read_bytes(S& s,std
     auto& m=s.memory;
     if(__builtin_expect(GuestMemory::inline_span(ea,n) &&
         !(m.inline_view.table[ea>>12].load(std::memory_order_relaxed)&GuestMemory::InlineFlat::load_block),1)){
-        GuestMemory::atomic_read(m.inline_view.base+ea,out,n);return true;}
+        // lvx: aligned quadword into a vector register (16-byte destination).
+        if(n==16 && !(ea&7))GuestMemory::atomic_read16(m.inline_view.base+ea,*reinterpret_cast<std::uint8_t(*)[16]>(out));
+        else GuestMemory::atomic_read(m.inline_view.base+ea,out,n);
+        return true;}
     return false;
 }
 template<class S> [[gnu::always_inline]] inline bool ppu_try_write_bytes(S& s,std::uint64_t ea,const std::uint8_t* in,unsigned n){
