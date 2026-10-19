@@ -44,6 +44,7 @@ source-snapshot-*/
 /.aws/
 /.codex/
 .claude/settings.local.json
+/.claude/worktrees/
 
 # Editors and OS
 .idea/
