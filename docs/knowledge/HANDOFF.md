@@ -1,253 +1,253 @@
-# Předání další instanci
+# Handoff to the next instance
 
-Předávající doplní CURRENT a odkazy na ověření. Přebírající zkontroluje pracovní strom, otevře poslední log a ověří cesty i profil. Předání není požadavek na nový plán: pokračuj od nejbližší konkrétní otázky.
+The handing-over party fills in CURRENT and the links to verification. The receiving party checks the working tree, opens the latest log and verifies the paths and the profile. A handoff is not a request for a new plan: continue from the nearest concrete question.
 
-## Předání 2026-10-19 večer — vlna FAST (Claude Opus 5.5, goal: 60 FPS s rezervou)
+## Handoff 2026-10-19 evening — FAST wave (Claude Opus 5.5, goal: 60 FPS with headroom)
 
-Stav a důkazy: [záznam FAST](experiments/2026-10-19-fast-wave.md) — sekce „Stav na konci session“ obsahuje
-**první další akce**. **Nejlepší ověřený build: `native-virtual-460`** (snímek 460 = 386 + RSX2; 386 = 380 + PPUFAST +
-RSXFAST 443 + SPUFAST 421), úroveň **22,59 FPS** (380: 14,25). Úzké hrdlo RSX worker (~28 ms/snímek), pak GPU.
-60 FPS nedosaženo. Session ukončena na pokyn uživatele 2026-10-19 ~22:00; žádný agent, build, sada ani hra neběží.
-**Živý strom (`anyps3/`, `tests/`, `profiles/`) = snímek 460** (povýšeno na pokyn uživatele, ověřeno proti
-`native-virtual-460/build.json` source_sha256) a je v gitu (`main`, origin `maceeek/AnyPS3`). Další integraci skládat
-přes `integrate.py` ze snímku 460 (nebo novějšího) a výsledek po ověření promítnout do živého stromu a commitnout.
-Neintegrováno a hrou neověřeno: `work/spufast/tree` po 422 (oprava par1/par2 + par_worker), `work/rsx2/dev-after-460.patch`.
+State and evidence: [FAST record](experiments/2026-10-19-fast-wave.md) — the section "State at the end of the session" contains the
+**first next actions**. **Best verified build: `native-virtual-460`** (snapshot 460 = 386 + RSX2; 386 = 380 + PPUFAST +
+RSXFAST 443 + SPUFAST 421), level **22.59 FPS** (380: 14.25). Bottleneck: the RSX worker (~28 ms/frame), then the GPU.
+60 FPS not reached. Session ended on user instruction 2026-10-19 ~22:00; no agent, build, suite or game is running.
+**The live tree (`anyps3/`, `tests/`, `profiles/`) = snapshot 460** (promoted on user instruction, verified against
+`native-virtual-460/build.json` source_sha256) and is in git (`main`, origin `maceeek/AnyPS3`). Assemble further integration
+via `integrate.py` from snapshot 460 (or a newer one) and, after verification, reflect the result in the live tree and commit it.
+Not integrated and not verified in the game: `work/spufast/tree` after 422 (par1/par2 fix + par_worker), `work/rsx2/dev-after-460.patch`.
 
-- **Nástroje:** `local/ratchet/tools/measure_level.sh SRC NAME` (menu → LOAD → úroveň, okno 60 s, `level-summary.json`,
-  zámek `.run.lock`, výchozí `GAP=8`), `make_worktree.sh`, `agent_build.sh` (zámek `.compile.lock`), `integrate.py` +
-  `integrate_build.sh` (integrační snímky; **nikdy nepředávat seznam souborů přes zsh proměnnou** — 381/382 neplatné),
-  `run_suite.py` (celá sada z cwd), `watch_fast.sh` (monitor).
-- **Agenti:** pracovní stromy `local/ratchet/work/<úkol>/{base,tree}`, zadání `TASK.md`, stav `STATUS.md`, výsledek
-  `RESULT.md`, pravidla `work/COMMON-FAST.md`. PPUFAST a RSXFAST uzavřeny (RESULT.md), SPUFAST a RSX2 uzavřeny (RESULT.md). Uživatel: dál preferovat Sonnet subagenty (limit API).
-- **Další integrace:** nový snímek z 386 + `work/rsx2/tree` + novější SPUFAST snímek (42x) přes `integrate.py`.
+- **Tools:** `local/ratchet/tools/measure_level.sh SRC NAME` (menu → LOAD → level, 60 s window, `level-summary.json`,
+  lock `.run.lock`, default `GAP=8`), `make_worktree.sh`, `agent_build.sh` (lock `.compile.lock`), `integrate.py` +
+  `integrate_build.sh` (integration snapshots; **never pass the file list through a zsh variable** — 381/382 invalid),
+  `run_suite.py` (the whole suite from cwd), `watch_fast.sh` (monitor).
+- **Agents:** work trees `local/ratchet/work/<task>/{base,tree}`, assignment `TASK.md`, status `STATUS.md`, result
+  `RESULT.md`, rules `work/COMMON-FAST.md`. PPUFAST and RSXFAST closed (RESULT.md), SPUFAST and RSX2 closed (RESULT.md). User: continue to prefer Sonnet subagents (API limit).
+- **Next integration:** a new snapshot from 386 + `work/rsx2/tree` + a newer SPUFAST snapshot (42x) via `integrate.py`.
 
-## Předání 2026-10-19 — na výslovný pokyn uživatele po tomto kole
+## Handoff 2026-10-19 — on explicit user instruction after this round
 
-**Cíl zůstává původní hratelná úroveň ACIT s funkčním gamepadem a s rezervou 60 FPS. Není splněn.**
-Uživatel požádal ukončit toto kolo, zapsat výsledky a pokračovat v jiném AI prostředí.
-Aktivní goal následně zrušil; žádná automatická další kola nezahajovat.
-Žádné náhradní menu/emulátor ani patch herních bajtů; zvuk vždy `SDL_AUDIODRIVER=dummy`
-a `ANYPS3_AUDIO_SINK=null`, nikdy povolit AUDIBLE.
+**The goal remains the original playable ACIT level with a working gamepad and with 60 FPS headroom. It is not met.**
+The user asked to end this round, record the results and continue in another AI environment.
+The active goal was subsequently cancelled by the user; do not start any further automatic rounds.
+No substitute menu/emulator and no patching of game bytes; audio always `SDL_AUDIODRIVER=dummy`
+and `ANYPS3_AUDIO_SINK=null`, never enable AUDIBLE.
 
-- **Strom:** `source-snapshot-380` =377+HLEFAST1+oprava scheduler deadline; živé Python soubory/profil
-  při kontrole přesně shodné. `build380-handoff-audit.json` ověřuje117 source hashů a binárky.
-  Buildy379 i380 `rc=0`, zdroje shodné se svými snímky. Git metadata zde nedostupná, neinicializovat.
-- **379load ověřeno:** původní menu → LOAD → `great_clock_a`, Clank pohyb virtuálním padem,
-  `evidence-play-montage.png`. Dvouminutové ustálené okno60 intervalů: **14,64 FPS**, min13/max16,5;
+- **Tree:** `source-snapshot-380` = 377+HLEFAST1+scheduler deadline fix; the live Python files/profile were exactly identical
+  at the check. `build380-handoff-audit.json` verifies 117 source hashes and the binaries.
+  Builds 379 and 380 `rc=0`, sources identical to their snapshots. Git metadata is unavailable here, do not initialize.
+- **379load verified:** original menu → LOAD → `great_clock_a`, Clank movement with the virtual pad,
+  `evidence-play-montage.png`. Two-minute steady window of 60 intervals: **14.64 FPS**, min 13/max 16.5;
   `measurement-steady.json`, profiler `profile-379load.txt`, `sample-profile-379load-T1/-T2`.
-  Po měření řízeně SIGKILL; verification−9, stop null, oba původní PT_LOAD shodné;49 captures.
-  Ruční vizuální/input posouzení v `acceptance.json` odděleně od generických false příznaků verifieru.
-- **380load ověřeno a ukončeno:** původní menu → LOAD → `great_clock_a`, Clank se pohybuje virtuálním padem
-  (`evidence-input-montage.png`, `acceptance.json`). Ustálené okno67 intervalů/134,067s:
-  **15,0154 FPS**, medián15,0, min13,5/max16,0. `measurement-steady.json`, `profile-380load.txt`.
-  Bez guest stopu, po měření a vstupu SIGKILL ověřeného PID120207; verification−9/stop null,
-  oba původní PT_LOAD shodné,34 captures. Rozdíl+2,6% proti379 není z těchto dvou běhů průkazný zisk.
-- **Integrovaná oprava:** `anyps3/threads.py` počítá nejbližší deadline i při aktivním guest audiu;
-  dřívější100µs spánek nesmí překrýt30µs PPU timer. Není to přeskočení guest čekání.
-  `tests/test_scheduler_idle_deadline.py`:11 deterministických native scénářů PASS, starý runtime RED.
-  Opraven také zastaralý atexit test, který chybně žádal stop místo správného wait_kind13.
-  Cílená37922/23PASS, opravený atexit modul2/2PASS. **Celá sada sloučeného380 dosud neprovedena.**
-- **Nový hlavní důkaz PIPE2:** engine counters group2 i4 dokončuje SPU přes MFC PUTLLUC,
-  nikoli potvrzený RSX label. Group2 SPU0x02000200/frontier0xfc7d00,
-  group4 SPU0x04000200/frontier0xfc7e00, společný originpc0x3f9e8.
-  Issue counter zapisuje PPU1 stw0x696524. Capture JSON/logy a původní bajty:
+  After the measurement, controlled SIGKILL; verification −9, stop null, both original PT_LOAD identical; 49 captures.
+  Manual visual/input assessment in `acceptance.json`, separate from the verifier's generic false flags.
+- **380load verified and terminated:** original menu → LOAD → `great_clock_a`, Clank moves with the virtual pad
+  (`evidence-input-montage.png`, `acceptance.json`). Steady window of 67 intervals/134.067 s:
+  **15.0154 FPS**, median 15.0, min 13.5/max 16.0. `measurement-steady.json`, `profile-380load.txt`.
+  No guest stop; after the measurement and input, SIGKILL of the verified PID 120207; verification −9/stop null,
+  both original PT_LOAD identical, 34 captures. The difference of +2.6% against 379 is not a conclusive gain from these two runs.
+- **Integrated fix:** `anyps3/threads.py` computes the nearest deadline even with active guest audio;
+  the earlier 100 µs sleep must not overshadow the 30 µs PPU timer. This is not skipping a guest wait.
+  `tests/test_scheduler_idle_deadline.py`: 11 deterministic native scenarios PASS, old runtime RED.
+  An outdated atexit test that wrongly demanded a stop instead of the correct wait_kind 13 was also fixed.
+  Targeted 379 22/23 PASS, fixed atexit module 2/2 PASS. **The whole suite of the merged 380 has not been run yet.**
+- **New main evidence PIPE2:** the engine counters of group 2 and 4 are completed by the SPU via MFC PUTLLUC,
+  not by a confirmed RSX label. Group2 SPU 0x02000200/frontier 0xfc7d00,
+  group4 SPU 0x04000200/frontier 0xfc7e00, common origin pc 0x3f9e8. The issue counter is written by PPU1 stw 0x696524.
+  Capture JSON/logs and original bytes:
   `local/ratchet/codex/pipe2/`, report `codex/batch/pipe2-result.md`.
-  Ve380 group4 právě vykonávala původní mikroprogram0x27: EA0xbbf480, živé LS0x26c00,
-  všech5264B shodných s původním EBOOT (`job380-proof.json`); FP normalizační instrukce.
-  Lidský název nadřazeného jobu a jeho celý begin→end interval nejsou doložené.
-  Vazba konkrétního counteru na dominantní27ms burst není samotným GDB časováním prokázaná.
-- **PPUMEM2, neintegrované:** hotový report `codex/batch/ppumem2-result.md`.
-  Zbytek sady58 modulů/219 testů PASS, finální5TSan+2UBSan PASS;10 společných HLE epoch scénářů
-  a2 AOT/worker kontroly PASS. Epochová cesta má~2× zrychlení běžného scalar/AOT případu,
-  ale hot-tracked AOT **5,297→7,768ns/instr (+46,6% času)**. Neoznačit kandidáta za plošně rychlejší.
-  Žádný herní build/FPS kandidáta není ověřen. Dodávka a manifesty `codex/ppumem1/ppumem2-*`;
-  před integrací číst instrukce, přenést minimální `program.py` hook, nikoli celý starší soubor.
-- **SPUFP2, neintegrované:** dokončený kandidát v `codex/spufp2/`; report
-  `codex/batch/spufp2-result.md`,27 cílených testů PASS (Fraction/exact oracle, generic/native/UBSan,
-  MXCSR obnova, aliasy, FPSCR, čítače). Patch `owned-changes.patch` mění pouze `anyps3/spu.py`
-  a přidává `tests/test_spufp2.py`. Helpery~1,5×, syntetický AOT1,31–1,37×; nejde o herní FPS.
-  All-exact scénář měl jednu pomalejší dvojici0,897×, není záruka absence každé regrese.
-  Přesné SIMD masky bez odstranění
-  MXCSR guardu nebo exact fallbacku. V kritické group4 tvoří single_vector+clones~27,95% CPU,
-  exact round2,06%; event polling není doložený dominantní problém této skupiny.
-- **Ovladače:** v tomto kole přímo ověřen virtuální pad379 i380; uinput ve hře doloženo starším363,
-  fyzický gamepad v tomto kole neověřen. 60 FPS není dosaženo.
+  In 380, group4 was executing the original microprogram 0x27: EA 0xbbf480, live LS 0x26c00,
+  all 5264 B identical to the original EBOOT (`job380-proof.json`); FP normalization instructions.
+  The human-readable name of the parent job and its whole begin→end interval are not documented.
+  The link of a specific counter to the dominant 27 ms burst is not proven by GDB timing alone.
+- **PPUMEM2, not integrated:** finished report `codex/batch/ppumem2-result.md`.
+  The rest of the suite, 58 modules/219 tests PASS, final 5 TSan + 2 UBSan PASS; 10 common HLE epoch scenarios
+  and 2 AOT/worker checks PASS. The epoch path has a ~2× speedup of the ordinary scalar/AOT case,
+  but hot-tracked AOT **5.297→7.768 ns/instr (+46.6% time)**. Do not label the candidate as uniformly faster.
+  No game build/FPS of the candidate has been verified. Deliverable and manifests `codex/ppumem1/ppumem2-*`;
+  read the instructions before integrating, carry over the minimal `program.py` hook, not the entire older file.
+- **SPUFP2, not integrated:** finished candidate in `codex/spufp2/`; report
+  `codex/batch/spufp2-result.md`, 27 targeted tests PASS (Fraction/exact oracle, generic/native/UBSan,
+  MXCSR restore, aliases, FPSCR, counters). The patch `owned-changes.patch` changes only `anyps3/spu.py`
+  and adds `tests/test_spufp2.py`. Helpers ~1.5×, synthetic AOT 1.31–1.37×; this is not game FPS.
+  The all-exact scenario had one slower pair, 0.897×, which is no guarantee of the absence of every regression.
+  Exact SIMD masks without removing
+  the MXCSR guard or the exact fallback. In the critical group4, single_vector+clones make up ~27.95% of CPU,
+  exact round 2.06%; event polling is not documented as the dominant problem of this group.
+- **Controllers:** in this round the virtual pad was directly verified for 379 and 380; uinput in the game was documented by the older 363,
+  the physical gamepad was not verified in this round. 60 FPS not reached.
 
-Podrobné změny, příkazy a odkazy: [záznam379+](experiments/2026-10-19-performance-379.md).
-Všechny výše zkrácené cesty `codex/`, `profile-*`, `source-snapshot-*` jsou pod `local/ratchet/`.
+Detailed changes, commands and links: [record 379+](experiments/2026-10-19-performance-379.md).
+All the paths abbreviated above (`codex/`, `profile-*`, `source-snapshot-*`) are under `local/ratchet/`.
 
-**Ověření předání:** `local/ratchet/handoff380-final-audit.json` znovu porovnal117 source hashů,
-runtime artefakty, živé Python/JSON proti snímku380,44 PIPE2 manifest položek a19 SPUFP2 artefaktů:
-vše bez rozdílu. PPUMEM2 sedm dodaných souborů bylo samostatně porovnáno s manifestem.
-Generický verifier má `menu_reached=false` jako výchozí pole; ruční obrazové a vstupní posouzení
-je proto zvlášť v `native-virtual-{379,380}load/acceptance.json`, bez přepisování původního verifieru.
-Soupis41 hlavních dokumentů a důkazů se SHA256: `local/ratchet/handoff380-index.json`;
-ověřeno62 místních Markdown odkazů bez chybějícího cíle. Velké herní/snapshot artefakty zůstávají
-na původních cestách a jejich vlastní manifesty se zachovaly.
+**Handoff verification:** `local/ratchet/handoff380-final-audit.json` again compared 117 source hashes,
+runtime artifacts, the live Python/JSON against snapshot 380, 44 PIPE2 manifest entries and 19 SPUFP2 artifacts:
+all without difference. The seven delivered PPUMEM2 files were compared with the manifest separately.
+The generic verifier has `menu_reached=false` as a default field; the manual visual and input assessment
+is therefore separately in `native-virtual-{379,380}load/acceptance.json`, without overwriting the original verifier.
+Inventory of 41 main documents and evidence with SHA256: `local/ratchet/handoff380-index.json`;
+62 local Markdown links verified without a missing target. Large game/snapshot artifacts remain
+at their original paths and their own manifests were preserved.
 
-**Procesy:** host audit 2026-10-19 09:59:29 UTC v `local/ratchet/handoff380-process-audit.json`
-potvrdil nulové vlastní herní/build/debugger procesy a nulové běžící `anyps3-*` scopes.
-PID104347 i120207 už neexistují. Všechny runtime/test tool sessions skončily; při převzetí ověřit znovu.
+**Processes:** the host audit of 2026-10-19 09:59:29 UTC in `local/ratchet/handoff380-process-audit.json`
+confirmed zero own game/build/debugger processes and zero running `anyps3-*` scopes.
+PIDs 104347 and 120207 no longer exist. All runtime/test tool sessions have ended; verify again upon takeover.
 
-**Prostředí:** tato relace měla skutečně `workspace-write`, omezenou síť a zápis jen do projektu a/tmp,
-přestože uživatel dříve volil Full access. Host procesy a GUI proto vyžadovaly eskalaci.
-Jde o oprávnění aktivní relace, nikoli chybu hry; konfigurace oprávnění se zde neměnila.
+**Environment:** this session actually had `workspace-write`, a restricted network and write access only to the project and /tmp,
+although the user had previously chosen Full access. Host processes and the GUI therefore required escalation.
+This is a permission of the active session, not a game error; the permission configuration was not changed here.
 
-**První další akce:** ověřit tento stav a zvolit malý kandidát SPUFP2 pro nový izolovaný snímek
-(nejprve baseline SHA `spu.py`, pak jeden `owned-changes.patch`). Po integraci celá regresní sada
-včetně skutečného Vulkanu, nový build a stejné měření úrovně. PPUMEM2 zvažovat zvlášť kvůli hot-tracked
-regresi; přenášet minimální program hook, nikdy celý starý `program.py`. Ani jeden kandidát neintegrovat
-pouze podle syntetického násobku. PIPE2 další otázka: časově spojit úplný job s čekáním bez GDB perturbace.
+**First next action:** verify this state and choose a small SPUFP2 candidate for a new isolated snapshot
+(first the baseline SHA of `spu.py`, then one `owned-changes.patch`). After integration, the whole regression suite
+including real Vulkan, a new build and the same level measurement. Consider PPUMEM2 separately because of the hot-tracked
+regression; carry over the minimal program hook, never the whole old `program.py`. Do not integrate either candidate
+solely on the basis of a synthetic multiple. Next PIPE2 question: link the complete job to the wait in time without GDB perturbation.
 
-**Výslovně vyžádaná webová rešerše:**
-[skutečné PS3 recomp projekty, revize, licence a použitelné mechanismy](experiments/2026-10-19-web-ps3-recomp.md).
-Agent našel6 konkrétních PS3 portů. Nejsilnější jsou veřejné alfa sestavy
+**Explicitly requested web research:**
+[real PS3 recomp projects, revisions, licenses and usable mechanisms](experiments/2026-10-19-web-ps3-recomp.md).
+The agent found 6 concrete PS3 ports. The strongest are the public alpha builds of
 [Drakengard3](https://github.com/soyjxck/dod3-recomp/releases/tag/v0.2.5-alpha)
-a launcher [Soulcalibur II HD Online](https://github.com/n0madic/Soulcalibur2HD-recomp).
-Existence kódu/release je ověřená; uváděná hratelnost/FPS jsou tvrzení autorů, zde se porty nespouštěly.
-34 veřejných podkladů se SHA/URL/revizí: `local/ratchet/codex/web-ps3-recomp/manifest.json`,
-validace v `validation.json`; main inventář znovu přepočítal.
+and the launcher [Soulcalibur II HD Online](https://github.com/n0madic/Soulcalibur2HD-recomp).
+The existence of the code/release is verified; the stated playability/FPS are the authors' claims, the ports were not run here.
+34 public sources with SHA/URL/revision: `local/ratchet/codex/web-ps3-recomp/manifest.json`,
+validation in `validation.json`; the main agent recomputed the inventory.
 
-Pět relevantních oblastí: PPU stránkové příznaky pro rychlé přístupy; registry v lokálech a analýza
-změněného/živého stavu; přesné SPU FP a nezávislé orákulum; RSX write-watch cache a dávkování;
-SPURS přidělování práce a invarianty probuzení. Přesné cesty a pevné revize obsahuje rešerše.
-**Přínos pro AnyPS3 je hypotéza.** Drakengard3/MIT fork navíc mění konkrétní hru a některé SPU úlohy;
-takové byte patches či náhradní logika nejsou slučitelné se zdejšími pravidly. Soulcalibur zdroj je
-GPL2-or-later, distribuovaný celek GPL3-or-later. Rešerše nic neintegrovala a pořadí pokračování
-výše nemění. Všichni zadaní pracovníci včetně rešerše dokončili výstupy; nezůstal otevřený vedlejší úkol.
+Five relevant areas: PPU page flags for fast accesses; registers in locals and analysis of
+changed/live state; exact SPU FP and an independent oracle; RSX write-watch cache and batching;
+SPURS work allocation and wake-up invariants. The research contains the exact paths and pinned revisions.
+**The benefit for AnyPS3 is a hypothesis.** Moreover, the Drakengard3/MIT fork modifies the specific game and some SPU tasks;
+such byte patches or substitute logic are not compatible with the local rules. The Soulcalibur source is
+GPL2-or-later, the distributed whole GPL3-or-later. The research integrated nothing and does not change the continuation order
+above. All assigned workers, including the research, finished their outputs; no side task remains open.
 
-## Předání 2026-10-18 ~22:25 — konec relace (Claude Opus 5.5)
+## Handoff 2026-10-18 ~22:25 — end of session (Claude Opus 5.5)
 
-Čti [CURRENT.md](CURRENT.md) a [záznam 338+](experiments/2026-10-17-ingame-338.md) od sekce „374load".
+Read [CURRENT.md](CURRENT.md) and [record 338+](experiments/2026-10-17-ingame-338.md) from the section "374load".
 
-- **ABSOLUTNÍ PRAVIDLO:** z PC nikdy slyšitelný zvuk — jen `SDL_AUDIODRIVER=dummy`, `ANYPS3_AUDIO_SINK=null`;
-  nikdy `ANYPS3_AUDIO_AUDIBLE=1`. Platí i pro codex agenty (`local/ratchet/codex/batch/COMMON.md`).
-- **Poslední ověřený build:** `local/ratchet/native-virtual-377` (snímek `source-snapshot-377` = 375 + oprava
-  souběžného `sys_ppu_thread_exit` + SPUDYN2 v2). Běh `native-virtual-377load`: menu → LOAD → úroveň great_clock_a,
-  **~14,8 FPS stabilně** (120 s: 13,0–16,5), žádný stop; gamepad ve hře ověřen dříve (363, virtuální i uinput).
-  Cíl 59,94 FPS nesplněn.
-- **Řetěz dnes:** 373 (9,16 FPS) → 374 PROF1 sampler + PAR15 (~10) → 375 RSXVK22 v24 (stop atexit při bootu) →
-  377 atexit + SPUDYN2 (~14,8). 376 diag neprošel překladem, 378diag = časová osa PIPE1 (jen diagnostika).
-- **Živý strom ≠ poslední build:** = 377 + **HLEFAST1** (`services.py`, `lightweight_sync.py`, `program.py` hunks +
-  `hle_perf_report`, `tests/test_hlefast1.py`); cílené testy OK (38 + `test_services` 3/3 izolovaně), **herní build
-  ještě neproveden** → první akce: `bash local/ratchet/tools/snapshot_build.sh 379 377 "HLEFAST1 …" anyps3/services.py
-  anyps3/lightweight_sync.py anyps3/program.py tests/test_hlefast1.py`, pak běh jako 377load.
-- **Běh do úrovně (vzor):** `(bash local/ratchet/tools/run_to_menu_ptrace.sh N NAME 0-5,12-17 SDL_AUDIODRIVER=dummy
+- **ABSOLUTE RULE:** never any audible sound from the PC — only `SDL_AUDIODRIVER=dummy`, `ANYPS3_AUDIO_SINK=null`;
+  never `ANYPS3_AUDIO_AUDIBLE=1`. Applies also to codex agents (`local/ratchet/codex/batch/COMMON.md`).
+- **Last verified build:** `local/ratchet/native-virtual-377` (snapshot `source-snapshot-377` = 375 + fix of
+  concurrent `sys_ppu_thread_exit` + SPUDYN2 v2). Run `native-virtual-377load`: menu → LOAD → level great_clock_a,
+  **~14.8 FPS stable** (120 s: 13.0–16.5), no stop; gamepad in the game verified earlier (363, both virtual and uinput).
+  Target 59.94 FPS not met.
+- **Chain today:** 373 (9.16 FPS) → 374 PROF1 sampler + PAR15 (~10) → 375 RSXVK22 v24 (atexit stop at boot) →
+  377 atexit + SPUDYN2 (~14.8). 376 diag did not pass translation, 378diag = PIPE1 timeline (diagnostics only).
+- **Live tree ≠ last build:** = 377 + **HLEFAST1** (`services.py`, `lightweight_sync.py`, `program.py` hunks +
+  `hle_perf_report`, `tests/test_hlefast1.py`); targeted tests OK (38 + `test_services` 3/3 in isolation), **the game build
+  has not been made yet** → first action: `bash local/ratchet/tools/snapshot_build.sh 379 377 "HLEFAST1 …" anyps3/services.py
+  anyps3/lightweight_sync.py anyps3/program.py tests/test_hlefast1.py`, then a run like 377load.
+- **Run to the level (template):** `(bash local/ratchet/tools/run_to_menu_ptrace.sh N NAME 0-5,12-17 SDL_AUDIODRIVER=dummy
   ANYPS3_RSX_WORKER=1 ANYPS3_SPU_THREADS=1 ANYPS3_PRESENT=sdl SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS=1
   ANYPS3_SAMPLE_PROFILE=$PWD/local/ratchet/sample-profile-NAME && bash local/ratchet/tools/to_load.sh
-  local/ratchet/native-virtual-NAME 330) > local/ratchet/drive-NAME.log 2>&1 &`; hru ukončit `kill -KILL` po kontrole
-  `comm == program`. Profil okna: `local/ratchet/profile-374load/sample_window.py T1 T2 PROGRAM BUILD` (kopie adresáře
-  sampleru v čase T1/T2), po vláknech `sample_threads.py`. Časová osa: `ANYPS3_FRAME_TIMELINE` jen v diag buildu.
-- **`snapshot_build.sh`** nově umí `SRC=<pracovní strom>` (diagnostické buildy bez zásahu do živého stromu).
-- **Agenti (codex gpt-6.1-sol), výsledky v `local/ratchet/codex/batch/<úkol>-result.md`:** PROF1, PAR15, RSXVK22,
-  HLEFAST1 hotovo a integrováno; SPUDYN2 integrováno (jeho sada přerušena, 380/733 bez selhání); **PIPE1** (fáze B:
-  publikace labelů/fence vs. čekání hry 0x696c10, latence `usleep(30)` ~151 µs) a **PPUMEM1** (epochová rychlá cesta
-  PPU paměti, ~35 % CPU PPU) dostaly pokyn k ukončení se zápisem stavu — jejich dodávky jsou neúplné/neintegrované.
-  Pokračování konverzace agenta: `codex exec resume --skip-git-repo-check -c 'sandbox_mode="workspace-write"'
-  -c 'model="gpt-6.1-sol"' <session id z batch/run-<úkol>.log> "<pokyn>"`.
-- **Obecnost:** uživatel chce budoucí kompatibilitu s dalšími hrami — preferovat obecné mechanismy (obsahové
-  přiřazení, cache, JIT) před per-game daty v profilu (COMMON.md).
+  local/ratchet/native-virtual-NAME 330) > local/ratchet/drive-NAME.log 2>&1 &`; terminate the game with `kill -KILL` after checking
+  `comm == program`. Window profile: `local/ratchet/profile-374load/sample_window.py T1 T2 PROGRAM BUILD` (copy of the sampler
+  directory at time T1/T2), per thread `sample_threads.py`. Timeline: `ANYPS3_FRAME_TIMELINE` only in a diag build.
+- **`snapshot_build.sh`** now supports `SRC=<work tree>` (diagnostic builds without touching the live tree).
+- **Agents (codex gpt-6.1-sol), results in `local/ratchet/codex/batch/<task>-result.md`:** PROF1, PAR15, RSXVK22,
+  HLEFAST1 done and integrated; SPUDYN2 integrated (its suite interrupted, 380/733 without failure); **PIPE1** (phase B:
+  publication of labels/fences vs. the game's wait 0x696c10, `usleep(30)` latency ~151 µs) and **PPUMEM1** (epoch fast path
+  of PPU memory, ~35% of PPU CPU) were instructed to terminate with a state write-up — their deliverables are incomplete/not integrated.
+  Continuing an agent's conversation: `codex exec resume --skip-git-repo-check -c 'sandbox_mode="workspace-write"'
+  -c 'model="gpt-6.1-sol"' <session id from batch/run-<task>.log> "<instruction>"`.
+- **Generality:** the user wants future compatibility with other games — prefer general mechanisms (content-based
+  matching, cache, JIT) over per-game data in the profile (COMMON.md).
 
-## Předání 2026-10-18 ~10:55 (Claude Opus 5.5 → codex gpt-6-astra, ~1 h)
+## Handoff 2026-10-18 ~10:55 (Claude Opus 5.5 → codex gpt-6-astra, ~1 h)
 
-Čti [CURRENT.md](CURRENT.md), [záznam 338+](experiments/2026-10-17-ingame-338.md) (sekce 359load → 360/361) a
-zadání `local/ratchet/codex/batch/task-astra-main.md`. Hra je v úrovni na ~1,5 FPS; hlavní práce = výkon RSX
-(RSXVK22) + chyby renderingu (RSXFIX1) + důkaz gamepadu ve hře. Nástroje: `local/ratchet/tools/snapshot_build.sh`
-(snímek+build s cache objektů), `to_load.sh`, `to_play.sh` (`FT=` frame trigger), `stack_sample.py`.
+Read [CURRENT.md](CURRENT.md), [record 338+](experiments/2026-10-17-ingame-338.md) (section 359load → 360/361) and
+the assignment `local/ratchet/codex/batch/task-astra-main.md`. The game is in the level at ~1.5 FPS; main work = RSX performance
+(RSXVK22) + rendering errors (RSXFIX1) + evidence of the gamepad in the game. Tools: `local/ratchet/tools/snapshot_build.sh`
+(snapshot + build with an object cache), `to_load.sh`, `to_play.sh` (`FT=` frame trigger), `stack_sample.py`.
 
-## Nejnovější předání 2026-10-17 večer (Claude Opus 5.5)
+## Latest handoff 2026-10-17 evening (Claude Opus 5.5)
 
-Čti [CURRENT.md](CURRENT.md) a [záznam 338+](experiments/2026-10-17-ingame-338.md).
+Read [CURRENT.md](CURRENT.md) and [record 338+](experiments/2026-10-17-ingame-338.md).
 
-- **ABSOLUTNÍ PRAVIDLO:** z tohoto PC nikdy žádný slyšitelný zvuk (spí tu miminko) — jen SDL `dummy`/`disk`, pojistka
-  v `anyps3/native_audio.py`, sinky PipeWire ztlumené. Platí i pro všechny subagenty (`codex/batch/COMMON.md`).
-- **Build:** vždy ze snímku `PYTHONPATH=local/ratchet/source-snapshot-N python -P …` a každá kompilace/sada/běh ve vlastní
-  `systemd-run --user --scope -p MemoryMax=… -p MemorySwapMax=0` (OOM v 17:07 shodil session). Když agent mění živý
-  strom, snímek skládej z izolované kopie (snímek N-1 + vlastní soubory).
-- **Poslední ověřený build:** `native-virtual-347` (snímek 347 = 345 + SPUPERF2 + diagnostika). Poslední stop:
-  347serial `SPU code differs` (SPU 0x3000200 pc 0x5680, kód z EBOOT 0xdd3220 na LS 0x5600); paralelní SPU režim
-  uvízne dřív (ztracené LR probuzení, hypotéza). Nástroje: `run_to_menu_ptrace.sh` (`STRIDE=`, `PAD=uinput`),
+- **ABSOLUTE RULE:** never any audible sound from this PC (a baby sleeps here) — only SDL `dummy`/`disk`, safeguard
+  in `anyps3/native_audio.py`, PipeWire sinks muted. Applies also to all subagents (`codex/batch/COMMON.md`).
+- **Build:** always from a snapshot `PYTHONPATH=local/ratchet/source-snapshot-N python -P …` and every compilation/suite/run in its own
+  `systemd-run --user --scope -p MemoryMax=… -p MemorySwapMax=0` (the OOM at 17:07 took the session down). When an agent modifies the live
+  tree, assemble the snapshot from an isolated copy (snapshot N-1 + own files).
+- **Last verified build:** `native-virtual-347` (snapshot 347 = 345 + SPUPERF2 + diagnostics). Last stop:
+  347serial `SPU code differs` (SPU 0x3000200 pc 0x5680, code from EBOOT 0xdd3220 at LS 0x5600); the parallel SPU mode
+  gets stuck earlier (lost LR wakeups, hypothesis). Tools: `run_to_menu_ptrace.sh` (`STRIDE=`, `PAD=uinput`),
   `to_game.sh`, `uinput_pad.py`, `ANYPS3_DIAG_WATCH`, `ANYPS3_SPU_LS_DUMP_DIR`, SIGUSR1 = dump PPU+SPU (+LS).
-  Cesta LOAD: v menu se savem stojí kurzor na LOAD → CROSS → systémový seznam → CROSS.
-- **Agenti:** SPUDYN (`task-spudyn.md`, základ 346) a AUDIOFULL2 (`task-audiofull.md`, jen tiše) — stav viz konec
-  předání/CURRENT; výsledky v `local/ratchet/codex/batch/{spudyn,audiofull}-result.md`.
-- **Živé procesy při předání (2026-10-17 ~22:35):** jen codex agenti **SPUDYN** (scope `anyps3-spudyn`) a
-  **AUDIOFULL2** (scope `anyps3-audiofull2`) dobíhají závěrečnou sadu; uživatel je nechal doběhnout. Žádná hra, build ani
-  gdb neběží. **Živý strom proto obsahuje jejich změny navíc proti snímku 347** (`spu*.py`, audio soubory, testy) —
-  příští integrace: ověřit `owned-files.json`, skládat snímek 348 z izolované kopie 347 + jejich dodávek.
-- **Úklid:** `local/ratchet/_trash-2026-10-17/` (karanténa ~197 GiB, `MANIFEST.txt`), smaže uživatel; archiv starých
-  logů `local/ratchet/archive/`. Velké logy běhů jsou `*.log.xz`.
-- **První akce:** viz CURRENT „První další akce“ (SPUDYN → LR wakeup → AUDIOFULL2 → skutečná hra a FPS).
+  LOAD path: in the menu with a save the cursor rests on LOAD → CROSS → system list → CROSS.
+- **Agents:** SPUDYN (`task-spudyn.md`, base 346) and AUDIOFULL2 (`task-audiofull.md`, silent only) — for status see the end of the
+  handoff/CURRENT; results in `local/ratchet/codex/batch/{spudyn,audiofull}-result.md`.
+- **Live processes at handoff (2026-10-17 ~22:35):** only the codex agents **SPUDYN** (scope `anyps3-spudyn`) and
+  **AUDIOFULL2** (scope `anyps3-audiofull2`) are finishing the final suite; the user let them finish. No game, build or
+  gdb is running. **The live tree therefore contains their changes in addition to snapshot 347** (`spu*.py`, audio files, tests) —
+  next integration: verify `owned-files.json`, assemble snapshot 348 from an isolated copy of 347 + their deliverables.
+- **Cleanup:** `local/ratchet/_trash-2026-10-17/` (quarantine ~197 GiB, `MANIFEST.txt`), to be deleted by the user; archive of old
+  logs `local/ratchet/archive/`. Large run logs are `*.log.xz`.
+- **First action:** see CURRENT "First next action" (SPUDYN → LR wakeup → AUDIOFULL2 → real game and FPS).
 
-## Nejnovější předání 2026-10-17 odpoledne (Claude Opus 5.5)
+## Latest handoff 2026-10-17 afternoon (Claude Opus 5.5)
 
-Čti [CURRENT.md](CURRENT.md) a [záznam 332+](experiments/2026-10-17-menu-fps-332.md).
+Read [CURRENT.md](CURRENT.md) and [record 332+](experiments/2026-10-17-menu-fps-332.md).
 
-- **Poslední ověřený stav:** build `local/ratchet/native-virtual-337` (snímek `source-snapshot-337`, sada 614/614),
-  `ANYPS3_RSX_WORKER=1 ANYPS3_SPU_THREADS=1` → původní menu medián 58,96 FPS (2 min, `native-virtual-337long`),
-  navigace virtuálním padem 10/10 (`native-virtual-337tap`). Běží/proběhl codex PAR12 (`task-par12.md`).
-- **Build ze snímku:** `PYTHONPATH=local/ratchet/source-snapshot-N python -P -m anyps3.build_game …` a
-  `python -P local/ratchet/tools/virtual_pad.py build …`; po buildu porovnat `build.json:source_sha256` se snímkem
-  (bez `-P` se bere živý strom, kde pracují agenti — viz záznam).
-- **Nástroje:** `local/ratchet/tools/{profile_menu.sh,stack_sample.py,stall_probe.sh,hang_probe.sh,nav_check.sh,
-  nav_strip.py,menu_table.py,run_to_menu_ptrace.sh}`, `tools/ptracer/libptracer.so` (gdb/eu-stack při Yama 1).
-- **Fyzický gamepad:** běh bez `ANYPS3_VIRTUAL_PAD_CONTROL` použije SDL GameController (hotplug v `NativePad::poll`);
-  nepřipojen → neověřen.
+- **Last verified state:** build `local/ratchet/native-virtual-337` (snapshot `source-snapshot-337`, suite 614/614),
+  `ANYPS3_RSX_WORKER=1 ANYPS3_SPU_THREADS=1` → original menu median 58.96 FPS (2 min, `native-virtual-337long`),
+  virtual pad navigation 10/10 (`native-virtual-337tap`). The codex PAR12 is running/has run (`task-par12.md`).
+- **Build from a snapshot:** `PYTHONPATH=local/ratchet/source-snapshot-N python -P -m anyps3.build_game …` and
+  `python -P local/ratchet/tools/virtual_pad.py build …`; after the build compare `build.json:source_sha256` with the snapshot
+  (without `-P` the live tree is used, where the agents are working — see the record).
+- **Tools:** `local/ratchet/tools/{profile_menu.sh,stack_sample.py,stall_probe.sh,hang_probe.sh,nav_check.sh,
+  nav_strip.py,menu_table.py,run_to_menu_ptrace.sh}`, `tools/ptracer/libptracer.so` (gdb/eu-stack with Yama 1).
+- **Physical gamepad:** a run without `ANYPS3_VIRTUAL_PAD_CONTROL` uses the SDL GameController (hotplug in `NativePad::poll`);
+  not connected → not verified.
 
-## Předání 2026-10-17 dopoledne (Claude Opus 5.5)
+## Handoff 2026-10-17 morning (Claude Opus 5.5)
 
-Čti [CURRENT.md](CURRENT.md) a [záznam 311–331](experiments/2026-10-16-oom-alias-fps-311.md) (sekce od „PAR8 + RSXVK19
-→ 331“ zpět). Cíl: původní menu na 59,94 FPS s gamepadem, pak skutečná hra.
+Read [CURRENT.md](CURRENT.md) and [record 311–331](experiments/2026-10-16-oom-alias-fps-311.md) (sections from "PAR8 + RSXVK19
+→ 331" backwards). Goal: the original menu at 59.94 FPS with a gamepad, then the real game.
 
-- **Poslední ověřený stav:** build `local/ratchet/native-virtual-331` (snímek `source-snapshot-331`, sada 583/583),
-  `ANYPS3_RSX_WORKER=1 ANYPS3_SPU_THREADS=1` → menu **38–40 FPS** (`native-virtual-331tw`), sériově 25,8 FPS.
-  Žádný guest stop; běhy ukončeny SIGKILL po měření (verification −9, PT_LOAD shodné).
-- **Výstupy agentů:** `local/ratchet/codex/batch/{par0..par8,rsxvk12..rsxvk19}-result.md`, jejich `DESIGN.md`/
-  `INTEGRATION.md` v `local/ratchet/codex/par*/` a `local/ratchet/codex/rsxvk/rsxvk*/`. Herní profily
+- **Last verified state:** build `local/ratchet/native-virtual-331` (snapshot `source-snapshot-331`, suite 583/583),
+  `ANYPS3_RSX_WORKER=1 ANYPS3_SPU_THREADS=1` → menu **38–40 FPS** (`native-virtual-331tw`), serially 25.8 FPS.
+  No guest stop; the runs were terminated by SIGKILL after the measurement (verification −9, PT_LOAD identical).
+- **Agent outputs:** `local/ratchet/codex/batch/{par0..par8,rsxvk12..rsxvk19}-result.md`, their `DESIGN.md`/
+  `INTEGRATION.md` in `local/ratchet/codex/par*/` and `local/ratchet/codex/rsxvk/rsxvk*/`. Game profiles
   `local/ratchet/codex/rsxvk/game-profiles/menu-3*.{prof,txt}`; captures `local/ratchet/codex/rsxvk/capture-3{19,22,24}-menu`.
-- **Nástroje:** `local/ratchet/tools/{measure_menu.sh,to_menu.sh,menu_stats.py,gperf_report.py}`,
+- **Tools:** `local/ratchet/tools/{measure_menu.sh,to_menu.sh,menu_stats.py,gperf_report.py}`,
   `virtual_pad.py` (`ANYPS3_EXTRA_CXXFLAGS`).
-- **Živé procesy při předání:** žádné (agenti, buildy, běhy i memwatch ukončeny).
-- **První akce:** profil 331tw (hlavní + RSX vlákno saturované), pak další vlna (CPU rendereru na worker cestě,
-  koordinátor/PPU aktivní čekání, PPU2). Fyzický gamepad ověřit po připojení.
+- **Live processes at handoff:** none (agents, builds, runs and memwatch terminated).
+- **First action:** profile 331tw (main + RSX thread saturated), then the next wave (renderer CPU on the worker path,
+  coordinator/PPU active waiting, PPU2). Verify the physical gamepad after connecting.
 
-## Předání 2026-10-14 večer (Claude Opus 5.5)
+## Handoff 2026-10-14 evening (Claude Opus 5.5)
 
-Čti [CURRENT.md](CURRENT.md) a
-[záznam 247–255](experiments/2026-10-14-full-opd-coverage-247-250.md). Starší předání (odkazy níže) jsou překonaná
-(247 už použito, 246 profil ověřen během 247). Výstupy codex subagentů: `local/ratchet/codex/*-result.md`,
-`switches-250.md`, rešerše importů `experiments/2026-10-14-import-research-250.md`.
-První akce: rozdělit generovaný C++ do více TU (kompilace je hlavní brzda vývoje), pak běh s profilem 255.
+Read [CURRENT.md](CURRENT.md) and
+[record 247–255](experiments/2026-10-14-full-opd-coverage-247-250.md). Older handoffs (links below) are superseded
+(247 already used, 246 profile verified during 247). Outputs of codex subagents: `local/ratchet/codex/*-result.md`,
+`switches-250.md`, import research `experiments/2026-10-14-import-research-250.md`.
+First action: split the generated C++ into several TUs (compilation is the main brake on development), then a run with profile 255.
 
-## Šablona experimentu nebo předání
+## Template for an experiment or handoff
 
 ```text
-Datum a autor/model:
-Cíl a kritérium dokončení:
-Zdrojový stav: commit + necommitované soubory/hashes
-Vstup: profil, identifikace hry, relevantní konfigurace
-Ověřený fakt: co přesně bylo pozorováno
-Zdroje: soubor:řádek @ commit / titul-verze PDF page N + SHA256
-Runtime: přesný příkaz, log, exit/timeout, artefakty a čítače
-Změny: co je hotové a kde
-Hypotéza: důvod, alternativa, rozlišující test
-Vyvráceno: pokus a důvod
-Otevřeno: co zatím nevíme
-Další krok: konkrétní první akce
-Omezení: co test nepokrývá
+Date and author/model:
+Goal and completion criterion:
+Source state: commit + uncommitted files/hashes
+Input: profile, game identification, relevant configuration
+Verified fact: what exactly was observed
+Sources: file:line @ commit / PDF title-version page N + SHA256
+Runtime: exact command, log, exit/timeout, artifacts and counters
+Changes: what is done and where
+Hypothesis: reason, alternative, distinguishing test
+Refuted: attempt and reason
+Open: what we do not know yet
+Next step: concrete first action
+Limitations: what the test does not cover
 ```
 
-## Kontrola před převzetím
+## Check before takeover
 
-- Cesty skutečně existují; referenční checkout má zaznamenanou revizi.
-- Fakt vychází z konkrétního zdroje nebo runtime artefaktu.
-- Výsledek odpovídá kritériu původního menu a gamepadu; diagnostická prezentace není zaměněna za guest rendering.
-- Neúspěšné pokusy a hypotézy jsou viditelně oddělené od potvrzeného chování.
-- Další krok řeší skutečný poslední blokátor, nikoli dávno odstraněnou chybu.
+- The paths actually exist; the reference checkout has a recorded revision.
+- A fact comes from a specific source or a runtime artifact.
+- The result matches the criterion of the original menu and gamepad; a diagnostic presentation is not mistaken for guest rendering.
+- Failed attempts and hypotheses are visibly separated from confirmed behavior.
+- The next step addresses the real last blocker, not a long-removed error.
 
 
-## Starší předání
+## Older handoffs
 
-Předání 238–246 (překonaná): [runtime-handoff-246.md](runtime-handoff-246.md),
+Handoffs 238–246 (superseded): [runtime-handoff-246.md](runtime-handoff-246.md),
 [runtime-handoff-237.md](runtime-handoff-237.md), [runtime-handoff-198.md](runtime-handoff-198.md).
-Plné předchozí znění tohoto souboru: `local/ratchet/HANDOFF-before-cleanup-2026-10-14.md`.
+Full previous wording of this file: `local/ratchet/HANDOFF-before-cleanup-2026-10-14.md`.
