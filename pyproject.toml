@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "anyps3"
+version = "0.1.0"
+description = "Experimental PS3 binary inspection and PPU static recompilation"
+requires-python = ">=3.11"
+license = {text = "GPL-2.0-only"}
+readme = "README.md"
+
+[project.optional-dependencies]
+self = ["cryptography"]
+
+[project.scripts]
+anyps3 = "anyps3.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["anyps3*"]
+

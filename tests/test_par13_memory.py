@@ -1,0 +1,225 @@
+"""PAR13 physical hazards, bounded map batches and independent ordering oracles."""
+from pathlib import Path
+import os
+import shutil
+import subprocess
+import unittest
+from tests.test_par1 import source
+
+ARTIFACTS = Path('local/ratchet/codex/par13/tests')
+
+
+@unittest.skipUnless(shutil.which('c++'), 'Requires native C++ compiler')
+class Parallel13Memory(unittest.TestCase):
+    def native(self, name, body, *, full=False, instrument=None):
+        ARTIFACTS.mkdir(parents=True, exist_ok=True)
+        code = source(body, full=full)
+        if instrument:
+            code = instrument(code)
+        cpp = ARTIFACTS / (name + '.cpp')
+        cpp.write_text(code)
+        command = ['c++', '-std=c++17', '-O2', '-Wall', '-Wextra', '-Werror',
+                   '-pthread', str(cpp), '-o', str(cpp.with_suffix(''))]
+        p = subprocess.run(command, capture_output=True, timeout=300)
+        cpp.with_suffix('.build.log').write_bytes(p.stdout + p.stderr)
+        self.assertEqual(p.returncode, 0, p.stderr.decode()[-12000:])
+        env = {**os.environ, 'SDL_AUDIODRIVER': 'dummy', 'LP_NUM_THREADS': '4',
+               'ANYPS3_SPU_THREADS': '0', 'ANYPS3_SPU_WORKER': '0', 'ANYPS3_RSX_WORKER': '0'}
+        env.pop('ANYPS3_AUDIO_AUDIBLE', None)
+        p = subprocess.run([str(cpp.with_suffix(''))], capture_output=True, timeout=90, env=env)
+        cpp.with_suffix('.run.log').write_bytes(p.stdout + p.stderr)
+        self.assertEqual(p.returncode, 0, p.stderr.decode()[-12000:])
+
+    def test_pending_map_hazard_blocks_raw_writer(self):
+        self.native('pending-map', r'''
+ GuestMemory m;m.map(0x10000,8192,6,nullptr,0);m.enable_concurrency();m.enable_page_broker();
+ if(!m.parallel->asymmetric)return 0;
+ std::atomic<bool> ready{false},retire{false},entered{false};
+ std::thread cpu([&]{(void)m.load(0x10000,4);auto& local=m.local_state();
+  assert(m.try_enter_scalar_reader(local));assert(!m.parallel->readers[local.slot].active.load());
+  ready=true;while(!retire.load())std::this_thread::yield();m.leave_scalar_reader(local);m.release_reader_slot();});
+ while(!ready.load())std::this_thread::yield();
+ std::thread controller([&]{while(!m.parallel->exclusive.load())std::this_thread::yield();
+  assert(!entered.load());retire=true;});
+ {GuestMemory::RawPermit raw(m);entered=true;m.regions[0].flags=4;m.mapping_changed();}
+ cpu.join();controller.join();fault([&]{m.store(0x10000,4,1);});
+''')
+
+    def test_first_ppu_reservation_drains_compact_untracked_write(self):
+        self.native('first-reservation', r'''
+ GuestMemory m;m.map(0x10000,4096,6,nullptr,0);m.regions.push_back({0x20000,6,m.regions[0].bytes});
+ auto pin=m.regions[0].bytes;m.enable_concurrency();m.enable_page_broker();
+ if(!m.parallel->asymmetric)return 0;
+ std::atomic<bool> ready{false},retire{false};auto state=m.parallel->snapshot->maps[0].state;
+ std::thread writer([&]{m.store(0x20000,4,0);
+  {GuestMemory::ScalarAccess access(m,0x20000,4,true,true,true);assert(access.map && !access.tracked->load());
+   ready=true;while(!retire.load())std::this_thread::yield();GuestMemory::atomic_scalar_write(access.payload,4,0x11223344);}
+  m.release_reader_slot();});
+ while(!ready.load())std::this_thread::yield();
+ std::thread controller([&]{while(!state->tracked[0].load())std::this_thread::yield();retire=true;});
+ std::pair<std::uintptr_t,std::uint64_t> token;assert(m.load_reserved(0x10000,4,token)==0x11223344);
+ writer.join();controller.join();m.store(0x20001,1,0x22);assert(!m.store_conditional(0x10000,4,0,token));
+ std::array<std::uint8_t,128> bytes{};m.getllar(0x10000,bytes.data(),token);
+ assert(bytes[0]==0x11 && bytes[1]==0x22 && bytes[2]==0x33 && bytes[3]==0x44);
+ m.store(0x2007f,1,0xa5);assert(!m.putllc(0x10000,bytes.data(),token));
+''')
+
+    def test_gpu_claim_drains_tagged_scalar_and_keeps_payload(self):
+        self.native('claim-tag', r'''
+ GuestMemory m;m.map(0x10000,4096,6,nullptr,0);m.enable_concurrency();m.enable_page_broker();
+ if(!m.parallel->asymmetric)return 0;
+ auto pin=m.regions[0].bytes;auto range=m.range(0x10000,4,true);
+ auto* cell=m.page_broker.cell(reinterpret_cast<std::uintptr_t>(pin->data())>>12);
+ std::atomic<bool> ready{false},retire{false};
+ std::thread cpu([&]{m.store(0x10000,4,0);
+  {GuestMemory::ScalarAccess access(m,0x10000,4,true,true,true);assert(access.map);ready=true;
+   while(!retire.load()){std::this_thread::yield();}GuestMemory::atomic_scalar_write(access.payload,4,0xaabbccdd);}
+  m.release_reader_slot();});
+ while(!ready.load())std::this_thread::yield();
+ std::thread controller([&]{while(!(cell->state.load()&GuestMemory::PageBroker::claimed))std::this_thread::yield();retire=true;});
+ {GuestMemory::GpuPages claim(m,{{pin->data(),4,pin}});
+  assert((claim.snapshot(range,0,4)==std::vector<std::uint8_t>{0xaa,0xbb,0xcc,0xdd}));}
+ cpu.join();controller.join();assert(m.load(0x10000,4)==0xaabbccdd);
+''')
+
+    def test_batch_revokes_at_raw_yield_and_mapping_mutation(self):
+        self.native('batch-map', r'''
+ GuestMemory m;m.map(0x10000,8192,6,nullptr,0);m.enable_concurrency();m.enable_page_broker();
+ if(!m.parallel->asymmetric)return 0;
+ auto& local=m.local_state();auto old=m.regions[0].bytes;
+ {GuestMemory::ScalarBatch batch(m);m.store(0x10000,4,0x11223344);assert(m.load(0x10000,4)==0x11223344);
+  assert(local.scalar_batch_active && m.parallel->readers[local.slot].active.load());
+  {GuestMemory::RawYield yield(m);assert(!local.scalar_batch_active && !m.parallel->readers[local.slot].active.load());}
+  assert(m.load(0x10000,4)==0x11223344 && local.scalar_batch_active);
+  {GuestMemory::RawPermit raw(m);assert(!local.scalar_batch_active);m.regions[0].flags=4;m.mapping_changed();}
+  fault([&]{m.store(0x10000,4,0);});assert(m.load(0x10000,4)==0x11223344);
+  {GuestMemory::RawPermit raw(m);m.regions.clear();m.mapping_changed();}
+  m.map(0x10000,8192,6,nullptr,0);assert(m.load(0x10000,4)==0);m.store(0x10000,4,0xaabbccdd);
+  assert(m.load(0x10000,4)==0xaabbccdd && old->coherent_data()[0]==0x11);
+  {GuestMemory::ScalarBatch nested(m);assert(m.load(0x10000,4)==0xaabbccdd);}
+  assert(local.scalar_batch_active);
+  m.release_reader_slot();assert(!local.scalar_batch_active && local.slot==UINT32_MAX);
+  assert(m.load(0x10000,4)==0xaabbccdd);assert(m.load(0x10000,4)==0xaabbccdd);
+ }
+ assert(!local.scalar_batch_active && !m.parallel->readers[local.slot].active.load());
+ {GuestMemory::ScalarBatch batch(m);assert(m.load(0x10000,4)==0xaabbccdd);
+  fault([&]{m.load(UINT64_C(0x100000000),1);});}
+ assert(!local.scalar_batch_active);
+''')
+
+    def test_live_observer_summaries_alias_dirty_and_lifecycle(self):
+        self.native('summaries', r'''
+ GuestMemory m;m.map(0x10000,8192,6,nullptr,0);m.regions.push_back({0x20000,6,m.regions[0].bytes});auto pin=m.regions[0].bytes;
+ m.host_access_observer=[](const void*,std::uint64_t,bool){};m.host_access_observer.filtered=true;m.host_access_observer.supports_exact_bytes=true;
+ m.host_access_observer.watch(pin->data()+63,2); // Replay pre-existing watches on enable.
+ m.enable_concurrency();m.enable_page_broker();m.renderer_enabled=true;m.renderer_barrier=[](bool){};
+ unsigned calls=0;m.renderer_access=[&](const void*,std::uint64_t,bool){assert(!m.local_state().scalar_batch_active);++calls;};
+ {GuestMemory::ScalarBatch batch(m);
+  m.store(0x20000,8,UINT64_C(0x1122334455667788));assert(m.load(0x10000,8)==UINT64_C(0x1122334455667788));assert(calls==0);
+  (void)m.load(0x2003f,2);assert(calls>0);m.host_access_observer.watch(pin->data()+63,2,false);
+  for(unsigned i=0;i<100;++i){auto before=calls;(void)m.load(0x20000,4);assert(calls==before);
+   m.host_access_observer.watch(pin->data(),4);(void)m.load(0x20000,4);assert(calls>before);
+   m.host_access_observer.watch(pin->data(),4,false);}
+  auto range=m.range(0x10000,8,true);auto dirty=m.watch_cpu_dirty(range);assert(dirty->consume());
+  m.store(0x20000,8,UINT64_C(0xaabbccddeeff0011));assert(dirty->consume());assert(!dirty->consume());
+  m.store(0x20008,8,0);assert(!dirty->consume());m.unwatch_cpu_dirty(dirty);
+  assert(!m.page_broker.cell(reinterpret_cast<std::uintptr_t>(pin->data())>>12)->dirty.load());
+  {GuestMemory::RawPermit raw(m);m.host_access_observer=[](const void*,std::uint64_t,bool){};}
+  auto before=calls;(void)m.load(0x20000,4);assert(calls>before); // Unfiltered observer bypasses summary.
+  {GuestMemory::RawPermit raw(m);GuestMemory::HostObserver replacement;replacement=[](const void*,std::uint64_t,bool){};
+   replacement.filtered=true;replacement.supports_exact_bytes=true;replacement.watch(pin->data()+8,4);m.host_access_observer=std::move(replacement);}
+  before=calls;(void)m.load(0x20008,4);assert(calls>before);
+  // Watches can predate mapping a retained physical backing. Choose an
+  // unprepared 2MiB host radix block, not a lucky nearby prepared leaf.
+  auto future=std::make_shared<GuestBacking>(0x400000,0);unsigned offset=0;
+  while(offset<future->size() && m.page_broker.cell((reinterpret_cast<std::uintptr_t>(future->data())+offset)>>12))offset+=0x200000;
+  assert(offset<future->size());m.host_access_observer.watch(future->data()+offset,4);
+  {GuestMemory::RawPermit raw(m);m.regions.push_back({0x300000,6,future});m.mapping_changed();}
+  before=calls;(void)m.load(0x300000+offset,4);assert(calls>before);
+ }
+ m.renderer_enabled=false;
+''')
+
+    def test_ppu_spu_dma_rsx_claim_release_acquire_stress(self):
+        self.native('three-actors', r'''
+ GuestMemory m;m.map(0x10000,0x6000,6,nullptr,0);m.enable_concurrency();m.enable_page_broker();auto pin=m.regions[0].bytes;
+ auto produced=m.range(0x12000,8,true),ack=m.range(0x14000,4,true);m.renderer_enabled=true;
+ std::atomic<bool> ready{false};constexpr unsigned count=1000;
+ std::thread rsx([&]{m.renderer_thread=std::this_thread::get_id();m.page_broker.delegated_owner=m.renderer_thread;ready=true;
+  for(unsigned n=1;n<=count;++n){while(m.load(0x13000,4)!=n)std::this_thread::yield();
+   m.local_state().renderer_claim=true;
+   {GuestMemory::GpuPages claim(m,{{pin->data()+8192,8,pin}});auto bytes=claim.snapshot(produced,0,8);
+    assert(bytes[0]==0x11 && bytes[1]==0x22 && bytes[2]==0x33 && bytes[3]==0x44);
+    assert(bytes[4]==0 && bytes[5]==0 && bytes[6]==(n>>8) && bytes[7]==(n&255));}
+   const std::uint8_t bytes[]={0,0,std::uint8_t(n>>8),std::uint8_t(n)};
+   {GuestMemory::GpuPages claim(m,{{pin->data()+16384,4,pin}});claim.commit(ack,0,bytes,4);}
+  }m.release_reader_slot();});
+ std::thread spu([&]{for(unsigned n=1;n<=count;++n){while(m.load(0x11000,4)!=n)std::this_thread::yield();
+   std::uint8_t bytes[8]{};m.transfer(0x10000,bytes,8,false);
+   assert(bytes[0]==0x11 && bytes[3]==0x44 && bytes[6]==(n>>8) && bytes[7]==(n&255));
+   m.transfer(0x12000,bytes,8,true);m.store(0x13000,4,n);
+  }m.release_reader_slot();});
+ while(!ready.load())std::this_thread::yield();
+ for(unsigned n=1;n<=count;++n){GuestMemory::ScalarBatch batch(m);m.store(0x10000,8,UINT64_C(0x1122334400000000)|n);
+  m.store(0x11000,4,n);while(m.load(0x14000,4)!=n)std::this_thread::yield();}
+ spu.join();rsx.join();assert(m.load(0x14000,4)==1000);m.renderer_enabled=false;
+''')
+
+    def test_split_permissions_and_non_asymmetric_fallback(self):
+        self.native('split-fallback', r'''
+ GuestMemory m;m.map(0x10003,125,6,nullptr,0);m.map(0x10080,128,4,nullptr,0);
+ m.map(0x20000,8192,6,nullptr,0);m.enable_concurrency();m.enable_page_broker();
+ for(unsigned mode=0;mode<2;++mode){if(mode)m.parallel->asymmetric=false;
+  GuestMemory::ScalarBatch batch(m);m.store(0x2003f,8,UINT64_C(0x0123456789abcdef));
+  assert(m.load(0x2003f,8)==UINT64_C(0x0123456789abcdef));
+  m.store(0x20ffd,8,UINT64_C(0x1122334455667788));assert(m.load(0x20ffd,8)==UINT64_C(0x1122334455667788));
+  fault([&]{m.store(0x1007f,2,0xffff);});assert(m.load(0x1007f,1)==0);
+  std::uint8_t bytes[]={1,2,3,4};fault([&]{m.transfer(0x1007e,bytes,4,true);});assert(m.load(0x1007e,2)==0);
+ }
+''')
+
+    def test_real_worker_raw_wait_revokes_batch_before_service(self):
+        self.native('worker-revoke', r'''
+ setenv("ANYPS3_RSX_WORKER","1",1);setenv("ANYPS3_SPU_THREADS","1",1);
+ PpuState s;auto& m=s.memory;m.map(0x10000,8192,6,nullptr,0);SpuWorkerSession life(s);
+ if(m.parallel->asymmetric){
+  auto& q=*s.process.rsx_worker.queue;std::atomic<bool> entered{false};
+  {GuestMemory::ScalarBatch batch(m);m.store(0x10000,4,0x11223344);assert(m.load(0x10000,4)==0x11223344);
+   assert(m.local_state().scalar_batch_active);
+   auto request=q.post(RsxOwnerQueue::Kind::HostAccess,[&]{GuestMemory::RawPermit raw(m);entered=true;});
+   const auto until=std::chrono::steady_clock::now()+std::chrono::seconds(5);
+   while(!m.parallel->exclusive.load()){assert(std::chrono::steady_clock::now()<until);std::this_thread::yield();}
+   {SpuServiceScope service(s,true);assert(!m.local_state().scalar_batch_active);}
+   q.await(request);assert(entered.load());assert(m.load(0x10000,4)==0x11223344);
+  }
+ }
+ life.finish();
+''', full=True)
+
+    def test_synthetic_aot_dispatch_hook_preserves_steps_and_results(self):
+        import struct
+        from anyps3.prx import make_image
+        from anyps3.program import compile_program
+        # addi/xor/stw/lwz/add/cmp/bc loop: two memory ops per seven guest
+        # instructions; independent sum and instruction count, no game code.
+        words = [0x38c00000, 0x38600000, 0x38630001,
+                 (31 << 26) | (4 << 21) | (4 << 16) | (3 << 11) | (316 << 1),
+                 0x90620000, 0x80a20000,
+                 (31 << 26) | (6 << 21) | (6 << 16) | (5 << 11) | (266 << 1),
+                 0x7c233800, 0x4180ffe8, 0x4e800020]
+        image = make_image([(0x10000, 5, struct.pack('>10I', *words)),
+                            (0x20000, 6, struct.pack('>II', 0x10000, 0))], entry=0x20000)
+        generated = compile_program(image, process_entry=True).cpp(max_steps=100000)
+        anchor = 'try { ExecutionPpuPage ppu_perf_page(state.execution,state.thread_id,state.steps); { anyps3_dispatch_page(state);'
+        self.assertEqual(generated.count(anchor), 1)
+        generated = generated.replace(anchor, anchor.replace('anyps3_dispatch_page', 'GuestMemory::ScalarBatch scalar_batch(state.memory); anyps3_dispatch_page'))
+        generated = generated.replace('int main(int argc, char** argv)', 'int original_main(int argc, char** argv)')
+        def instrument(code):
+            return generated + code[code.rindex('\n#include <cassert>'):]
+        self.native('aot-dispatch', r'''
+ PpuState state;auto& m=state.memory;m.map(0x50000,8192,6,nullptr,0);m.enable_concurrency();m.enable_page_broker();
+ state.r[2]=0x50000;state.r[4]=0;state.r[7]=10000;state.pc=0x10000;state.lr=RETURN_SENTINEL;
+ anyps3_entry(state,false);assert(state.returned && state.steps==70003);
+ assert(state.r[3]==10000 && state.r[4]==10000 && state.r[6]==50005000);
+ assert(m.load(0x50000,4)==10000 && !m.local_state().scalar_batch_active);
+''', instrument=instrument)

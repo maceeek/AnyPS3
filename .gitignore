@@ -1,0 +1,53 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Build outputs
+/build/
+/dist/
+*.o
+*.so
+*.a
+
+# Local-only data: game discs/dumps, firmware, keys, saves, caches, builds, runs, agent work trees,
+# reference checkouts and downloaded manuals. Never commit anything from here.
+/local/
+
+# PS3 game/firmware material and secrets must never be committed, wherever they appear
+*.iso
+*.pkg
+*.PUP
+*.psarc
+*.self
+*.sprx
+*.edat
+*.rap
+EBOOT*.BIN
+EBOOT*.elf
+app-key.json
+
+# Generated native bundles, game runs and captures outside local/
+native-bundle-*/
+native-virtual-*/
+source-snapshot-*/
+*.ppm
+
+# Local tool, agent and credential state
+/.agents/
+/.aws/
+/.codex/
+.claude/settings.local.json
+
+# Editors and OS
+.idea/
+.vscode/
+*.swp
+*~
+.DS_Store

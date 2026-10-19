@@ -1,0 +1,5016 @@
+{
+  "schema_version": 1,
+  "title": "Ratchet & Clank: A Crack in Time",
+  "title_id": "BCES00511",
+  "game_version": "01.00",
+  "executable_sha256": "6debdca0f181f35d98ebe23faabe2531b697c558b4e3384b06630173400674c1",
+  "executable_kind": "AnyPS3 analysis ELF reconstructed from verified SELF load segments",
+  "self_sha256": "0d3c7e78fc66a8f964fbaab9d90436b717a8f60ec999f1245d1134131e7e9f83",
+  "target_platform": "linux-x86_64",
+  "status": "native-startup-with-verified-spu-decompression-and-black-flips",
+  "notes": "Native startup executes four original RSX clears and four headless black flips at 1280x720, then initializes FIOS, reads actual PSARC archives and writes real cache.idx/cache.dat files. The original AOT SPU code decompresses game.toc (136620 bytes), verified byte-for-byte against independent zlib decoding. DMA spans adjacent guest mappings and mailbox events notify the PPU. The default diagnostic per-SPU budget is 10000000 instructions; ANYPS3_SPU_MAX_STEPS allows an explicit positive uint64 budget. Startup with 500000000 reaches over 117 million PPU steps. PPU NaN propagation and gradual underflow are implemented with integer rounding and independently checked FPSCR status. No menu, game shaders, geometry or gameplay yet. Exact original game/firmware callback descriptors and SPU overlays are statically translated; unknown execution remains a diagnostic stop. Vulkan supports tiled ARGB8 and packed Z24S8 clears with two horizontal samples, reports, real-time vblank and headless scanout. SDL2 input remains native. vrefp still uses a rounded reciprocal rather than the Cell estimate table. See docs/ratchet-acit-loading-milestone.md, docs/menu-progress.md and docs/vulkan-rendering.md.",
+  "static_seed_entries": [
+    9389848,
+    9383808,
+    9382336,
+    9069952,
+    9069504,
+    9054232,
+    9021864,
+    8878600,
+    8297000,
+    8277944,
+    8267744,
+    8265560,
+    8056296,
+    7673456,
+    7541344,
+    7422056,
+    7398288,
+    7357952,
+    7340848,
+    7334784,
+    7325936,
+    10054296,
+    10041128,
+    10026872,
+    10007080,
+    7198720,
+    7187084,
+    7149780,
+    7144228,
+    7122168,
+    7115388,
+    7047580,
+    7043212,
+    7012436,
+    6995228,
+    6891212,
+    6821212,
+    6817492,
+    6803156,
+    6796044,
+    6788816,
+    6785284,
+    6783280,
+    6759076,
+    6752496,
+    6738464,
+    6731356,
+    6724228,
+    6713724,
+    6704868,
+    6703176,
+    6700920,
+    6698356,
+    6697396,
+    6684964,
+    6646292,
+    6636600,
+    6624844,
+    6620120,
+    6617072,
+    6579756,
+    6569900,
+    6418608,
+    6414636,
+    6368780,
+    6305784,
+    6254600,
+    6214640,
+    6204480,
+    6190488,
+    6188056,
+    6172720,
+    6134284,
+    6121236,
+    6106220,
+    6099792,
+    6078360,
+    6057000,
+    6015380,
+    6011316,
+    5986220,
+    5917528,
+    5841244,
+    5831716,
+    5824776,
+    5753680,
+    5732784,
+    5730752,
+    5713736,
+    5648952,
+    5648276,
+    5624044,
+    5590056,
+    5582944,
+    5580436,
+    5570864,
+    5560324,
+    5506844,
+    5477880,
+    5471548,
+    5427884,
+    5415920,
+    5412528,
+    5223760,
+    5194076,
+    5192224,
+    5157704,
+    5123988,
+    5114548,
+    5111184,
+    5110884,
+    5107504,
+    5088908,
+    5075320,
+    5065936,
+    5047824,
+    5023368,
+    5016024,
+    5015564,
+    5012324,
+    4996768,
+    4927716,
+    4893732,
+    4827816,
+    4813372,
+    4768176,
+    4764672,
+    4751164,
+    4746492,
+    4741684,
+    4718776,
+    4714852,
+    4710336,
+    4706672,
+    4700956,
+    4698952,
+    4697132,
+    4695736,
+    4694424,
+    4693540,
+    4691136,
+    4687676,
+    4684380,
+    4679576,
+    4674660,
+    4666824,
+    4663756,
+    4637568,
+    4609384,
+    4541448,
+    4525856,
+    4493672,
+    4474264,
+    3798476,
+    3759700,
+    3738308,
+    3697724,
+    3658024,
+    3627104,
+    3621096,
+    3542108,
+    3533004,
+    3511720,
+    3488392,
+    3393512,
+    3368668,
+    3345276,
+    3340492,
+    3336108,
+    3331420,
+    3318616,
+    3298064,
+    3123556,
+    3064080,
+    3060204,
+    3041232,
+    3035792,
+    3025556,
+    3004348,
+    2986292,
+    2982760,
+    2856436,
+    2779196,
+    2761636,
+    2758280,
+    2207968,
+    2200404,
+    2195972,
+    2195432,
+    2191324,
+    2103616,
+    2060420,
+    1974580,
+    1925800,
+    1912764,
+    1621556,
+    1601920,
+    1521008,
+    1473800,
+    1431268,
+    1414084,
+    1398176,
+    1396828,
+    1395392,
+    1384512,
+    1333520,
+    1308192,
+    1296980,
+    1288992,
+    1237900,
+    1219580,
+    1097360,
+    764328,
+    718800,
+    332556,
+    325568,
+    319068,
+    309824,
+    309176,
+    255716,
+    245400,
+    242656,
+    220128,
+    208404,
+    185076,
+    124012,
+    110196,
+    4625148,
+    4625164,
+    4625180,
+    4625196,
+    5055692,
+    6724356,
+    6724408,
+    6724464,
+    6724816,
+    6724632,
+    6724676,
+    6724732,
+    9760608,
+    9761272,
+    9759232,
+    9759236,
+    3319504,
+    9759248,
+    9759252,
+    3319240,
+    9759264,
+    9759268,
+    9852760,
+    9852700,
+    6737816,
+    6738756,
+    9852692,
+    9852216,
+    9852228,
+    6740300,
+    6741844,
+    6740360,
+    9852192,
+    6741332,
+    6741528,
+    6741980,
+    6741592,
+    9852208,
+    6740088,
+    9475624,
+    9479144,
+    9479344,
+    9479404,
+    9479952,
+    9480080,
+    9480168,
+    9480224,
+    9480816,
+    9481216,
+    9481336,
+    6689208,
+    6692012,
+    6692052,
+    6692076,
+    6692088,
+    6692104,
+    6692024,
+    6053844,
+    6053836,
+    6053852,
+    6053860,
+    6053868,
+    6053876,
+    6060356,
+    6060324,
+    6060316,
+    6060332,
+    6060340,
+    6060348,
+    6060584,
+    6060796,
+    6060608,
+    6060628,
+    6060652,
+    6060672,
+    6060696,
+    6060724,
+    6060760,
+    6061672,
+    6061640,
+    6061632,
+    6061648,
+    6061656,
+    6061664,
+    6905028,
+    6573152,
+    6573156,
+    6573160,
+    6573164,
+    6573168,
+    6573172,
+    6573176,
+    6573180,
+    6736032,
+    6741112,
+    6690608,
+    3324788,
+    9760120,
+    9761412,
+    3323532,
+    3323580,
+    3323448,
+    9855808,
+    9855332,
+    9855552,
+    9853284,
+    9856024,
+    9476328,
+    7405992,
+    7406444,
+    7409456,
+    7406176,
+    7409428,
+    7409344,
+    7409356,
+    7408412,
+    7407784,
+    7407772,
+    7407120,
+    7411424,
+    7411376,
+    7410488,
+    7409740,
+    7406404,
+    7406168,
+    7410896,
+    7406640,
+    7401336,
+    7401056,
+    10102800,
+    7397408,
+    7398304,
+    7332080,
+    7422232,
+    7373552,
+    7380200,
+    7373568,
+    9475880,
+    7363300,
+    7363920,
+    7363896,
+    7363832,
+    7363788,
+    7363748,
+    7363672,
+    7363556,
+    7363460,
+    7363984,
+    9856804,
+    9856676,
+    9852876,
+    9853960,
+    9853020,
+    9853596,
+    9853556,
+    9853512,
+    9853452,
+    9853396,
+    9853308,
+    7319584,
+    7320040,
+    7320688,
+    7319888,
+    7320584,
+    7320672,
+    7320432,
+    7320656,
+    7320504,
+    7320360,
+    7320232,
+    7320216,
+    7246328,
+    7246088,
+    7255320,
+    10102400,
+    10102496,
+    7269088,
+    10102696,
+    7277720,
+    7276840,
+    10102592,
+    7278264,
+    10102672,
+    10102680,
+    7241944,
+    10102688,
+    7240520,
+    7266272,
+    7246696,
+    7256104,
+    7271060,
+    7269556,
+    7269692,
+    7269252,
+    7271748,
+    7270512,
+    7273176,
+    7269936,
+    7350648,
+    7350304,
+    7349552,
+    7353704,
+    7254856,
+    7248976,
+    7265248,
+    7247400,
+    7240608,
+    7249416,
+    7240616,
+    7259664,
+    7244104,
+    7256936,
+    6750640,
+    6750760,
+    6749628,
+    6749728,
+    6749888,
+    6750328,
+    7296632,
+    7295944,
+    7279216,
+    7279016,
+    7291008,
+    7280584,
+    7283240,
+    7341156,
+    7341088,
+    7341616,
+    7341496,
+    7341368,
+    7341320,
+    7341760,
+    7341716,
+    7341276,
+    7341208,
+    7421212,
+    7421204,
+    7421164,
+    7417024,
+    7421188,
+    7421172,
+    7421180,
+    7421196,
+    7421260,
+    7421268,
+    7421220,
+    7421276,
+    7421244,
+    7421228,
+    7421236,
+    7421252,
+    7418180,
+    7418192,
+    7418064,
+    7414484,
+    7418156,
+    7418132,
+    7418144,
+    7418168,
+    7418116,
+    7418124,
+    7418076,
+    7417040,
+    7418100,
+    7418084,
+    7418092,
+    7418108,
+    7421292,
+    7421300,
+    7418548,
+    7421308,
+    7421324,
+    7418556,
+    7421316,
+    7421284,
+    7419236,
+    7419244,
+    7419140,
+    7418572,
+    7419220,
+    7419204,
+    7419212,
+    7419228,
+    7419188,
+    7419196,
+    7419148,
+    7418588,
+    7419172,
+    7419156,
+    7419164,
+    7419180,
+    7421148,
+    7421156,
+    7420780,
+    7412052,
+    7421132,
+    7421060,
+    7421068,
+    7421140,
+    7420716,
+    7420664,
+    7420536,
+    7420672,
+    7420724,
+    7420544,
+    7420656,
+    7420708,
+    7421116,
+    7421124,
+    7421076,
+    7420772,
+    7421100,
+    7421084,
+    7421092,
+    7421108,
+    7435608,
+    5156956,
+    5157140,
+    5157048,
+    5157040,
+    5157072,
+    5157080,
+    5157108,
+    5157056,
+    5157092,
+    5157124,
+    9744680,
+    9745500,
+    3049492,
+    5430400,
+    3049448,
+    3050896,
+    3049968,
+    3049296,
+    3050172,
+    3050252,
+    3049808,
+    3049048,
+    5431204,
+    3049056,
+    5003704,
+    9760060,
+    9762356,
+    3343540,
+    3342212,
+    3342932,
+    3342108,
+    3341664,
+    3344100,
+    3341672,
+    2743172,
+    9760000,
+    9761752,
+    3327624,
+    3328456,
+    9759244,
+    3327196,
+    3327132,
+    3327232,
+    3327460,
+    2194488,
+    2194516,
+    2194628,
+    2194648,
+    2194700,
+    2194760,
+    2194824,
+    2194844,
+    2194872,
+    2194904,
+    2194952,
+    5184980,
+    5185000,
+    5185076,
+    5185176,
+    5185220,
+    5185404,
+    5749424,
+    5735436,
+    9840392,
+    9840416,
+    9839612,
+    9840384,
+    9839628,
+    9839632,
+    5749656,
+    5749224,
+    5749552,
+    5749180,
+    5749416,
+    5749168,
+    5747392,
+    9840360,
+    9840300,
+    5746512,
+    9840292,
+    5747944,
+    5746748,
+    5747528,
+    5747448,
+    5747348,
+    9839636,
+    5744860,
+    9840016,
+    9840040,
+    5744756,
+    9839620,
+    5744544,
+    5744632,
+    5744764,
+    5744768,
+    5744772,
+    9840008,
+    5744936,
+    5745872,
+    9840208,
+    9840232,
+    5745820,
+    5745780,
+    5746028,
+    5745972,
+    5745728,
+    5745732,
+    9840200,
+    5745708,
+    5745388,
+    9840116,
+    9840140,
+    5745512,
+    9840100,
+    9840104,
+    5745380,
+    9840108,
+    5743304,
+    5743392,
+    9839924,
+    9839948,
+    5744520,
+    5743228,
+    5743548,
+    9839908,
+    9839912,
+    5743256,
+    9839916,
+    5481028,
+    5482052,
+    5481760,
+    5488264,
+    9761716,
+    5161204,
+    5160652,
+    6937456,
+    6937560,
+    6937624,
+    6937672,
+    6937684,
+    6937732,
+    6937744,
+    6937844,
+    6937856,
+    6937904,
+    6937964,
+    6937976,
+    4718076,
+    4718132,
+    4718156,
+    4718180,
+    4718204,
+    5409752,
+    5409784,
+    5409820,
+    5409936,
+    5410052,
+    5410084,
+    5410116,
+    5410148,
+    5410180,
+    5410220,
+    5410252,
+    5410272,
+    5410352,
+    5410828,
+    5410860,
+    5410896,
+    5410924,
+    7733764,
+    7733920,
+    7734016,
+    7734036,
+    7734064,
+    7734092,
+    7734116,
+    7734144,
+    7734172,
+    7774208,
+    7774280,
+    7774352,
+    7774440,
+    7774528,
+    7774664,
+    7818564,
+    7818684,
+    7818804,
+    7818924,
+    7819152,
+    7819376,
+    7933752,
+    7934092,
+    7934272,
+    7934324,
+    7934408,
+    7934548,
+    7934628,
+    7951256,
+    7951624,
+    7951664,
+    7951760,
+    7952116,
+    7952180,
+    7952220,
+    7952264,
+    7952336,
+    8015884,
+    8016376,
+    8016384,
+    8016392,
+    8016400,
+    8016408,
+    8016416,
+    8016424,
+    8016432,
+    8130640,
+    8131612,
+    8131916,
+    8131924,
+    8131932,
+    8131940,
+    8185400,
+    8185956,
+    8186072,
+    8186080,
+    8234312,
+    8234432,
+    8234512,
+    8234664,
+    8234804,
+    8234952,
+    8235052,
+    8536872,
+    8537516,
+    8538964,
+    8540132,
+    8540272,
+    8540412,
+    8540552,
+    8540652,
+    8540780,
+    8540888,
+    8540996,
+    8541192,
+    8541420,
+    8541548,
+    8541992,
+    8542012,
+    8542080,
+    8542724,
+    8543092,
+    8563632,
+    8565440,
+    8569268,
+    8569368,
+    8569432,
+    8569496,
+    8569608,
+    8569748,
+    8569888,
+    8570028,
+    8570168,
+    8570308,
+    8570540,
+    8570668,
+    8570908,
+    8570976,
+    8571104,
+    8571204,
+    8571228,
+    8571256,
+    8571512,
+    8571660,
+    8572856,
+    8572940,
+    8573092,
+    8576336,
+    8578312,
+    8579464,
+    8580216,
+    8580712,
+    8580896,
+    8581156,
+    8581528,
+    8581940,
+    8582012,
+    8583708,
+    8583768,
+    8584000,
+    8584792,
+    8584900,
+    8585032,
+    8585156,
+    8585312,
+    8585888,
+    8585924,
+    8587584,
+    8587916,
+    8587972,
+    8588428,
+    8588920,
+    8589220,
+    8589496,
+    8590968,
+    8591132,
+    8591580,
+    8591736,
+    8592844,
+    8593924,
+    8594016,
+    8594440,
+    8596920,
+    9241528,
+    9241744,
+    9241896,
+    9241920,
+    9241956,
+    9242056,
+    9242112,
+    9242192,
+    9242228,
+    9242340,
+    9242392,
+    9242436,
+    9242516,
+    9242568,
+    9242628,
+    9242760,
+    9242816,
+    9242840,
+    9242992,
+    9243040,
+    9243096,
+    9480188,
+    9481736,
+    9481776,
+    9481812,
+    9528980,
+    9529424,
+    9529452,
+    9529480,
+    9529508,
+    9529536,
+    9530544,
+    9530696,
+    9530788,
+    9530892,
+    9530916,
+    9530948,
+    9530968,
+    9532120,
+    9532232,
+    9532320,
+    9532536,
+    9532600,
+    9532664,
+    9532728,
+    9532772,
+    9532840,
+    9532892,
+    9532924,
+    9532948,
+    9533012,
+    9533052,
+    9533136,
+    9533240,
+    9533292,
+    9533332,
+    9533384,
+    9533416,
+    9533444,
+    9533480,
+    9544624,
+    9544776,
+    9544868,
+    9544972,
+    9544996,
+    9545028,
+    9545048,
+    9558920,
+    9559072,
+    9559164,
+    9559268,
+    9559292,
+    9559324,
+    9559344,
+    9940756,
+    9940788,
+    9940800,
+    9940812,
+    9940824,
+    9940836,
+    9940848,
+    9940860,
+    10075984,
+    10076000,
+    10076064,
+    10076108,
+    10076148,
+    10103748,
+    10103756,
+    10103792,
+    10103800,
+    10103816,
+    10103828,
+    10413644,
+    10413956,
+    10414076,
+    10414248,
+    10414376,
+    10414472,
+    10414568,
+    10414684,
+    10415028,
+    10415168,
+    10415176,
+    10415252,
+    10415336,
+    10415420,
+    10415504,
+    10415584,
+    10415660,
+    10415764,
+    10415904,
+    10416044,
+    10416332,
+    10416436,
+    10416520,
+    10416632,
+    10416792,
+    10417056,
+    10417192,
+    10417304,
+    10417592,
+    10417716,
+    10417828,
+    10417916,
+    10417968,
+    10418272,
+    10418852,
+    10418948,
+    10419140,
+    10419216,
+    10419608,
+    10419664,
+    10419704,
+    10419772,
+    10419924,
+    10420000,
+    10420040,
+    10420100,
+    10420152,
+    10420240,
+    10421640,
+    10421712,
+    10421808,
+    10422092
+  ],
+  "static_seed_source": {
+    "kind": "constructor OPD pointers traversed by code at 0x4e2a40",
+    "table_end_pointer_address": "0x00d2f648",
+    "last_slot": "0xc2038c",
+    "first_slot": "0xc20004",
+    "count": 227,
+    "note": "Derived from this exact ELF. These seeds only add translation targets; the original guest control flow still chooses execution order."
+  },
+  "static_jump_tables": [
+    {
+      "address": 4625128,
+      "count": 5,
+      "format": "signed big-endian 32-bit offsets relative to table base",
+      "targets": [
+        4625148,
+        4625164,
+        4625180,
+        4625196
+      ],
+      "dispatch": 4625124
+    },
+    {
+      "address": 6724328,
+      "count": 7,
+      "format": "signed big-endian 32-bit offsets relative to table base",
+      "targets": [
+        6724356,
+        6724408,
+        6724464,
+        6724816,
+        6724632,
+        6724676,
+        6724732
+      ],
+      "dispatch": 6724324
+    },
+    {
+      "address": 9478804,
+      "count": 84,
+      "format": "signed big-endian 32-bit offsets relative to table base",
+      "targets": [
+        9479144,
+        9479344,
+        9479404,
+        9479952,
+        9480080,
+        9480168,
+        9480224,
+        9480816,
+        9481216,
+        9481336
+      ],
+      "dispatch": 9478800
+    },
+    {
+      "address": 6691988,
+      "count": 6,
+      "format": "signed big-endian 32-bit offsets relative to table base",
+      "targets": [
+        6692012,
+        6692052,
+        6692076,
+        6692088,
+        6692104,
+        6692024
+      ],
+      "dispatch": 6691984
+    },
+    {
+      "address": 6053784,
+      "count": 13,
+      "format": "signed big-endian 32-bit offsets relative to table base",
+      "targets": [
+        6053844,
+        6053836,
+        6053852,
+        6053860,
+        6053868,
+        6053876
+      ],
+      "dispatch": 6053780
+    },
+    {
+      "address": 6060260,
+      "count": 14,
+      "format": "signed big-endian 32-bit offsets relative to table base",
+      "targets": [
+        6060356,
+        6060324,
+        6060316,
+        6060332,
+        6060340,
+        6060348
+      ],
+      "dispatch": 6060256
+    },
+    {
+      "address": 6060528,
+      "count": 14,
+      "format": "signed big-endian 32-bit offsets relative to table base",
+      "targets": [
+        6060584,
+        6060796,
+        6060608,
+        6060628,
+        6060652,
+        6060672,
+        6060696,
+        6060724,
+        6060760
+      ],
+      "dispatch": 6060524
+    },
+    {
+      "address": 6061576,
+      "count": 14,
+      "format": "signed big-endian 32-bit offsets relative to table base",
+      "targets": [
+        6061672,
+        6061640,
+        6061632,
+        6061648,
+        6061656,
+        6061664
+      ],
+      "dispatch": 6061572
+    },
+    {
+      "address": 7406320,
+      "count": 20,
+      "format": "signed big-endian 32-bit offsets relative to table base",
+      "targets": [
+        7406444,
+        7409456,
+        7406176,
+        7409428,
+        7409344,
+        7409356,
+        7408412,
+        7407784,
+        7407772,
+        7407120,
+        7411424,
+        7411376,
+        7410488,
+        7409740,
+        7406404,
+        7406168,
+        7410896,
+        7406640
+      ],
+      "dispatch": 7406316
+    },
+    {
+      "address": 7363188,
+      "count": 10,
+      "format": "signed big-endian 32-bit offsets relative to table base",
+      "targets": [
+        7363300,
+        7363920,
+        7363896,
+        7363832,
+        7363788,
+        7363748,
+        7363672,
+        7363556,
+        7363460,
+        7363984
+      ],
+      "dispatch": 7363184
+    },
+    {
+      "address": 7319736,
+      "count": 18,
+      "format": "signed big-endian 32-bit offsets relative to table base",
+      "targets": [
+        7320040,
+        7320688,
+        7319888,
+        7320584,
+        7320672,
+        7320432,
+        7320656,
+        7320504,
+        7320360,
+        7320232,
+        7320216
+      ],
+      "dispatch": 7319732
+    },
+    {
+      "address": 7269440,
+      "count": 18,
+      "format": "signed big-endian 32-bit offsets relative to table base",
+      "targets": [
+        7271060,
+        7269556,
+        7269692,
+        7269252,
+        7271748,
+        7270512,
+        7273176,
+        7269936
+      ],
+      "dispatch": 7269436
+    },
+    {
+      "address": 6749604,
+      "count": 6,
+      "format": "signed big-endian 32-bit offsets relative to table base",
+      "targets": [
+        6750640,
+        6750760,
+        6749628,
+        6749728,
+        6749888,
+        6750328
+      ],
+      "dispatch": 6749600
+    },
+    {
+      "address": 7341040,
+      "count": 12,
+      "format": "signed big-endian 32-bit offsets relative to table base",
+      "targets": [
+        7341156,
+        7341088,
+        7341616,
+        7341496,
+        7341368,
+        7341320,
+        7341760,
+        7341716,
+        7341276,
+        7341208
+      ],
+      "dispatch": 7341036
+    },
+    {
+      "address": 7412228,
+      "count": 57,
+      "format": "signed big-endian 32-bit offsets relative to table base",
+      "targets": [
+        7421212,
+        7421204,
+        7421164,
+        7417024,
+        7421188,
+        7421172,
+        7421180,
+        7421196
+      ],
+      "dispatch": 7412224
+    },
+    {
+      "address": 7417140,
+      "count": 57,
+      "format": "signed big-endian 32-bit offsets relative to table base",
+      "targets": [
+        7421260,
+        7421268,
+        7421220,
+        7421276,
+        7421244,
+        7421228,
+        7421236,
+        7421252
+      ],
+      "dispatch": 7417136
+    },
+    {
+      "address": 7417564,
+      "count": 57,
+      "format": "signed big-endian 32-bit offsets relative to table base",
+      "targets": [
+        7418180,
+        7418192,
+        7418064,
+        7414484,
+        7418156,
+        7418132,
+        7418144,
+        7418168
+      ],
+      "dispatch": 7417560
+    },
+    {
+      "address": 7417836,
+      "count": 57,
+      "format": "signed big-endian 32-bit offsets relative to table base",
+      "targets": [
+        7418116,
+        7418124,
+        7418076,
+        7417040,
+        7418100,
+        7418084,
+        7418092,
+        7418108
+      ],
+      "dispatch": 7417832
+    },
+    {
+      "address": 7418248,
+      "count": 57,
+      "format": "signed big-endian 32-bit offsets relative to table base",
+      "targets": [
+        7421292,
+        7421300,
+        7418548,
+        7421308,
+        7421324,
+        7418556,
+        7421316,
+        7421284
+      ],
+      "dispatch": 7418244
+    },
+    {
+      "address": 7418640,
+      "count": 57,
+      "format": "signed big-endian 32-bit offsets relative to table base",
+      "targets": [
+        7419236,
+        7419244,
+        7419140,
+        7418572,
+        7419220,
+        7419204,
+        7419212,
+        7419228
+      ],
+      "dispatch": 7418636
+    },
+    {
+      "address": 7418912,
+      "count": 57,
+      "format": "signed big-endian 32-bit offsets relative to table base",
+      "targets": [
+        7419188,
+        7419196,
+        7419148,
+        7418588,
+        7419172,
+        7419156,
+        7419164,
+        7419180
+      ],
+      "dispatch": 7418908
+    },
+    {
+      "address": 7419372,
+      "count": 57,
+      "format": "signed big-endian 32-bit offsets relative to table base",
+      "targets": [
+        7421148,
+        7421156,
+        7420780,
+        7412052,
+        7421132,
+        7421060,
+        7421068,
+        7421140
+      ],
+      "dispatch": 7419368
+    },
+    {
+      "address": 7420056,
+      "count": 57,
+      "format": "signed big-endian 32-bit offsets relative to table base",
+      "targets": [
+        7420716,
+        7420664,
+        7420536,
+        7420672,
+        7420724,
+        7420544,
+        7420656,
+        7420708
+      ],
+      "dispatch": 7420052
+    },
+    {
+      "address": 7420832,
+      "count": 57,
+      "format": "signed big-endian 32-bit offsets relative to table base",
+      "targets": [
+        7421116,
+        7421124,
+        7421076,
+        7420772,
+        7421100,
+        7421084,
+        7421092,
+        7421108
+      ],
+      "dispatch": 7420828
+    },
+    {
+      "address": 5157000,
+      "count": 10,
+      "format": "signed big-endian 32-bit offsets relative to table base",
+      "targets": [
+        5157140,
+        5157048,
+        5157040,
+        5157072,
+        5157080,
+        5157108,
+        5157056,
+        5157092,
+        5157124
+      ],
+      "dispatch": 5156996
+    },
+    {
+      "address": 2194396,
+      "count": 23,
+      "format": "signed big-endian 32-bit offsets relative to table base",
+      "targets": [
+        2194488,
+        2194516,
+        2194628,
+        2194648,
+        2194700,
+        2194760,
+        2194824,
+        2194844,
+        2194872,
+        2194904,
+        2194952
+      ],
+      "dispatch": 2194392,
+      "note": "Bound cmplwi r31,22 at 0x217af0 with bt gt at 0x217bbc (straight-line path, r31/cr0 unchanged); base from TOC-relative slot r30-32696; observed in native-bundle-213."
+    },
+    {
+      "address": 5184948,
+      "count": 8,
+      "format": "signed big-endian 32-bit offsets relative to table base",
+      "targets": [
+        5184980,
+        5185000,
+        5185076,
+        5185176,
+        5185220,
+        5185404
+      ],
+      "dispatch": 5184944,
+      "note": "Bound cmplwi cr7,r9,7 + bt gt at 0x4f1d90/0x4f1d94; base r5 from r30-32704, table immediately follows bctr; observed in native-bundle-214."
+    },
+    {
+      "address": 6937400,
+      "count": 14,
+      "format": "signed big-endian 32-bit offsets relative to table base",
+      "targets": [
+        6937456,
+        6937560,
+        6937624,
+        6937672,
+        6937684,
+        6937732,
+        6937744,
+        6937844,
+        6937856,
+        6937904,
+        6937964,
+        6937976
+      ],
+      "dispatch": 6937396,
+      "note": "Original byte-indexed switch reached in native-virtual-245 at case 13 -> 0x69dd30, LR 0x69dabc. lbz at 0x69db10; unsigned bound <=13 at 0x69db14/18, default 0x69dd78; rlwinm index*4 mask 0x3fc; signed lwzx/extsw offsets relative to table 0x69db38. TOC 0xd34a88, bias cell 0xd2fb74 -> 0xcacf80, original table-pointer cell 0xca5028 -> 0x69db38. All 14 original offsets/targets/executable bytes and ELF identity verified; evidence local/ratchet/target-246-evidence.json."
+    },
+    {
+      "address": 4718056,
+      "count": 5,
+      "format": "signed big-endian 32-bit offsets relative to table base",
+      "targets": [
+        4718076,
+        4718132,
+        4718156,
+        4718180,
+        4718204
+      ],
+      "dispatch": 4718052,
+      "note": "Multi-block/aliased switch at bctr 0x47fde4, reconstructed by codex GPT-6.1 Sol subagent (local/ratchet/codex/switches-250.md, status verified); slots recomputed from original ELF by this tool. All entry paths bounded per report."
+    },
+    {
+      "address": 5409644,
+      "count": 27,
+      "format": "signed big-endian 32-bit offsets relative to table base",
+      "targets": [
+        5409752,
+        5409784,
+        5409820,
+        5409936,
+        5410052,
+        5410084,
+        5410116,
+        5410148,
+        5410180,
+        5410220,
+        5410252,
+        5410272,
+        5410352,
+        5410828,
+        5410860,
+        5410896,
+        5410924
+      ],
+      "dispatch": 5409640,
+      "note": "Multi-block/aliased switch at bctr 0x528b68, reconstructed by codex GPT-6.1 Sol subagent (local/ratchet/codex/switches-250.md, status verified); slots recomputed from original ELF by this tool. All entry paths bounded per report."
+    },
+    {
+      "address": 7733728,
+      "count": 9,
+      "format": "signed big-endian 32-bit offsets relative to table base",
+      "targets": [
+        7733764,
+        7733920,
+        7734016,
+        7734036,
+        7734064,
+        7734092,
+        7734116,
+        7734144,
+        7734172
+      ],
+      "dispatch": 7733724,
+      "note": "Multi-block/aliased switch at bctr 0x7601dc, reconstructed by codex GPT-6.1 Sol subagent (local/ratchet/codex/switches-250.md, status verified); slots recomputed from original ELF by this tool. All entry paths bounded per report."
+    },
+    {
+      "address": 7774184,
+      "count": 6,
+      "format": "signed big-endian 32-bit offsets relative to table base",
+      "targets": [
+        7774208,
+        7774280,
+        7774352,
+        7774440,
+        7774528,
+        7774664
+      ],
+      "dispatch": 7774180,
+      "note": "Multi-block/aliased switch at bctr 0x769fe4, reconstructed by codex GPT-6.1 Sol subagent (local/ratchet/codex/switches-250.md, status verified); slots recomputed from original ELF by this tool. All entry paths bounded per report."
+    },
+    {
+      "address": 7818516,
+      "count": 6,
+      "format": "signed big-endian 32-bit offsets relative to table base",
+      "targets": [
+        7818564,
+        7818684,
+        7818804,
+        7818924,
+        7819152,
+        7819376
+      ],
+      "dispatch": 7818512,
+      "note": "Multi-block/aliased switch at bctr 0x774d10, reconstructed by codex GPT-6.1 Sol subagent (local/ratchet/codex/switches-250.md, status verified); slots recomputed from original ELF by this tool. All entry paths bounded per report."
+    },
+    {
+      "address": 7933836,
+      "count": 64,
+      "format": "signed big-endian 32-bit offsets relative to table base",
+      "targets": [
+        7933752,
+        7934092,
+        7934272,
+        7934324,
+        7934408,
+        7934548,
+        7934628
+      ],
+      "dispatch": 7933832,
+      "note": "Multi-block/aliased switch at bctr 0x790f88, reconstructed by codex GPT-6.1 Sol subagent (local/ratchet/codex/switches-250.md, status verified); slots recomputed from original ELF by this tool. All entry paths bounded per report."
+    },
+    {
+      "address": 7951356,
+      "count": 64,
+      "format": "signed big-endian 32-bit offsets relative to table base",
+      "targets": [
+        7951256,
+        7951624,
+        7951664,
+        7951760,
+        7952116,
+        7952180,
+        7952220,
+        7952264,
+        7952336
+      ],
+      "dispatch": 7951352,
+      "note": "Multi-block/aliased switch at bctr 0x7953f8, reconstructed by codex GPT-6.1 Sol subagent (local/ratchet/codex/switches-250.md, status verified); slots recomputed from original ELF by this tool. All entry paths bounded per report."
+    },
+    {
+      "address": 8016340,
+      "count": 9,
+      "format": "signed big-endian 32-bit offsets relative to table base",
+      "targets": [
+        8015884,
+        8016376,
+        8016384,
+        8016392,
+        8016400,
+        8016408,
+        8016416,
+        8016424,
+        8016432
+      ],
+      "dispatch": 8016336,
+      "note": "Multi-block/aliased switch at bctr 0x7a51d0, reconstructed by codex GPT-6.1 Sol subagent (local/ratchet/codex/switches-250.md, status verified); slots recomputed from original ELF by this tool. All entry paths bounded per report."
+    },
+    {
+      "address": 8130828,
+      "count": 6,
+      "format": "signed big-endian 32-bit offsets relative to table base",
+      "targets": [
+        8130640,
+        8131612,
+        8131916,
+        8131924,
+        8131932,
+        8131940
+      ],
+      "dispatch": 8130824,
+      "note": "Multi-block/aliased switch at bctr 0x7c1108, reconstructed by codex GPT-6.1 Sol subagent (local/ratchet/codex/switches-250.md, status verified); slots recomputed from original ELF by this tool. All entry paths bounded per report."
+    },
+    {
+      "address": 8185588,
+      "count": 6,
+      "format": "signed big-endian 32-bit offsets relative to table base",
+      "targets": [
+        8185400,
+        8185956,
+        8186072,
+        8186080
+      ],
+      "dispatch": 8185584,
+      "note": "Multi-block/aliased switch at bctr 0x7ce6f0, reconstructed by codex GPT-6.1 Sol subagent (local/ratchet/codex/switches-250.md, status verified); slots recomputed from original ELF by this tool. All entry paths bounded per report."
+    },
+    {
+      "address": 8234396,
+      "count": 9,
+      "format": "signed big-endian 32-bit offsets relative to table base",
+      "targets": [
+        8234312,
+        8234432,
+        8234512,
+        8234664,
+        8234804,
+        8234952,
+        8235052
+      ],
+      "dispatch": 8234392,
+      "note": "Multi-block/aliased switch at bctr 0x7da598, reconstructed by codex GPT-6.1 Sol subagent (local/ratchet/codex/switches-250.md, status verified); slots recomputed from original ELF by this tool. All entry paths bounded per report."
+    },
+    {
+      "address": 8536156,
+      "count": 106,
+      "format": "signed big-endian 32-bit offsets relative to table base",
+      "targets": [
+        8536872,
+        8537516,
+        8538964,
+        8540132,
+        8540272,
+        8540412,
+        8540552,
+        8540652,
+        8540780,
+        8540888,
+        8540996,
+        8541192,
+        8541420,
+        8541548,
+        8541992,
+        8542012,
+        8542080,
+        8542724,
+        8543092,
+        8563632,
+        8565440,
+        8569268,
+        8569368,
+        8569432,
+        8569496,
+        8569608,
+        8569748,
+        8569888,
+        8570028,
+        8570168,
+        8570308,
+        8570540,
+        8570668,
+        8570908,
+        8570976,
+        8571104,
+        8571204,
+        8571228,
+        8571256,
+        8571512,
+        8571660,
+        8572856,
+        8572940,
+        8573092,
+        8576336,
+        8578312,
+        8579464,
+        8580216,
+        8580712,
+        8580896,
+        8581156,
+        8581528,
+        8581940,
+        8582012,
+        8583708,
+        8583768,
+        8584000,
+        8584792,
+        8584900,
+        8585032,
+        8585156,
+        8585312,
+        8585888,
+        8585924,
+        8587584,
+        8587916,
+        8587972,
+        8588428,
+        8588920,
+        8589220,
+        8589496,
+        8590968,
+        8591132,
+        8591580,
+        8591736,
+        8592844,
+        8593924,
+        8594016,
+        8594440,
+        8596920
+      ],
+      "dispatch": 8536152,
+      "note": "Multi-block/aliased switch at bctr 0x824058, reconstructed by codex GPT-6.1 Sol subagent (local/ratchet/codex/switches-250.md, status verified); slots recomputed from original ELF by this tool. All entry paths bounded per report."
+    },
+    {
+      "address": 9241652,
+      "count": 23,
+      "format": "signed big-endian 32-bit offsets relative to table base",
+      "targets": [
+        9241528,
+        9241744,
+        9241896,
+        9241920,
+        9241956,
+        9242056,
+        9242112,
+        9242192,
+        9242228,
+        9242340,
+        9242392,
+        9242436,
+        9242516,
+        9242568,
+        9242628,
+        9242760,
+        9242816,
+        9242840,
+        9242992,
+        9243040,
+        9243096
+      ],
+      "dispatch": 9241648,
+      "note": "Multi-block/aliased switch at bctr 0x8d0430, reconstructed by codex GPT-6.1 Sol subagent (local/ratchet/codex/switches-250.md, status verified); slots recomputed from original ELF by this tool. All entry paths bounded per report."
+    },
+    {
+      "address": 9481436,
+      "count": 25,
+      "format": "signed big-endian 32-bit offsets relative to table base",
+      "targets": [
+        9480188,
+        9481736,
+        9481776,
+        9481812
+      ],
+      "dispatch": 9481432,
+      "note": "Multi-block/aliased switch at bctr 0x90acd8, reconstructed by codex GPT-6.1 Sol subagent (local/ratchet/codex/switches-250.md, status verified); slots recomputed from original ELF by this tool. All entry paths bounded per report."
+    },
+    {
+      "address": 9529256,
+      "count": 25,
+      "format": "signed big-endian 32-bit offsets relative to table base",
+      "targets": [
+        9528980,
+        9529424,
+        9529452,
+        9529480,
+        9529508,
+        9529536
+      ],
+      "dispatch": 9529252,
+      "note": "Multi-block/aliased switch at bctr 0x9167a4, reconstructed by codex GPT-6.1 Sol subagent (local/ratchet/codex/switches-250.md, status verified); slots recomputed from original ELF by this tool. All entry paths bounded per report."
+    },
+    {
+      "address": 9530580,
+      "count": 13,
+      "format": "signed big-endian 32-bit offsets relative to table base",
+      "targets": [
+        9530544,
+        9530696,
+        9530788,
+        9530892,
+        9530916,
+        9530948,
+        9530968
+      ],
+      "dispatch": 9530576,
+      "note": "Multi-block/aliased switch at bctr 0x916cd0, reconstructed by codex GPT-6.1 Sol subagent (local/ratchet/codex/switches-250.md, status unclear); slots recomputed from original ELF by this tool. Path-bound proof incomplete: entries/base verified, used only as translation seeds; execution follows real CTR."
+    },
+    {
+      "address": 9531928,
+      "count": 48,
+      "format": "signed big-endian 32-bit offsets relative to table base",
+      "targets": [
+        9532120,
+        9532232,
+        9532320,
+        9532536,
+        9532600,
+        9532664,
+        9532728,
+        9532772,
+        9532840,
+        9532892,
+        9532924,
+        9532948,
+        9533012,
+        9533052,
+        9533136,
+        9533240,
+        9533292,
+        9533332,
+        9533384,
+        9533416,
+        9533444,
+        9533480
+      ],
+      "dispatch": 9531924,
+      "note": "Multi-block/aliased switch at bctr 0x917214, reconstructed by codex GPT-6.1 Sol subagent (local/ratchet/codex/switches-250.md, status verified); slots recomputed from original ELF by this tool. All entry paths bounded per report."
+    },
+    {
+      "address": 9544660,
+      "count": 13,
+      "format": "signed big-endian 32-bit offsets relative to table base",
+      "targets": [
+        9544624,
+        9544776,
+        9544868,
+        9544972,
+        9544996,
+        9545028,
+        9545048
+      ],
+      "dispatch": 9544656,
+      "note": "Multi-block/aliased switch at bctr 0x91a3d0, reconstructed by codex GPT-6.1 Sol subagent (local/ratchet/codex/switches-250.md, status unclear); slots recomputed from original ELF by this tool. Path-bound proof incomplete: entries/base verified, used only as translation seeds; execution follows real CTR."
+    },
+    {
+      "address": 9558956,
+      "count": 13,
+      "format": "signed big-endian 32-bit offsets relative to table base",
+      "targets": [
+        9558920,
+        9559072,
+        9559164,
+        9559268,
+        9559292,
+        9559324,
+        9559344
+      ],
+      "dispatch": 9558952,
+      "note": "Multi-block/aliased switch at bctr 0x91dba8, reconstructed by codex GPT-6.1 Sol subagent (local/ratchet/codex/switches-250.md, status unclear); slots recomputed from original ELF by this tool. Path-bound proof incomplete: entries/base verified, used only as translation seeds; execution follows real CTR."
+    },
+    {
+      "address": 9940724,
+      "count": 8,
+      "format": "signed big-endian 32-bit offsets relative to table base",
+      "targets": [
+        9940756,
+        9940788,
+        9940800,
+        9940812,
+        9940824,
+        9940836,
+        9940848,
+        9940860
+      ],
+      "dispatch": 9940720,
+      "note": "Multi-block/aliased switch at bctr 0x97aef0, reconstructed by codex GPT-6.1 Sol subagent (local/ratchet/codex/switches-250.md, status verified); slots recomputed from original ELF by this tool. All entry paths bounded per report."
+    },
+    {
+      "address": 10075756,
+      "count": 5,
+      "format": "signed big-endian 32-bit offsets relative to table base",
+      "targets": [
+        10075984,
+        10076000,
+        10076064,
+        10076108,
+        10076148
+      ],
+      "dispatch": 10075752,
+      "note": "Multi-block/aliased switch at bctr 0x99be68, reconstructed by codex GPT-6.1 Sol subagent (local/ratchet/codex/switches-250.md, status verified); slots recomputed from original ELF by this tool. All entry paths bounded per report."
+    },
+    {
+      "address": 10103708,
+      "count": 8,
+      "format": "signed big-endian 32-bit offsets relative to table base",
+      "targets": [
+        10103748,
+        10103756,
+        10103792,
+        10103800,
+        10103816,
+        10103828
+      ],
+      "dispatch": 10103704,
+      "note": "Multi-block/aliased switch at bctr 0x9a2b98, reconstructed by codex GPT-6.1 Sol subagent (local/ratchet/codex/switches-250.md, status verified); slots recomputed from original ELF by this tool. All entry paths bounded per report."
+    },
+    {
+      "address": 10413388,
+      "count": 64,
+      "format": "signed big-endian 32-bit offsets relative to table base",
+      "targets": [
+        10413644,
+        10413956,
+        10414076,
+        10414248,
+        10414376,
+        10414472,
+        10414568,
+        10414684,
+        10415028,
+        10415168,
+        10415176,
+        10415252,
+        10415336,
+        10415420,
+        10415504,
+        10415584,
+        10415660,
+        10415764,
+        10415904,
+        10416044,
+        10416332,
+        10416436,
+        10416520,
+        10416632,
+        10416792,
+        10417056,
+        10417192,
+        10417304,
+        10417592,
+        10417716,
+        10417828,
+        10417916,
+        10417968,
+        10418272,
+        10418852,
+        10418948,
+        10419140,
+        10419216,
+        10419608,
+        10419664,
+        10419704,
+        10419772,
+        10419924,
+        10420000,
+        10420040,
+        10420100,
+        10420152,
+        10420240,
+        10421640,
+        10421712,
+        10421808,
+        10422092
+      ],
+      "dispatch": 10413384,
+      "note": "Multi-block/aliased switch at bctr 0x9ee548, reconstructed by codex GPT-6.1 Sol subagent (local/ratchet/codex/switches-250.md, status verified); slots recomputed from original ELF by this tool. All entry paths bounded per report."
+    }
+  ],
+  "observed_indirect_entries": [
+    {
+      "descriptor": 13670632,
+      "code": 5055692,
+      "call_return": 5057944
+    },
+    {
+      "descriptor": 13692848,
+      "code": 5481028,
+      "call_return": 5744608
+    }
+  ],
+  "static_function_tables": [
+    {
+      "address": 12829416,
+      "entries": [
+        {
+          "slot": 12829416,
+          "descriptor": 13511160,
+          "code": 9760608
+        },
+        {
+          "slot": 12829420,
+          "descriptor": 13511336,
+          "code": 9761272
+        },
+        {
+          "slot": 12829424,
+          "descriptor": 13510752,
+          "code": 9759232
+        },
+        {
+          "slot": 12829428,
+          "descriptor": 13510760,
+          "code": 9759236
+        },
+        {
+          "slot": 12829432,
+          "descriptor": 13511376,
+          "code": 3319504
+        },
+        {
+          "slot": 12829436,
+          "descriptor": 13510776,
+          "code": 9759248
+        },
+        {
+          "slot": 12829440,
+          "descriptor": 13510784,
+          "code": 9759252
+        },
+        {
+          "slot": 12829444,
+          "descriptor": 13511368,
+          "code": 3319240
+        },
+        {
+          "slot": 12829448,
+          "descriptor": 13510800,
+          "code": 9759264
+        },
+        {
+          "slot": 12829452,
+          "descriptor": 13510808,
+          "code": 9759268
+        }
+      ]
+    },
+    {
+      "address": 13190208,
+      "entries": [
+        {
+          "slot": 13190208,
+          "descriptor": 13692848,
+          "code": 5481028
+        },
+        {
+          "slot": 13190212,
+          "descriptor": 13692872,
+          "code": 5482052
+        },
+        {
+          "slot": 13190216,
+          "descriptor": 13692864,
+          "code": 5481760
+        },
+        {
+          "slot": 13190220,
+          "descriptor": 13692968,
+          "code": 5488264
+        },
+        {
+          "slot": 13190224,
+          "descriptor": 13511936,
+          "code": 9761716
+        },
+        {
+          "slot": 13190228,
+          "descriptor": 13676832,
+          "code": 5161204
+        },
+        {
+          "slot": 13190232,
+          "descriptor": 13676776,
+          "code": 5160652
+        }
+      ],
+      "note": "Seven original constant-pool callback references installed at 0x32c40c..0x32c464 via setters 0x577cf4..0x577db4 into loader control block 0xf46da4 (+0xc,+0x10,+0x14,+0x1c,+0x24,+0x28,+0x2c). Allocation callback OPD 0xd0efb0 -> 0x53a244 reached in native-bundle-242 at 0x57a7dc with count=0x136, element-size=4, flags=0x20. Original ELF identity, OPDs, TOC and executable bytes verified; evidence local/ratchet/target-244-evidence.json. Other callbacks verified from original registration, not claimed as observed runtime calls."
+    }
+  ],
+  "firmware_static_seeds": {
+    "libsysutil": {
+      "analysis_sha256": "2351cec1aa3d5b7fef3774326716e532e8da9706c0b88907b6102e7d5e231abe",
+      "offsets": [
+        17516,
+        17600,
+        17644,
+        17692,
+        17740,
+        17788,
+        17836,
+        17884,
+        17896,
+        17908,
+        17920,
+        17932,
+        17944,
+        17308
+      ],
+      "note": "Firmware 3.01 callback OPD at relocated 0x2013093c and 12-entry relative jump table at module offset 0x4490."
+    },
+    "libsre": {
+      "analysis_sha256": "3aab67e689a53d56d5a55f1534e4d2be7c5172ecb730aa5eb9cc485684a6dd99",
+      "offsets": [
+        43648,
+        36444,
+        71044
+      ],
+      "note": "Firmware 3.01 PPU thread entry points from original OPDs: SpursHdlr1 0xaa80 (OPD 0x32e54), SpursHdlr0 0x8e5c; observed native sys_ppu_thread_create calls. Original task notification callback OPD 0x202730cc -> 0x20251584 invoked at 0x20244458 in bundle 182."
+    },
+    "libgcm_sys": {
+      "analysis_sha256": "ebb0a1d09d8f7f81659dcd28579be9426292ba2e150c9537ba4d582034b15478",
+      "offsets": [
+        29960
+      ]
+    },
+    "libfs": {
+      "analysis_sha256": "19926a176c7f6e2b794ffb8707e28e7459a0c2913bea2781daae0f18dce4428e",
+      "offsets": [
+        54516,
+        54080
+      ],
+      "note": "Firmware 3.01 regular filesystem stat callback: original OPD relocated 0x20190778, observed via libfs vtable 0x20190310 slot +12. Open callback OPD 0x201907a8 -> 0x2018d340 observed at 0x20187a78."
+    },
+    "libsysutil_np_trophy": {
+      "analysis_sha256": "8fc9fd147c6223f6e1c1bf3033421a11d78978c10fc528b39d56a9f812b0b38d",
+      "offsets": [
+        23032,
+        23440
+      ],
+      "note": "Firmware 3.01 sysutil event handlers registered by sceNpTrophyInit (0x886d0747): type 299 OPD relocated 0x20230104 -> 0x202259f8 (status forwarder, dispatched at libsysutil 0x20127e30 in bundle 210) and type 310 OPD 0x202300f4 -> 0x20225b90; both TOC 0x20238360."
+    }
+  },
+  "static_vtables": [
+    {
+      "address": 12923768,
+      "count": 17,
+      "note": "Object vtable invoked at 0x66ce78; slot +8 resolves to 0x66cf98.",
+      "entries": [
+        {
+          "slot": 12923768,
+          "descriptor": 13730376,
+          "code": 9852760
+        },
+        {
+          "slot": 12923772,
+          "descriptor": 13730304,
+          "code": 9852700
+        },
+        {
+          "slot": 12923776,
+          "descriptor": 13730128,
+          "code": 6737816
+        },
+        {
+          "slot": 12923780,
+          "descriptor": 13730168,
+          "code": 6738756
+        },
+        {
+          "slot": 12923784,
+          "descriptor": 13730280,
+          "code": 9852692
+        },
+        {
+          "slot": 12923788,
+          "descriptor": 13729968,
+          "code": 9852216
+        },
+        {
+          "slot": 12923792,
+          "descriptor": 13729976,
+          "code": 9852228
+        },
+        {
+          "slot": 12923796,
+          "descriptor": 13730328,
+          "code": 6740300
+        },
+        {
+          "slot": 12923800,
+          "descriptor": 13730392,
+          "code": 6741844
+        },
+        {
+          "slot": 12923804,
+          "descriptor": 13730336,
+          "code": 6740360
+        },
+        {
+          "slot": 12923808,
+          "descriptor": 13729920,
+          "code": 9852192
+        },
+        {
+          "slot": 12923812,
+          "descriptor": 13730360,
+          "code": 6741332
+        },
+        {
+          "slot": 12923816,
+          "descriptor": 13730368,
+          "code": 6741528
+        },
+        {
+          "slot": 12923820,
+          "descriptor": 13730400,
+          "code": 6741980
+        },
+        {
+          "slot": 12923824,
+          "descriptor": 13730384,
+          "code": 6741592
+        },
+        {
+          "slot": 12923828,
+          "descriptor": 13729952,
+          "code": 9852208
+        },
+        {
+          "slot": 12923832,
+          "descriptor": 13730312,
+          "code": 6740088
+        }
+      ]
+    },
+    {
+      "address": 12829512,
+      "count": 10,
+      "note": "Original state object vtable reached after four startup flips, bounded by zero RTTI/separator words; slot +8 calls 0x32bb74 in bundle 138.",
+      "entries": [
+        {
+          "slot": 12829512,
+          "descriptor": 13510984,
+          "code": 9760120
+        },
+        {
+          "slot": 12829516,
+          "descriptor": 13511728,
+          "code": 9761412
+        },
+        {
+          "slot": 12829520,
+          "descriptor": 13511824,
+          "code": 3324788
+        },
+        {
+          "slot": 12829524,
+          "descriptor": 13511792,
+          "code": 3323532
+        },
+        {
+          "slot": 12829528,
+          "descriptor": 13511808,
+          "code": 3323580
+        },
+        {
+          "slot": 12829532,
+          "descriptor": 13510776,
+          "code": 9759248
+        },
+        {
+          "slot": 12829536,
+          "descriptor": 13510784,
+          "code": 9759252
+        },
+        {
+          "slot": 12829540,
+          "descriptor": 13511768,
+          "code": 3323448
+        },
+        {
+          "slot": 12829544,
+          "descriptor": 13510800,
+          "code": 9759264
+        },
+        {
+          "slot": 12829548,
+          "descriptor": 13510808,
+          "code": 9759268
+        }
+      ]
+    },
+    {
+      "address": 12924112,
+      "count": 5,
+      "note": "Allocator vtable reached at original call 0x6ff070 in bundle 142; first descriptor 0xd18430 calls 0x966340.",
+      "entries": [
+        {
+          "slot": 12924112,
+          "descriptor": 13730864,
+          "code": 9855808
+        },
+        {
+          "slot": 12924116,
+          "descriptor": 13730808,
+          "code": 9855332
+        },
+        {
+          "slot": 12924120,
+          "descriptor": 13730856,
+          "code": 9855552
+        },
+        {
+          "slot": 12924124,
+          "descriptor": 13730680,
+          "code": 9853284
+        },
+        {
+          "slot": 12924128,
+          "descriptor": 13730912,
+          "code": 9856024
+        }
+      ]
+    },
+    {
+      "address": 12927624,
+      "count": 7,
+      "note": "Original FIOS object vtable observed at call 0x6fd2b4 in bundle 148; descriptor 0xd1ea88 resolves to 0x6fe0f0.",
+      "entries": [
+        {
+          "slot": 12927624,
+          "descriptor": 13758248,
+          "code": 7401336
+        },
+        {
+          "slot": 12927628,
+          "descriptor": 13758240,
+          "code": 7401056
+        },
+        {
+          "slot": 12927632,
+          "descriptor": 13756824,
+          "code": 10102800
+        },
+        {
+          "slot": 12927636,
+          "descriptor": 13758136,
+          "code": 7397408
+        },
+        {
+          "slot": 12927640,
+          "descriptor": 13758184,
+          "code": 7398304
+        },
+        {
+          "slot": 12927644,
+          "descriptor": 13758280,
+          "code": 7405992
+        },
+        {
+          "slot": 12927648,
+          "descriptor": 13757064,
+          "code": 7332080
+        }
+      ]
+    },
+    {
+      "address": 12923928,
+      "count": 11,
+      "note": "Original allocator object vtable observed by native bundle 161 at 0x966028; slot +24 descriptor 0xd183a0 -> 0x965a74.",
+      "entries": [
+        {
+          "slot": 12923928,
+          "descriptor": 13731064,
+          "code": 9856804
+        },
+        {
+          "slot": 12923932,
+          "descriptor": 13731056,
+          "code": 9856676
+        },
+        {
+          "slot": 12923936,
+          "descriptor": 13730544,
+          "code": 9852876
+        },
+        {
+          "slot": 12923940,
+          "descriptor": 13730736,
+          "code": 9853960
+        },
+        {
+          "slot": 12923944,
+          "descriptor": 13730552,
+          "code": 9853020
+        },
+        {
+          "slot": 12923948,
+          "descriptor": 13730728,
+          "code": 9853596
+        },
+        {
+          "slot": 12923952,
+          "descriptor": 13730720,
+          "code": 9853556
+        },
+        {
+          "slot": 12923956,
+          "descriptor": 13730712,
+          "code": 9853512
+        },
+        {
+          "slot": 12923960,
+          "descriptor": 13730704,
+          "code": 9853452
+        },
+        {
+          "slot": 12923964,
+          "descriptor": 13730696,
+          "code": 9853396
+        },
+        {
+          "slot": 12923968,
+          "descriptor": 13730688,
+          "code": 9853308
+        }
+      ]
+    },
+    {
+      "address": 12927120,
+      "count": 19,
+      "note": "Original FIOS backend vtable observed at 0x6fb228 in bundle 168; slot +20 -> OPD 0xd1e718 -> 0x6eeae0.",
+      "entries": [
+        {
+          "slot": 12927120,
+          "descriptor": 13756008,
+          "code": 7246328
+        },
+        {
+          "slot": 12927124,
+          "descriptor": 13756000,
+          "code": 7246088
+        },
+        {
+          "slot": 12927128,
+          "descriptor": 13756112,
+          "code": 7255320
+        },
+        {
+          "slot": 12927132,
+          "descriptor": 13755792,
+          "code": 10102400
+        },
+        {
+          "slot": 12927136,
+          "descriptor": 13755800,
+          "code": 10102496
+        },
+        {
+          "slot": 12927140,
+          "descriptor": 13756184,
+          "code": 7269088
+        },
+        {
+          "slot": 12927144,
+          "descriptor": 13755872,
+          "code": 10102696
+        },
+        {
+          "slot": 12927148,
+          "descriptor": 13756200,
+          "code": 7277720
+        },
+        {
+          "slot": 12927152,
+          "descriptor": 13756192,
+          "code": 7276840
+        },
+        {
+          "slot": 12927156,
+          "descriptor": 13755808,
+          "code": 10102592
+        },
+        {
+          "slot": 12927160,
+          "descriptor": 13756208,
+          "code": 7278264
+        },
+        {
+          "slot": 12927164,
+          "descriptor": 13755816,
+          "code": 10102672
+        },
+        {
+          "slot": 12927168,
+          "descriptor": 13755824,
+          "code": 10102680
+        },
+        {
+          "slot": 12927172,
+          "descriptor": 13755912,
+          "code": 7241944
+        },
+        {
+          "slot": 12927176,
+          "descriptor": 13755832,
+          "code": 10102688
+        },
+        {
+          "slot": 12927180,
+          "descriptor": 13755848,
+          "code": 7240520
+        },
+        {
+          "slot": 12927184,
+          "descriptor": 13756176,
+          "code": 7266272
+        },
+        {
+          "slot": 12927188,
+          "descriptor": 13756024,
+          "code": 7246696
+        },
+        {
+          "slot": 12927192,
+          "descriptor": 13756120,
+          "code": 7256104
+        }
+      ]
+    },
+    {
+      "address": 12927528,
+      "count": 7,
+      "note": "Original chained FIOS backend vtable observed at 0x6ef2c4 in bundle 169; slot +20 -> OPD 0xd1ec40 -> 0x703568.",
+      "entries": [
+        {
+          "slot": 12927528,
+          "descriptor": 13757472,
+          "code": 7350648
+        },
+        {
+          "slot": 12927532,
+          "descriptor": 13757464,
+          "code": 7350304
+        },
+        {
+          "slot": 12927536,
+          "descriptor": 13757456,
+          "code": 7349552
+        },
+        {
+          "slot": 12927540,
+          "descriptor": 13755792,
+          "code": 10102400
+        },
+        {
+          "slot": 12927544,
+          "descriptor": 13755800,
+          "code": 10102496
+        },
+        {
+          "slot": 12927548,
+          "descriptor": 13757504,
+          "code": 7353704
+        },
+        {
+          "slot": 12927552,
+          "descriptor": 13755872,
+          "code": 10102696
+        }
+      ]
+    },
+    {
+      "address": 12927032,
+      "count": 19,
+      "note": "Original FIOS backend vtable observed at 0x6f0630 in bundle 170; OPD 0xd1e688 -> 0x6e9628.",
+      "entries": [
+        {
+          "slot": 12927032,
+          "descriptor": 13756104,
+          "code": 7254856
+        },
+        {
+          "slot": 12927036,
+          "descriptor": 13756048,
+          "code": 7248976
+        },
+        {
+          "slot": 12927040,
+          "descriptor": 13756112,
+          "code": 7255320
+        },
+        {
+          "slot": 12927044,
+          "descriptor": 13755792,
+          "code": 10102400
+        },
+        {
+          "slot": 12927048,
+          "descriptor": 13755800,
+          "code": 10102496
+        },
+        {
+          "slot": 12927052,
+          "descriptor": 13756184,
+          "code": 7269088
+        },
+        {
+          "slot": 12927056,
+          "descriptor": 13755872,
+          "code": 10102696
+        },
+        {
+          "slot": 12927060,
+          "descriptor": 13756168,
+          "code": 7265248
+        },
+        {
+          "slot": 12927064,
+          "descriptor": 13756192,
+          "code": 7276840
+        },
+        {
+          "slot": 12927068,
+          "descriptor": 13755808,
+          "code": 10102592
+        },
+        {
+          "slot": 12927072,
+          "descriptor": 13756208,
+          "code": 7278264
+        },
+        {
+          "slot": 12927076,
+          "descriptor": 13756040,
+          "code": 7247400
+        },
+        {
+          "slot": 12927080,
+          "descriptor": 13755856,
+          "code": 7240608
+        },
+        {
+          "slot": 12927084,
+          "descriptor": 13755912,
+          "code": 7241944
+        },
+        {
+          "slot": 12927088,
+          "descriptor": 13756056,
+          "code": 7249416
+        },
+        {
+          "slot": 12927092,
+          "descriptor": 13755864,
+          "code": 7240616
+        },
+        {
+          "slot": 12927096,
+          "descriptor": 13756160,
+          "code": 7259664
+        },
+        {
+          "slot": 12927100,
+          "descriptor": 13755968,
+          "code": 7244104
+        },
+        {
+          "slot": 12927104,
+          "descriptor": 13756128,
+          "code": 7256936
+        }
+      ]
+    },
+    {
+      "address": 12927336,
+      "count": 10,
+      "note": "Original FIOS backend vtable observed at 0x704718 in bundle 175. Ten OPDs end at 0xc54190, followed by RTTI (not a null delimiter).",
+      "entries": [
+        {
+          "slot": 12927336,
+          "descriptor": 13756528,
+          "code": 7296632
+        },
+        {
+          "slot": 12927340,
+          "descriptor": 13756520,
+          "code": 7295944
+        },
+        {
+          "slot": 12927344,
+          "descriptor": 13756232,
+          "code": 7279216
+        },
+        {
+          "slot": 12927348,
+          "descriptor": 13756224,
+          "code": 7279016
+        },
+        {
+          "slot": 12927352,
+          "descriptor": 13755800,
+          "code": 10102496
+        },
+        {
+          "slot": 12927356,
+          "descriptor": 13756648,
+          "code": 7319584
+        },
+        {
+          "slot": 12927360,
+          "descriptor": 13755872,
+          "code": 10102696
+        },
+        {
+          "slot": 12927364,
+          "descriptor": 13756456,
+          "code": 7291008
+        },
+        {
+          "slot": 12927368,
+          "descriptor": 13756296,
+          "code": 7280584
+        },
+        {
+          "slot": 12927372,
+          "descriptor": 13756344,
+          "code": 7283240
+        }
+      ]
+    },
+    {
+      "address": 12812928,
+      "count": 14,
+      "note": "Original game object vtable reached through slot 2 at 0x52db04, observed in native bundle 194; fourteen matching original OPDs followed by nulls.",
+      "entries": [
+        {
+          "slot": 12812928,
+          "descriptor": 13482752,
+          "code": 9744680
+        },
+        {
+          "slot": 12812932,
+          "descriptor": 13483544,
+          "code": 9745500
+        },
+        {
+          "slot": 12812936,
+          "descriptor": 13483520,
+          "code": 3049492
+        },
+        {
+          "slot": 12812940,
+          "descriptor": 13690072,
+          "code": 5430400
+        },
+        {
+          "slot": 12812944,
+          "descriptor": 13483512,
+          "code": 3049448
+        },
+        {
+          "slot": 12812948,
+          "descriptor": 13483576,
+          "code": 3050896
+        },
+        {
+          "slot": 12812952,
+          "descriptor": 13483536,
+          "code": 3049968
+        },
+        {
+          "slot": 12812956,
+          "descriptor": 13483496,
+          "code": 3049296
+        },
+        {
+          "slot": 12812960,
+          "descriptor": 13483552,
+          "code": 3050172
+        },
+        {
+          "slot": 12812964,
+          "descriptor": 13483560,
+          "code": 3050252
+        },
+        {
+          "slot": 12812968,
+          "descriptor": 13483528,
+          "code": 3049808
+        },
+        {
+          "slot": 12812972,
+          "descriptor": 13483408,
+          "code": 3049048
+        },
+        {
+          "slot": 12812976,
+          "descriptor": 13690168,
+          "code": 5431204
+        },
+        {
+          "slot": 12812980,
+          "descriptor": 13483456,
+          "code": 3049056
+        }
+      ]
+    },
+    {
+      "address": 12829736,
+      "count": 10,
+      "note": "Original game object vtable reached through slot 2 (OPD 0xce3178 -> 0x3304b4) at 0x669b28, observed in native bundle 204; ten original OPDs with TOC 0xd34a88 before the first null slot. Later slots after the two nulls are not included.",
+      "entries": [
+        {
+          "slot": 12829736,
+          "descriptor": 13510976,
+          "code": 9760060
+        },
+        {
+          "slot": 12829740,
+          "descriptor": 13512960,
+          "code": 9762356
+        },
+        {
+          "slot": 12829744,
+          "descriptor": 13513080,
+          "code": 3343540
+        },
+        {
+          "slot": 12829748,
+          "descriptor": 13513024,
+          "code": 3342212
+        },
+        {
+          "slot": 12829752,
+          "descriptor": 13513056,
+          "code": 3342932
+        },
+        {
+          "slot": 12829756,
+          "descriptor": 13513008,
+          "code": 3342108
+        },
+        {
+          "slot": 12829760,
+          "descriptor": 13512920,
+          "code": 3341664
+        },
+        {
+          "slot": 12829764,
+          "descriptor": 13513088,
+          "code": 3344100
+        },
+        {
+          "slot": 12829768,
+          "descriptor": 13510800,
+          "code": 9759264
+        },
+        {
+          "slot": 12829772,
+          "descriptor": 13512928,
+          "code": 3341672
+        }
+      ]
+    },
+    {
+      "address": 12829560,
+      "count": 10,
+      "note": "Original game vtable reached at 0x669b28, observed in native-bundle-211; 10 consecutive original OPDs (.opd section, TOC 0xd34a88) up to the first non-OPD word.",
+      "entries": [
+        {
+          "slot": 12829560,
+          "descriptor": 13510968,
+          "code": 9760000
+        },
+        {
+          "slot": 12829564,
+          "descriptor": 13512120,
+          "code": 9761752
+        },
+        {
+          "slot": 12829568,
+          "descriptor": 13512080,
+          "code": 3327624
+        },
+        {
+          "slot": 12829572,
+          "descriptor": 13512152,
+          "code": 3328456
+        },
+        {
+          "slot": 12829576,
+          "descriptor": 13510768,
+          "code": 9759244
+        },
+        {
+          "slot": 12829580,
+          "descriptor": 13512048,
+          "code": 3327196
+        },
+        {
+          "slot": 12829584,
+          "descriptor": 13512040,
+          "code": 3327132
+        },
+        {
+          "slot": 12829588,
+          "descriptor": 13512056,
+          "code": 3327232
+        },
+        {
+          "slot": 12829592,
+          "descriptor": 13510800,
+          "code": 9759264
+        },
+        {
+          "slot": 12829596,
+          "descriptor": 13512064,
+          "code": 3327460
+        }
+      ]
+    },
+    {
+      "address": 12923464,
+      "count": 14,
+      "note": "Original game vtable reached at 0x577dfc, observed in native-bundle-238; 14 consecutive original OPDs (.opd section, TOC 0xd34a88) up to the first non-OPD word.",
+      "entries": [
+        {
+          "slot": 12923464,
+          "descriptor": 13702568,
+          "code": 5749424
+        },
+        {
+          "slot": 12923468,
+          "descriptor": 13701648,
+          "code": 5735436
+        },
+        {
+          "slot": 12923472,
+          "descriptor": 13702536,
+          "code": 9840392
+        },
+        {
+          "slot": 12923476,
+          "descriptor": 13702592,
+          "code": 9840416
+        },
+        {
+          "slot": 12923480,
+          "descriptor": 13701544,
+          "code": 9839612
+        },
+        {
+          "slot": 12923484,
+          "descriptor": 13702512,
+          "code": 9840384
+        },
+        {
+          "slot": 12923488,
+          "descriptor": 13701560,
+          "code": 9839628
+        },
+        {
+          "slot": 12923492,
+          "descriptor": 13701568,
+          "code": 9839632
+        },
+        {
+          "slot": 12923496,
+          "descriptor": 13702584,
+          "code": 5749656
+        },
+        {
+          "slot": 12923500,
+          "descriptor": 13702552,
+          "code": 5749224
+        },
+        {
+          "slot": 12923504,
+          "descriptor": 13702576,
+          "code": 5749552
+        },
+        {
+          "slot": 12923508,
+          "descriptor": 13702544,
+          "code": 5749180
+        },
+        {
+          "slot": 12923512,
+          "descriptor": 13702560,
+          "code": 5749416
+        },
+        {
+          "slot": 12923516,
+          "descriptor": 13702528,
+          "code": 5749168
+        }
+      ]
+    },
+    {
+      "address": 12923400,
+      "count": 14,
+      "note": "Original game vtable reached at 0x577dfc, observed in native-bundle-240; 14 consecutive original OPDs (.opd section, TOC 0xd34a88) up to the first non-OPD word.",
+      "entries": [
+        {
+          "slot": 12923400,
+          "descriptor": 13702440,
+          "code": 5747392
+        },
+        {
+          "slot": 12923404,
+          "descriptor": 13701648,
+          "code": 5735436
+        },
+        {
+          "slot": 12923408,
+          "descriptor": 13702472,
+          "code": 9840360
+        },
+        {
+          "slot": 12923412,
+          "descriptor": 13702384,
+          "code": 9840300
+        },
+        {
+          "slot": 12923416,
+          "descriptor": 13702376,
+          "code": 5746512
+        },
+        {
+          "slot": 12923420,
+          "descriptor": 13702368,
+          "code": 9840292
+        },
+        {
+          "slot": 12923424,
+          "descriptor": 13701560,
+          "code": 9839628
+        },
+        {
+          "slot": 12923428,
+          "descriptor": 13701568,
+          "code": 9839632
+        },
+        {
+          "slot": 12923432,
+          "descriptor": 13702480,
+          "code": 5747944
+        },
+        {
+          "slot": 12923436,
+          "descriptor": 13702408,
+          "code": 5746748
+        },
+        {
+          "slot": 12923440,
+          "descriptor": 13702456,
+          "code": 5747528
+        },
+        {
+          "slot": 12923444,
+          "descriptor": 13702448,
+          "code": 5747448
+        },
+        {
+          "slot": 12923448,
+          "descriptor": 13702432,
+          "code": 5747348
+        },
+        {
+          "slot": 12923452,
+          "descriptor": 13701576,
+          "code": 9839636
+        }
+      ]
+    },
+    {
+      "address": 12923200,
+      "count": 15,
+      "note": "Original loader constructor 0x57765c: type 2, vtable loaded at 0x57778c from original pointer cell 0xca1840, installed at 0x577798, object registered at 0x5777ac. Six-entry dispatch loop 0x5778b4..0x5778dc reached in bundles 238/240 (indices 0/1). All original OPDs, TOC 0xd34a88 and executable targets verified; constructor-only evidence for this type, no claim of runtime dispatch. Evidence: local/ratchet/loader-vtables-242-evidence.json.",
+      "entries": [
+        {
+          "slot": 12923200,
+          "descriptor": 13702072,
+          "code": 5744860
+        },
+        {
+          "slot": 12923204,
+          "descriptor": 13701648,
+          "code": 5735436
+        },
+        {
+          "slot": 12923208,
+          "descriptor": 13702080,
+          "code": 9840016
+        },
+        {
+          "slot": 12923212,
+          "descriptor": 13702104,
+          "code": 9840040
+        },
+        {
+          "slot": 12923216,
+          "descriptor": 13702040,
+          "code": 5744756
+        },
+        {
+          "slot": 12923220,
+          "descriptor": 13701552,
+          "code": 9839620
+        },
+        {
+          "slot": 12923224,
+          "descriptor": 13702024,
+          "code": 5744544
+        },
+        {
+          "slot": 12923228,
+          "descriptor": 13701568,
+          "code": 9839632
+        },
+        {
+          "slot": 12923232,
+          "descriptor": 13702032,
+          "code": 5744632
+        },
+        {
+          "slot": 12923236,
+          "descriptor": 13702048,
+          "code": 5744764
+        },
+        {
+          "slot": 12923240,
+          "descriptor": 13702056,
+          "code": 5744768
+        },
+        {
+          "slot": 12923244,
+          "descriptor": 13702064,
+          "code": 5744772
+        },
+        {
+          "slot": 12923248,
+          "descriptor": 13702016,
+          "code": 9840008
+        },
+        {
+          "slot": 12923252,
+          "descriptor": 13701576,
+          "code": 9839636
+        },
+        {
+          "slot": 12923256,
+          "descriptor": 13702088,
+          "code": 5744936
+        }
+      ]
+    },
+    {
+      "address": 12923336,
+      "count": 14,
+      "note": "Original loader constructor 0x57765c: type 3, vtable loaded at 0x5777e0 from original pointer cell 0xca1844, installed at 0x5777f4, object registered at 0x577808. Six-entry dispatch loop 0x5778b4..0x5778dc reached in bundles 238/240 (indices 0/1). All original OPDs, TOC 0xd34a88 and executable targets verified; constructor-only evidence for this type, no claim of runtime dispatch. Evidence: local/ratchet/loader-vtables-242-evidence.json.",
+      "entries": [
+        {
+          "slot": 12923336,
+          "descriptor": 13702312,
+          "code": 5745872
+        },
+        {
+          "slot": 12923340,
+          "descriptor": 13701648,
+          "code": 5735436
+        },
+        {
+          "slot": 12923344,
+          "descriptor": 13702280,
+          "code": 9840208
+        },
+        {
+          "slot": 12923348,
+          "descriptor": 13702336,
+          "code": 9840232
+        },
+        {
+          "slot": 12923352,
+          "descriptor": 13701544,
+          "code": 9839612
+        },
+        {
+          "slot": 12923356,
+          "descriptor": 13701552,
+          "code": 9839620
+        },
+        {
+          "slot": 12923360,
+          "descriptor": 13702304,
+          "code": 5745820
+        },
+        {
+          "slot": 12923364,
+          "descriptor": 13702296,
+          "code": 5745780
+        },
+        {
+          "slot": 12923368,
+          "descriptor": 13702328,
+          "code": 5746028
+        },
+        {
+          "slot": 12923372,
+          "descriptor": 13702320,
+          "code": 5745972
+        },
+        {
+          "slot": 12923376,
+          "descriptor": 13702264,
+          "code": 5745728
+        },
+        {
+          "slot": 12923380,
+          "descriptor": 13702272,
+          "code": 5745732
+        },
+        {
+          "slot": 12923384,
+          "descriptor": 13702240,
+          "code": 9840200
+        },
+        {
+          "slot": 12923388,
+          "descriptor": 13702256,
+          "code": 5745708
+        }
+      ]
+    },
+    {
+      "address": 12923272,
+      "count": 14,
+      "note": "Original loader constructor 0x57765c: type 4, vtable loaded at 0x577840 from original pointer cell 0xca1848, installed at 0x57784c, object registered at 0x57787c. Six-entry dispatch loop 0x5778b4..0x5778dc reached in bundles 238/240 (indices 0/1). All original OPDs, TOC 0xd34a88 and executable targets verified; constructor-only evidence for this type, no claim of runtime dispatch. Evidence: local/ratchet/loader-vtables-242-evidence.json.",
+      "entries": [
+        {
+          "slot": 12923272,
+          "descriptor": 13702200,
+          "code": 5745388
+        },
+        {
+          "slot": 12923276,
+          "descriptor": 13701648,
+          "code": 5735436
+        },
+        {
+          "slot": 12923280,
+          "descriptor": 13702192,
+          "code": 9840116
+        },
+        {
+          "slot": 12923284,
+          "descriptor": 13702216,
+          "code": 9840140
+        },
+        {
+          "slot": 12923288,
+          "descriptor": 13701544,
+          "code": 9839612
+        },
+        {
+          "slot": 12923292,
+          "descriptor": 13701552,
+          "code": 9839620
+        },
+        {
+          "slot": 12923296,
+          "descriptor": 13701560,
+          "code": 9839628
+        },
+        {
+          "slot": 12923300,
+          "descriptor": 13701568,
+          "code": 9839632
+        },
+        {
+          "slot": 12923304,
+          "descriptor": 13702208,
+          "code": 5745512
+        },
+        {
+          "slot": 12923308,
+          "descriptor": 13702152,
+          "code": 9840100
+        },
+        {
+          "slot": 12923312,
+          "descriptor": 13702160,
+          "code": 9840104
+        },
+        {
+          "slot": 12923316,
+          "descriptor": 13702176,
+          "code": 5745380
+        },
+        {
+          "slot": 12923320,
+          "descriptor": 13702168,
+          "code": 9840108
+        },
+        {
+          "slot": 12923324,
+          "descriptor": 13701576,
+          "code": 9839636
+        }
+      ]
+    },
+    {
+      "address": 12923136,
+      "count": 14,
+      "note": "Original loader constructor 0x57765c: type 5, vtable loaded at 0x577894 from original pointer cell 0xca184c, installed at 0x5778a4, object registered at 0x5778b0. Six-entry dispatch loop 0x5778b4..0x5778dc reached in bundles 238/240 (indices 0/1). All original OPDs, TOC 0xd34a88 and executable targets verified; constructor-only evidence for this type, no claim of runtime dispatch. Evidence: local/ratchet/loader-vtables-242-evidence.json.",
+      "entries": [
+        {
+          "slot": 12923136,
+          "descriptor": 13701952,
+          "code": 5743304
+        },
+        {
+          "slot": 12923140,
+          "descriptor": 13701960,
+          "code": 5743392
+        },
+        {
+          "slot": 12923144,
+          "descriptor": 13701936,
+          "code": 9839924
+        },
+        {
+          "slot": 12923148,
+          "descriptor": 13701984,
+          "code": 9839948
+        },
+        {
+          "slot": 12923152,
+          "descriptor": 13701976,
+          "code": 5744520
+        },
+        {
+          "slot": 12923156,
+          "descriptor": 13701552,
+          "code": 9839620
+        },
+        {
+          "slot": 12923160,
+          "descriptor": 13701920,
+          "code": 5743228
+        },
+        {
+          "slot": 12923164,
+          "descriptor": 13701568,
+          "code": 9839632
+        },
+        {
+          "slot": 12923168,
+          "descriptor": 13701968,
+          "code": 5743548
+        },
+        {
+          "slot": 12923172,
+          "descriptor": 13701896,
+          "code": 9839908
+        },
+        {
+          "slot": 12923176,
+          "descriptor": 13701904,
+          "code": 9839912
+        },
+        {
+          "slot": 12923180,
+          "descriptor": 13701928,
+          "code": 5743256
+        },
+        {
+          "slot": 12923184,
+          "descriptor": 13701912,
+          "code": 9839916
+        },
+        {
+          "slot": 12923188,
+          "descriptor": 13701576,
+          "code": 9839636
+        }
+      ]
+    }
+  ],
+  "static_callbacks": [
+    {
+      "descriptor": 13812072,
+      "code": 9475624,
+      "call_site": 9478452,
+      "note": "C library formatted-output callback from original OPD."
+    },
+    {
+      "descriptor": 13736536,
+      "code": 6905028,
+      "note": "Original igSpuPrintHandler thread entry observed in native bundle 102."
+    },
+    {
+      "descriptor": 13730080,
+      "code": 6736032,
+      "note": "Original SysUtilThread() entry observed in native bundle 119."
+    },
+    {
+      "descriptor": 13668192,
+      "code": 5003704,
+      "note": "Original TrophyInitThread entry, PPU thread 10 created in bundle 142 and first scheduled to this entry after initialization in native bundle 197."
+    },
+    {
+      "descriptor": 13450040,
+      "code": 2743172,
+      "toc": 13847176,
+      "note": "sceNpTrophyRegisterContext statusCb OPD from original ELF data segment (unique OPD with this code); called by libsysutil_np_trophy 0x20225b50 in native bundle 207 with status NOT_INSTALLED."
+    }
+  ],
+  "embedded_spu_images": [
+    {
+      "address": 539404288,
+      "size": 2696,
+      "sha256": "59cb39e9fafdf06feaf1c9134631ce261bc59edf9bb5b5e17755a1160060215c",
+      "note": "Firmware 3.01 libsre embedded SPU boot image, original sys_spu_image_import observed at source 0x2026a800.",
+      "overlays": [
+        {
+          "address": 539396224,
+          "size": 8064,
+          "local_address": 2560,
+          "sha256": "fa8e5c57e69dc4f07b9da207fb44859fc0bf8735931cff5b81656ebf36bf6dd4",
+          "note": "Original SPURS bootstrap DMA GET in build 47, followed by branch to LS 0xa00 after 104 native SPU instructions."
+        },
+        {
+          "address": 11377920,
+          "size": 560,
+          "local_address": 2560,
+          "sha256": "70dfc5772734f288fe917ea482370fad0960bf8c16ed118634f98aa6136a50e3",
+          "note": "Original game SPURS workload, DMA GET EA 0xad9d00 to LS 0xa00 size 0x230 and branch observed in native bundle 105."
+        },
+        {
+          "address": 11376512,
+          "size": 1296,
+          "local_address": 259456,
+          "sha256": "af92b38ca61591b296d030a22a1bf6eb43c18444df6f8c1adf6845fc8651eaef",
+          "note": "Original game job manager, DMA GET EA 0xad9780 to LS 0x3f580 size 0x510 and call to LS 0x3f5a0 observed in native bundle 106."
+        },
+        {
+          "address": 539388672,
+          "size": 7456,
+          "local_address": 2560,
+          "sha256": "32e5d27bd618b04a10a10f5433cd190df509cbdeccf81309ea269e6500551345",
+          "note": "Original firmware SPURS workload DMA GET EA 0x20266b00 to LS 0xa00 size 0x1d20 observed in bundle 162 after cache initialization; SPU 0x100 branches to loaded entry."
+        },
+        {
+          "address": 12535168,
+          "size": 35872,
+          "local_address": 12288,
+          "sha256": "9bf7a38c46ca1e04dea7ea0cd515d920d9f49cf5a1c00e63637c0a5c7edad481",
+          "note": "Original game embedded SPU ELF at 0xbf4480, entry 0x3050; executable PT_LOAD validated, DMA GET chunks at 0xbf4580/0xbf8580/0xbfc580 to LS 0x3000/0x7000/0xb000 observed in bundle 166."
+        },
+        {
+          "address": 12573824,
+          "local_address": 16384,
+          "size": 56368,
+          "sha256": "3777cc31da011b1e23080376466a7278ea576bd96d01c509988d45541cd78571",
+          "note": "PT_LOAD segment of embedded SPU ELF at 0xbfdc00 (ELF32 BE machine 23, entry 0x4080, vaddr 0x4000, offset 0x80, filesz 0xdc30)."
+        },
+        {
+          "address": 12632960,
+          "local_address": 16384,
+          "size": 46544,
+          "sha256": "d1b9e6c64da6744c633ee529371c6b503ab88d994df9aaeb259f35d81675eeba",
+          "note": "PT_LOAD segment of embedded SPU ELF at 0xc0c300 (ELF32 BE machine 23, entry 0x4080, vaddr 0x4000, offset 0x80, filesz 0xb5d0)."
+        },
+        {
+          "address": 14390912,
+          "size": 1376,
+          "local_address": 68864,
+          "sha256": "b1035c12d720a66b9d28c3d9f93350b6a82419a7dff2186c035e82ba3e754966",
+          "note": "SPU module table 0xde3600 entry 0 (verified {EA,size}); LS 0x10d00 = HYPOTHESIS contiguous run from entry 0 at 0x10d00 in table order (observed: entries 2,3 at 0x10d00/0x11f00 in native-virtual-264). Runtime word guard."
+        },
+        {
+          "address": 14392320,
+          "size": 3600,
+          "local_address": 70240,
+          "sha256": "7ea1e313d82f21470fcc816de25b0fa2056c0639c01103cdc32f1ef4a522d85d",
+          "note": "SPU module table 0xde3600 entry 1 (verified {EA,size}); LS 0x11260 = HYPOTHESIS contiguous run from entry 0 at 0x10d00 in table order (observed: entries 2,3 at 0x10d00/0x11f00 in native-virtual-264). Runtime word guard."
+        },
+        {
+          "address": 14396032,
+          "size": 4608,
+          "local_address": 73840,
+          "sha256": "77229e54f83aa785316e878a7d17fd1b773e24f24498e4f43d40d88b054a71ba",
+          "note": "SPU module table 0xde3600 entry 2 (verified {EA,size}); LS 0x12070 = HYPOTHESIS contiguous run from entry 0 at 0x10d00 in table order (observed: entries 2,3 at 0x10d00/0x11f00 in native-virtual-264). Runtime word guard."
+        },
+        {
+          "address": 14400640,
+          "size": 7952,
+          "local_address": 78448,
+          "sha256": "5f628145f9ec56d7b86c24b134d5ce2aa96a43146d9167a91ab704d2cb699f27",
+          "note": "SPU module table 0xde3600 entry 3 (verified {EA,size}); LS 0x13270 = HYPOTHESIS contiguous run from entry 0 at 0x10d00 in table order (observed: entries 2,3 at 0x10d00/0x11f00 in native-virtual-264). Runtime word guard."
+        },
+        {
+          "address": 14408704,
+          "size": 880,
+          "local_address": 86400,
+          "sha256": "eb3e131365f1f30900ffcc2a4a1880c848f26fa9a8a9f0074c963b46ba9f9952",
+          "note": "SPU module table 0xde3600 entry 4 (verified {EA,size}); LS 0x15180 = HYPOTHESIS contiguous run from entry 0 at 0x10d00 in table order (observed: entries 2,3 at 0x10d00/0x11f00 in native-virtual-264). Runtime word guard."
+        },
+        {
+          "address": 14409600,
+          "size": 5504,
+          "local_address": 87280,
+          "sha256": "3131a0a54dc24ab5e171751d1b751b67664e2a1eaa48fe0a3a15d97342b10e52",
+          "note": "SPU module table 0xde3600 entry 5 (verified {EA,size}); LS 0x154f0 = HYPOTHESIS contiguous run from entry 0 at 0x10d00 in table order (observed: entries 2,3 at 0x10d00/0x11f00 in native-virtual-264). Runtime word guard."
+        },
+        {
+          "address": 14415104,
+          "size": 2112,
+          "local_address": 92784,
+          "sha256": "8dd854b15365f6c9b170a71b4dc575d1a456b06ab4aafb066b992fc164adf0d5",
+          "note": "SPU module table 0xde3600 entry 6 (verified {EA,size}); LS 0x16a70 = HYPOTHESIS contiguous run from entry 0 at 0x10d00 in table order (observed: entries 2,3 at 0x10d00/0x11f00 in native-virtual-264). Runtime word guard."
+        },
+        {
+          "address": 14417280,
+          "size": 7088,
+          "local_address": 94896,
+          "sha256": "3ebb5d6dd0a173f42ccaab53f2ca65aabe3c62dae26ac6ba1a2972ed157d1381",
+          "note": "SPU module table 0xde3600 entry 7 (verified {EA,size}); LS 0x172b0 = HYPOTHESIS contiguous run from entry 0 at 0x10d00 in table order (observed: entries 2,3 at 0x10d00/0x11f00 in native-virtual-264). Runtime word guard."
+        },
+        {
+          "address": 14424448,
+          "size": 3872,
+          "local_address": 101984,
+          "sha256": "bba03f55525708f4b116a4348ca3c986f2cab6b980ccc8abe0a5ce414a4cd955",
+          "note": "SPU module table 0xde3600 entry 8 (verified {EA,size}); LS 0x18e60 = HYPOTHESIS contiguous run from entry 0 at 0x10d00 in table order (observed: entries 2,3 at 0x10d00/0x11f00 in native-virtual-264). Runtime word guard."
+        },
+        {
+          "address": 14428416,
+          "size": 12000,
+          "local_address": 105856,
+          "sha256": "984a243f3033477df6014bbb5d1c1c1c9fec122d0c59bb07ebe0790f5060022a",
+          "note": "SPU module table 0xde3600 entry 9 (verified {EA,size}); LS 0x19d80 = HYPOTHESIS contiguous run from entry 0 at 0x10d00 in table order (observed: entries 2,3 at 0x10d00/0x11f00 in native-virtual-264). Runtime word guard."
+        },
+        {
+          "address": 14392320,
+          "size": 3600,
+          "local_address": 68864,
+          "sha256": "7ea1e313d82f21470fcc816de25b0fa2056c0639c01103cdc32f1ef4a522d85d",
+          "note": "SPU module table 0xde3600 entry 1 (verified {EA,size}); LS 0x10d00 = HYPOTHESIS contiguous run from entry 1 at 0x10d00 in table order (observed: entries 2,3 at 0x10d00/0x11f00 in native-virtual-264). Runtime word guard."
+        },
+        {
+          "address": 14396032,
+          "size": 4608,
+          "local_address": 72464,
+          "sha256": "77229e54f83aa785316e878a7d17fd1b773e24f24498e4f43d40d88b054a71ba",
+          "note": "SPU module table 0xde3600 entry 2 (verified {EA,size}); LS 0x11b10 = HYPOTHESIS contiguous run from entry 1 at 0x10d00 in table order (observed: entries 2,3 at 0x10d00/0x11f00 in native-virtual-264). Runtime word guard."
+        },
+        {
+          "address": 14400640,
+          "size": 7952,
+          "local_address": 77072,
+          "sha256": "5f628145f9ec56d7b86c24b134d5ce2aa96a43146d9167a91ab704d2cb699f27",
+          "note": "SPU module table 0xde3600 entry 3 (verified {EA,size}); LS 0x12d10 = HYPOTHESIS contiguous run from entry 1 at 0x10d00 in table order (observed: entries 2,3 at 0x10d00/0x11f00 in native-virtual-264). Runtime word guard."
+        },
+        {
+          "address": 14408704,
+          "size": 880,
+          "local_address": 85024,
+          "sha256": "eb3e131365f1f30900ffcc2a4a1880c848f26fa9a8a9f0074c963b46ba9f9952",
+          "note": "SPU module table 0xde3600 entry 4 (verified {EA,size}); LS 0x14c20 = HYPOTHESIS contiguous run from entry 1 at 0x10d00 in table order (observed: entries 2,3 at 0x10d00/0x11f00 in native-virtual-264). Runtime word guard."
+        },
+        {
+          "address": 14409600,
+          "size": 5504,
+          "local_address": 85904,
+          "sha256": "3131a0a54dc24ab5e171751d1b751b67664e2a1eaa48fe0a3a15d97342b10e52",
+          "note": "SPU module table 0xde3600 entry 5 (verified {EA,size}); LS 0x14f90 = HYPOTHESIS contiguous run from entry 1 at 0x10d00 in table order (observed: entries 2,3 at 0x10d00/0x11f00 in native-virtual-264). Runtime word guard."
+        },
+        {
+          "address": 14415104,
+          "size": 2112,
+          "local_address": 91408,
+          "sha256": "8dd854b15365f6c9b170a71b4dc575d1a456b06ab4aafb066b992fc164adf0d5",
+          "note": "SPU module table 0xde3600 entry 6 (verified {EA,size}); LS 0x16510 = HYPOTHESIS contiguous run from entry 1 at 0x10d00 in table order (observed: entries 2,3 at 0x10d00/0x11f00 in native-virtual-264). Runtime word guard."
+        },
+        {
+          "address": 14417280,
+          "size": 7088,
+          "local_address": 93520,
+          "sha256": "3ebb5d6dd0a173f42ccaab53f2ca65aabe3c62dae26ac6ba1a2972ed157d1381",
+          "note": "SPU module table 0xde3600 entry 7 (verified {EA,size}); LS 0x16d50 = HYPOTHESIS contiguous run from entry 1 at 0x10d00 in table order (observed: entries 2,3 at 0x10d00/0x11f00 in native-virtual-264). Runtime word guard."
+        },
+        {
+          "address": 14424448,
+          "size": 3872,
+          "local_address": 100608,
+          "sha256": "bba03f55525708f4b116a4348ca3c986f2cab6b980ccc8abe0a5ce414a4cd955",
+          "note": "SPU module table 0xde3600 entry 8 (verified {EA,size}); LS 0x18900 = HYPOTHESIS contiguous run from entry 1 at 0x10d00 in table order (observed: entries 2,3 at 0x10d00/0x11f00 in native-virtual-264). Runtime word guard."
+        },
+        {
+          "address": 14428416,
+          "size": 12000,
+          "local_address": 104480,
+          "sha256": "984a243f3033477df6014bbb5d1c1c1c9fec122d0c59bb07ebe0790f5060022a",
+          "note": "SPU module table 0xde3600 entry 9 (verified {EA,size}); LS 0x19820 = HYPOTHESIS contiguous run from entry 1 at 0x10d00 in table order (observed: entries 2,3 at 0x10d00/0x11f00 in native-virtual-264). Runtime word guard."
+        },
+        {
+          "address": 14396032,
+          "size": 4608,
+          "local_address": 68864,
+          "sha256": "77229e54f83aa785316e878a7d17fd1b773e24f24498e4f43d40d88b054a71ba",
+          "note": "SPU module table 0xde3600 entry 2 (verified {EA,size}); LS 0x10d00 = HYPOTHESIS contiguous run from entry 2 at 0x10d00 in table order (observed: entries 2,3 at 0x10d00/0x11f00 in native-virtual-264). Runtime word guard."
+        },
+        {
+          "address": 14400640,
+          "size": 7952,
+          "local_address": 73472,
+          "sha256": "5f628145f9ec56d7b86c24b134d5ce2aa96a43146d9167a91ab704d2cb699f27",
+          "note": "SPU module table 0xde3600 entry 3 (verified {EA,size}); LS 0x11f00 = HYPOTHESIS contiguous run from entry 2 at 0x10d00 in table order (observed: entries 2,3 at 0x10d00/0x11f00 in native-virtual-264). Runtime word guard."
+        },
+        {
+          "address": 14408704,
+          "size": 880,
+          "local_address": 81424,
+          "sha256": "eb3e131365f1f30900ffcc2a4a1880c848f26fa9a8a9f0074c963b46ba9f9952",
+          "note": "SPU module table 0xde3600 entry 4 (verified {EA,size}); LS 0x13e10 = HYPOTHESIS contiguous run from entry 2 at 0x10d00 in table order (observed: entries 2,3 at 0x10d00/0x11f00 in native-virtual-264). Runtime word guard."
+        },
+        {
+          "address": 14409600,
+          "size": 5504,
+          "local_address": 82304,
+          "sha256": "3131a0a54dc24ab5e171751d1b751b67664e2a1eaa48fe0a3a15d97342b10e52",
+          "note": "SPU module table 0xde3600 entry 5 (verified {EA,size}); LS 0x14180 = HYPOTHESIS contiguous run from entry 2 at 0x10d00 in table order (observed: entries 2,3 at 0x10d00/0x11f00 in native-virtual-264). Runtime word guard."
+        },
+        {
+          "address": 14415104,
+          "size": 2112,
+          "local_address": 87808,
+          "sha256": "8dd854b15365f6c9b170a71b4dc575d1a456b06ab4aafb066b992fc164adf0d5",
+          "note": "SPU module table 0xde3600 entry 6 (verified {EA,size}); LS 0x15700 = HYPOTHESIS contiguous run from entry 2 at 0x10d00 in table order (observed: entries 2,3 at 0x10d00/0x11f00 in native-virtual-264). Runtime word guard."
+        },
+        {
+          "address": 14417280,
+          "size": 7088,
+          "local_address": 89920,
+          "sha256": "3ebb5d6dd0a173f42ccaab53f2ca65aabe3c62dae26ac6ba1a2972ed157d1381",
+          "note": "SPU module table 0xde3600 entry 7 (verified {EA,size}); LS 0x15f40 = HYPOTHESIS contiguous run from entry 2 at 0x10d00 in table order (observed: entries 2,3 at 0x10d00/0x11f00 in native-virtual-264). Runtime word guard."
+        },
+        {
+          "address": 14424448,
+          "size": 3872,
+          "local_address": 97008,
+          "sha256": "bba03f55525708f4b116a4348ca3c986f2cab6b980ccc8abe0a5ce414a4cd955",
+          "note": "SPU module table 0xde3600 entry 8 (verified {EA,size}); LS 0x17af0 = HYPOTHESIS contiguous run from entry 2 at 0x10d00 in table order (observed: entries 2,3 at 0x10d00/0x11f00 in native-virtual-264). Runtime word guard."
+        },
+        {
+          "address": 14428416,
+          "size": 12000,
+          "local_address": 100880,
+          "sha256": "984a243f3033477df6014bbb5d1c1c1c9fec122d0c59bb07ebe0790f5060022a",
+          "note": "SPU module table 0xde3600 entry 9 (verified {EA,size}); LS 0x18a10 = HYPOTHESIS contiguous run from entry 2 at 0x10d00 in table order (observed: entries 2,3 at 0x10d00/0x11f00 in native-virtual-264). Runtime word guard."
+        },
+        {
+          "address": 14400640,
+          "size": 7952,
+          "local_address": 68864,
+          "sha256": "5f628145f9ec56d7b86c24b134d5ce2aa96a43146d9167a91ab704d2cb699f27",
+          "note": "SPU module table 0xde3600 entry 3 (verified {EA,size}); LS 0x10d00 = HYPOTHESIS contiguous run from entry 3 at 0x10d00 in table order (observed: entries 2,3 at 0x10d00/0x11f00 in native-virtual-264). Runtime word guard."
+        },
+        {
+          "address": 14408704,
+          "size": 880,
+          "local_address": 76816,
+          "sha256": "eb3e131365f1f30900ffcc2a4a1880c848f26fa9a8a9f0074c963b46ba9f9952",
+          "note": "SPU module table 0xde3600 entry 4 (verified {EA,size}); LS 0x12c10 = HYPOTHESIS contiguous run from entry 3 at 0x10d00 in table order (observed: entries 2,3 at 0x10d00/0x11f00 in native-virtual-264). Runtime word guard."
+        },
+        {
+          "address": 14409600,
+          "size": 5504,
+          "local_address": 77696,
+          "sha256": "3131a0a54dc24ab5e171751d1b751b67664e2a1eaa48fe0a3a15d97342b10e52",
+          "note": "SPU module table 0xde3600 entry 5 (verified {EA,size}); LS 0x12f80 = HYPOTHESIS contiguous run from entry 3 at 0x10d00 in table order (observed: entries 2,3 at 0x10d00/0x11f00 in native-virtual-264). Runtime word guard."
+        },
+        {
+          "address": 14415104,
+          "size": 2112,
+          "local_address": 83200,
+          "sha256": "8dd854b15365f6c9b170a71b4dc575d1a456b06ab4aafb066b992fc164adf0d5",
+          "note": "SPU module table 0xde3600 entry 6 (verified {EA,size}); LS 0x14500 = HYPOTHESIS contiguous run from entry 3 at 0x10d00 in table order (observed: entries 2,3 at 0x10d00/0x11f00 in native-virtual-264). Runtime word guard."
+        },
+        {
+          "address": 14417280,
+          "size": 7088,
+          "local_address": 85312,
+          "sha256": "3ebb5d6dd0a173f42ccaab53f2ca65aabe3c62dae26ac6ba1a2972ed157d1381",
+          "note": "SPU module table 0xde3600 entry 7 (verified {EA,size}); LS 0x14d40 = HYPOTHESIS contiguous run from entry 3 at 0x10d00 in table order (observed: entries 2,3 at 0x10d00/0x11f00 in native-virtual-264). Runtime word guard."
+        },
+        {
+          "address": 14424448,
+          "size": 3872,
+          "local_address": 92400,
+          "sha256": "bba03f55525708f4b116a4348ca3c986f2cab6b980ccc8abe0a5ce414a4cd955",
+          "note": "SPU module table 0xde3600 entry 8 (verified {EA,size}); LS 0x168f0 = HYPOTHESIS contiguous run from entry 3 at 0x10d00 in table order (observed: entries 2,3 at 0x10d00/0x11f00 in native-virtual-264). Runtime word guard."
+        },
+        {
+          "address": 14428416,
+          "size": 12000,
+          "local_address": 96272,
+          "sha256": "984a243f3033477df6014bbb5d1c1c1c9fec122d0c59bb07ebe0790f5060022a",
+          "note": "SPU module table 0xde3600 entry 9 (verified {EA,size}); LS 0x17810 = HYPOTHESIS contiguous run from entry 3 at 0x10d00 in table order (observed: entries 2,3 at 0x10d00/0x11f00 in native-virtual-264). Runtime word guard."
+        },
+        {
+          "address": 14408704,
+          "size": 880,
+          "local_address": 68864,
+          "sha256": "eb3e131365f1f30900ffcc2a4a1880c848f26fa9a8a9f0074c963b46ba9f9952",
+          "note": "SPU module table 0xde3600 entry 4 (verified {EA,size}); LS 0x10d00 = HYPOTHESIS contiguous run from entry 4 at 0x10d00 in table order (observed: entries 2,3 at 0x10d00/0x11f00 in native-virtual-264). Runtime word guard."
+        },
+        {
+          "address": 14409600,
+          "size": 5504,
+          "local_address": 69744,
+          "sha256": "3131a0a54dc24ab5e171751d1b751b67664e2a1eaa48fe0a3a15d97342b10e52",
+          "note": "SPU module table 0xde3600 entry 5 (verified {EA,size}); LS 0x11070 = HYPOTHESIS contiguous run from entry 4 at 0x10d00 in table order (observed: entries 2,3 at 0x10d00/0x11f00 in native-virtual-264). Runtime word guard."
+        },
+        {
+          "address": 14415104,
+          "size": 2112,
+          "local_address": 75248,
+          "sha256": "8dd854b15365f6c9b170a71b4dc575d1a456b06ab4aafb066b992fc164adf0d5",
+          "note": "SPU module table 0xde3600 entry 6 (verified {EA,size}); LS 0x125f0 = HYPOTHESIS contiguous run from entry 4 at 0x10d00 in table order (observed: entries 2,3 at 0x10d00/0x11f00 in native-virtual-264). Runtime word guard."
+        },
+        {
+          "address": 14417280,
+          "size": 7088,
+          "local_address": 77360,
+          "sha256": "3ebb5d6dd0a173f42ccaab53f2ca65aabe3c62dae26ac6ba1a2972ed157d1381",
+          "note": "SPU module table 0xde3600 entry 7 (verified {EA,size}); LS 0x12e30 = HYPOTHESIS contiguous run from entry 4 at 0x10d00 in table order (observed: entries 2,3 at 0x10d00/0x11f00 in native-virtual-264). Runtime word guard."
+        },
+        {
+          "address": 14424448,
+          "size": 3872,
+          "local_address": 84448,
+          "sha256": "bba03f55525708f4b116a4348ca3c986f2cab6b980ccc8abe0a5ce414a4cd955",
+          "note": "SPU module table 0xde3600 entry 8 (verified {EA,size}); LS 0x149e0 = HYPOTHESIS contiguous run from entry 4 at 0x10d00 in table order (observed: entries 2,3 at 0x10d00/0x11f00 in native-virtual-264). Runtime word guard."
+        },
+        {
+          "address": 14428416,
+          "size": 12000,
+          "local_address": 88320,
+          "sha256": "984a243f3033477df6014bbb5d1c1c1c9fec122d0c59bb07ebe0790f5060022a",
+          "note": "SPU module table 0xde3600 entry 9 (verified {EA,size}); LS 0x15900 = HYPOTHESIS contiguous run from entry 4 at 0x10d00 in table order (observed: entries 2,3 at 0x10d00/0x11f00 in native-virtual-264). Runtime word guard."
+        },
+        {
+          "address": 14409600,
+          "size": 5504,
+          "local_address": 68864,
+          "sha256": "3131a0a54dc24ab5e171751d1b751b67664e2a1eaa48fe0a3a15d97342b10e52",
+          "note": "SPU module table 0xde3600 entry 5 (verified {EA,size}); LS 0x10d00 = HYPOTHESIS contiguous run from entry 5 at 0x10d00 in table order (observed: entries 2,3 at 0x10d00/0x11f00 in native-virtual-264). Runtime word guard."
+        },
+        {
+          "address": 14415104,
+          "size": 2112,
+          "local_address": 74368,
+          "sha256": "8dd854b15365f6c9b170a71b4dc575d1a456b06ab4aafb066b992fc164adf0d5",
+          "note": "SPU module table 0xde3600 entry 6 (verified {EA,size}); LS 0x12280 = HYPOTHESIS contiguous run from entry 5 at 0x10d00 in table order (observed: entries 2,3 at 0x10d00/0x11f00 in native-virtual-264). Runtime word guard."
+        },
+        {
+          "address": 14417280,
+          "size": 7088,
+          "local_address": 76480,
+          "sha256": "3ebb5d6dd0a173f42ccaab53f2ca65aabe3c62dae26ac6ba1a2972ed157d1381",
+          "note": "SPU module table 0xde3600 entry 7 (verified {EA,size}); LS 0x12ac0 = HYPOTHESIS contiguous run from entry 5 at 0x10d00 in table order (observed: entries 2,3 at 0x10d00/0x11f00 in native-virtual-264). Runtime word guard."
+        },
+        {
+          "address": 14424448,
+          "size": 3872,
+          "local_address": 83568,
+          "sha256": "bba03f55525708f4b116a4348ca3c986f2cab6b980ccc8abe0a5ce414a4cd955",
+          "note": "SPU module table 0xde3600 entry 8 (verified {EA,size}); LS 0x14670 = HYPOTHESIS contiguous run from entry 5 at 0x10d00 in table order (observed: entries 2,3 at 0x10d00/0x11f00 in native-virtual-264). Runtime word guard."
+        },
+        {
+          "address": 14428416,
+          "size": 12000,
+          "local_address": 87440,
+          "sha256": "984a243f3033477df6014bbb5d1c1c1c9fec122d0c59bb07ebe0790f5060022a",
+          "note": "SPU module table 0xde3600 entry 9 (verified {EA,size}); LS 0x15590 = HYPOTHESIS contiguous run from entry 5 at 0x10d00 in table order (observed: entries 2,3 at 0x10d00/0x11f00 in native-virtual-264). Runtime word guard."
+        },
+        {
+          "address": 14415104,
+          "size": 2112,
+          "local_address": 68864,
+          "sha256": "8dd854b15365f6c9b170a71b4dc575d1a456b06ab4aafb066b992fc164adf0d5",
+          "note": "SPU module table 0xde3600 entry 6 (verified {EA,size}); LS 0x10d00 = HYPOTHESIS contiguous run from entry 6 at 0x10d00 in table order (observed: entries 2,3 at 0x10d00/0x11f00 in native-virtual-264). Runtime word guard."
+        },
+        {
+          "address": 14417280,
+          "size": 7088,
+          "local_address": 70976,
+          "sha256": "3ebb5d6dd0a173f42ccaab53f2ca65aabe3c62dae26ac6ba1a2972ed157d1381",
+          "note": "SPU module table 0xde3600 entry 7 (verified {EA,size}); LS 0x11540 = HYPOTHESIS contiguous run from entry 6 at 0x10d00 in table order (observed: entries 2,3 at 0x10d00/0x11f00 in native-virtual-264). Runtime word guard."
+        },
+        {
+          "address": 14424448,
+          "size": 3872,
+          "local_address": 78064,
+          "sha256": "bba03f55525708f4b116a4348ca3c986f2cab6b980ccc8abe0a5ce414a4cd955",
+          "note": "SPU module table 0xde3600 entry 8 (verified {EA,size}); LS 0x130f0 = HYPOTHESIS contiguous run from entry 6 at 0x10d00 in table order (observed: entries 2,3 at 0x10d00/0x11f00 in native-virtual-264). Runtime word guard."
+        },
+        {
+          "address": 14428416,
+          "size": 12000,
+          "local_address": 81936,
+          "sha256": "984a243f3033477df6014bbb5d1c1c1c9fec122d0c59bb07ebe0790f5060022a",
+          "note": "SPU module table 0xde3600 entry 9 (verified {EA,size}); LS 0x14010 = HYPOTHESIS contiguous run from entry 6 at 0x10d00 in table order (observed: entries 2,3 at 0x10d00/0x11f00 in native-virtual-264). Runtime word guard."
+        },
+        {
+          "address": 14417280,
+          "size": 7088,
+          "local_address": 68864,
+          "sha256": "3ebb5d6dd0a173f42ccaab53f2ca65aabe3c62dae26ac6ba1a2972ed157d1381",
+          "note": "SPU module table 0xde3600 entry 7 (verified {EA,size}); LS 0x10d00 = HYPOTHESIS contiguous run from entry 7 at 0x10d00 in table order (observed: entries 2,3 at 0x10d00/0x11f00 in native-virtual-264). Runtime word guard."
+        },
+        {
+          "address": 14424448,
+          "size": 3872,
+          "local_address": 75952,
+          "sha256": "bba03f55525708f4b116a4348ca3c986f2cab6b980ccc8abe0a5ce414a4cd955",
+          "note": "SPU module table 0xde3600 entry 8 (verified {EA,size}); LS 0x128b0 = HYPOTHESIS contiguous run from entry 7 at 0x10d00 in table order (observed: entries 2,3 at 0x10d00/0x11f00 in native-virtual-264). Runtime word guard."
+        },
+        {
+          "address": 14428416,
+          "size": 12000,
+          "local_address": 79824,
+          "sha256": "984a243f3033477df6014bbb5d1c1c1c9fec122d0c59bb07ebe0790f5060022a",
+          "note": "SPU module table 0xde3600 entry 9 (verified {EA,size}); LS 0x137d0 = HYPOTHESIS contiguous run from entry 7 at 0x10d00 in table order (observed: entries 2,3 at 0x10d00/0x11f00 in native-virtual-264). Runtime word guard."
+        },
+        {
+          "address": 14424448,
+          "size": 3872,
+          "local_address": 68864,
+          "sha256": "bba03f55525708f4b116a4348ca3c986f2cab6b980ccc8abe0a5ce414a4cd955",
+          "note": "SPU module table 0xde3600 entry 8 (verified {EA,size}); LS 0x10d00 = HYPOTHESIS contiguous run from entry 8 at 0x10d00 in table order (observed: entries 2,3 at 0x10d00/0x11f00 in native-virtual-264). Runtime word guard."
+        },
+        {
+          "address": 14428416,
+          "size": 12000,
+          "local_address": 72736,
+          "sha256": "984a243f3033477df6014bbb5d1c1c1c9fec122d0c59bb07ebe0790f5060022a",
+          "note": "SPU module table 0xde3600 entry 9 (verified {EA,size}); LS 0x11c20 = HYPOTHESIS contiguous run from entry 8 at 0x10d00 in table order (observed: entries 2,3 at 0x10d00/0x11f00 in native-virtual-264). Runtime word guard."
+        },
+        {
+          "address": 14428416,
+          "size": 12000,
+          "local_address": 68864,
+          "sha256": "984a243f3033477df6014bbb5d1c1c1c9fec122d0c59bb07ebe0790f5060022a",
+          "note": "SPU module table 0xde3600 entry 9 (verified {EA,size}); LS 0x10d00 = HYPOTHESIS contiguous run from entry 9 at 0x10d00 in table order (observed: entries 2,3 at 0x10d00/0x11f00 in native-virtual-264). Runtime word guard."
+        },
+        {
+          "address": 11376512,
+          "size": 1296,
+          "local_address": 256,
+          "sha256": "af92b38ca61591b296d030a22a1bf6eb43c18444df6f8c1adf6845fc8651eaef",
+          "note": "Original SPU job binary: EA referenced from original data 0xca4e98; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 11377920,
+          "size": 560,
+          "local_address": 256,
+          "sha256": "70dfc5772734f288fe917ea482370fad0960bf8c16ed118634f98aa6136a50e3",
+          "note": "Original SPU job binary: EA referenced from original data 0xca4e90; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 11378560,
+          "size": 7952,
+          "local_address": 256,
+          "sha256": "077b531a8e14ac0bedd7725d1dd4e9187b7e3dc56797879cef894daf660f2ce1",
+          "note": "Original SPU job binary: EA referenced from original data 0xca5444; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 11386624,
+          "size": 98320,
+          "local_address": 256,
+          "sha256": "ff7c42362672f3057d9a787d5f991921131532309f4d6ddf024d0b22aa934474",
+          "note": "Original SPU job binary: EA referenced from original data 0xca3b40; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 11485056,
+          "size": 42800,
+          "local_address": 256,
+          "sha256": "f7bc2c1ba54a987ee8aad3999de805bf876309655c454715f61064b0d050ef58",
+          "note": "Original SPU job binary: EA referenced from original data 0xde1fe0; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 11527936,
+          "size": 13440,
+          "local_address": 256,
+          "sha256": "fea84c485196006ffb34fa37b85c5054507781bc2b116306831207bfeb0c9bc5",
+          "note": "Original SPU job binary: EA referenced from original data 0xca4894; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 11541504,
+          "size": 14960,
+          "local_address": 256,
+          "sha256": "426c6bb3ebb550cb54325efdb9b01a9d170695b703d9c3f758fbeaec9e041fe9",
+          "note": "Original SPU job binary: EA referenced from original data 0xca1278; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 11556480,
+          "size": 78496,
+          "local_address": 256,
+          "sha256": "2de1e8a914c43981cdeff4605b50172a03fc156daf8854ad793e942710804cbf",
+          "note": "Original SPU job binary: EA referenced from original data 0xca46f0; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 11635072,
+          "size": 53904,
+          "local_address": 256,
+          "sha256": "473a1066f02f996f5f67f1607eb2e85de7a0496f4095207398e679c7e232fe2e",
+          "note": "Original SPU job binary: EA referenced from original data 0xca3bcc; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 11689088,
+          "size": 30752,
+          "local_address": 256,
+          "sha256": "5c9b969208703a8a0a16e4bbd26a4bf714f67aa2e15c0a7fc7ba3b25311e85f0",
+          "note": "Original SPU job binary: EA referenced from original data 0xca572c; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 11719936,
+          "size": 2832,
+          "local_address": 256,
+          "sha256": "1b2a8557921afcd191aa1be42dd2e63796a48a23de7ad82a2b72df78d0789631",
+          "note": "Original SPU job binary: EA referenced from original data 0xca56b0; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 11722880,
+          "size": 2064,
+          "local_address": 256,
+          "sha256": "09d0d674a55053eec678d8c7d22dc5f4c9736bfea1b33d96fbc1b67a27a2b10a",
+          "note": "Original SPU job binary: EA referenced from original data 0xca56a8; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 11725056,
+          "size": 3088,
+          "local_address": 256,
+          "sha256": "c71de8297e11bfbcb8539b49bf7456ec1d37e8d7cf2e90006b925038324895f1",
+          "note": "Original SPU job binary: EA referenced from original data 0xca56ac; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 11728256,
+          "size": 2576,
+          "local_address": 256,
+          "sha256": "ef614006202d6c508722819e7859d7d0cfca9018459185b92b037be07f696b6d",
+          "note": "Original SPU job binary: EA referenced from original data 0xca56a4; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 11730944,
+          "size": 1680,
+          "local_address": 256,
+          "sha256": "0cbc0f23465debf14b35be9c27f19bd1b56d8eff126d0ae05e8ca8a749a1865c",
+          "note": "Original SPU job binary: EA referenced from original data 0xca569c; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 11732736,
+          "size": 3728,
+          "local_address": 256,
+          "sha256": "a9dcf47dd95dd5cdaa11cce62f8b767c8fdd1d2e6178eac3580e7bb7b968e1f1",
+          "note": "Original SPU job binary: EA referenced from original data 0xca5698; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 11736576,
+          "size": 144,
+          "local_address": 256,
+          "sha256": "fbd9025d55f4863f0f4db566234321bcdd713280f5c21c360ff0ebff3b7dd6de",
+          "note": "Original SPU job binary: EA referenced from original data 0xca56b4; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 11736832,
+          "size": 1680,
+          "local_address": 256,
+          "sha256": "bb07b8648480edf459836e795b5ef40e58d8d38623dd1a026d603f8b841cecb9",
+          "note": "Original SPU job binary: EA referenced from original data 0xca568c; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 11738624,
+          "size": 1424,
+          "local_address": 256,
+          "sha256": "6d463ae4422eec4c8678edb3f3011865aaef604f10327566f43807c2aaae4e23",
+          "note": "Original SPU job binary: EA referenced from original data 0xca5690; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 11740160,
+          "size": 3216,
+          "local_address": 256,
+          "sha256": "79fc4d1f3a4c75cf294fcd0a536e4a821de8dc5c3290f2e24ed0a4ccc47a4f35",
+          "note": "Original SPU job binary: EA referenced from original data 0xca5694; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 11743488,
+          "size": 2832,
+          "local_address": 256,
+          "sha256": "7f9b90a311379750d9271f52f2368e4a1b9571c72d9dbe0b7dcd79414ee10c6e",
+          "note": "Original SPU job binary: EA referenced from original data 0xca56a0; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 11746432,
+          "size": 13712,
+          "local_address": 256,
+          "sha256": "4e1f74ff9de3d08a6ea28f7c3d51a926dee90f5ce018bd45aea5716e9da9ed5c",
+          "note": "Original SPU job binary: EA referenced from original data 0xca56b8; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 11760256,
+          "size": 9872,
+          "local_address": 256,
+          "sha256": "ceb6b349549ed8c77883bad749681cf0c71c5532e627cb655d723e580ffa9356",
+          "note": "Original SPU job binary: EA referenced from original data 0xca56bc; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 11770240,
+          "size": 1296,
+          "local_address": 256,
+          "sha256": "1d88771e24d0cdab0bb97be97ef0da96417dacf6e5b24601afc6fee41dc1acfa",
+          "note": "Original SPU job binary: EA referenced from original data 0xca5580; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 11771648,
+          "size": 115248,
+          "local_address": 256,
+          "sha256": "9e4c2098f55dee12a28f023a4f60e6af88593fdb223e361056160974de05a128",
+          "note": "Original SPU job binary: EA referenced from original data 0xca5724; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 11886976,
+          "size": 18656,
+          "local_address": 256,
+          "sha256": "e9e45cca83cc29654d36ee34c66d0299cddb7abbe0cac358d61532040ed8d7c3",
+          "note": "Original SPU job binary: EA referenced from original data 0xca35b8; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 11905664,
+          "size": 13840,
+          "local_address": 256,
+          "sha256": "aa6b5ed54dea3d86b51f57300e8db56e50d2be9979b69fdf19eccd34cf0719ea",
+          "note": "Original SPU job binary: EA referenced from original data 0xca3104; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 11919616,
+          "size": 2752,
+          "local_address": 256,
+          "sha256": "25b2d072c66ab22e601a756b6ef9b38a620eecb6951b927558c597dd9f3b6a47",
+          "note": "Original SPU job binary: EA referenced from original data 0xca3fbc; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 11922432,
+          "size": 6240,
+          "local_address": 256,
+          "sha256": "5486e5c0b5baaf5536b484bdbe1d6e823476bc0f01d195f542afb6444f56ec6a",
+          "note": "Original SPU job binary: EA referenced from original data 0xca3ec4; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 11928704,
+          "size": 7696,
+          "local_address": 256,
+          "sha256": "0ca72e0b332461fcf0acb1e07d613ffa50e88fb4cffafdbd83d8618777923a06",
+          "note": "Original SPU job binary: EA referenced from original data 0xca398c; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 11936512,
+          "size": 6912,
+          "local_address": 256,
+          "sha256": "55383d53bf61c438ee4e222ea1711427d81936835cc9dbe08d67974c47a260b3",
+          "note": "Original SPU job binary: EA referenced from original data 0xca3ae0; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 11943552,
+          "size": 3088,
+          "local_address": 256,
+          "sha256": "344dde0044d87b821e22e896b30a1e20a0111bd5883eaea553b5cc408408fb8a",
+          "note": "Original SPU job binary: EA referenced from original data 0xca3984; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 11946752,
+          "size": 19216,
+          "local_address": 256,
+          "sha256": "8c9f0119b3646558940e4a2a0b62c3aa1e1153ffc0673ad8adacce509cb28007",
+          "note": "Original SPU job binary: EA referenced from original data 0xca47c0; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 11966080,
+          "size": 126560,
+          "local_address": 256,
+          "sha256": "675e0408057b841b4b3c7e597a38f02000c99b0f71dda663eb40b9dbd53fb31b",
+          "note": "Original SPU job binary: EA referenced from original data 0xca52a8; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12092672,
+          "size": 6864,
+          "local_address": 256,
+          "sha256": "e7775c4eec520e91958dfcf92af161f8e00b8aa44798c5633cb06cd39fc4419f",
+          "note": "Original SPU job binary: EA referenced from original data 0xca1824; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12099584,
+          "size": 4384,
+          "local_address": 256,
+          "sha256": "de757d71c503bd2ab11d3cb051fd87aa7ae58b4532609401f8c14e7fa0dc270c",
+          "note": "Original SPU job binary: EA referenced from original data 0xca3994; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12104064,
+          "size": 68560,
+          "local_address": 256,
+          "sha256": "d4c0df8094ac11afec428794ea67d6ebd0558bf4702889297dda6f642835d728",
+          "note": "Original SPU job binary: EA referenced from original data 0xca1484; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12172672,
+          "size": 50800,
+          "local_address": 256,
+          "sha256": "efa38b85768f57991923b7f3d13293593bb954e7f7b75084fdd493df779317fa",
+          "note": "Original SPU job binary: EA referenced from original data 0xca147c; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12223488,
+          "size": 2960,
+          "local_address": 256,
+          "sha256": "543ffdaad936c9e47838c8b017aa6ebf1cc2c6a4a3c33332b8e370172115db6c",
+          "note": "Original SPU job binary: EA referenced from original data 0xca4254; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12226560,
+          "size": 3728,
+          "local_address": 256,
+          "sha256": "cb0ab6b5aadcf3fde7fc15004138f179e153c9440095613524ac14f57196cc85",
+          "note": "Original SPU job binary: EA referenced from original data 0xca13e8; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12230400,
+          "size": 21536,
+          "local_address": 256,
+          "sha256": "22dbc0b13a2d2c074a7eca095ae86b4771cee33c3cebcafcd803b82845f80bfb",
+          "note": "Original SPU job binary: EA referenced from original data 0xca4740; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12252032,
+          "size": 19936,
+          "local_address": 256,
+          "sha256": "71074886f4eb7bc0e0412c72110a5d085cf2def64e45b3718a549c4115869561",
+          "note": "Original SPU job binary: EA referenced from original data 0xca12e8; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12272000,
+          "size": 15120,
+          "local_address": 256,
+          "sha256": "2fb3d4f27728386b89a2f9ea814fb1bc0abd9ee62c43b057cc00afa2b4d3b1c1",
+          "note": "Original SPU job binary: EA referenced from original data 0xca1270; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12287232,
+          "size": 1808,
+          "local_address": 256,
+          "sha256": "ce5449ed52119dbf8c470dfca33df19fc7aa7ba4d15473f42a14d51b1dab3061",
+          "note": "Original SPU job binary: EA referenced from original data 0xc53f48; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12289152,
+          "size": 1168,
+          "local_address": 256,
+          "sha256": "11b740c0ab3ae48121ce03c7d9a700c406bba36cdb6af92cfdb699a395a4ce0e",
+          "note": "Original SPU job binary: EA referenced from original data 0xc53f54; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12290432,
+          "size": 2704,
+          "local_address": 256,
+          "sha256": "f970f5607e52fdd898c447c3fa01b7b7b7c56f36a7ef301277c90d48cefd36ff",
+          "note": "Original SPU job binary: EA referenced from original data 0xc53f60; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12293248,
+          "size": 2960,
+          "local_address": 256,
+          "sha256": "1e90ebb88144eaaa40fd693f76c6bfc93787bcccf628e42cdb3309f6a72eecb0",
+          "note": "Original SPU job binary: EA referenced from original data 0xc53f6c; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12296320,
+          "size": 2320,
+          "local_address": 256,
+          "sha256": "f72aadba372f5d24e4435276d351e22f5e0a8bf8b1dbe9c55cee290be87aaa8f",
+          "note": "Original SPU job binary: EA referenced from original data 0xc53f78; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12298752,
+          "size": 3472,
+          "local_address": 256,
+          "sha256": "e45ed5f4c7e960acce0c09dd28adb46e5d971fc4281c7270bdff183f423be5d7",
+          "note": "Original SPU job binary: EA referenced from original data 0xc53f84; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12302336,
+          "size": 3856,
+          "local_address": 256,
+          "sha256": "d7572e8e555ba112f1a26178f904db0ea6a67b92343e1759d142018e032f2e67",
+          "note": "Original SPU job binary: EA referenced from original data 0xc53f90; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12306304,
+          "size": 2448,
+          "local_address": 256,
+          "sha256": "4c25eb69fa3ad241064e88a0bc9133688f78c40250a2faa826fa4b8ddb87cd83",
+          "note": "Original SPU job binary: EA referenced from original data 0xc53f9c; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12308864,
+          "size": 4240,
+          "local_address": 256,
+          "sha256": "eb2ac075292e0ab74b9f60ae6965a1f556e796624bbe460afef8f8a755d68729",
+          "note": "Original SPU job binary: EA referenced from original data 0xc53ef4; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12313216,
+          "size": 4496,
+          "local_address": 256,
+          "sha256": "50c9b1d744fcd26f7aab89985e87133be2bb62da11ad6abb3b11fd63f206fac3",
+          "note": "Original SPU job binary: EA referenced from original data 0xc53f00; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12317824,
+          "size": 5264,
+          "local_address": 256,
+          "sha256": "e0117dc4f83e6413c0c2f8a5f12d4aae77e933736539a097ba2c3232fa508184",
+          "note": "Original SPU job binary: EA referenced from original data 0xc53f0c; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12323200,
+          "size": 5392,
+          "local_address": 256,
+          "sha256": "ffebf3148eaab6862733b9a27105880bc12f05dedbd76f634d01b8c060358bbc",
+          "note": "Original SPU job binary: EA referenced from original data 0xc53f18; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12328704,
+          "size": 6544,
+          "local_address": 256,
+          "sha256": "5db6b4ad601a3ad7aa4924a0cdc829ff84acfa57a6de79fa6db5c160ca16f948",
+          "note": "Original SPU job binary: EA referenced from original data 0xc53f24; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12335360,
+          "size": 5136,
+          "local_address": 256,
+          "sha256": "969bcf1ded76981b580f7c73b75cf60c3421caa74148477d4577d098b3e1276b",
+          "note": "Original SPU job binary: EA referenced from original data 0xc53f30; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12340608,
+          "size": 3728,
+          "local_address": 256,
+          "sha256": "9e9d9c11a579cb6c349e430cf4c24ec9229aa3e602ddba20487971edf16e4e8d",
+          "note": "Original SPU job binary: EA referenced from original data 0xc53f3c; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12344448,
+          "size": 1552,
+          "local_address": 256,
+          "sha256": "f3072646cf4a650ef03034e72d4449151369eeeeb01f80f8ec580687cfddcea8",
+          "note": "Original SPU job binary: EA referenced from original data 0xc53ee8; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12346112,
+          "size": 1552,
+          "local_address": 256,
+          "sha256": "0161518de8ccedbc1df9abebc4f0de8c256789d036fd925aa6883e90a037efd4",
+          "note": "Original SPU job binary: EA referenced from original data 0xc53edc; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12347776,
+          "size": 1424,
+          "local_address": 256,
+          "sha256": "c4a383eeecc2586358cecd93cb23544ae2b8fd737819d95605dc551c65c9d864",
+          "note": "Original SPU job binary: EA referenced from original data 0xc53ed0; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12349312,
+          "size": 1424,
+          "local_address": 256,
+          "sha256": "39a4b659953b6cdf529b29a85cfee3dec884b817e5707876ff891702cb95ef60",
+          "note": "Original SPU job binary: EA referenced from original data 0xc53e70; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12350848,
+          "size": 1296,
+          "local_address": 256,
+          "sha256": "c5bd3f7d695dc1d92a1ea278dc051cc8ae5493281668ba590f2bf980ca3f8c3e",
+          "note": "Original SPU job binary: EA referenced from original data 0xc53e4c; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12352256,
+          "size": 2064,
+          "local_address": 256,
+          "sha256": "16f630c75ecfbf655ec36b3124607e57dfc866e1bbe7525cb5d7bf03c7d33a5b",
+          "note": "Original SPU job binary: EA referenced from original data 0xc53eb8; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12354432,
+          "size": 1424,
+          "local_address": 256,
+          "sha256": "a05630687952b066ce2324e09465ed83b0cc4fd05542ab41a8438274a7dd0af1",
+          "note": "Original SPU job binary: EA referenced from original data 0xc53e40; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12355968,
+          "size": 1296,
+          "local_address": 256,
+          "sha256": "9a15a9eeb9545bb9e2430f1cef749e3cf738042415f9a34e3e3b0f069c321f20",
+          "note": "Original SPU job binary: EA referenced from original data 0xc53e64; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12357376,
+          "size": 1296,
+          "local_address": 256,
+          "sha256": "cbc0d696ef496f004ece4c3342476a6071f1d7a31124f4ebaf6268c26adaeb0a",
+          "note": "Original SPU job binary: EA referenced from original data 0xc53e58; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12358784,
+          "size": 1936,
+          "local_address": 256,
+          "sha256": "67e674917eac47a08fb8141f797e34c41f6e80a7520611bc3c01e8d26c29bfd5",
+          "note": "Original SPU job binary: EA referenced from original data 0xc53e7c; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12360832,
+          "size": 4368,
+          "local_address": 256,
+          "sha256": "3b927577bfb618b642b9636eece973c5e10c7d16bef43a8ec6715364a3e7ab54",
+          "note": "Original SPU job binary: EA referenced from original data 0xc53e94; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12365312,
+          "size": 3600,
+          "local_address": 256,
+          "sha256": "3f981e6751e2a9f712ea3c509c48b8ccff6f56d2abc61ae79490c024698326ee",
+          "note": "Original SPU job binary: EA referenced from original data 0xc53e88; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12369024,
+          "size": 2192,
+          "local_address": 256,
+          "sha256": "dec9ec4e1fffc9fa4325941d9e9929b7a94dac4a9f2ebfd125cd28e61a7753f0",
+          "note": "Original SPU job binary: EA referenced from original data 0xc53ea0; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12371328,
+          "size": 3216,
+          "local_address": 256,
+          "sha256": "dc35f331f13d76389db526a903bce343f8fbadbbda664040d5c16d8aad87aec5",
+          "note": "Original SPU job binary: EA referenced from original data 0xc53eac; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12374656,
+          "size": 2960,
+          "local_address": 256,
+          "sha256": "cae5d6d14f8e0d7f9ad2c2336f3ed18d7614700c8896ea122694a398a3a9dc47",
+          "note": "Original SPU job binary: EA referenced from original data 0xc53ec4; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12377728,
+          "size": 1296,
+          "local_address": 256,
+          "sha256": "7017c5198749e2ee9add24006d483bac6e9aa3af4bc865f2a21262c5f97d5305",
+          "note": "Original SPU job binary: EA referenced from original data 0xc53d50; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12379136,
+          "size": 1296,
+          "local_address": 256,
+          "sha256": "9351f98c0a35198be02de6e7e8f1c6b1617c71c9972dfc57b8cf101e039dfebb",
+          "note": "Original SPU job binary: EA referenced from original data 0xc53d5c; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12380544,
+          "size": 1424,
+          "local_address": 256,
+          "sha256": "8b8a74af406e1debea2c8ed5de2e909da06d8a6ecebbbd8e5860a2bf6e6d9b5d",
+          "note": "Original SPU job binary: EA referenced from original data 0xc53d68; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12382080,
+          "size": 1424,
+          "local_address": 256,
+          "sha256": "4f42b034a16a12892a60829394562a7e26166af02d96b68a474c9de1837d288b",
+          "note": "Original SPU job binary: EA referenced from original data 0xc53d74; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12383616,
+          "size": 1552,
+          "local_address": 256,
+          "sha256": "5d5de8e501bcaf1f508b11cb09028b67c3f605e71b9ab2277a59e31b6f0024d1",
+          "note": "Original SPU job binary: EA referenced from original data 0xc53d80; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12385280,
+          "size": 1296,
+          "local_address": 256,
+          "sha256": "6a21a89fed55839470b410eac98609903512d37e0d13e2f59ef0c87f05174550",
+          "note": "Original SPU job binary: EA referenced from original data 0xc53d8c; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12386688,
+          "size": 1296,
+          "local_address": 256,
+          "sha256": "3d909a49220d62ad03a69cdb1c38234fb16497b0bd7b05bb281c3fc5cb7c689d",
+          "note": "Original SPU job binary: EA referenced from original data 0xc53d98; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12388096,
+          "size": 1296,
+          "local_address": 256,
+          "sha256": "525ac691efd1bd41aac333823522b45c23a20815aad2be01a80ad3dcf7f5b685",
+          "note": "Original SPU job binary: EA referenced from original data 0xc53da4; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12389504,
+          "size": 1296,
+          "local_address": 256,
+          "sha256": "cbcfe6361d575377761f9bbb80ffbf410434ca18a8dbeb0ab43894b159e5a5bd",
+          "note": "Original SPU job binary: EA referenced from original data 0xc53db0; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12390912,
+          "size": 1552,
+          "local_address": 256,
+          "sha256": "63c6ad541d10f81df9863b50d2149d4e94d2fea1fe53e59f1ebc86c934d43b44",
+          "note": "Original SPU job binary: EA referenced from original data 0xc53dbc; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12392576,
+          "size": 528,
+          "local_address": 256,
+          "sha256": "fd82b88411c7f97c40e2df739868a6a6b3f4a2512cb1133f924aee39f5c97225",
+          "note": "Original SPU job binary: EA referenced from original data 0xc53dc8; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12393216,
+          "size": 656,
+          "local_address": 256,
+          "sha256": "a932d96e57d846eb75ca2e6c6cef9fc795b4f1aff5e3930df39e20618af61738",
+          "note": "Original SPU job binary: EA referenced from original data 0xc53dd4; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12393984,
+          "size": 656,
+          "local_address": 256,
+          "sha256": "18e0f644aca062f21d2e88b750b8d89a02eda080762900b1cad07383053849cf",
+          "note": "Original SPU job binary: EA referenced from original data 0xc53de0; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12394752,
+          "size": 656,
+          "local_address": 256,
+          "sha256": "63d511d053b997069a7213ca40615eab366d786ab683fa7629b3fb27db8da6ee",
+          "note": "Original SPU job binary: EA referenced from original data 0xc53dec; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12395520,
+          "size": 1424,
+          "local_address": 256,
+          "sha256": "bf0d2d9ff2b170b04c1c5b2156ad7b8cb9d62b99c4f42f43de5f60a3bc31bad1",
+          "note": "Original SPU job binary: EA referenced from original data 0xc53df8; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12397056,
+          "size": 528,
+          "local_address": 256,
+          "sha256": "9dff552a19c5a1fd5dcc01b89f549a49ef94ff4d174b93753db814797838e162",
+          "note": "Original SPU job binary: EA referenced from original data 0xc53e04; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12397696,
+          "size": 528,
+          "local_address": 256,
+          "sha256": "ed30aaa0b215c9b32984c1e1b7dc72b04b3ba123bd14753dc20973f06a4cdbbb",
+          "note": "Original SPU job binary: EA referenced from original data 0xc53e10; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12398336,
+          "size": 528,
+          "local_address": 256,
+          "sha256": "8b54937056d5b5a16795fe25f5abf579cded3fd4dfcf815606632d9d2fbf3cbd",
+          "note": "Original SPU job binary: EA referenced from original data 0xc53e1c; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12398976,
+          "size": 656,
+          "local_address": 256,
+          "sha256": "7eea084b90190fe828c0cbe64d86d74fd6a58eac30d8a1b0ff389151df8816f3",
+          "note": "Original SPU job binary: EA referenced from original data 0xc53e28; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12399744,
+          "size": 1296,
+          "local_address": 256,
+          "sha256": "9976dc51d5fc1734488527a7b444797cd465fb5270a798e5f9c48ef536e04c85",
+          "note": "Original SPU job binary: EA referenced from original data 0xc53e34; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12401152,
+          "size": 784,
+          "local_address": 256,
+          "sha256": "292f4aa56851e5074f58c42072ddaad8fe7fbda8eafed0dfed1c7b8f971262ed",
+          "note": "Original SPU job binary: EA referenced from original data 0xc53ce4; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12402048,
+          "size": 784,
+          "local_address": 256,
+          "sha256": "0743133bf0acafa7bf58b8e2b9a7b4ce5f7a76b4ed7212291f489b6ae2ae5a3c",
+          "note": "Original SPU job binary: EA referenced from original data 0xc53cf0; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12402944,
+          "size": 912,
+          "local_address": 256,
+          "sha256": "f0c60f2330f01633239507f5122e843be9f94f4e812eaae4613f9b3292ede2ea",
+          "note": "Original SPU job binary: EA referenced from original data 0xc53cfc; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12403968,
+          "size": 784,
+          "local_address": 256,
+          "sha256": "de4862029d8466f4ebdec21aa912b21b0bfa40edcaa14b040a0797a1a48d51cb",
+          "note": "Original SPU job binary: EA referenced from original data 0xc53d08; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12404864,
+          "size": 784,
+          "local_address": 256,
+          "sha256": "162ef1943b7d967b0fbd3af2947b4b027d12b5ce2d0af4bf47bd702e85376212",
+          "note": "Original SPU job binary: EA referenced from original data 0xc53d14; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12405760,
+          "size": 1040,
+          "local_address": 256,
+          "sha256": "d9a71c3a9349c3c464f5318ea88b927a9510efd9f61488610bcb6cc95b56d56b",
+          "note": "Original SPU job binary: EA referenced from original data 0xc53d20; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12406912,
+          "size": 1040,
+          "local_address": 256,
+          "sha256": "9c5a2c4ac1035670d685c220aedc778fe9a8cf9e9c93f46f7f3ce98a2d644fb1",
+          "note": "Original SPU job binary: EA referenced from original data 0xc53d2c; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12408064,
+          "size": 912,
+          "local_address": 256,
+          "sha256": "b7cb5557f002dc27610539bc4a4a83003822f7121e8481d0fc0a49c1cf70164f",
+          "note": "Original SPU job binary: EA referenced from original data 0xc53d38; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12409088,
+          "size": 912,
+          "local_address": 256,
+          "sha256": "4ad5633bf3cb7d6876f4037d5e0c4b96c006f15b66073b5a5b69413c9b0254cb",
+          "note": "Original SPU job binary: EA referenced from original data 0xc53d44; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12410112,
+          "size": 784,
+          "local_address": 256,
+          "sha256": "00af3a03f3e425b1f2b2fcd22577b59ea586bb8b4a955331a045d3932284053a",
+          "note": "Original SPU job binary: EA referenced from original data 0xc53c6c; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12411008,
+          "size": 784,
+          "local_address": 256,
+          "sha256": "21fa3840e3f01e3c9e1ea7e966650606521af9ee56ec82c21830febdd7543d51",
+          "note": "Original SPU job binary: EA referenced from original data 0xc53c78; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12411904,
+          "size": 784,
+          "local_address": 256,
+          "sha256": "5080a17da4790a0ce46b84fc803f63f07264b7398a9a4c78f807d878810a30de",
+          "note": "Original SPU job binary: EA referenced from original data 0xc53c84; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12412800,
+          "size": 784,
+          "local_address": 256,
+          "sha256": "a6126635ec066347f5cf9a9697bdca1aa7cf0f1d54ebce6c02e994e7aac30201",
+          "note": "Original SPU job binary: EA referenced from original data 0xc53c90; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12413696,
+          "size": 784,
+          "local_address": 256,
+          "sha256": "ad9c63a62a3e0ab4bf4ce203dd6d784c4e0d7c63704f167ddea14720b5c3a569",
+          "note": "Original SPU job binary: EA referenced from original data 0xc53c9c; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12414592,
+          "size": 912,
+          "local_address": 256,
+          "sha256": "3de92f29520320711ab51d4fc689e5752271ebfc864bee11a7bf9a7ada88dace",
+          "note": "Original SPU job binary: EA referenced from original data 0xc53ca8; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12415616,
+          "size": 1040,
+          "local_address": 256,
+          "sha256": "a8f7b4c7af66a80e4a306a7b8e1a29f084c8a666381c4295c07cfc7448a301e8",
+          "note": "Original SPU job binary: EA referenced from original data 0xc53cb4; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12416768,
+          "size": 1040,
+          "local_address": 256,
+          "sha256": "5c02d61571b79b0f55848a3b245ae0dc245d1e5a856d9bbee44681cb59f446a0",
+          "note": "Original SPU job binary: EA referenced from original data 0xc53cc0; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12417920,
+          "size": 912,
+          "local_address": 256,
+          "sha256": "4644170a740a5ef854b41873bd42edd2ab99e84c5305cfe6ad6a71936b557704",
+          "note": "Original SPU job binary: EA referenced from original data 0xc53ccc; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12418944,
+          "size": 784,
+          "local_address": 256,
+          "sha256": "94428d5a9d292910d255b96812737674f876d50cde42748dcc50e0bba6ef7454",
+          "note": "Original SPU job binary: EA referenced from original data 0xc53cd8; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12419840,
+          "size": 1040,
+          "local_address": 256,
+          "sha256": "7c642149030a18284a124ad07d91922950d9bb09a9b5da1e90c7c2f3a26db9e1",
+          "note": "Original SPU job binary: EA referenced from original data 0xc53c60; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12420992,
+          "size": 1040,
+          "local_address": 256,
+          "sha256": "7d36bdef30da62cdc58fb2a742a7c4f609a4805b34b7e786b928be6aa9a48a77",
+          "note": "Original SPU job binary: EA referenced from original data 0xc53c54; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12422144,
+          "size": 1296,
+          "local_address": 256,
+          "sha256": "5cf7c331cb94ef091822edcd66ddaae3001bacd0c65dbfc8d856f3759bee56b6",
+          "note": "Original SPU job binary: EA referenced from original data 0xc53c24; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12423552,
+          "size": 1168,
+          "local_address": 256,
+          "sha256": "fedddf8c27e8811ec149224716c2ca1bd1eb8f0898e3d49288d0f8aaefcd23d5",
+          "note": "Original SPU job binary: EA referenced from original data 0xc53c30; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12424832,
+          "size": 1424,
+          "local_address": 256,
+          "sha256": "edcdcc21e63666136994c448d92d671c71bee137f9d7fe59753a80b87c75c700",
+          "note": "Original SPU job binary: EA referenced from original data 0xc53c3c; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12426368,
+          "size": 784,
+          "local_address": 256,
+          "sha256": "25c8b9e2ab0fc5baefda2a85af01bcc2b88e8955ec4815c951967e3c5279230e",
+          "note": "Original SPU job binary: EA referenced from original data 0xc53c48; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12427264,
+          "size": 656,
+          "local_address": 256,
+          "sha256": "6523758ab994a303634029ae14694ba46189a8bba5eb697b33f70cdfeda21cfc",
+          "note": "Original SPU job binary: EA referenced from original data 0xc53c00; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12428032,
+          "size": 656,
+          "local_address": 256,
+          "sha256": "fdeaaf8683aeb730767599cea1361756df0c9bc2d7b7cc3eb9a67050d3084e92",
+          "note": "Original SPU job binary: EA referenced from original data 0xc53c0c; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12428800,
+          "size": 1424,
+          "local_address": 256,
+          "sha256": "15bc3fa151771515655e006a91f06e9df6852daa0886e53217e818fd1568ad8f",
+          "note": "Original SPU job binary: EA referenced from original data 0xc53c18; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12430336,
+          "size": 400,
+          "local_address": 256,
+          "sha256": "fab0541784897b8cafffb0012488661a20fd14a869f1dd3f35f2851312edaf89",
+          "note": "Original SPU job binary: EA referenced from original data 0xc53bc4; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12430848,
+          "size": 400,
+          "local_address": 256,
+          "sha256": "4d3b217e812797983a4d2ef8b69514a2d4375d293952d896676d4111c418bfd6",
+          "note": "Original SPU job binary: EA referenced from original data 0xc53bd0; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12431360,
+          "size": 400,
+          "local_address": 256,
+          "sha256": "b0c85d8c5e3ca5ecc5c27661047d01a738c439660c51b21062caba9c3b434efa",
+          "note": "Original SPU job binary: EA referenced from original data 0xc53bdc; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12431872,
+          "size": 400,
+          "local_address": 256,
+          "sha256": "b1783654217e25749e0f9b6a0101ef410eee9205350b7962e76e2875c58f5b56",
+          "note": "Original SPU job binary: EA referenced from original data 0xc53be8; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12432384,
+          "size": 656,
+          "local_address": 256,
+          "sha256": "aaff9c83430aaac9853c313023fe34d264daafe237258e1f19ad93dd1b891480",
+          "note": "Original SPU job binary: EA referenced from original data 0xc53bf4; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12433152,
+          "size": 528,
+          "local_address": 256,
+          "sha256": "70af3928f35ff1d3cbab88e46a94a03512eaab0166cbb7af9fb831c0f7f3950c",
+          "note": "Original SPU job binary: EA referenced from original data 0xc53b94; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12433792,
+          "size": 528,
+          "local_address": 256,
+          "sha256": "e445e3712e6353e76b38bb963d393b568c7bb18fb279ec11115c5d8bad10e455",
+          "note": "Original SPU job binary: EA referenced from original data 0xc53ba0; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12434432,
+          "size": 656,
+          "local_address": 256,
+          "sha256": "f7ecfcb413dac231f6100b5fcd4146b21f4d344d4ba3383a4c4e2b84b7454a95",
+          "note": "Original SPU job binary: EA referenced from original data 0xc53bb8; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12435200,
+          "size": 528,
+          "local_address": 256,
+          "sha256": "8205835cbb92be73ac7d78d2015be7b9aab22b5c4d871e5895982dc5f62e21b1",
+          "note": "Original SPU job binary: EA referenced from original data 0xc53bac; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12435840,
+          "size": 528,
+          "local_address": 256,
+          "sha256": "4e3c7aa0aa9a9b7093b2c74cad3c2d4c5ba6d8c493bcc5acec45d57e3179f56e",
+          "note": "Original SPU job binary: EA referenced from original data 0xc53b64; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12436480,
+          "size": 528,
+          "local_address": 256,
+          "sha256": "f50d31816ea585b8b149062ad07522f1128f9896a293790a268feecbb0f59033",
+          "note": "Original SPU job binary: EA referenced from original data 0xc53b70; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12437120,
+          "size": 656,
+          "local_address": 256,
+          "sha256": "21e3332f79405462057e6e3dc7172f8eb45158a3115cbcf8ede8b5ea98c76b8d",
+          "note": "Original SPU job binary: EA referenced from original data 0xc53b88; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12437888,
+          "size": 528,
+          "local_address": 256,
+          "sha256": "1e20e0f55e293ca4c2becb92909ec269ee595e60f0c670a5c65e8207e936493e",
+          "note": "Original SPU job binary: EA referenced from original data 0xc53b7c; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12438528,
+          "size": 784,
+          "local_address": 256,
+          "sha256": "b7a360caee8f5af3646b09b56a0644f57bafccb6f29bcdf5af4147312095319e",
+          "note": "Original SPU job binary: EA referenced from original data 0xc9d028; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12439424,
+          "size": 13200,
+          "local_address": 256,
+          "sha256": "300d824feeac36693c5f1fdad024a54cb795b707861aa0e715f8b5eb6deec95b",
+          "note": "Original SPU job binary: EA referenced from original data 0xc9f45c; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12452736,
+          "size": 15504,
+          "local_address": 256,
+          "sha256": "ebbf6fc353d5b5bab71fcdd211a454f39f50720c78412e2569f4e406d414cf1c",
+          "note": "Original SPU job binary: EA referenced from original data 0xc9f464; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12468352,
+          "size": 14736,
+          "local_address": 256,
+          "sha256": "47596492b96f68365882cbab7a66b33cac45209ddfadef43bb135ae4fead76fb",
+          "note": "Original SPU job binary: EA referenced from original data 0xc9f46c; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12483200,
+          "size": 17168,
+          "local_address": 256,
+          "sha256": "dd796325f1c5ff5a8bc6e0777e5a61d0f90fc4ce37bc271604c39bb165da5ae7",
+          "note": "Original SPU job binary: EA referenced from original data 0xc9f474; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12500480,
+          "size": 16400,
+          "local_address": 256,
+          "sha256": "7fa33d623db42bb41bf84f4194d62fc09b46353c033bf04c0d97ab4446d9c97a",
+          "note": "Original SPU job binary: EA referenced from original data 0xc751a4; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12516992,
+          "size": 6672,
+          "local_address": 256,
+          "sha256": "bd455ceaa6fc92c2a61f55ad5cb41752748a5781282c2d3ee541141cd6d9cb99",
+          "note": "Original SPU job binary: EA referenced from original data 0xc97c0c; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12523776,
+          "size": 3984,
+          "local_address": 256,
+          "sha256": "f7b530d0e79f7d04572d991da80468d9dad70b059e71216cadade3eb4a981c9e",
+          "note": "Original SPU job binary: EA referenced from original data 0xc96b50; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12527872,
+          "size": 144,
+          "local_address": 256,
+          "sha256": "0003179a04fb124dfe9f1f63a84a5133f26f9c12a5f1545432f46c2fec41266d",
+          "note": "Original SPU job binary: EA referenced from original data 0xc755e8; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 12528128,
+          "size": 6672,
+          "local_address": 256,
+          "sha256": "65add76838715bdf2660d86d057c59e40938c29998bcff732f98afe7871332b8",
+          "note": "Original SPU job binary: EA referenced from original data 0xc9f4ac; starts with four ila; extent to next referenced job start (trailing zero quads trimmed). LS 0x100 = observed job load base (CollNarrow 0xb8b180+0x10be0, CollBroad 0xb9bd80+0xc680 DMA in native-virtual-253/256). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 14496288,
+          "size": 1424,
+          "local_address": 22144,
+          "sha256": "1b3a901180e4fc5708563fa2559c9fe7ee291cdbd5942c5afb36b3d8ff30c1b3",
+          "note": "Original SPU module code in the EBOOT data segment, observed at LS 0x5680 while loading level great_clock_a: SPU 0x3000200 stopped \"SPU code differs\" at pc 0x5680 in runs native-virtual-347serial and 348load; LS dumps (local/ratchet/ls-dumps-347serial, ls-dumps-348load) show a runtime header at LS 0x5600 (magic 0x3da3d708, segment table ..., (0x5680, 0x590)) and LS 0x5680+0x590 byte-identical to EBOOT 0xdd3220 in both runs (block DMAed from heap 0x47193500). No static BE32 reference to 0xdd3220 found. Every executed word is still verified at runtime; other load bases stop explicitly."
+        },
+        {
+          "address": 12681984,
+          "size": 11512,
+          "local_address": 2560,
+          "sha256": "70c39ecd3c505ccc22e77d0c7905ae56779b10b0883fd163f8644ddbb052080e",
+          "note": "Original WWS job manager binary in the EBOOT text segment (second SPURS workload, used once audio is configured): data descriptor {0xc18300, 0x2cf8} at EBOOT 0xd309e4 (next to {0xc1b000, 0x220}, amid kWwsJob strings). Observed on SPU 0x100 (CellSpursKernel0) in run native-virtual-351load: DMA GET EA 0xc18300 -> LS 0xa00 size 0x2d00 (and partial reloads 0xc18df0->0x14f0, 0xc18e80->0x1580, 0xc18eb0->0x15b0); all 213 executed 64-byte cells in local/ratchet/ls-dumps-351load/spu-dynamic.jsonl are byte-identical to EBOOT EA = 0xc18300 + (LS - 0xa00). Without this overlay the code ran in the SPUDYN interpreter (~13 M instr/s). Every executed word is still verified at runtime."
+        }
+      ]
+    }
+  ],
+  "static_computed_branches": [
+    {
+      "dispatch": 6573148,
+      "targets": [
+        6573152,
+        6573156,
+        6573160,
+        6573164,
+        6573168,
+        6573172,
+        6573176,
+        6573180
+      ],
+      "note": "Original memset tail: 0x644c60 + 28 - ((size >> 1) & 28). Seven stdu operations and blr. Observed branch to 0x644c7c in build 116."
+    }
+  ],
+  "observed_callback_entries": [
+    {
+      "descriptor": 13730352,
+      "code": 6741112,
+      "toc": 13847176,
+      "note": "Original CellGameDataStatCallback invoked by firmware at 0x20125f98; native bundle 125."
+    },
+    {
+      "descriptor": 13727888,
+      "code": 6690608,
+      "toc": 13847176,
+      "note": "Original head-1 vblank callback, firmware call 0x20287648 observed in native bundle 135."
+    },
+    {
+      "descriptor": 13511824,
+      "code": 3324788,
+      "toc": 13847176,
+      "note": "Original vtable 0xc3c348 slot 2, call 0x669b28 observed after four headless flips in native bundle 138."
+    },
+    {
+      "descriptor": 13812120,
+      "code": 9476328,
+      "toc": 13847176,
+      "note": "Original formatted FILE-output callback at 0x90a134 observed in bundle 145."
+    },
+    {
+      "descriptor": 13758280,
+      "code": 7405992,
+      "toc": 13847176,
+      "note": "Original FIOS operation callback invoked at 0x6fd288 in bundle 146."
+    },
+    {
+      "descriptor": 13758352,
+      "code": 7422232,
+      "toc": 13847176,
+      "note": "Original FIOS mediathread entry observed when sys_ppu_thread_create created thread 11 in bundle 149."
+    },
+    {
+      "descriptor": 13757800,
+      "code": 7373552,
+      "toc": 13847176,
+      "note": "Original FIOS mediathread callback invoked at 0x714144 in bundle 150."
+    },
+    {
+      "descriptor": 13757872,
+      "code": 7380200,
+      "toc": 13847176,
+      "note": "Original FIOS thread callback invoked at 0x714144 in bundle 151."
+    },
+    {
+      "descriptor": 13757808,
+      "code": 7373568,
+      "toc": 13847176,
+      "note": "Original FIOS operation phase callback invoked at 0x70805c in bundle 153."
+    },
+    {
+      "descriptor": 13812088,
+      "code": 9475880,
+      "toc": 13847176,
+      "note": "Original formatted string-output callback invoked at 0x91436c in bundle 154."
+    },
+    {
+      "descriptor": 13756648,
+      "code": 7319584,
+      "toc": 13847176,
+      "note": "Original FIOS virtual callback reached at 0x6fd288 after disk cache writes and SPURS task startup in bundle 166."
+    },
+    {
+      "descriptor": 13758800,
+      "code": 7435608,
+      "toc": 13847176,
+      "note": "Original archive-entry comparison callback passed to native-recompiled qsort at 0x903aa8 in bundle 179 after actual GAME.PSARC reads (32-byte header, 68-byte index)."
+    },
+    {
+      "descriptor": 13676360,
+      "code": 5156956,
+      "toc": 13847176,
+      "note": "Original callback through OPD 0xd0af48, call returning to 0x4eb6b0 observed in native bundle 192."
+    }
+  ],
+  "static_opd_section": {
+    "address": 13266232,
+    "size": 548176,
+    "toc": 13847176,
+    "sha256": "8fde48659444ad0802a609269e434b2f0acad9ef3f974937ef3410aa0b429394",
+    "note": "Original ELF section header [22] (offset 0xc96d38, WA, align 8) of EBOOT.analysis.elf SHA256 6debdca0f181f35d98ebe23faabe2531b697c558b4e3384b06630173400674c1: 68522 8-byte descriptors, every TOC 0xd34a88 (= entry OPD TOC), every code aligned and executable; 34512 unique code entries. build_game re-verifies section hash, each TOC and executable code. Seeds only add translation targets; original control flow decides execution."
+  },
+  "firmware_opd_seeding": {
+    "enabled": true,
+    "note": "Seed every {code,TOC} function descriptor in relocated firmware module data whose TOC equals the module TOC and whose code is aligned executable code of that module (anyps3/build_game.py:module_opd_seeds). Motivated by native-virtual-271 stop: libssl indirect call to 0x20085030 (an OPD target with libssl TOC). 4330 descriptors over 14 modules in build 271."
+  }
+}
