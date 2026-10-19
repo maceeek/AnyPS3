@@ -85,6 +85,33 @@ out by hand, the architecture definition, or the exact implementation as oracle 
    here**; **verified** equivalent by test_rsx_graphics, test_rsx_parity, test_rsx_unused_coords (bit-exact images).
 4. Small per-draw items: env switches read once (`rsx_vk_cache.py`), worker progress flag `load` before `exchange`
    (`rsx_game_worker.py`), single-thread draw path when the graphics backend is active (`rsx_draw.py`).
+5. **MSAA plane runs** (`rsx_vk_graphics.py` `GraphicsBatch::PlaneDraw`, `graphics_replay_planes`). The default MSAA
+   path renders each sample plane as its own image in its own render pass (layered/multiview are opt-in because they
+   raised GPU time on the RTX 4070 SUPER, `anyps3/vulkan.py:218-230`). Previously every MSAA draw switched passes once
+   per plane: **verified** from the comment at `vulkan.py:222`, the level replay had **~1712 render passes per frame**
+   (76 with multiview). Now plane 0 of consecutive draws on the same attachments stays in one pass; planes ≥1 are
+   recorded as runs (one pass per plane) when that pass ends. Each plane keeps the original draw order; planes are
+   distinct images; every command outside a pass (copy, clear, barrier, conditional-rendering scope, submit) already
+   goes through `graphics_end_pass`/`graphics_barrier`, which replay pending planes first. `ANYPS3_RSX_PLANE_RUNS=0`
+   restores the old recording. **Verified:** test_rsx_gpu_batch (1/2/4 samples: one plane-0 pass for three draws,
+   `render_passes==samples` after the transfer, unchanged pixels/depth/stencil, Khronos validation with sync
+   validation clean), test_rsx_graphics, test_rsx_parity, test_rsxvk20–22 (incl. conditional), test_rsx_rtt,
+   test_rsx_alias_flow, test_rsx_readback and the other RSX modules of the batch.
+   **Hypothesis:** a large share of the ~30 ms GPU busy time per frame in the level is render-pass switching
+   (load/store of the attachments per pass); plane runs keep the fast per-plane layout and should cut passes to
+   roughly the multiview count. **Distinguishing test on the PC:** the same level window with
+   `ANYPS3_RSX_PLANE_RUNS=0` and `=1`, comparing `PERF GPU busy_ns`, render passes per frame (RSX perf counters)
+   and FPS.
+6. **Stale test fixed:** `tests/test_rsx_gpu_upload.py` (vertex-format oracle) pasted `raw_vertex_glsl` into its own
+   compute shader; since build 460 that code reads the state arena (`state_`), so the module failed on 460 with
+   `'state_' : undeclared identifier` (**verified** on a worktree of `43c6b27`). The oracle now maps `state_` to its
+   single buffer; literal expectations unchanged; the module passes. No runtime change was needed: production vertex
+   shaders insert `state_glsl` (`rsx_graphics.py` `hardware_vertex_uncached`).
+
+**Candidate, not implemented:** each draw wraps every plane in a precise occlusion query; the counts are
+guest-visible only while ZPASS pixel counting (register 0x17cc) is enabled (`rsx_graphics.py` `retire_work`,
+`rsx.py` report reset), otherwise they feed the diagnostic `draw.pixels`, which 20 test modules use as an oracle.
+Eliding queries while 0x17cc is 0 would need a separate diagnostic mode; worth it only if a PC profile shows query cost.
 
 ### Scheduler
 
