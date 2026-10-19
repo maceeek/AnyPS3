@@ -127,6 +127,17 @@ struct NativeSpu {
         // before the last successful token compare, the physical granule and memory they belong to.
         std::array<std::uint64_t,3> reservation_observed{};std::uintptr_t reservation_observed_pointer=0;
         std::uint64_t reservation_observed_memory=0;bool reservation_observed_valid=false;
+        // Pool-lane busy-poll detector (spu_poll_note in spu.py). enabled is set only while a pool lane runs
+        // this thread; parked/parked_kind describe the SpuBlocked that lane just caught.
+        struct PollState {
+            enum Kind : std::uint32_t {None,Getllar,EventCount};
+            struct Site {Kind kind=None;std::uint64_t address=0;std::uint32_t pc=0;bool valid=false;
+                std::array<SpuRegister,128> regs{};SpuRegister fpscr{};};
+            bool enabled=false,parked=false,resume_pass=false,spinning=false;Kind parked_kind=None;
+            std::chrono::steady_clock::time_point spin_start{};
+            unsigned count=0,parks=0,window=0,next_site=0;std::uint64_t total_parks=0;
+            std::array<Site,2> sites;
+        } idle_poll;
         std::uint32_t atomic_status=0;bool atomic_status_ready=false;
         std::uint32_t event_mask=0,event_status=0;
         bool event_ready=false,waiting_event=false;
@@ -371,6 +382,7 @@ static std::uint32_t spu_syscall(PpuState& s) {
             thread.dma_writes.clear();thread.dynamic_blocks.clear();thread.dynamic_seen.clear();thread.dynamic_miss=false;thread.reloc_delta=0;
             thread.steps=0;thread.published_steps.value.store(0,std::memory_order_relaxed);thread.dma={};thread.tag_mask=0;thread.tag_status=0;thread.tag_status_ready=false;thread.stalled_lists={};thread.stall_mask=0;thread.stall_stat=0;thread.stall_stat_ready=false;thread.tag_update_pending=0;
             thread.out_mailbox_full=false;thread.in_mailbox.clear();thread.reservation_address=UINT64_MAX;
+            thread.reservation_observed_valid=false;thread.idle_poll=NativeSpu::Thread::PollState{};
             thread.atomic_status_ready=false;thread.event_mask=0;thread.event_status=0;
             thread.event_ready=false;thread.waiting_event=false;thread.waiting_signal=0;
             thread.interrupts_enabled=false;thread.srr0_valid=false;thread.srr0_pending=false;
