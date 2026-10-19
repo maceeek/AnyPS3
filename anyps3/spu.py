@@ -797,18 +797,45 @@ template<class Thread> static void spu_update_decrementer(Thread& t,std::uint64_
 // over the whole interval latches the same underflow event and the same modulo-2^32 value. The clock is
 // read only while TM (0x20) is enabled, or with full=true before channels that read the value (8),
 // change the mask/acknowledge (1/2) or reload the decrementer (7).
+//
+// Reservation-lost check. With concurrent guest memory the full compare is GuestMemory::reservation_token():
+// reader admission, stripe lock, map lookup and tracking state. Pool lanes repeat this check on every
+// GETLLAR/PUTLLC, rchcnt/rdch of channel 0, branch-on-event and slice entry, and it contends for the very
+// stripe a worker's PUTLLUC or a PPU store needs. The filter keeps the result exact: notify() (par_wait.py)
+// publishes every bump of a tracked granule and every map-epoch change, and the counters observed BEFORE the
+// last successful full compare prove that nothing was published since (proof at
+// ReservationNotifications::touched). The full compare runs on the first check, after any published change
+// (hash collisions included) and for a different granule or memory; serial memory always compares fully.
+// One effect of the compare is not a published change: a synchronous host-access observer (RSX/GPU
+// coherence) materializes deferred writes when a CPU access reaches its range, and that write is what loses
+// the reservation. A reservation line such an observer covers therefore always takes the full compare.
 static void spu_collect_events(PpuState& s,NativeSpu::Thread& t,bool full=false){
     spu_stat(t,12);
-    HostAccessContext event_origin(HostAccessOrigin::Engine::Spu,t.id,t.pc,&t.steps);
     unsigned produced=0;
     const auto take=[](auto& flag){return flag.load(std::memory_order_relaxed) && flag.exchange(false,std::memory_order_acq_rel);};
     if(take(t.in_mailbox.state->event))produced|=0x10;
     for(unsigned i=0;i<2;++i)if(take(t.snr[i].state->event))produced|=i?0x100:0x200;
     t.event_status|=produced;if(produced&t.event_mask)t.event_ready=true;
     if(t.decrementer_running && (full || (t.event_mask&0x20)))spu_update_decrementer(t,timebase_ticks());
-    if(t.reservation_address!=UINT64_MAX && t.reservation!=s.memory.reservation_token(t.reservation_address)){
-        t.reservation_address=UINT64_MAX;t.event_status|=0x400;
-        if(t.event_mask&0x400)t.event_ready=true;
+    if(t.reservation_address!=UINT64_MAX){
+        auto& memory=s.memory;const bool concurrent=memory.concurrent();
+        if(__builtin_expect(concurrent && t.reservation_observed_valid && t.reservation_observed_pointer==t.reservation.first &&
+            t.reservation_observed_memory==memory.parallel->identity &&
+            memory.parallel->notifications->observe(t.reservation.first)==t.reservation_observed &&
+            (!memory.host_access_observer || !memory.host_access_observer.synchronous(reinterpret_cast<const void*>(t.reservation.first),128)),1))return;
+        // The token compare reads guest memory; give observers the SPU origin (pc, retired steps).
+        HostAccessContext event_origin(HostAccessOrigin::Engine::Spu,t.id,t.pc,&t.steps);
+        // Sample first, compare second: a bump after the sample either shows in the compare (the version
+        // is read under the stripe lock) or publishes later and invalidates the sample.
+        const auto observed=concurrent?memory.parallel->notifications->observe(t.reservation.first):std::array<std::uint64_t,3>{};
+        if(t.reservation!=s.memory.reservation_token(t.reservation_address)){
+            t.reservation_observed_valid=false;
+            t.reservation_address=UINT64_MAX;t.event_status|=0x400;
+            if(t.event_mask&0x400)t.event_ready=true;
+        }else if(concurrent){
+            t.reservation_observed=observed;t.reservation_observed_pointer=t.reservation.first;
+            t.reservation_observed_memory=memory.parallel->identity;t.reservation_observed_valid=true;
+        }
     }
 }
 void spu_interpret(PpuState&,NativeSpu::Thread&,std::uint8_t*);

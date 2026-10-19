@@ -79,7 +79,9 @@ RESERVATION = r'''
  std::uint8_t bytes[128]{};m.getllar(0x10000,bytes,t.reservation);t.reservation_address=0x10000;
  lane.watch_reservation(m,t.reservation.first);spu_collect_events(s,t);assert(!t.event_ready);
  for(unsigned i=0;i<1000;++i)spu_collect_events(s,t);
- assert(token_calls==1001 && !t.event_ready);
+ // No observer covers the line: only the first check compares; the published-change counters prove that
+ // nothing changed since (test_spu_reservation_filter pins the exactness of that claim).
+ assert(token_calls==1 && !t.event_ready);
  m.store(0x20080,4,7);spu_collect_events(s,t);assert(!t.event_ready);
  m.store(0x20000,4,0);spu_collect_events(s,t);assert(t.event_ready && t.event_status==0x400);
  // A future observer-backed write is not a CPU store notification yet. The
@@ -91,6 +93,8 @@ RESERVATION = r'''
    if(materialize){materialize=false;GuestMemory::ObserverPause pause(m);m.store(0x20000,4,0x11223344);}
   };
  }
+ // A synchronous observer on the line forbids the shortcut: every check compares (and so runs coherence).
+ {const auto before=token_calls;for(unsigned i=0;i<10;++i)spu_collect_events(s,t);assert(token_calls==before+10 && !t.event_ready);}
  materialize=true;spu_collect_events(s,t);
  assert(callbacks>0 && !materialize && t.event_ready && t.event_status==0x400);
  assert(m.load(0x10000,4)==0x11223344);
@@ -98,7 +102,7 @@ RESERVATION = r'''
  t.event_ready=false;t.event_status=0;m.getllar(0x10080,bytes,t.reservation);t.reservation_address=0x10080;
  spu_collect_events(s,t);assert(!t.event_ready);m.mapping_changed();spu_collect_events(s,t);assert(t.event_ready);
  NativeSpuWorker::current=nullptr;lane.reservation_watch.reset();assert(m.parallel->notifications->count==0);
- std::puts("PASS LR alias/same-value/map and mandatory observer coherence; no unsafe token cache");
+ std::puts("PASS LR alias/same-value/map and mandatory observer coherence; exact change-counter shortcut only without observer");
 '''
 
 FAILURE = r'''

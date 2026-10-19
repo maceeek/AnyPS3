@@ -123,6 +123,10 @@ struct NativeSpu {
         std::array<SpuSignal,2> snr;
         std::pair<std::uintptr_t,std::uint64_t> reservation{};
         std::uint64_t reservation_address=UINT64_MAX;
+        // Reservation-lost filter for concurrent memory (spu_reservation_intact): change counters sampled
+        // before the last successful token compare, the physical granule and memory they belong to.
+        std::array<std::uint64_t,3> reservation_observed{};std::uintptr_t reservation_observed_pointer=0;
+        std::uint64_t reservation_observed_memory=0;bool reservation_observed_valid=false;
         std::uint32_t atomic_status=0;bool atomic_status_ready=false;
         std::uint32_t event_mask=0,event_status=0;
         bool event_ready=false,waiting_event=false;
