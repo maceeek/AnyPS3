@@ -132,6 +132,13 @@ struct NativeSpuWorker {
         }
     }
     unsigned pauses=0,tickets=0,budget=1024,request_budget=1024;
+    // A pool lane free-runs between coordinator ticks, so the PPU tick budget (spu_run(s,1024) per 256 PPU
+    // steps) is no reason to slice it every 1024 instructions: each slice costs the lane mutex, the
+    // coordinator signal and (with ANYPS3_PERF_REPORT) two clock reads. Pause/ack latency is one slice
+    // (4096 instructions is tens of microseconds at ~10 ns/instruction). Explicit smaller requests stay
+    // exact for stepping tests; a request of at least the tick budget selects the standard lane slice.
+    static constexpr unsigned pool_tick_budget=1024,pool_lane_quantum=4096;
+    static unsigned lane_budget(unsigned requested){return requested<pool_tick_budget?requested:pool_lane_quantum;}
     std::uint64_t generation=0,wake_generation=0;
     std::atomic<std::uint64_t> completed{0},worker_ns{0};
     std::exception_ptr error;
@@ -171,8 +178,11 @@ struct NativeSpuWorker {
                     if(tickets)--tickets;
                     const auto observed_wake=wake_generation;
                     active=true;const unsigned quantum=pauses?request_budget:budget;lock.unlock();
-                    const auto start=std::chrono::steady_clock::now();const bool progress=step(quantum);
-                    const auto ns=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-start).count();
+                    // Wall time of a quantum is only consumed by the ANYPS3_PERF_REPORT line (worker_ns); the
+                    // lane loop reads the host clock only when that report is enabled.
+                    std::chrono::steady_clock::time_point start{};if(coordinator_clock.enabled)start=std::chrono::steady_clock::now();
+                    const bool progress=step(quantum);
+                    const auto ns=coordinator_clock.enabled?std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-start).count():0;
                     lock.lock();worker_ns+=ns;last_progress=progress;++completed;if(parent && progress)parent->pool_completed.fetch_add(1,std::memory_order_relaxed);++generation;active=false;if(pauses)changed.notify_all();signal_coordinator();
                     if(!progress && !tickets && !pauses){
                         const auto ready=[&]{return stop || pauses || tickets || wake_generation!=observed_wake;};
@@ -208,7 +218,7 @@ struct NativeSpuWorker {
             if(++refresh_ticks==64){refresh_ticks=0;refresh_pending=true;}
             if(attention.load(std::memory_order_acquire) || refresh_pending){attention.exchange(false,std::memory_order_acq_rel);service();check();}
             if(quantum && quantum!=pool_budget){pool_budget=quantum;
-                for(auto& lane:lanes){std::lock_guard<std::mutex> lock(lane->mutex);lane->budget=std::min(quantum,1024u);}}
+                for(auto& lane:lanes){std::lock_guard<std::mutex> lock(lane->mutex);lane->budget=lane_budget(quantum);}}
             const auto completed_now=pool_completed.load(std::memory_order_relaxed);
             const bool progress=completed_now!=observed_completed;observed_completed=completed_now;
             return {progress,false};}
@@ -389,7 +399,7 @@ static void spu_pool_refresh(PpuState& s){
         if(g.state!=6 && g.state!=3 && g.state!=4 && g.state!=5)continue;
         for(unsigned i=0;i<g.threads.size();++i){auto& t=g.threads[i];
             if(std::any_of(w.lanes.begin(),w.lanes.end(),[&](const auto& lane){return lane->lane_thread_id==t.id;}))continue;
-            auto lane=std::make_unique<NativeSpuWorker>();lane->parent=&w;lane->group_id=g.id;lane->guest_thread=t.id;lane->lane_thread_id=t.id;lane->scheduled=g.scheduled;lane->pauses=w.pauses;lane->budget=std::min(w.pool_budget,1024u);lane->context=&t;lane->group=&g;
+            auto lane=std::make_unique<NativeSpuWorker>();lane->parent=&w;lane->group_id=g.id;lane->guest_thread=t.id;lane->lane_thread_id=t.id;lane->scheduled=g.scheduled;lane->pauses=w.pauses;lane->budget=NativeSpuWorker::lane_budget(w.pool_budget);lane->context=&t;lane->group=&g;
             auto facade=std::make_shared<PpuState>(s.process);auto* group=&g;
             lane->step=[facade,group,i](unsigned budget){try{const auto progress=spu_run_thread(*facade,*group,i,budget);if(group->state!=6 || !NativeSpuWorker::current->scheduled.load())facade->memory.release_reader_slot();return progress;}catch(const SpuControlEnd&){return false;}catch(...){auto& t=group->threads[i];NativeSpuWorker::current->failed_context(t.pc,t.id);throw;}};
             auto* wake_lane=lane.get();t.in_mailbox.set_wakeup([wake_lane]{wake_lane->wake();});for(auto& snr:t.snr)snr.set_wakeup([wake_lane]{wake_lane->wake();});
