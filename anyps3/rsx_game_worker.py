@@ -50,12 +50,21 @@ static void rsx_host_request(NativeRsxWorker& w,std::function<void()> invoke){
     struct Waiter {Waiter(){rsx_host_waiters.fetch_add(1,std::memory_order_relaxed);}~Waiter(){rsx_host_waiters.fetch_sub(1,std::memory_order_relaxed);}} waiter;
     w.queue->await(w.queue->post(RsxOwnerQueue::Kind::HostAccess,std::move(invoke),0,1));
 }
-static void rsx_owner_drain(NativeRsxWorker& w,PpuState* f){
+// Serves the drainable requests that are queued when the poll starts, at most that many and in queue order. Producers may refill the
+// queue while it is served (every served request wakes its requester, which can post the next one); looping until the queue is empty
+// would then keep the owner here indefinitely and starve the FIFO (GET, labels) and the vblank deadline. Requests posted meanwhile are
+// served by the next poll (every FIFO packet, every vsync-wait step). The front barrier (any other request kind, or an untagged one)
+// and the recursion guard are unchanged; `served` (optional) receives the number of requests executed.
+static void rsx_owner_drain(NativeRsxWorker& w,PpuState* f,unsigned* served=nullptr){
     static thread_local bool active=false;
     if(active)return;
     active=true;struct Reset {~Reset(){active=false;}} reset;
     auto& q=*w.queue;
-    for(;;){
+    std::size_t admitted=0;
+    {std::lock_guard<std::mutex> lock(q.mutex);
+        if(q.closing || q.error)return;
+        for(const auto& request:q.queue){if(request->kind!=RsxOwnerQueue::Kind::HostAccess || request->put_generation!=1)break;++admitted;}}
+    for(;admitted;--admitted){
         std::shared_ptr<RsxOwnerQueue::Request> request;
         {std::lock_guard<std::mutex> lock(q.mutex);
             if(q.closing || q.error || q.queue.empty())return;
@@ -63,6 +72,7 @@ static void rsx_owner_drain(NativeRsxWorker& w,PpuState* f){
             if(front->kind!=RsxOwnerQueue::Kind::HostAccess || front->put_generation!=1)return;
             request=front;q.queue.pop_front();++q.generation;q.changed.notify_all();}
         anyps3_ft::mark(anyps3_ft::Mark,0xd1);
+        if(served)++*served;
         try{HostAccessContext origin(request->origin);HostByteAccess bytes(request->byte_access,true);if(request->invoke)request->invoke();}
         catch(...){
             {std::lock_guard<std::mutex> lock(q.mutex);request->error=std::current_exception();request->done=true;++q.generation;q.changed.notify_all();}
