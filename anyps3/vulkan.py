@@ -86,6 +86,11 @@ class NativeVulkan {
     VkQueue transfer_queue=VK_NULL_HANDLE;VkCommandPool transfer_pool=VK_NULL_HANDLE;std::uint32_t transfer_family=UINT32_MAX;
     VkSemaphore graphics_upload_timeline=VK_NULL_HANDLE;std::uint64_t graphics_upload_serial=0;
     VkBuffer graphics_loop_scratch=VK_NULL_HANDLE;VkDeviceMemory graphics_loop_scratch_memory=VK_NULL_HANDLE;std::uint64_t graphics_loop_scratch_size=0; // diagnostic loop benchmark only
+    // Diagnostic loop benchmark only: an immutable host snapshot of the staging bytes (the graphics batch writes status words
+    // back into its own staging buffer), a serial chain so that no two iterations of one command buffer overlap.
+    VkBuffer graphics_loop_snapshot=VK_NULL_HANDLE;VkDeviceMemory graphics_loop_snapshot_memory=VK_NULL_HANDLE;void* graphics_loop_snapshot_map=nullptr;bool graphics_loop_snapshot_coherent=false;std::uint64_t graphics_loop_snapshot_size=0;
+    VkSemaphore graphics_loop_timeline=VK_NULL_HANDLE;std::uint64_t graphics_loop_serial=0;
+    std::uint32_t transfer_timestamp_bits=0; // timestampValidBits of the transfer family (differs from the graphics family's)
     bool graphics_host_query_reset=false;
 #endif
     static void check(VkResult result,const char* operation){
@@ -116,6 +121,10 @@ class NativeVulkan {
             if(graphics_upload_timeline)vkDestroySemaphore(device,graphics_upload_timeline,nullptr);
             if(graphics_loop_scratch)vkDestroyBuffer(device,graphics_loop_scratch,nullptr);
             if(graphics_loop_scratch_memory)vkFreeMemory(device,graphics_loop_scratch_memory,nullptr);
+            if(graphics_loop_snapshot_map)vkUnmapMemory(device,graphics_loop_snapshot_memory);
+            if(graphics_loop_snapshot)vkDestroyBuffer(device,graphics_loop_snapshot,nullptr);
+            if(graphics_loop_snapshot_memory)vkFreeMemory(device,graphics_loop_snapshot_memory,nullptr);
+            if(graphics_loop_timeline)vkDestroySemaphore(device,graphics_loop_timeline,nullptr);
             if(graphics_sampler)vkDestroySampler(device,graphics_sampler,nullptr);
             save_pipeline_cache(true);compile_stats_print(true);
             graphics_pipelines.clear();
@@ -229,7 +238,7 @@ public:
                 if(!v || !std::strcmp(v,"1")){
                     std::uint32_t n=0;vkGetPhysicalDeviceQueueFamilyProperties(physical,&n,nullptr);std::vector<VkQueueFamilyProperties> families(n);vkGetPhysicalDeviceQueueFamilyProperties(physical,&n,families.data());
                     for(std::uint32_t i=0;i<n;++i)if(i!=family && families[i].queueCount && (families[i].queueFlags&VK_QUEUE_TRANSFER_BIT) &&
-                        !(families[i].queueFlags&~(VK_QUEUE_TRANSFER_BIT|VK_QUEUE_SPARSE_BINDING_BIT)) && families[i].timestampValidBits){transfer_family=i;break;}}}
+                        !(families[i].queueFlags&~(VK_QUEUE_TRANSFER_BIT|VK_QUEUE_SPARSE_BINDING_BIT)) && families[i].timestampValidBits){transfer_family=i;transfer_timestamp_bits=families[i].timestampValidBits;break;}}}
             if(transfer_family!=UINT32_MAX){queue_infos[1].queueFamilyIndex=transfer_family;di.queueCreateInfoCount=2;di.pQueueCreateInfos=queue_infos;}
             #endif
             #ifdef ANYPS3_RSX_VK

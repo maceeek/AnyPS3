@@ -149,6 +149,11 @@ public:
         explicit GraphicsBatch(NativeVulkan* o):owner(o){}
         ~GraphicsBatch(){
             if(submitted)vkWaitForFences(owner->device,1,&fence,VK_TRUE,UINT64_MAX);
+            // A prelude submitted on the DMA queue before a failing graphics submit (or before an abandoned batch) still reads our staging
+            // buffer and writes our device buffer: wait for its upload timeline value before anything is freed. upload_wait is set by
+            // the submission itself, independently of profiling, and cleared by graphics_reset after retirement.
+            if(upload_wait && owner->graphics_upload_timeline){VkSemaphoreWaitInfo wi{};wi.sType=VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;wi.semaphoreCount=1;wi.pSemaphores=&owner->graphics_upload_timeline;wi.pValues=&upload_wait;
+                vkWaitSemaphores(owner->device,&wi,UINT64_MAX);}
             framebuffer_pins.clear();framebuffers.clear();pipeline_pins.clear();
             if(busy_queries)vkDestroyQueryPool(owner->device,busy_queries,nullptr);
             if(occlusion)vkDestroyQueryPool(owner->device,occlusion,nullptr);
@@ -198,6 +203,10 @@ private:
     VkSemaphore graphics_timeline=VK_NULL_HANDLE;
     std::uint64_t graphics_serial=0;
 public:
+    // TEST HOOK (tests/test_rsx_async_upload.py): makes the next graphics submit fail AFTER its DMA prelude was submitted.
+    bool graphics_test_submit_fault=false;
+    // TEST HOOK: N>0 makes the Nth graphics submission of the ANYPS3_RSX_GPU_LOOP benchmark fail (earlier iterations are then still pending).
+    unsigned graphics_test_loop_fault=0;
     std::uint64_t graphics_busy_ns=0,graphics_profile_frames=0,graphics_completed_batches=0,graphics_prelude_ns=0;
     std::array<std::uint64_t,256> graphics_mark_ns{},graphics_mark_count{};
     std::uint64_t graphics_loop_ns=0,graphics_loop_warm_ns=0,graphics_loop_batches=0;
@@ -269,7 +278,7 @@ private:
         if(b.recording)return;
         if(b.submitted || b.completion)throw std::runtime_error("RSX graphics begin before retirement/reset");
         if(!b.plane_draws.empty())throw std::runtime_error("RSX graphics deferred MSAA planes outlived their batch");
-        VkCommandBufferBeginInfo i{};i.sType=VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;i.flags=graphics_gpu_loop()?0:VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        VkCommandBufferBeginInfo i{};i.sType=VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;i.flags=graphics_gpu_loop()?VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT:VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
         check(vkBeginCommandBuffer(b.command,&i),"graphics begin");b.recording=true;++graphics_recordings;
         if(b.queries)vkCmdResetQueryPool(b.command,b.queries,0,4096);
         vkCmdResetQueryPool(b.command,b.occlusion,0,1024);
@@ -806,7 +815,7 @@ public:
             // Recording is complete, so every immutable slice is known. Upload
             // them once before all consumers instead of breaking every draw's
             // pass. Distinct allocations never overlap, even across versions.
-            VkCommandBufferBeginInfo begin{};begin.sType=VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;begin.flags=graphics_gpu_loop()?0:VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+            VkCommandBufferBeginInfo begin{};begin.sType=VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;begin.flags=graphics_gpu_loop()?VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT:VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
             VkCommandBuffer commands[2]{};unsigned command_count=0;
             if(transfer_queue){
                 // The prelude runs on the DMA queue while the graphics queue still executes the previous batch. The batch waits on
@@ -853,11 +862,20 @@ public:
                 // DIAGNOSTIC ONLY (ANYPS3_RSX_GPU_LOOP=N, replay benchmark): run this batch N extra times back to back so the GPU
                 // is saturated (driver boosts clocks); the second half is timed on the host. Guest-visible results of such a
                 // run are meaningless (blending and feedback accumulate), it never belongs in a game run.
-                VkSubmitInfo li{};li.sType=VK_STRUCTURE_TYPE_SUBMIT_INFO;li.commandBufferCount=command_count;li.pCommandBuffers=commands;
+                // Validity: the command buffers are recorded SIMULTANEOUS_USE (the host resubmits them while earlier iterations are still
+                // pending) and the graphics iterations are chained on a loop timeline so that no two executions overlap; the DMA copies
+                // read an immutable snapshot of the staging bytes (the batch writes draw-status words back into its own staging buffer)
+                // and are chained on the upload timeline (every iteration writes the same scratch ranges).
                 const unsigned warm=loop/2,timed=loop-warm;
                 // With an async prelude each iteration also issues a same-sized prelude copy into a scratch buffer on the DMA queue
                 // (the steady state of consecutive batches: batch k+1's upload overlaps batch k's graphics work).
-                const bool overlap=transfer_queue && !b.uploads.empty();VkCommandBuffer loop_copy=VK_NULL_HANDLE;
+                const bool overlap=transfer_queue && !b.uploads.empty();
+                // The DMA copy command buffer is freed on every exit path, but only after both queues drained (see the catch below).
+                struct LoopCopy{NativeVulkan* owner;VkCommandBuffer command=VK_NULL_HANDLE;~LoopCopy(){if(command)vkFreeCommandBuffers(owner->device,owner->transfer_pool,1,&command);}} loop_copy_owner{this};
+                VkCommandBuffer& loop_copy=loop_copy_owner.command;
+                try{
+                if(!graphics_loop_timeline){VkSemaphoreTypeCreateInfo tt{};tt.sType=VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO;tt.semaphoreType=VK_SEMAPHORE_TYPE_TIMELINE;
+                    VkSemaphoreCreateInfo ti{};ti.sType=VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;ti.pNext=&tt;check(vkCreateSemaphore(device,&ti,nullptr,&graphics_loop_timeline),"graphics loop timeline");}
                 if(overlap){
                     if(graphics_loop_scratch_size<b.capacity){
                         if(graphics_loop_scratch){vkDeviceWaitIdle(device);vkDestroyBuffer(device,graphics_loop_scratch,nullptr);vkFreeMemory(device,graphics_loop_scratch_memory,nullptr);}
@@ -867,27 +885,58 @@ public:
                         VkMemoryRequirements r{};vkGetBufferMemoryRequirements(device,graphics_loop_scratch,&r);VkMemoryAllocateInfo mi{};mi.sType=VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;mi.allocationSize=r.size;mi.memoryTypeIndex=memory_type(r.memoryTypeBits,VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
                         check(vkAllocateMemory(device,&mi,nullptr,&graphics_loop_scratch_memory),"loop scratch memory");check(vkBindBufferMemory(device,graphics_loop_scratch,graphics_loop_scratch_memory,0),"loop scratch bind");graphics_loop_scratch_size=b.capacity;
                     }
+                    // Snapshot of the staging bytes in the same kind of host memory as the staging buffer itself (PCIe-bound copies).
+                    if(graphics_loop_snapshot_size<b.used){
+                        vkDeviceWaitIdle(device);
+                        if(graphics_loop_snapshot_map){vkUnmapMemory(device,graphics_loop_snapshot_memory);graphics_loop_snapshot_map=nullptr;}
+                        if(graphics_loop_snapshot){vkDestroyBuffer(device,graphics_loop_snapshot,nullptr);graphics_loop_snapshot=VK_NULL_HANDLE;}
+                        if(graphics_loop_snapshot_memory){vkFreeMemory(device,graphics_loop_snapshot_memory,nullptr);graphics_loop_snapshot_memory=VK_NULL_HANDLE;}
+                        graphics_loop_snapshot_size=0;
+                        VkBufferCreateInfo sbi{};sbi.sType=VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;sbi.size=b.capacity;sbi.usage=VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+                        const std::uint32_t fam[2]={family,transfer_family};sbi.sharingMode=VK_SHARING_MODE_CONCURRENT;sbi.queueFamilyIndexCount=2;sbi.pQueueFamilyIndices=fam;
+                        check(vkCreateBuffer(device,&sbi,nullptr,&graphics_loop_snapshot),"loop snapshot");
+                        VkMemoryRequirements r{};vkGetBufferMemoryRequirements(device,graphics_loop_snapshot,&r);VkMemoryAllocateInfo mi{};mi.sType=VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;mi.allocationSize=r.size;mi.memoryTypeIndex=host_read_memory_type(r.memoryTypeBits);
+                        graphics_loop_snapshot_coherent=memory.memoryTypes[mi.memoryTypeIndex].propertyFlags&VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+                        check(vkAllocateMemory(device,&mi,nullptr,&graphics_loop_snapshot_memory),"loop snapshot memory");check(vkBindBufferMemory(device,graphics_loop_snapshot,graphics_loop_snapshot_memory,0),"loop snapshot bind");
+                        check(vkMapMemory(device,graphics_loop_snapshot_memory,0,VK_WHOLE_SIZE,0,&graphics_loop_snapshot_map),"loop snapshot map");graphics_loop_snapshot_size=b.capacity;
+                    }
+                    std::memcpy(graphics_loop_snapshot_map,b.map,b.used);
+                    if(!graphics_loop_snapshot_coherent){VkMappedMemoryRange r{};r.sType=VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;r.memory=graphics_loop_snapshot_memory;r.size=VK_WHOLE_SIZE;check(vkFlushMappedMemoryRanges(device,1,&r),"loop snapshot flush");}
                     VkCommandBufferAllocateInfo ai{};ai.sType=VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;ai.commandPool=transfer_pool;ai.level=VK_COMMAND_BUFFER_LEVEL_PRIMARY;ai.commandBufferCount=1;
-                    check(vkAllocateCommandBuffers(device,&ai,&loop_copy),"loop copy command");VkCommandBufferBeginInfo lb{};lb.sType=VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-                    check(vkBeginCommandBuffer(loop_copy,&lb),"loop copy begin");vkCmdCopyBuffer(loop_copy,b.buffer,graphics_loop_scratch,unsigned(b.uploads.size()),b.uploads.data());check(vkEndCommandBuffer(loop_copy),"loop copy end");
+                    check(vkAllocateCommandBuffers(device,&ai,&loop_copy),"loop copy command");VkCommandBufferBeginInfo lb{};lb.sType=VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;lb.flags=VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT;
+                    check(vkBeginCommandBuffer(loop_copy,&lb),"loop copy begin");vkCmdCopyBuffer(loop_copy,graphics_loop_snapshot,graphics_loop_scratch,unsigned(b.uploads.size()),b.uploads.data());check(vkEndCommandBuffer(loop_copy),"loop copy end");
                 }
                 auto run=[&](unsigned n){for(unsigned k=0;k<n;++k){
+                    std::uint64_t waits_value[2]{};VkSemaphore waits_semaphore[2]{};VkPipelineStageFlags waits_stage[2]{};unsigned wait_count=0;
                     if(overlap){
-                        const std::uint64_t u=++graphics_upload_serial;
-                        VkTimelineSemaphoreSubmitInfo ut{};ut.sType=VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;ut.signalSemaphoreValueCount=1;ut.pSignalSemaphoreValues=&u;
-                        VkSubmitInfo ui{};ui.sType=VK_STRUCTURE_TYPE_SUBMIT_INFO;ui.pNext=&ut;ui.commandBufferCount=1;ui.pCommandBuffers=&loop_copy;ui.signalSemaphoreCount=1;ui.pSignalSemaphores=&graphics_upload_timeline;
-                        check(vkQueueSubmit(transfer_queue,1,&ui,VK_NULL_HANDLE),"graphics loop upload submit");
-                        VkTimelineSemaphoreSubmitInfo wt{};wt.sType=VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;wt.waitSemaphoreValueCount=1;wt.pWaitSemaphoreValues=&u;
-                        VkSubmitInfo gi=li;gi.pNext=&wt;gi.waitSemaphoreCount=1;gi.pWaitSemaphores=&graphics_upload_timeline;const VkPipelineStageFlags stage=VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;gi.pWaitDstStageMask=&stage;
-                        check(vkQueueSubmit(queue,1,&gi,VK_NULL_HANDLE),"graphics loop submit");
-                    }else check(vkQueueSubmit(queue,1,&li,VK_NULL_HANDLE),"graphics loop submit");}
+                        const std::uint64_t before=graphics_upload_serial,u=before+1; // the serial advances only after the submission succeeded
+                        // The previous DMA submission (real prelude or earlier iteration) completes before this one starts: no scratch WAW overlap.
+                        VkTimelineSemaphoreSubmitInfo ut{};ut.sType=VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;ut.waitSemaphoreValueCount=1;ut.pWaitSemaphoreValues=&before;ut.signalSemaphoreValueCount=1;ut.pSignalSemaphoreValues=&u;
+                        const VkPipelineStageFlags transfer_stage=VK_PIPELINE_STAGE_TRANSFER_BIT;
+                        VkSubmitInfo ui{};ui.sType=VK_STRUCTURE_TYPE_SUBMIT_INFO;ui.pNext=&ut;ui.commandBufferCount=1;ui.pCommandBuffers=&loop_copy;ui.waitSemaphoreCount=1;ui.pWaitSemaphores=&graphics_upload_timeline;ui.pWaitDstStageMask=&transfer_stage;ui.signalSemaphoreCount=1;ui.pSignalSemaphores=&graphics_upload_timeline;
+                        check(vkQueueSubmit(transfer_queue,1,&ui,VK_NULL_HANDLE),"graphics loop upload submit");graphics_upload_serial=u;
+                        waits_value[wait_count]=u;waits_semaphore[wait_count]=graphics_upload_timeline;waits_stage[wait_count++]=VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+                    }
+                    // The previous graphics iteration has completed before this one starts (no overlap of one command buffer with itself).
+                    const std::uint64_t previous=graphics_loop_serial,current=previous+1;
+                    waits_value[wait_count]=previous;waits_semaphore[wait_count]=graphics_loop_timeline;waits_stage[wait_count++]=VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+                    VkTimelineSemaphoreSubmitInfo gt{};gt.sType=VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;gt.waitSemaphoreValueCount=wait_count;gt.pWaitSemaphoreValues=waits_value;gt.signalSemaphoreValueCount=1;gt.pSignalSemaphoreValues=&current;
+                    VkSubmitInfo gi{};gi.sType=VK_STRUCTURE_TYPE_SUBMIT_INFO;gi.pNext=&gt;gi.commandBufferCount=command_count;gi.pCommandBuffers=commands;gi.waitSemaphoreCount=wait_count;gi.pWaitSemaphores=waits_semaphore;gi.pWaitDstStageMask=waits_stage;gi.signalSemaphoreCount=1;gi.pSignalSemaphores=&graphics_loop_timeline;
+                    if(graphics_test_loop_fault && !--graphics_test_loop_fault)throw std::runtime_error("injected graphics loop submit failure (test hook)");
+                    check(vkQueueSubmit(queue,1,&gi,VK_NULL_HANDLE),"graphics loop submit");graphics_loop_serial=current;}
                     check(vkQueueWaitIdle(queue),"graphics loop idle");if(overlap)check(vkQueueWaitIdle(transfer_queue),"graphics loop transfer idle");};
                 const auto t0=std::chrono::steady_clock::now();run(warm);const auto t1=std::chrono::steady_clock::now();run(timed);const auto t2=std::chrono::steady_clock::now();
                 graphics_loop_warm_ns+=std::chrono::duration_cast<std::chrono::nanoseconds>(t1-t0).count()/std::max(1u,warm);
                 graphics_loop_ns+=std::chrono::duration_cast<std::chrono::nanoseconds>(t2-t1).count()/timed;++graphics_loop_batches;
-                if(loop_copy)vkFreeCommandBuffers(device,transfer_pool,1,&loop_copy);
+                }catch(...){
+                    // Earlier iterations may still be pending: drain both queues (ignoring their errors) before anything is released,
+                    // then surface the original failure.
+                    vkQueueWaitIdle(queue);if(transfer_queue)vkQueueWaitIdle(transfer_queue);
+                    throw;
+                }
                 std::fprintf(stderr,"PERF GPU_LOOP batches=%llu steady_ns=%llu warm_ns=%llu\n",(unsigned long long)graphics_loop_batches,(unsigned long long)graphics_loop_ns,(unsigned long long)graphics_loop_warm_ns);
             }
+            if(graphics_test_submit_fault){graphics_test_submit_fault=false;throw std::runtime_error("injected graphics submit failure (test hook)");}
             check(vkQueueSubmit(queue,1,&si,b.fence),"graphics submit");::RsxPerfCounters::add(::RsxPerfCounters::submits);graphics_serial=value;b.completion=value;b.submitted=true;++b.submissions;return value;
         }catch(...){b.failed=true;throw;}
     }
@@ -921,7 +970,8 @@ public:
                 double prelude_batch_ns=transfer_queue?0.0:double((ticks[2]-ticks[0])&busy_mask)*b.timestamp_period;
                 if(transfer_queue){ticks[2]=ticks[0];
                     if(b.transfer_pending){std::uint64_t t[2]{};check(vkGetQueryPoolResults(device,b.transfer_queries,0,2,sizeof(t),t,8,VK_QUERY_RESULT_64_BIT),"graphics transfer results");
-                        prelude_batch_ns=double((t[1]-t[0])&busy_mask)*b.timestamp_period;vkResetQueryPool(device,b.transfer_queries,0,2);b.transfer_pending=false;}}
+                        const auto transfer_mask=transfer_timestamp_bits>=64?UINT64_MAX:((UINT64_C(1)<<transfer_timestamp_bits)-1); // the DMA family's own width
+                        prelude_batch_ns=double((t[1]-t[0])&transfer_mask)*b.timestamp_period;vkResetQueryPool(device,b.transfer_queries,0,2);b.transfer_pending=false;}}
                 graphics_busy_ns+=std::uint64_t(double((ticks[1]-ticks[0])&busy_mask)*b.timestamp_period);graphics_profile_frames+=b.frames;++graphics_completed_batches;
                 graphics_prelude_ns+=std::uint64_t(prelude_batch_ns);
                 if(b.marks && b.mark_count>1){std::vector<std::uint64_t> stamps(b.mark_count);

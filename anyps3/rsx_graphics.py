@@ -1270,14 +1270,20 @@ struct Session {
         // owners' bytes outside the new footprint must survive (as remainders).
         const bool aliased=std::any_of(surfaces.begin(),surfaces.end(),[&](const Surface& old){for(const auto& span:surface.physical)if(old.overlaps(reinterpret_cast<const void*>(span.begin),span.end-span.begin))return true;return false;});
         if(!aliased)return false;
+        // ANYPS3_RSX_MERGE_TRACE=1 (diagnostic): the new surface and every live surface it overlaps, for each bind over live aliases.
+        {static const bool on=std::getenv("ANYPS3_RSX_MERGE_TRACE")!=nullptr;static unsigned lines=0;
+            if(on && lines<200){++lines;
+                std::fprintf(stderr,"RSX MERGE BIND new off=%u pitch=%u %ux%u s=%u fmt=%u depth=%d bpp=%u discard=%d protectable=%d image_fmt=%d\n",unsigned(t.offset),unsigned(t.pitch),surface.width,surface.height,surface.samples,surface.format,int(surface.depth),unsigned(t.bpp),int(discard),int(surface.protectable),int(format));
+                for(const auto& old:surfaces){bool hit=false;for(const auto& span:surface.physical)if(old.overlaps(reinterpret_cast<const void*>(span.begin),span.end-span.begin)){hit=true;break;}
+                    if(hit)std::fprintf(stderr,"RSX MERGE BIND   old off=%u pitch=%u %ux%u s=%u fmt=%u depth=%d bpp=%u dirty=%d partial=%d protectable=%d exposed=%zu words=%zu runs=%zu image_fmt=%d\n",unsigned(old.target.offset),unsigned(old.target.pitch),old.width,old.height,old.samples,old.format,int(old.depth),unsigned(old.target.bpp),int(old.dirty),int(old.partial),int(old.protectable),old.exposed.size(),old.readback?old.readback->words.size():size_t(0),old.readback?old.readback->runs.size():size_t(0),old.image?int(old.image->format):-1);}}}
         auto reject=[](::RsxPerfCounters::Id id){::RsxPerfCounters::add(id);return false;};
         // ANYPS3_RSX_MERGE_TRACE=1: why a new surface over live aliases cannot use the GPU merge (diagnostic).
         auto trace_new=[&](const char* why){static const bool on=std::getenv("ANYPS3_RSX_MERGE_TRACE")!=nullptr;static unsigned lines=0;
             if(on && lines++<60)std::fprintf(stderr,"RSX MERGE REJECT %s discard=%d protectable=%d exposed=%zu mapping=%d plan=%d plan_words=%zu bpp=%u offset=%u pitch=%u width=%u height=%u samples=%u format=%u depth=%d bytes=%llu\n",why,int(discard),int(surface.protectable),surface.exposed.size(),int(bool(t.mapping)),int(bool(plan)),plan?plan->words.size():size_t(0),unsigned(t.bpp),unsigned(t.offset),unsigned(t.pitch),surface.width,surface.height,surface.samples,surface.format,int(surface.depth),(unsigned long long)bytes);};
         if(!surface.protectable || !surface.exposed.empty() || !t.mapping){trace_new("protection");return reject(::RsxPerfCounters::merge_rej_new);}
-        if(!discard){if(!plan || plan->words.empty() || t.bpp<4 || (t.offset&3) || (t.pitch&3) || plan->words.size()*4!=bytes){trace_new("plan_or_bpp_or_align");return reject(::RsxPerfCounters::merge_rej_new);}
+        if(!discard){if(!plan || plan->words.empty() || (t.bpp!=1 && t.bpp!=2 && t.bpp%4) || (t.offset&3) || (t.pitch&3) || plan->words.size()*4!=bytes){trace_new("plan_or_bpp_or_align");return reject(::RsxPerfCounters::merge_rej_new);}
             for(const auto& run:plan->runs)if((run.offset|run.size)&3){trace_new("run_align");return reject(::RsxPerfCounters::merge_rej_new);}}
-        std::vector<std::size_t> olds;std::uint64_t required=discard?0:bytes*4+65536;
+        std::vector<std::size_t> olds;std::uint64_t required=discard?0:unpack_budget(surface);
         for(std::size_t i=0;i<surfaces.size();++i){const auto& old=surfaces[i];bool overlap=false;
             for(const auto& span:surface.physical)if(old.overlaps(reinterpret_cast<const void*>(span.begin),span.end-span.begin)){overlap=true;break;}
             if(!overlap)continue;
@@ -1335,17 +1341,23 @@ struct Session {
         if(fallback_stats().enabled)++fallback_stats().paths["surface_alias_merge_gpu"];
         return true;
     }
+    // Device scratch of one packed->image unpack: packed input, word table and packed owner copies (3 x bytes), the texel output
+    // (4 bytes per pixel for 1/2-byte formats held in R32_UINT, otherwise bytes) and slack. Equals bytes*4+65536 for whole-word formats.
+    static std::uint64_t unpack_budget(const Surface& surface){
+        const auto pixels=std::uint64_t(surface.width)*surface.height*surface.samples,bytes=pixels*surface.target.bpp;
+        return bytes*3+std::max(bytes,pixels*4)+65536;
+    }
     bool upload_surface(Surface& surface){
         const auto& t=surface.target;const auto& plan=surface.readback;
         const auto bytes=std::uint64_t(surface.width)*surface.height*surface.samples*t.bpp;
-        // Sub-word formats and split words retain the general CPU codec. The
+        // Split words (unaligned runs/offsets/pitch) retain the general CPU codec. The
         // inverse table must cover complete pixels, including every plane.
-        if(!plan || plan->words.empty() || !t.mapping || t.bpp<4 || (t.offset&3) || (t.pitch&3) || plan->words.size()*4!=bytes)return false;
+        if(!plan || plan->words.empty() || !t.mapping || (t.bpp!=1 && t.bpp!=2 && t.bpp%4) || (t.offset&3) || (t.pitch&3) || plan->words.size()*4!=bytes)return false;
         for(const auto& run:plan->runs)if((run.offset|run.size)&3)return false;
         // Keep the established arena/readback capacity policy. In particular,
         // never replace an arena containing the image's initial transition.
-        if(bytes*4+65536>batch->capacity)return false;
-        if(batch->used+bytes*4+65536>batch->capacity)submit_async("surface_upload_capacity");
+        if(unpack_budget(surface)>batch->capacity)return false;
+        if(batch->used+unpack_budget(surface)>batch->capacity)submit_async("surface_upload_capacity");
         std::vector<std::uint8_t> packed;
         struct Reading {bool& busy;bool previous;explicit Reading(bool& b):busy(b),previous(b){busy=true;}~Reading(){busy=previous;}} reading(busy);
         SurfaceBytes transfer(surface,false);transfer.snapshot();

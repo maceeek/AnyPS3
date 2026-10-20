@@ -7,14 +7,23 @@ MEMBERS = r'''
         GraphicsSite site(SiteUnpack);
         const auto size=words.size()*4,pixels=std::uint64_t(image->width)*image->height*samples;
         const bool stencil=depth && format==2;
+        // Bytes per texel of the image (what vkCmdCopyBufferToImage reads). Equal to bpp for whole-word formats; sub-word guest formats
+        // (bpp 1/2) land in R32_UINT texels (4 bytes: one word per pixel) or in 16-bit texels (R5G6B5, D16: two pixels per word).
+        unsigned texel=4;
+        switch(image->format){case VK_FORMAT_D16_UNORM:case VK_FORMAT_R5G6B5_UNORM_PACK16:texel=2;break;
+            case VK_FORMAT_R16G16B16A16_SFLOAT:texel=8;break;case VK_FORMAT_R32G32B32A32_SFLOAT:texel=16;break;default:break;}
+        const bool sub_word=bpp<4;
+        if(!bpp || bpp==3)throw std::runtime_error("unsupported RSX surface upload bytes per pixel");
+        const auto out_size=sub_word?((pixels*texel+3)&~UINT64_C(3)):size;
         if(device_input!=UINT64_MAX && (device_input%4 || device_input>b.used || size>b.used-device_input))throw std::runtime_error("RSX device surface upload input bounds");
-        const auto input=device_input==UINT64_MAX?graphics_upload(b,bytes,size):device_input,table=graphics_space(b,size),output=graphics_space(b,size);
+        const auto input=device_input==UINT64_MAX?graphics_upload(b,bytes,size):device_input,table=graphics_space(b,size),output=graphics_space(b,out_size);
         const auto stencil_at=stencil?graphics_space(b,(pixels+3)&~UINT64_C(3)):0;
         if(!word_buffer)word_buffer=graphics_buffer(b,words.data(),size);
         graphics_barrier(b);VkBufferCopy copies[]={{input,input,size},{0,table,size}};
         if(device_input==UINT64_MAX)b.uploads.push_back(copies[0]); // immutable CPU slice: copied by the batch prelude
         vkCmdCopyBuffer(b.command,word_buffer->buffer,b.data_buffer,1,copies+1);
         if(stencil)vkCmdFillBuffer(b.command,b.data_buffer,stencil_at,(pixels+3)&~UINT64_C(3),0);
+        if(sub_word && texel==2)vkCmdFillBuffer(b.command,b.data_buffer,output,out_size,0); // 16-bit texels are assembled with atomicOr
         const unsigned parameters[]={unsigned(input/4),unsigned(table/4),unsigned(output/4),unsigned(stencil_at/4),unsigned(words.size()),image->width,image->height,samples,bpp,pitch,format,unsigned(depth),unsigned(image->format==VK_FORMAT_R32_UINT)};
         const auto params=graphics_upload(b,parameters,sizeof(parameters));
         b.uploads.push_back({params,params,sizeof(parameters)});
@@ -25,6 +34,16 @@ layout(push_constant) uniform Base{uint base_;};
 uint P(uint n){return w[base_+n];}
 uint reverse_(uint v){return (v>>24u)|((v>>8u)&0xff00u)|((v<<8u)&0xff0000u)|(v<<24u);}
 void main(){uint i=gl_GlobalInvocationID.x+gl_WorkGroupID.y*gl_NumWorkGroups.x*64u;if(i>=P(4u))return;
+ if(P(8u)<4u){ // 1/2-byte pixels: a packed word holds 4/bpp whole pixels (rows are word aligned), each texel has exactly one writer
+  uint bpp=P(8u),nx=P(7u)>1u?2u:1u,ny=P(7u)==4u?2u:1u,logical=w[P(1u)+i],v=w[P(0u)+i];
+  for(uint j=0u;j<4u/bpp;++j){
+   uint l=logical+j*bpp,yy=l/P(9u),xx=l%P(9u),x=xx/bpp,layer=(yy%ny)*nx+x%nx,pixel=(layer*P(6u)+yy/ny)*P(5u)+x/nx;
+   uint g=bpp==1u?((v>>(8u*j))&255u):((((v>>(16u*j))&255u)<<8u)|((v>>(16u*j+8u))&255u)); // big-endian guest value
+   if(P(12u)!=0u)w[P(2u)+pixel]=g;
+   else atomicOr(w[P(2u)+pixel/2u],g<<(16u*(pixel&1u)));
+  }
+  return;
+ }
  uint logical=w[P(1u)+i],yy=logical/P(9u),xx=logical%P(9u),nx=P(7u)>1u?2u:1u,ny=P(7u)==4u?2u:1u;
  uint x=xx/P(8u),layer=(yy%ny)*nx+x%nx,pixel=(layer*P(6u)+yy/ny)*P(5u)+x/nx;
  uint at=P(2u)+pixel*(P(8u)/4u)+(xx%P(8u))/4u,v=w[P(0u)+i],value;
