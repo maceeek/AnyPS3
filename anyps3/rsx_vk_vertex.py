@@ -1,9 +1,54 @@
 """RSX VP ALU, predicates, address registers and checked indexed fetch."""
 CPP = r'''
+// Reachable instructions of a vertex program from `start`, mirroring run_vertex_program's control flow: after an instruction a taken
+// branch (BRI/CAL by the CC predicate, BRB/CLB by a bool constant, RET by the call stack) jumps, otherwise END ends the program,
+// otherwise execution continues at pc+1. BRA (address register target) and CLI (no verified semantics) are not translated. A
+// reachable unwritten instruction rejects the program (the interpreter stops only if it is executed; the CPU path keeps that).
+struct VertexFlow {
+    std::array<bool,544> reach{},leader{};
+    bool control=false,calls=false,falls_off=false;
+    static unsigned immediate(const std::uint32_t* d){return ((d[0]>>23)&1)<<9|((d[2]&63)<<3)|(d[3]>>29);}
+};
+static bool vertex_program_flow(const NativeRsx& gpu,unsigned start,VertexFlow& flow){
+    flow=VertexFlow{};
+    if(start>=544)return false;
+    std::vector<unsigned> work{start};flow.leader[start]=true;
+    while(!work.empty()){
+        const unsigned pc=work.back();work.pop_back();
+        if(flow.reach[pc])continue;
+        for(unsigned c=0;c<4;++c)if(!gpu.transform_program_written[pc*4+c])return false;
+        flow.reach[pc]=true;
+        const std::uint32_t* d=gpu.transform_program.data()+pc*4;
+        const unsigned sca=(d[1]>>27)&31;
+        if(sca==8 || sca==11)return false;
+        const bool jump=sca==9 || sca==10 || sca==17 || sca==18,call=sca==10 || sca==18;
+        if(jump || sca==12)flow.control=true;
+        if(call || sca==12)flow.calls=true;
+        if(jump){const unsigned target=VertexFlow::immediate(d);if(target<544){flow.leader[target]=true;work.push_back(target);}}
+        const bool always=(sca==9 || sca==12) && ((d[0]>>10)&7)==7;   // CC condition TR: pass_ is true, the instruction never falls through
+        if((!(d[3]&1) && !always) || call){   // fall-through, or the return point of a call (taken or not)
+            if(pc+1<544){if(call)flow.leader[pc+1]=true;work.push_back(pc+1);}
+            else if(!(d[3]&1))flow.falls_off=true;
+        }
+    }
+    return true;
+}
 static std::optional<std::string> vertex_shader(const NativeRsx& gpu,unsigned start,bool dynamic_constants=false,bool checked=false){
+    VertexFlow flow;if(!vertex_program_flow(gpu,start,flow))return {};
+    // Programs with branches need the checked mode (runtime error flag for the budget, call stack, targets, unwritten constants).
+    if(flow.control && !(checked && dynamic_constants))return {};
+    if(!flow.control && flow.falls_off)return {};
     std::string body="void main(){uint id=gl_GlobalInvocationID.x;if(id>=w[0])return;vec4 t[32],o[16],input_[16],cc[2];ivec4 address_[2];cc[0]=cc[1]=vec4(0);address_[0]=address_[1]=ivec4(0);for(uint n=0u;n<32u;++n)t[n]=vec4(0);for(uint n=0u;n<16u;++n){o[n]=vec4(0,0,0,1);input_[n]=load4(1u+id*64u+n*4u);}\n";
+    // Control flow: one switch case per branch target inside a bounded loop; straight-line code falls through the cases.
+    if(flow.control){
+        body+="uint pc_="+u(start)+",steps_=0u;bool done_=false;";
+        if(flow.calls)body+="uint stack_[16],sp_=0u;";
+        body+="for(;;){if(++steps_>65536u){atomicOr(w[7],16u);return;}switch(pc_){\n";
+    }
     bool ended=false;
-    for(unsigned pc=start;pc<544;++pc){
+    for(unsigned pc=0;pc<544;++pc){
+        if(!flow.reach[pc])continue;
+        if(flow.control && flow.leader[pc])body+="case "+u(pc)+":\n";
         std::array<unsigned,4> d{};for(unsigned c=0;c<4;++c){if(!gpu.transform_program_written[pc*4+c])return {};d[c]=gpu.transform_program[pc*4+c];}
         const bool indexed_input=d[0]&(1u<<27),indexed_constant=d[3]&2;
         if((indexed_input || indexed_constant) && !checked)return {};
@@ -32,7 +77,12 @@ static std::optional<std::string> vertex_shader(const NativeRsx& gpu,unsigned st
                     body+="if("+idx+">=468u){atomicOr(w[7],16u);return;}if(w[w[2]+1872u+"+idx+"]!=15u){atomicOr(w[7],16u);return;}\n";
                     v="load4(w[2]+4u*"+idx+")";
                 }else{
-                    if(index<468)for(unsigned j=0;j<4;++j){if(!gpu.transform_constants_written[index*4+j])valid=false;c[j]=bits_float(gpu.transform_constants[index*4+j]);}
+                    if(index<468){
+                        bool all_written=true;for(unsigned j=0;j<4;++j){if(!gpu.transform_constants_written[index*4+j])all_written=false;c[j]=bits_float(gpu.transform_constants[index*4+j]);}
+                        // A path that is not executed may reference an unwritten constant: check at run time (the interpreter stops only when it reads one).
+                        if(flow.control)body+="if(w[w[2]+1872u+"+u(index)+"]!=15u){atomicOr(w[7],16u);return;}\n";
+                        else if(!all_written)valid=false;
+                    }
                     v=dynamic_constants?(index<468?"load4(w[2]+"+u(index*4)+")":"vec4(0)"):literal(c);
                 }
             }else{valid=false;return std::string("vec4(0)");}
@@ -83,7 +133,7 @@ static std::optional<std::string> vertex_shader(const NativeRsx& gpu,unsigned st
             }
             write(expr,false);body+="}\n";
         }
-        if(sca){const auto a=src(2);std::string expr;
+        if(sca && !(flow.control && (sca==9 || sca==10 || sca==12 || sca==17 || sca==18))){const auto a=src(2);std::string expr;
             switch(sca){case 1:expr="a";break;case 2:expr="vec4(1)/a";break;
             case 3:expr="uintBitsToFloat((floatBitsToUint(clamp(abs(vec4(1)/a),vec4(5.42101e-20),vec4(1.884467e19)))&uvec4(0x7fffffffu))|(floatBitsToUint(vec4(1)/a)&uvec4(0x80000000u)))";break;
             case 4:expr="vec4(1.0/sqrt(abs(a.x)))";break;case 5:expr="exp(a)";break;case 6:expr="log(a)";break;
@@ -92,11 +142,27 @@ static std::optional<std::string> vertex_shader(const NativeRsx& gpu,unsigned st
             }
             body+="{precise vec4 a="+a+";";write(expr,true);body+="}\n";
         }
+        if(flow.control && (sca==9 || sca==10 || sca==12 || sca==17 || sca==18)){
+            // The predicate was evaluated before this instruction's writes (pass_), exactly like run_vertex_program's `pass`.
+            const bool bool_branch=sca==17 || sca==18,call=sca==10 || sca==18;
+            const std::string condition=bool_branch?"(((R(0x1ff8u)>>"+u((d[3]>>23)&31)+")&1u)=="+u((d[3]>>28)&1)+")":"(pass_.x||pass_.y||pass_.z||pass_.w)";
+            if(sca==12)body+="if("+condition+"){if(sp_==0u){done_=true;break;}pc_=stack_[--sp_];continue;}\n";
+            else{
+                const unsigned target=VertexFlow::immediate(d.data());
+                const std::string jump=target>=544?"atomicOr(w[7],16u);return;":"pc_="+u(target)+";continue;";
+                body+="if("+condition+"){"+(call?"if(sp_>=16u){atomicOr(w[7],16u);return;}stack_[sp_++]="+u(pc+1)+";":"")+jump+"}\n";
+            }
+        }
         body+="}\n";
         if(!valid)return {};
-        if(d[3]&1){ended=true;break;}
+        if(d[3]&1){
+            if(flow.control){body+="done_=true;break;\n";continue;}
+            ended=true;break;
+        }
+        if(flow.control && pc+1>=544)body+="atomicOr(w[7],16u);return;\n";
     }
-    if(!ended)return {};
+    if(flow.control)body+="default:atomicOr(w[7],16u);return;}if(done_)break;}\n";
+    else if(!ended)return {};
     body+="for(uint n=0u;n<16u;++n){uvec4 v=floatBitsToUint(o[n]);uint at=1u+w[0]*64u+id*64u+n*4u;for(uint c=0u;c<4u;++c)w[at+c]=v[c];}}\n";
     return preamble()+body;
 }

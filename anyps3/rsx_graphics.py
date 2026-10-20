@@ -363,8 +363,9 @@ static std::shared_ptr<const std::string> hardware_vertex(const NativeRsx& gpu,b
     static thread_local std::string key;key.clear();
     auto append_key=[&](const void* p,std::size_t n){key.append(static_cast<const char*>(p),n);};
     const unsigned flags[]={start,unsigned(fetch),unsigned(immediate),unsigned(rsx_layered_shaders().load(std::memory_order_relaxed))};append_key(flags,sizeof(flags));
-    for(unsigned pc=start;pc<544;++pc){append_key(gpu.transform_program_written.data()+pc*4,4*sizeof(bool));append_key(gpu.transform_program.data()+pc*4,16);
-        if(gpu.transform_program[pc*4+3]&1)break;}
+    // Every instruction the translation can reach (branch targets included), by address.
+    rsxvk::VertexFlow flow;if(!rsxvk::vertex_program_flow(gpu,start,flow))return {};
+    for(unsigned pc=0;pc<544;++pc)if(flow.reach[pc]){append_key(&pc,sizeof(pc));append_key(gpu.transform_program_written.data()+pc*4,4*sizeof(bool));append_key(gpu.transform_program.data()+pc*4,16);}
     // Exact canonical bool bytes avoid rebuilding 1,872 mask bits per lookup.
     append_key(gpu.transform_constants_written.data(),468*4*sizeof(bool));
     static thread_local SourceCache<std::string> cache;
