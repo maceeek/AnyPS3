@@ -569,7 +569,18 @@ static std::shared_ptr<const std::vector<FpInst>> load_fragment_program_shared(P
     if(location!=1 && location!=2)throw std::runtime_error("invalid RSX fragment program location");
     struct Entry {std::vector<std::uint8_t> bytes;std::shared_ptr<const std::vector<FpInst>> program;std::uint64_t use;};
     static thread_local std::unordered_map<std::uint32_t,Entry> cache;static thread_local std::uint64_t clock=0;
+    // Programs are a pure function of their microcode bytes (word offsets are relative to the start): a new SET_SHADER_PROGRAM
+    // value whose bytes equal an earlier program shares its decoded/prepared result.
+    struct Content {std::shared_ptr<const std::vector<FpInst>> program;std::uint64_t use;};
+    static thread_local std::unordered_map<std::string,Content> by_content;
     static thread_local std::vector<std::uint8_t> scratch;
+    // O(n) once per n/8 insertions instead of a full min_element scan per insertion: drop the least recently used eighth.
+    auto trim=[](auto& map){
+        if(map.size()<1024)return;
+        std::vector<std::uint64_t> uses;uses.reserve(map.size());for(const auto& item:map)uses.push_back(item.second.use);
+        const auto cut=uses.begin()+uses.size()/8;std::nth_element(uses.begin(),cut,uses.end());const auto limit=*cut;
+        for(auto it=map.begin();it!=map.end();)it=it->second.use<limit?map.erase(it):std::next(it);
+    };
     const std::uint32_t start=value&~3u;
     if(auto found=cache.find(value);found!=cache.end()){auto& entry=found->second;
         scratch.resize(entry.bytes.size());bool same=false;
@@ -580,8 +591,20 @@ static std::shared_ptr<const std::vector<FpInst>> load_fragment_program_shared(P
     ::RsxPerfCounters::add(::RsxPerfCounters::fp_misses);
     std::vector<FpInst> program;std::vector<std::uint8_t> image;
     std::uint32_t offset=start;
+    // Instruction blocks are fetched in 256-byte chunks (one admitted read instead of a Range per 16 bytes); a chunk
+    // that cannot be read as a whole (unmapped/forbidden tail) falls back to the exact 16-byte reads, which raise the
+    // original error at the original block. Only consumed blocks enter the image (the hit check reads exactly those).
+    std::array<std::uint8_t,256> chunk{};std::uint32_t chunk_at=0;unsigned chunk_size=0;
     auto block=[&](std::uint32_t at){
-        std::array<std::uint8_t,16> bytes{};read_fragment_bytes(s,location,at,bytes.data(),16);
+        std::array<std::uint8_t,16> bytes{};
+        if(!(at>=chunk_at && at+16<=chunk_at+chunk_size)){
+            chunk_size=0;chunk_at=at;
+            try{const unsigned n=std::min<unsigned>(unsigned(chunk.size()),0x100000-(at&0xfffff));
+                if(n>=16){read_fragment_bytes(s,location,at,chunk.data(),n&~15u,true);chunk_size=n&~15u;}}
+            catch(const std::exception&){chunk_size=0;}
+        }
+        if(chunk_size)std::memcpy(bytes.data(),chunk.data()+(at-chunk_at),16);
+        else read_fragment_bytes(s,location,at,bytes.data(),16);
         image.insert(image.end(),bytes.begin(),bytes.end());
         std::array<unsigned,4> words{};
         for(unsigned i=0;i<4;++i){const auto w=read_be(bytes.data()+4*i,4);words[i]=(w<<16)|(w>>16);}return words;
@@ -597,8 +620,12 @@ static std::shared_ptr<const std::vector<FpInst>> load_fragment_program_shared(P
         }
         program.push_back(inst);
         if(inst.d&1){
-            auto result=std::make_shared<const std::vector<FpInst>>(prepared_fragment_program(std::move(program)));
-            if(cache.size()>=1024 && !cache.count(value))cache.erase(std::min_element(cache.begin(),cache.end(),[](const auto& a,const auto& b){return a.second.use<b.second.use;}));
+            const std::string key(reinterpret_cast<const char*>(image.data()),image.size());
+            std::shared_ptr<const std::vector<FpInst>> result;
+            if(auto same=by_content.find(key);same!=by_content.end()){result=same->second.program;same->second.use=++clock;}
+            else{result=std::make_shared<const std::vector<FpInst>>(prepared_fragment_program(std::move(program)));
+                trim(by_content);by_content[key]=Content{result,++clock};}
+            if(!cache.count(value))trim(cache);
             cache[value]=Entry{std::move(image),result,++clock};
             return result;
         }
