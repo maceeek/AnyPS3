@@ -1,17 +1,27 @@
 """Opt-in per-frame timeline stamps (FRAMETIME): where does a frame spend its time, which path ends last?
 
-ANYPS3_FRAMETIME=/path/ring.bin enables a fixed-size ring of 48-byte events in a MAP_SHARED file (it survives SIGKILL; the
-header's head counter says how many events were ever written, the newest min(head, capacity) are valid). Off by default: the
-only cost is one predictable branch on a plain bool. ANYPS3_FRAMETIME_EVENTS=N sets the ring capacity (power of two, default
-2^23 = 384 MiB of sparse file), ANYPS3_FRAMETIME_PEEK_REG=N additionally records the big-endian word that guest register rN
+ANYPS3_FRAMETIME=/path/ring.bin enables a fixed-size ring of 64-byte events in a MAP_SHARED file (it survives SIGKILL; the
+header's head counter says how many events were ever reserved, the newest min(head, capacity) reservations are the window).
+Off by default: the only cost is one predictable branch on a plain bool. ANYPS3_FRAMETIME_EVENTS=N sets the ring capacity
+(power of two, default 2^23 = 512 MiB of sparse file), ANYPS3_FRAMETIME_PEEK_REG=N additionally records the big-endian word that guest register rN
 points to at every guest block (diagnostic: what does a polling loop wait for?); ANYPS3_FRAMETIME_PEEK_PC=0xADDR limits that
 to blocks at guest pc ADDR or ADDR+4 (the system call instruction, depending on where the runtime has advanced pc).
 
-Wire format (little endian, tools/analysis in bench/frametime/analyze.py):
-  header 64 bytes: char magic[8]="ANYPSFT1"; u64 capacity; u64 version=1; u64 head (atomic); u64 pad[4]
-  event 48 bytes:  u64 ns (CLOCK_MONOTONIC, same clock as the emulated vblank epoch; for spans = START time);
-                   u32 kind; u32 tid (Linux thread id); u64 a, b, c, d (meaning per kind below)
+Wire format version 2 (little endian, tools/analysis in bench/frametime/analyze.py; version 1 had 48-byte events without a
+commit sequence and could not tell a half-written or overwritten slot from a valid one -- the reader still accepts it):
+  header 64 bytes: char magic[8]="ANYPSFT1"; u64 capacity; u64 version=2; u64 head (atomic reservation counter);
+                   u64 dropped (atomic: events given up because their slot was busy or already taken by a newer lap); u64 pad[3]
+  event 64 bytes:  u64 seq (atomic commit word, see below);
+                   u64 ns (CLOCK_MONOTONIC, same clock as the emulated vblank epoch; for spans = START time);
+                   u32 kind; u32 tid (Linux thread id); u64 a, b, c, d (meaning per kind below); u64 pad
 Spans are emitted once, at their end, with ns = start and b = duration in ns.
+Publication protocol (per slot, exclusive ownership): a writer reserves the index i = head.fetch_add(1), then claims slot
+i & mask by a compare-and-swap of seq from an even value below 2i+2 (never written, or committed by an older lap) to the odd
+2i+1, fills the fields, and publishes seq = 2i+2 with release ordering. If the slot is odd (another writer is inside it, e.g.
+a stalled thread from the previous lap) or already holds a lap >= i, the event is dropped and counted in `dropped`: a writer
+never waits and never overwrites a slot that another writer owns. A reader accepts window index j only when seq == 2j+2 before
+and after copying the fields, so it never returns a half-written event (the writer was killed or is mid-store), an event of
+another lap (a delayed writer that committed after the ring wrapped) or a dropped one; it counts those slots as missing.
 
 kind  name        thread       fields
  1  PostFifo     main         a=PUT seen, b=budget
@@ -56,9 +66,9 @@ namespace anyps3_ft {
 enum Kind : std::uint32_t {PostFifo=1,FifoRun=2,Vblank=3,FlipReq=4,FlipVsync=5,FlipAsync=6,GpuSubmit=7,GpuRetire=8,LabelPub=9,
     HostReq=10,HostExec=11,Block=12,Idle=13,Service=14,Fault=15,DisplayReq=16,DisplayExec=17,BarrierReq=18,Switch=19,EventPub=20,
     WorkerWait=21,Mark=22};
-struct Event {std::uint64_t ns;std::uint32_t kind,tid;std::uint64_t a,b,c,d;};
-static_assert(sizeof(Event)==48,"frametime event ABI");
-struct Header {char magic[8];std::uint64_t capacity,version;std::atomic<std::uint64_t> head;std::uint64_t pad[4];};
+struct alignas(64) Event {std::atomic<std::uint64_t> seq;std::uint64_t ns;std::uint32_t kind,tid;std::uint64_t a,b,c,d,pad;};
+static_assert(sizeof(Event)==64 && std::atomic<std::uint64_t>::is_always_lock_free,"frametime event ABI");
+struct Header {char magic[8];std::uint64_t capacity,version;std::atomic<std::uint64_t> head,dropped;std::uint64_t pad[3];};
 static_assert(sizeof(Header)==64,"frametime header ABI");
 inline Header* header=nullptr;
 inline Event* ring=nullptr;
@@ -82,20 +92,33 @@ inline bool open_ring(){
         if(end==r || *end || v>0xffffffffu){std::fprintf(stderr,"invalid ANYPS3_FRAMETIME_PEEK_PC\n");std::_Exit(2);}peek_pc=std::uint32_t(v);}
     const int fd=::open(path,O_RDWR|O_CREAT|O_TRUNC,0644);
     if(fd<0){std::fprintf(stderr,"ANYPS3_FRAMETIME: cannot open %s\n",path);std::_Exit(2);}
-    const std::uint64_t bytes=sizeof(Header)+capacity*sizeof(Event);
+    const std::uint64_t bytes=sizeof(Header)+capacity*sizeof(Event);       // mmap offset 0 is page aligned: events are 64-byte aligned
     if(::ftruncate(fd,off_t(bytes))!=0){std::fprintf(stderr,"ANYPS3_FRAMETIME: ftruncate failed\n");std::_Exit(2);}
     void* map=::mmap(nullptr,bytes,PROT_READ|PROT_WRITE,MAP_SHARED,fd,0);::close(fd);
     if(map==MAP_FAILED){std::fprintf(stderr,"ANYPS3_FRAMETIME: mmap failed\n");std::_Exit(2);}
-    header=static_cast<Header*>(map);std::memcpy(header->magic,"ANYPSFT1",8);header->capacity=capacity;header->version=1;
-    header->head.store(0,std::memory_order_release);
+    header=static_cast<Header*>(map);std::memcpy(header->magic,"ANYPSFT1",8);header->capacity=capacity;header->version=2;
+    header->head.store(0,std::memory_order_release);header->dropped.store(0,std::memory_order_release);
     ring=reinterpret_cast<Event*>(static_cast<char*>(map)+sizeof(Header));ring_mask=capacity-1;
     return true;
 }
 inline const bool enabled_at_start=(on=open_ring());
-// Atomic slot claim: events of different threads may interleave but never overlap.
+// Slot ownership (see the wire format): reserve an index, claim its slot exclusively, fill, commit. Events of different
+// threads interleave but never overlap; a writer that cannot own the slot drops its event (counted) instead of waiting.
+inline std::uint64_t reserve(){return header->head.fetch_add(1,std::memory_order_relaxed);}
+// Returns the claimed slot (seq odd = 2i+1) or nullptr when the event was dropped.
+inline Event* claim(std::uint64_t i){
+    Event& e=ring[i&ring_mask];
+    std::uint64_t s=e.seq.load(std::memory_order_relaxed);
+    if((s&1) || s>=2*i+2 || !e.seq.compare_exchange_strong(s,2*i+1,std::memory_order_acquire,std::memory_order_relaxed)){
+        header->dropped.fetch_add(1,std::memory_order_relaxed);return nullptr;}
+    return &e;
+}
+inline void commit(Event* e,std::uint64_t i){e->seq.store(2*i+2,std::memory_order_release);}
 inline void put(std::uint64_t ns,std::uint32_t kind,std::uint64_t a,std::uint64_t b,std::uint64_t c,std::uint64_t d){
-    const auto i=header->head.fetch_add(1,std::memory_order_relaxed);
-    Event& e=ring[i&ring_mask];e.ns=ns;e.kind=kind;e.tid=this_tid();e.a=a;e.b=b;e.c=c;e.d=d;
+    const auto i=reserve();
+    Event* e=claim(i);if(!e)return;
+    e->ns=ns;e->kind=kind;e->tid=this_tid();e->a=a;e->b=b;e->c=c;e->d=d;
+    commit(e,i);
 }
 [[gnu::always_inline]] inline void mark(std::uint32_t kind,std::uint64_t a=0,std::uint64_t b=0,std::uint64_t c=0,std::uint64_t d=0){
     if(__builtin_expect(on,0))put(now(),kind,a,b,c,d);

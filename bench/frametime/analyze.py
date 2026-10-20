@@ -194,7 +194,8 @@ def main():
     out = []
     p = out.append
     span_s = (events[-1].ns - events[0].ns) / 1e9 if events else 0
-    p(f'ring capacity {header["capacity"]} head {header["head"]}; window {span_s:.1f} s, {len(events)} events')
+    lost = f'; {header["dropped"]} events dropped by writers, {header["missing"]} window slots not committed' if header['dropped'] or header['missing'] else ''
+    p(f'ring capacity {header["capacity"]} head {header["head"]}{lost}; window {span_s:.1f} s, {len(events)} events')
     p('kinds: ' + ', '.join(f'{ft.NAMES[kind]}={len(v)}' for kind, v in sorted(k.items())))
     coordinator_tid = collections.Counter(e.tid for e in k[ft.POST_FIFO]).most_common(1)
     coordinator_tid = coordinator_tid[0][0] if coordinator_tid else None
