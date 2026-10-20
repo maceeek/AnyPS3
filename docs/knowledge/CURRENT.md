@@ -19,7 +19,13 @@ no runtime promotion this wave.**
    `local/ratchet/work/warmup/tree` (backup `local/ratchet/work/warmup/wip-review-fixes.patch`, `wip-rsx_blit_frozen.py`); one observer
    test has a test bug; mutation checks pending. Commit them, re-merge `fast2/warmup` into the integration and rebuild before promotion.
 3. SPUWAKE: the main-thread SPU wait (5.09 ms/frame in 680a) is **94 % lane compute**, not parked lanes; lanes lose 10–26 % of run
-   wall time off CPU (gates/permits/pauses, peer LS GET ~0.9 ms/frame). Off-CPU attribution of 681a in `local/ratchet/work/spuwake/RESULT.md`.
+   wall time off CPU. 681a (traced, 48.71 FPS, perturbed): 5.69 ms/frame off CPU inside lane runs = owner calls 0.97 (lane 0x1000200
+   polls lane 0x200's LS ~106×/frame, each pausing the peer), pauses 0.41, reader gate 0.04 (gate/raw permits **ruled out**), 4.50
+   uninstrumented (3.03 on the critical path, lanes 0x2/3/4000200). **First fix (derived, strong):** lane PUTs into RSX local memory
+   (EA 0xc2xxxxxx) block on a synchronous `queue->call(HostAccess)` to the RSX owner (`GuestMemory::notify_parallel` →
+   `renderer_access`, `anyps3/rsx_game_worker.py:134–142`): ~75/44 µs off CPU per PUT on lanes 0x3/0x4000200, ~43 PUTs/frame ≈ 1.0 ms/frame
+   on the critical path. Verify with a `HostAccessWait` trace event, then make the request non-blocking with exact ordering semantics.
+   Details: `local/ratchet/work/spuwake/RESULT.md` (branch `fast2/spuwake` 626d9c8, build 681).
 4. Then: full suite on the final integration, gpt-6-astra review of the merge, promotion to main.
 
 Agents' handoffs: `local/ratchet/work/{integ473,warmup,spuwake}/{STATUS,RESULT}.md`. Record:
