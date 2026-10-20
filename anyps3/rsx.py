@@ -554,6 +554,7 @@ static bool rsx_run_impl(PpuState& s,unsigned budget,bool idle_poll=false){
     // when the cached value is reached. GET publication may lag behind pure
     // state methods only (rsx_method_class 1); it is stored before every
     // action method, before every return and on every exception.
+    rsxdraw::HostPhase fifo_phase(rsxdraw::HostStage::fifo);   // HOST_PROFILE: FIFO decode (draws switch to their own stages and return here)
     std::uint32_t put=0,get=0;bool cursor=false,pending=false;
     auto publish=[&]{if(pending){m.store(gpu.dma+0x44,4,get);pending=false;}};
     try{

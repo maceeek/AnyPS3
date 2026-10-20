@@ -77,6 +77,9 @@ static void rsx_worker_start(PpuState& s){
     auto& w=s.process.rsx_worker;
     if(w.enabled){w.check();return;}
     if(!anyps3_trace_enabled("ANYPS3_RSX_WORKER"))return;
+    // The game's RSX owner runs with the asynchronous draw recorder and the GPU completion notifier unless the variables are set
+    // explicitly (0 disables). Set before the first NativeVulkan is constructed (it reads them in its constructor).
+    ::setenv("ANYPS3_RSX_RECORDER","1",0);::setenv("ANYPS3_RSX_COMPLETION","1",0);
     auto& m=s.memory;if(!m.concurrent())m.enable_concurrency();m.restart_coherence();m.enable_page_broker();
     auto facade=std::make_shared<PpuState>(s.process);w.facade=facade;
     auto* f=facade.get();w.queue=std::make_unique<RsxOwnerQueue>();auto& q=*w.queue;
@@ -162,7 +165,7 @@ static void rsx_worker_start(PpuState& s){
         w.progress.store(rsx_run_inline(*f,budget),std::memory_order_release);rsx_worker_publish(*f);
     };
     q.service=[&w,f]{if(w.paused)return;ExecutionScope phase(w.timing,ExecutionPhase::Rsx);
-        const auto service_start=std::chrono::steady_clock::now();struct ServiceTime{std::chrono::steady_clock::time_point start;~ServiceTime(){rsx_service_calls().fetch_add(1,std::memory_order_relaxed);rsx_service_ns().fetch_add(std::uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-start).count()),std::memory_order_relaxed);}} service_time{service_start};
+        rsxdraw::HostPhase service_phase(rsxdraw::HostStage::service);const auto service_start=std::chrono::steady_clock::now();struct ServiceTime{std::chrono::steady_clock::time_point start;~ServiceTime(){rsx_service_calls().fetch_add(1,std::memory_order_relaxed);rsx_service_ns().fetch_add(std::uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-start).count()),std::memory_order_relaxed);}} service_time{service_start};
         const auto now=std::chrono::steady_clock::now().time_since_epoch();
         (void)rsx_tick_vblank(*f,std::chrono::duration_cast<std::chrono::nanoseconds>(now).count());
 #ifdef ANYPS3_RSX_VK
@@ -325,7 +328,7 @@ static void rsx_worker_perf(const PpuState& s){
         if(w.last_memory)std::fprintf(stderr,"PERF GUEST_MEMORY membarriers=%" PRIu64 " slow_leases=%" PRIu64 " gpu_claims=%" PRIu64 "\n",mem[0]-(*w.last_memory)[0],mem[1]-(*w.last_memory)[1],mem[2]-(*w.last_memory)[2]);
         w.last_memory=mem;}
     if(rsxdraw::host_stats().enabled){
-        static const char* names[]={"idle","indices","assembly","state","texture_metadata","targets","certification","shader_source","geometry","vertex_upload","texture_upload","record","flush","tail","draw","kick","g_inputs","g_state","g_shaders","g_data"};
+        static const char* names[]={"idle","indices","assembly","state","texture_metadata","targets","certification","shader_source","geometry","vertex_upload","texture_upload","record","flush","tail","draw","kick","g_inputs","g_state","g_shaders","g_data","fifo","service"};
         std::string line="PERF RSX_STAGES";char item[64];
         for(unsigned i=0;i<unsigned(rsxdraw::HostStage::count);++i){const auto v=w.stage_ns[i].load(std::memory_order_relaxed);std::snprintf(item,sizeof(item)," %s_ns=%" PRIu64,names[i],v-w.last_stage_ns[i]);line+=item;w.last_stage_ns[i]=v;}
         std::fprintf(stderr,"%s\n",line.c_str());
