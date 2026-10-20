@@ -1,0 +1,63 @@
+{
+  "base_commit": "abf245064fd8c31990ca3fa5f96f53820feff179",
+  "state": "verified-after-astra-review",
+  "source_sha256": {
+    "anyps3/native_build.py": "7134172b660d1f572f2186b48f07f82dd6da2ca474d1c2ac22864b7717d4aefa",
+    "anyps3_gui/__init__.py": "83fb620954568d6d4e030f8594871815eac48990d26071a82f13d7bd6387ef14",
+    "anyps3_gui/__main__.py": "a67c172046323b0efcafe92cb83abc266d5dd4bc931d9312cde1b7bed50643db",
+    "anyps3_gui/app.py": "e754e38c8951cc848d8a6e334b298c93aac98960a44df7e9458b5cd7fda51743",
+    "anyps3_gui/client.py": "2d70a6f799b7e9e2102af57e311af9b77986cb7e89cd8583e8dc47d0f22da6a8",
+    "anyps3_gui/import_wizard.py": "ca60c6c05f3aaaf26e7584a6d144cab2693907eb9601ef2616a1eacdee0dfe12",
+    "anyps3_gui/settings.py": "8898d8ce383d586b8d72dabb277b716b190323c12a0b4d2a1ff4c834f60a5838",
+    "anyps3_manager/__init__.py": "b2d83a36503cbe039fc01798729674a4a8a638becfde0e0752d187a4e90c8c9b",
+    "anyps3_manager/__main__.py": "935a1c1166b0c1ea35a82256345000bf2c73ded718d77773bc27a71ecce28f7d",
+    "anyps3_manager/capabilities.py": "71e5434ebb87d31030157f83876cbbd7969a68c69ab2a6e9b246b6a3e6555d65",
+    "anyps3_manager/cli.py": "71e95aa496c4fa888612488d422974870c5ecdad30e691e59a479c0898f48d35",
+    "anyps3_manager/jobs.py": "d0370dab79fd192a1b551109e067f9b67bbb2671a7c41a9993f1cb51e4ec4625",
+    "anyps3_manager/pads.py": "5de71aba8b17d0e9e4b75d2fd7c079bdc0ea90ebd657be50a8f78289f41da821",
+    "anyps3_manager/pipeline.py": "3b44abbc0384b4eaddc2dfd4bcd39db69037319f287c5ae78eaa7fcd51f8a4c0",
+    "anyps3_manager/processes.py": "b87b24f7694ff8746a4eafca98f3075e9f4d0134f8c8e698b4871bdff3d12bde",
+    "anyps3_manager/runs.py": "a0838eb8f73b80290d12803a51aa7df45c2e9b23c84937ac5923ec6c3f6f72e5",
+    "anyps3_manager/saves.py": "bca0907d82165510fcbd18bef0141d6ced751db67c9d85056473d7d1758dab8e",
+    "anyps3_manager/settings.py": "bf6ee3a2343829d90ec00fcaedc4ea86ef8cc48f901d495b4d459f6a737a2af0",
+    "anyps3_manager/storage.py": "5b6b7b5174b2ef949c2126182e69dfccc3b34f7935694d659e6c1342d8aea0b5",
+    "pyproject.toml": "440f297f9caa2b498e2aaa6d895c94f8e7c8fe3ecceeaa2727fe58a8bcae8b45",
+    "tests/gui/__init__.py": "a3c19694f4654e6afba826708b51f9da0dacd096d15f822ee7eec89b56455ddc",
+    "tests/gui/preview.py": "7a50582152f758cc4ffae090569ec3c7c56b4b30ad6a70c5c05cb319bf54808a",
+    "tests/gui/stub_cli.py": "bbd0526471b87df83d6cc73282a9fe16a3becf1037515552938f16b857c5cc85",
+    "tests/gui/test_gui.py": "d38cb1e5da244cb5dc904cbfbee45a73894361df1528f3be5c1c4d81bacffe64",
+    "tests/manager/__init__.py": "852bd77f67dca7b2cfdb8dcf229b33afdaf37e48e5ec40e24681d933459a3939",
+    "tests/manager/test_manager.py": "6c22778a3e1efbda61ff4f4a8e73708e86f47dd1dcb75b42c099f942d11cabbe",
+    "tests/manager/test_native_flags.py": "74191fae33dcddcca328fe4b22ad57a460a211d6071d162fa25da858d8db5f98",
+    "tests/manager/toolchain_stub.py": "faffa7cd0c800e888d8c75851aa16f5bb74480dcfb19e45d6a5f8f78288f1c95"
+  },
+  "tests": {
+    "passed": 30,
+    "skipped": 0,
+    "scope_memory": "4G",
+    "scope_swap": "0",
+    "allowed_cpus": "6-11,18-23",
+    "audio": "dummy/null"
+  },
+  "review": {
+    "model": "GPT-6-Astra",
+    "resolved": [
+      "R1",
+      "R2",
+      "R3",
+      "R4",
+      "R5"
+    ],
+    "new_confirmed_findings": 0
+  },
+  "limitations": [
+    "WP4 runtime player mode and pad P2-P7 are separate work packages",
+    "No original-game or physical-controller acceptance in this wrapper task"
+  ],
+  "evidence_sha256": {
+    "docs/manager/ASTRA-REVIEW.md": "b3aea01c0dbe969b387bd87c854faa5dd7255d19f06e59623e66248c3fb62684",
+    "docs/manager/evidence/suite-after-review.log": "97b32468a45fd175cd1457d86c906a46cb44e951d52a3fce12591ead84e9be8a",
+    "docs/manager/evidence/preview-after-review.log": "c50f35029b7ad6a4837c3846f7ea6998c884d223032698d2de6a7c60d4d2dde3",
+    "docs/manager/evidence/preview-after-review.png": "8bb2935239ed3a28b8c9588aea64b08ab63bf84c4d1400c4b0b764c0112f40a3"
+  }
+}

@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import shlex
 import subprocess
 import time
 
@@ -133,6 +134,7 @@ def main():
     parser.add_argument('-o', '--output', type=Path)
     parser.add_argument('-j', '--jobs', type=int)
     parser.add_argument('--vulkan', action='store_true', help='-DANYPS3_VULKAN and -lvulkan')
+    parser.add_argument('--extra-flags', default='', help='Additional shell-quoted C++ flags (recorded in compile.json)')
     parser.add_argument("--rsx-vk", action="store_true", help="RSX Vulkan graphics backend (default with --vulkan)")
     parser.add_argument("--rsx-cpu", action="store_true", help="Build Vulkan clear only; omit graphics shaders")
     args = parser.parse_args()
@@ -140,6 +142,7 @@ def main():
         args.vulkan = True
     rsx_vk = args.vulkan and not args.rsx_cpu
     report = compile_units(unit_sources(args.bundle), args.output or args.bundle/'program', jobs=args.jobs,
+                           flags=(*FLAGS, *shlex.split(args.extra_flags)),
                            defines=('ANYPS3_VULKAN', 'ANYPS3_RSX_VK') if rsx_vk else ('ANYPS3_VULKAN',) if args.vulkan else (),
                            libraries=('-lvulkan', '-lglslang', '-lSPIRV', '-lglslang-default-resource-limits') if rsx_vk else ('-lvulkan',) if args.vulkan else ())
     (args.bundle/'compile.json').write_text(json.dumps(report, indent=2)+'\n')
