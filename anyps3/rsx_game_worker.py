@@ -23,7 +23,7 @@ struct NativeRsxWorker {
 #ifdef ANYPS3_RSX_PERF_COUNTERS
     std::optional<std::array<std::uint64_t,RsxPerfCounters::count>> last_counters;
 #endif
-    std::array<std::atomic<std::uint64_t>,16> stage_ns{};std::array<std::uint64_t,16> last_stage_ns{};
+    std::array<std::atomic<std::uint64_t>,32> stage_ns{};std::array<std::uint64_t,32> last_stage_ns{};
     std::function<void()> stop;
     std::shared_ptr<VulkanHostService> host;
     bool on_owner()const{return enabled && queue && RsxOwnerQueue::current==queue.get();}
@@ -39,6 +39,10 @@ TYPES = TYPES.replace('    std::shared_ptr<VulkanHostService> host;', '''#ifdef 
 CPP = r'''
 static bool rsx_run_inline(PpuState&,unsigned);
 static bool rsx_tick_vblank(PpuState&,std::uint64_t);
+static_assert(unsigned(rsxdraw::HostStage::count)<=32,"NativeRsxWorker::stage_ns holds 32 host stages");
+// Idle service ticks of the RSX owner (GPU completion polling every 100 us while flights are outstanding): count and time (PERF RSX_SERVICE).
+static std::atomic<std::uint64_t>& rsx_service_calls(){static std::atomic<std::uint64_t> v{0};return v;}
+static std::atomic<std::uint64_t>& rsx_service_ns(){static std::atomic<std::uint64_t> v{0};return v;}
 static void rsx_worker_pump(PpuState& s){
     auto& w=s.process.rsx_worker;if(!w.enabled){w.check();return;}if(w.on_owner())return;
     GuestMemory::RawYield yield(s.memory);w.queue->pump_coordinator();w.check();
@@ -158,6 +162,7 @@ static void rsx_worker_start(PpuState& s){
         w.progress.store(rsx_run_inline(*f,budget),std::memory_order_release);rsx_worker_publish(*f);
     };
     q.service=[&w,f]{if(w.paused)return;ExecutionScope phase(w.timing,ExecutionPhase::Rsx);
+        rsxdraw::HostPhase service_phase(rsxdraw::HostStage::service);const auto service_start=std::chrono::steady_clock::now();struct ServiceTime{std::chrono::steady_clock::time_point start;~ServiceTime(){rsx_service_calls().fetch_add(1,std::memory_order_relaxed);rsx_service_ns().fetch_add(std::uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-start).count()),std::memory_order_relaxed);}} service_time{service_start};
         const auto now=std::chrono::steady_clock::now().time_since_epoch();
         (void)rsx_tick_vblank(*f,std::chrono::duration_cast<std::chrono::nanoseconds>(now).count());
 #ifdef ANYPS3_RSX_VK
@@ -181,8 +186,17 @@ static void rsx_worker_start(PpuState& s){
         // PUT can remain unchanged while the CPU polls a deferred GPU label.
         // Dropping empty FIFO ticks must not turn completion into a vblank
         // wait (or an infinite wait when no display context is installed).
-        if(f->rsx.graphics_owner && !static_cast<rsxgraphics::Session*>(f->rsx.graphics_owner.get())->flights.empty())
-            due=std::chrono::steady_clock::now()+std::chrono::microseconds(100);
+        if(f->rsx.graphics_owner && !static_cast<rsxgraphics::Session*>(f->rsx.graphics_owner.get())->flights.empty()){
+            // ANYPS3_RSX_POLL=adaptive: the first poll of the oldest flight comes when ~70% of its expected GPU time has passed
+            // (EWMA of earlier flights), then every 40 us; default: every 100 us.
+            static const bool adaptive=[]{const char* v=std::getenv("ANYPS3_RSX_POLL");if(v && std::strcmp(v,"adaptive") && std::strcmp(v,"fixed"))throw std::runtime_error("invalid ANYPS3_RSX_POLL");return v && !std::strcmp(v,"adaptive");}();
+            const auto now=std::chrono::steady_clock::now();
+            if(f->rsx.renderer && f->rsx.renderer->completion_notifier_enabled())due=now+std::chrono::milliseconds(2);   // safety net: completions poke the queue
+            else if(adaptive){auto& session=*static_cast<rsxgraphics::Session*>(f->rsx.graphics_owner.get());
+                const auto expected=session.flights.front().submitted+std::chrono::nanoseconds(std::int64_t(session.flight_ns*0.7));
+                due=std::max(expected,now+std::chrono::microseconds(40));}
+            else due=now+std::chrono::microseconds(100);
+        }
 #endif
         if(!f->rsx.context || !f->rsx.fifo_enabled || !f->rsx.vblank_epoch_ns)return due;
         const auto now=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
@@ -305,11 +319,13 @@ static void rsx_worker_perf(const PpuState& s){
         std::fprintf(stderr,"%s\n",line.c_str());}
     w.last_counters=counters;
 #endif
+    {static std::uint64_t last_calls=0,last_ns=0;const auto calls=rsx_service_calls().load(std::memory_order_relaxed),ns=rsx_service_ns().load(std::memory_order_relaxed);
+        std::fprintf(stderr,"PERF RSX_SERVICE calls=%" PRIu64 " ns=%" PRIu64 "\n",calls-last_calls,ns-last_ns);last_calls=calls;last_ns=ns;}
     {const std::array<std::uint64_t,3> mem{{GuestMemory::stat_membarriers.load(std::memory_order_relaxed),GuestMemory::stat_slow_leases.load(std::memory_order_relaxed),GuestMemory::stat_gpu_claims.load(std::memory_order_relaxed)}};
         if(w.last_memory)std::fprintf(stderr,"PERF GUEST_MEMORY membarriers=%" PRIu64 " slow_leases=%" PRIu64 " gpu_claims=%" PRIu64 "\n",mem[0]-(*w.last_memory)[0],mem[1]-(*w.last_memory)[1],mem[2]-(*w.last_memory)[2]);
         w.last_memory=mem;}
     if(rsxdraw::host_stats().enabled){
-        static const char* names[]={"idle","indices","assembly","state","texture_metadata","targets","certification","shader_source","geometry","vertex_upload","texture_upload","record","flush"};
+        static const char* names[]={"idle","indices","assembly","state","texture_metadata","targets","certification","shader_source","geometry","vertex_upload","texture_upload","record","flush","tail","draw","kick","g_inputs","g_state","g_shaders","g_data","fifo","service","g_tex","g_bind"};
         std::string line="PERF RSX_STAGES";char item[64];
         for(unsigned i=0;i<unsigned(rsxdraw::HostStage::count);++i){const auto v=w.stage_ns[i].load(std::memory_order_relaxed);std::snprintf(item,sizeof(item)," %s_ns=%" PRIu64,names[i],v-w.last_stage_ns[i]);line+=item;w.last_stage_ns[i]=v;}
         std::fprintf(stderr,"%s\n",line.c_str());

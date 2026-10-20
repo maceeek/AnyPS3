@@ -591,20 +591,22 @@ static std::shared_ptr<const std::vector<FpInst>> load_fragment_program_shared(P
     ::RsxPerfCounters::add(::RsxPerfCounters::fp_misses);
     std::vector<FpInst> program;std::vector<std::uint8_t> image;
     std::uint32_t offset=start;
-    // Instruction blocks are fetched in 256-byte chunks (one admitted read instead of a Range per 16 bytes); a chunk
-    // that cannot be read as a whole (unmapped/forbidden tail) falls back to the exact 16-byte reads, which raise the
-    // original error at the original block. Only consumed blocks enter the image (the hit check reads exactly those).
-    std::array<std::uint8_t,256> chunk{};std::uint32_t chunk_at=0;unsigned chunk_size=0;
+    // The extent of an unknown program is only discovered by decoding: the original parser reads one 16-byte block at a time
+    // (an instruction, plus one constant block when an operand selects it) until END, and every observer (surface readback,
+    // label synchronization) sees exactly those spans. A read-ahead chunk would also touch bytes behind END, so every block is
+    // read on its own, as two scalar 64-bit loads (the cheapest admitted access: the same bytes reach the same observers, a block
+    // inside one 1 MiB IO page needs no Range); any failure, and a block straddling an IO page edge, repeats the read through
+    // Range, which raises the original error at the original block.
     auto block=[&](std::uint32_t at){
-        std::array<std::uint8_t,16> bytes{};
-        if(!(at>=chunk_at && at+16<=chunk_at+chunk_size)){
-            chunk_size=0;chunk_at=at;
-            try{const unsigned n=std::min<unsigned>(unsigned(chunk.size()),0x100000-(at&0xfffff));
-                if(n>=16){read_fragment_bytes(s,location,at,chunk.data(),n&~15u,true);chunk_size=n&~15u;}}
-            catch(const std::exception&){chunk_size=0;}
+        std::array<std::uint8_t,16> bytes{};bool loaded=false;
+        if(((at&0xfffff)+16)<=0x100000){
+            try{const auto address=location_address(s.rsx,location-1,at,16);
+                HostByteAccess exact_bytes{s.memory.host_access_observer.supports_exact_bytes.load(std::memory_order_acquire)};   // byte-exact observer interest, as Range::read
+                const auto first=s.memory.load(address,8),second=s.memory.load(address+8,8);
+                for(unsigned i=0;i<8;++i){bytes[i]=std::uint8_t(first>>(56-8*i));bytes[8+i]=std::uint8_t(second>>(56-8*i));}loaded=true;}
+            catch(const std::exception&){}
         }
-        if(chunk_size)std::memcpy(bytes.data(),chunk.data()+(at-chunk_at),16);
-        else read_fragment_bytes(s,location,at,bytes.data(),16);
+        if(!loaded)read_fragment_bytes(s,location,at,bytes.data(),16);
         image.insert(image.end(),bytes.begin(),bytes.end());
         std::array<unsigned,4> words{};
         for(unsigned i=0;i<4;++i){const auto w=read_be(bytes.data()+4*i,4);words[i]=(w<<16)|(w>>16);}return words;
