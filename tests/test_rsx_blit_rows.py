@@ -320,6 +320,7 @@ struct ObserverSpec {
  std::vector<std::pair<std::uint64_t,unsigned>> watch;   // empty: unfiltered (every access is of interest)
  int throw_at=-1;                                         // one-shot exception at this callback index
  int poke_at=-1;std::uint64_t poke_address=0;std::uint8_t poke_value=0;   // at this callback, store a byte (host pointer)
+ int unwatch_at=-1;   // at this callback, remove every watch (as a coherence synchronization drops its interest)
 };
 static std::uint8_t* host_of(PpuState& s,std::uint64_t address){
  for(const auto& r:s.memory.regions)if(address>=r.base && address-r.base<r.bytes->size())return r.bytes->data()+(address-r.base);
@@ -334,6 +335,7 @@ static Effects observed(PpuState& s,const Case& c,const ObserverSpec& spec,bool 
   std::uint64_t at=0;if(!guest(p,at))at=~0ull;
   out.calls.push_back({at,n,write});const int me=index++;
   if(me==spec.poke_at)*host_of(s,spec.poke_address)=spec.poke_value;
+  if(me==spec.unwatch_at)for(const auto& [w,n]:spec.watch)s.memory.host_access_observer.watch(host_of(s,w),n,false);
   if(me==spec.throw_at)throw std::runtime_error("injected observer failure");};
  if(!spec.watch.empty()){s.memory.host_access_observer.filtered=true;for(const auto& [at,n]:spec.watch)s.memory.host_access_observer.watch(host_of(s,at),n);}
  out.error=reference?run_ref(s,c):run(s,c);
@@ -371,6 +373,15 @@ static void analytic_observer(){
  if(same_effects(c,{{{0xc0003000,4}}},init,"watched destination byte"))throw std::runtime_error("a fast path ran over a watched destination byte");
  // Callback order: the first destination acquisition rewrites the second source pixel (alpha 0 -> discarded in the reference).
  {ObserverSpec poke;poke.poke_at=2;poke.poke_address=0x70003000;poke.poke_value=0;same_effects(c,poke,init,"observer rewrites a later source pixel");}
+ // Interest that the reference's first access removes (a coherence sync): after one reference row the remainder is admitted and
+ // finished by the batch path; the callback also rewrites the second row's source colour, which both must read.
+ {ObserverSpec sync;sync.watch={{0x70001000,4}};sync.unwatch_at=0;sync.poke_at=0;sync.poke_address=0x70003001;sync.poke_value=0x99;
+  const auto escapes=rsxblit::prefix_escapes;same_effects(c,sync,init,"interest removed by the first access");
+  if(rsxblit::prefix_escapes!=escapes+1)throw std::runtime_error("the remainder after a removed interest did not take the batch path");
+  // The same with interest that stays: no escape, the reference finishes.
+  ObserverSpec stay;stay.watch={{0x70001000,4},{0x70003000,4}};stay.unwatch_at=-1;
+  const auto escapes2=rsxblit::prefix_escapes;same_effects(c,stay,init,"persistent interest");
+  if(rsxblit::prefix_escapes!=escapes2)throw std::runtime_error("a remainder with observed bytes took the batch path");}
  // One-shot observer failures at every position propagate exactly like the reference's.
  for(int at=0;at<6;++at){ObserverSpec one;one.throw_at=at;same_effects(c,one,init,"one-shot observer failure");}
  // First fault: destination on the read-only IO page 3; the observer throws on the second source row. The reference acquires the
@@ -394,6 +405,39 @@ static void analytic_observer(){
   if(rsxblit::rows_executed!=rows_before)throw std::runtime_error("the row path read across a watched byte");}
  std::puts("PASS observer callbacks, one-shot failures and first faults equal the frozen reference's");
 }
+// Protected pages (HostGuard, as RSX surfaces in guest memory): the first access faults, disarms the guard and runs its
+// synchronization. The batch declines guarded bytes; after one reference row the guard is gone (source guard) and the remainder
+// is admitted. A destination guard faults only in the write phase; a remainder on other pages is admitted and written after the
+// reference's prefix pixels (as in the reference), a remainder on the guarded page is not: the reference finishes.
+static void analytic_guard(){
+ for(int variant=0;variant<3;++variant){   // 0: source row 0 page guarded, 1: destination row 0 page, 2: one page holding both destination rows
+  PpuState a,b;setup(a);setup(b);
+  std::string error[2];std::vector<std::uint8_t> memory[2];unsigned syncs[2]={0,0};
+  const auto escapes=rsxblit::prefix_escapes;
+  for(int side=0;side<2;++side){
+   PpuState& s=side?b:a;
+   for(unsigned i=0;i<4;++i){s.memory.store(0x70001000+i,1,i==0?0xff:0x20+i);s.memory.store(0x70003000+i,1,i==0?0xff:0x30+i);
+    for(unsigned k=0;k<0x4000;k+=0x400)s.memory.store(0xc0001000+k+i,1,0x5a);}
+   Case c{};c.op=0;c.src_format=3;c.dst_format=10;c.origin=2;c.w=1;c.h=2;c.src_pitch=8192;c.ow=1;c.oh=2;c.cw=1;c.ch=2;c.dst_pitch=8192;
+   c.dx=c.dy=0x100000;c.src_io=true;c.src_offset=0x1000;c.dst_io=false;c.dst_offset=0x1000;if(variant==2)c.dst_pitch=8;
+   const std::uint64_t guarded=variant?0xc0001000:0x70001000;
+   std::shared_ptr<GuestBacking> owner;for(const auto& r:s.memory.regions)if(guarded>=r.base && guarded-r.base<r.bytes->size())owner=r.bytes;
+   {GuestMemory::HostGuard guard;
+    guard.synchronize=[&,side]{++syncs[side];*host_of(s,0x70003001)=0x99;*host_of(s,0xc0001010)=0x77;*host_of(s,0xc0003001)=0x66;};
+    if(!guard.add(host_of(s,guarded),4,*owner))throw std::runtime_error("test: guard.add failed");
+    guard.arm();
+    error[side]=side?run_ref(s,c):run(s,c);
+    guard.disarm();}
+   memory[side]=dump(s);
+  }
+  if(error[0]!=error[1])throw std::runtime_error("guard variant "+std::to_string(variant)+": error '"+error[0]+"' reference '"+error[1]+"'");
+  if(syncs[0]!=1 || syncs[1]!=1)throw std::runtime_error("guard variant "+std::to_string(variant)+": synchronizations "+std::to_string(syncs[0])+" reference "+std::to_string(syncs[1]));
+  if(memory[0]!=memory[1])throw std::runtime_error("guard variant "+std::to_string(variant)+": memory differs from the reference");
+  if(!variant && unsigned(a.memory.load(0xc0003001,1))!=0x99)throw std::runtime_error("guard variant "+std::to_string(variant)+": second pixel did not read the synchronized source");
+  if(rsxblit::prefix_escapes!=escapes+(variant==2?0:1))throw std::runtime_error("guard variant "+std::to_string(variant)+": unexpected remainder escape count");
+ }
+ std::puts("PASS guarded source/destination pages: remainder batch or reference, equal to the frozen reference");
+}
 // (4) A 2x2 nearest downscale of a 2048x2048 source taps four pixels: the planner must evaluate those addresses (and the four
 // destination pixels), not the 4 Mi pixel rectangle. rsxblit::locate_calls counts every Image::locate evaluation of planning.
 static void analytic_sparse(){
@@ -415,7 +459,7 @@ static void analytic_sparse(){
  std::puts("PASS sparse downscale plans only the taps it uses");
 }
 int main(){
- try{analytic();analytic_layouts();analytic_alias();analytic_alias_raster();analytic_observer();analytic_sparse();differential(false);std::puts("PASS row-wise equals per-pixel (serial)");differential(true);std::puts("PASS row-wise equals per-pixel (concurrent)");}
+ try{analytic();analytic_layouts();analytic_alias();analytic_alias_raster();analytic_observer();analytic_guard();analytic_sparse();differential(false);std::puts("PASS row-wise equals per-pixel (serial)");differential(true);std::puts("PASS row-wise equals per-pixel (concurrent)");}
  catch(const std::exception& e){std::fprintf(stderr,"FAIL %s\n",e.what());return 1;}
 }
 '''
@@ -440,7 +484,7 @@ class RsxBlitRowsTests(unittest.TestCase):
                 env['VK_DRIVER_FILES'] = str(lavapipe)
             run = subprocess.run([str(root / 'blit')], capture_output=True, text=True, env=env, timeout=300)
             self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
-            self.assertEqual(run.stdout.count('PASS '), 8, run.stdout)
+            self.assertEqual(run.stdout.count('PASS '), 9, run.stdout)
 
 
 if __name__ == '__main__':
