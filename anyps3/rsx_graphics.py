@@ -43,7 +43,7 @@ template<class Key> struct SourceCache {
         constexpr std::uint64_t limit=16*1024*1024;
         if(value->size()>limit)return value;
         while(!entries.empty() && (entries.size()>=256 || bytes+value->size()>limit)){
-            auto old=std::min_element(entries.begin(),entries.end(),[](const auto& a,const auto& b){return a.second.used<b.second.used;});bytes-=old->second.source->size();entries.erase(old);}
+            auto old=std::min_element(entries.begin(),entries.end(),[](const auto& a,const auto& b){return a.second.used<b.second.used;});bytes-=old->second.source->size();entries.erase(old);::RsxPerfCounters::add(::RsxPerfCounters::src_evictions);}
         bytes+=value->size();entries.emplace(std::move(key),Entry{value,++clock});return value;
     }
 };
@@ -256,7 +256,8 @@ static std::shared_ptr<const std::string> fragment_source(const std::vector<FpIn
     for(const auto& t:textures)if(t.valid)key.insert(key.end(),{unsigned(bool(t.resident_image)),t.format,t.dimension,unsigned(t.dimension==3 && t.levels[0].depth>1),unsigned(t.cube),t.shadow,unsigned(t.alpha_kill),t.wrap_s,t.wrap_t,t.wrap_r,t.mip_count,unsigned(t.unnormalized),t.min,t.mag});
     for(const auto& i:fp)key.insert(key.end(),{i.d,i.s0,i.s1,i.s2,unsigned(i.has_constant),i.word_offset});
     static thread_local SourceCache<std::vector<unsigned>> cache;
-    if(auto hit=cache.find(key))return hit;
+    if(auto hit=cache.find(key)){::RsxPerfCounters::add(::RsxPerfCounters::src_fs_hits);return hit;}
+    ::RsxPerfCounters::add(::RsxPerfCounters::src_fs_misses);
     auto source=fragment_source_uncached(fp,r,count,textures,lines,failure);if(!source)return {};
     if(rsx_layered_shaders().load(std::memory_order_relaxed)){const auto main=source->find("void main(){");
         if(main==std::string::npos || source->find("void main(){",main+1)!=std::string::npos)throw std::runtime_error("RSX layered fragment shader template mismatch");
@@ -369,7 +370,8 @@ static std::shared_ptr<const std::string> hardware_vertex(const NativeRsx& gpu,b
     // Exact canonical bool bytes avoid rebuilding 1,872 mask bits per lookup.
     append_key(gpu.transform_constants_written.data(),468*4*sizeof(bool));
     static thread_local SourceCache<std::string> cache;
-    if(auto hit=cache.find(key))return hit;
+    if(auto hit=cache.find(key)){::RsxPerfCounters::add(::RsxPerfCounters::src_vs_hits);return hit;}
+    ::RsxPerfCounters::add(::RsxPerfCounters::src_vs_misses);
     auto source=hardware_vertex_uncached(gpu,fetch,immediate);if(!source)return {};
     return cache.put(std::move(key),std::move(*source));
 }
@@ -605,7 +607,8 @@ struct Session {
             std::unique_ptr<NativeVulkan::GraphicsBatch> next;
             if(!spare_batches.empty()){next=std::move(spare_batches.back());spare_batches.pop_back();}
             else if(flights.size()<2)next=vk.graphics_batch(batch->capacity);
-            else{retire(true,flights.front().batch->completion);next=std::move(spare_batches.back());spare_batches.pop_back();}
+            else{{PerfTimer arena_timer(fallback_stats().enabled?&fallback_stats().flush_retire_time["arena_rotation"]:nullptr);retire(true,flights.front().batch->completion);}
+                next=std::move(spare_batches.back());spare_batches.pop_back();}
             vk.graphics_move_stats(*batch,*next);
             flights.push_back({std::move(batch),std::move(pending),std::move(labels),std::move(query_results),rsx_poll_adaptive()?std::chrono::steady_clock::now():std::chrono::steady_clock::time_point{}});
             batch=std::move(next);pending.clear();labels.clear();query_results=std::make_shared<std::vector<std::uint64_t>>();++async_submits;
@@ -1063,7 +1066,7 @@ struct Session {
         if(failed)throw std::runtime_error("RSX graphics session poisoned");
         if(busy)return;
         anyps3_ft::Span ft_flush(anyps3_ft::WorkerWait,anyps3_ft::pack(reason),download?2:3,100000);
-        retire(true);
+        {PerfTimer retire_timer(fallback_stats().enabled?&fallback_stats().flush_retire_time[reason]:nullptr);retire(true);}
         auto& stats=fallback_stats();if(stats.enabled)++stats.flush_calls[reason];
         bool dirty_read=false;if(download)for(const auto& surface:surfaces)if(surface.dirty && (!pointer || surface.overlaps(pointer,size))){dirty_read=true;break;}
         if(!batch->recording && !dirty_read && pending.empty() && labels.empty()){

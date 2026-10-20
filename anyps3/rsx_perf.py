@@ -1,7 +1,7 @@
 """Opt-in draw diagnostics. Worker counters are private until the draw joins."""
 
 CPP = r'''
-enum class HostStage {idle,indices,assembly,state,texture_metadata,targets,certification,source,geometry,vertex_upload,texture_upload,record,flush,tail,draw,kick,g_inputs,g_state,g_shaders,g_data,fifo,service,g_tex,g_bind,count};   // count <= 32 (NativeRsxWorker::stage_ns)
+enum class HostStage {idle,indices,assembly,state,texture_metadata,targets,certification,source,geometry,vertex_upload,texture_upload,record,flush,tail,draw,kick,g_inputs,g_state,g_shaders,g_data,fifo,service,g_tex,g_bind,blit,count};   // count <= 32 (NativeRsxWorker::stage_ns)
 struct HostStats {
     bool enabled=std::getenv("ANYPS3_RSX_HOST_PROFILE")!=nullptr;
     std::array<std::uint64_t,unsigned(HostStage::count)> ns{};
@@ -10,7 +10,7 @@ struct HostStats {
     HostStage active=HostStage::idle;std::chrono::steady_clock::time_point since;
     HostStats(){if(enabled)since=std::chrono::steady_clock::now();}
     HostStage select(HostStage stage){auto previous=active;if(enabled){const auto now=std::chrono::steady_clock::now();ns[unsigned(active)]+=std::chrono::duration_cast<std::chrono::nanoseconds>(now-since).count();since=now;active=stage;}return previous;}
-    void print(){if(!enabled)return;select(active);const char* names[]={"idle","indices","assembly","state","texture_metadata","targets","certification","shader_source","geometry","vertex_upload","texture_upload","record","flush","tail","draw","kick","g_inputs","g_state","g_shaders","g_data","fifo","service","g_tex","g_bind"};
+    void print(){if(!enabled)return;select(active);const char* names[]={"idle","indices","assembly","state","texture_metadata","targets","certification","shader_source","geometry","vertex_upload","texture_upload","record","flush","tail","draw","kick","g_inputs","g_state","g_shaders","g_data","fifo","service","g_tex","g_bind","blit"};
         std::fprintf(stderr,"RSX HOST PROFILE draws=%llu texture_metadata=%llu texture_materialize=%llu texture_plan_hit=%llu",(unsigned long long)draws,(unsigned long long)texture_metadata,(unsigned long long)texture_materialize,(unsigned long long)texture_plan_hit);for(unsigned i=1;i<unsigned(HostStage::count);++i)std::fprintf(stderr," %s_ms=%.3f",names[i],ns[i]/1.e6);
         for(unsigned i=1;i<unsigned(HostStage::count);++i)std::fprintf(stderr," %s_us_per_draw=%.3f",names[i],draws?ns[i]/(1.e3*draws):0);
         std::fprintf(stderr," cpu_vp=%llu cpu_attribute=%llu cpu_clip=%llu cpu_texel=%llu gpu_vertex_fetch=%llu\n",(unsigned long long)cpu_vertex,(unsigned long long)cpu_attribute,(unsigned long long)cpu_clip,(unsigned long long)cpu_texel,(unsigned long long)gpu_vertex);}
