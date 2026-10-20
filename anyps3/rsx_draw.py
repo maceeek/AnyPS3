@@ -549,20 +549,30 @@ struct FpInst { std::uint32_t d,s0,s1,s2; Vec4 constant; bool has_constant=false
 ''' + rsx_fpdecode.PREPARE + r'''
 // The program is a pure function of its microcode bytes. Cache the exact
 // byte image per SET_SHADER_PROGRAM value; a hit re-reads exactly those bytes
-// (same 1 MiB IO-page split, same Range permission/observer path) in one bulk
-// read and compares them. Any difference or read failure runs the original
-// 16-byte block parser, so errors and results are unchanged.
-static void read_fragment_bytes(PpuState& s,unsigned location,std::uint32_t at,std::uint8_t* out,unsigned n,bool bulk=false){
+// (same 1 MiB IO-page split, same permission/observer path) in one bulk
+// read and compares them. Any difference or ADMISSION fault (an unmapped or
+// unreadable byte, nothing was notified) runs the original 16-byte block
+// parser, so errors and results are unchanged; any other failure of an
+// admitted read (an observer or coherence error) propagates and is never
+// replayed through the parser.
+// Returns false only for a bulk read that failed its admission.
+static bool read_fragment_bytes(PpuState& s,unsigned location,std::uint32_t at,std::uint8_t* out,unsigned n,bool bulk=false){
     unsigned done=0;
     while(done<n){
         const unsigned count=std::min<unsigned>(n-done,0x100000-((at+done)&0xfffff));
-        const auto address=location_address(s.rsx,location-1,at+done,count);
+        // A translation fault is deterministic and notifies nothing: the bulk check reports it as "not the same" and the parser raises it again.
+        std::uint64_t address=0;
+        try{address=location_address(s.rsx,location-1,at+done,count);}catch(const std::exception&){if(bulk)return false;throw;}
         // A cache check uses the admitted, permission-checked transfer of the
         // same bytes without building a Range; the parser keeps Range::read.
-        if(bulk)s.memory.transfer(address,out+done,count,false);
+        if(bulk){
+            try{s.memory.transfer(address,out+done,count,false);}
+            catch(const std::exception&){if(s.memory.readable_span(address,count,true))throw;return false;}
+        }
         else{auto mapping=s.memory.range(address,count,false);mapping.read(0,out+done,count);}
         done+=count;
     }
+    return true;
 }
 static std::shared_ptr<const std::vector<FpInst>> load_fragment_program_shared(PpuState& s,const Reg& reg){
     const auto value=reg(0x8e4);const unsigned location=(value&3);
@@ -583,9 +593,8 @@ static std::shared_ptr<const std::vector<FpInst>> load_fragment_program_shared(P
     };
     const std::uint32_t start=value&~3u;
     if(auto found=cache.find(value);found!=cache.end()){auto& entry=found->second;
-        scratch.resize(entry.bytes.size());bool same=false;
-        try{read_fragment_bytes(s,location,start,scratch.data(),unsigned(scratch.size()),true);same=!std::memcmp(scratch.data(),entry.bytes.data(),scratch.size());}
-        catch(const std::exception&){same=false;}
+        scratch.resize(entry.bytes.size());
+        const bool same=read_fragment_bytes(s,location,start,scratch.data(),unsigned(scratch.size()),true) && !std::memcmp(scratch.data(),entry.bytes.data(),scratch.size());
         if(same){entry.use=++clock;::RsxPerfCounters::add(::RsxPerfCounters::fp_hits);return entry.program;}
     }
     ::RsxPerfCounters::add(::RsxPerfCounters::fp_misses);
@@ -596,14 +605,15 @@ static std::shared_ptr<const std::vector<FpInst>> load_fragment_program_shared(P
     // label synchronization) sees exactly those spans. A read-ahead chunk would also touch bytes behind END, so every block is
     // read on its own, as ONE admitted 16-byte transfer inside one 1 MiB IO page (no Range): the transfer validates the complete
     // block before any observer sees a byte, so a block that is half readable notifies nothing, exactly like Range. A block
-    // straddling an IO page edge, and a block whose admission faults, take the Range path, which raises the original error at
-    // the original block; a failure of an admitted block (an observer error) propagates and is never replayed.
+    // straddling an IO page edge, a block that continues into an adjacent mapping within one guest page (the scalar admission of a
+    // concurrent transfer resolves one mapping) and a block whose admission faults take the Range path, which raises the original
+    // error at the original block; a failure of an admitted block (an observer error) propagates and is never replayed.
     auto block=[&](std::uint32_t at){
         std::array<std::uint8_t,16> bytes{};bool loaded=false;
         if(((at&0xfffff)+16)<=0x100000){
             const auto address=location_address(s.rsx,location-1,at,16);   // the Range path below would raise the same error
             try{s.memory.transfer(address,bytes.data(),16,false);loaded=true;}
-            catch(const std::exception&){if(s.memory.readable_span(address,16))throw;}
+            catch(const std::exception&){if(s.memory.readable_span(address,16,true))throw;}
         }
         if(!loaded)read_fragment_bytes(s,location,at,bytes.data(),16);
         image.insert(image.end(),bytes.begin(),bytes.end());

@@ -218,15 +218,60 @@ static void partial_block_admission(){
   m.host_access_observer=nullptr;
   if(error!="observer failure" || calls!=1)throw std::runtime_error(std::string(concurrent?"[concurrent] ":"[serial] ")+"observer failure was replayed or masked: error '"+error+"' after "+std::to_string(calls)+" observer calls");
  }
+ // a block that continues into an adjacent mapping INSIDE one guest page: the scalar admission of a concurrent transfer resolves one mapping
+ // and fails, but every byte is readable and Range reads both parts. The loader must take the Range path (not rethrow), loading the same
+ // program and observing the same bytes as the reference, on a miss and on the following cache hit.
+ for(const bool concurrent:{false,true}){
+  auto run=[&](bool use_loader){
+   PpuState s;setup_draw(s,8,8,32,false);auto& m=s.memory;
+   m.map(0x70200000,0x48,6,nullptr,0);m.map(0x70200048,0xfb8,6,nullptr,0);const unsigned page=4+concurrent;s.rsx.io[page]=0x70200000;
+   put_block(s,0x70200040,1,0x70201000);                      // END block at 0x40..0x4f straddles the boundary at 0x48
+   s.rsx.registers[0x8e4]=value_of(2,(page<<20)|0x40);
+   const auto base=host_of(s,0x70200000);if(concurrent)m.enable_concurrency();
+   Admission out;
+   m.host_access_observer=[&](const void* p,std::uint64_t n,bool write){if(!write)out.spans.push_back({long(reinterpret_cast<std::uintptr_t>(p))-long(base),n});};
+   try{
+    if(use_loader){out.program=*rsxdraw::load_fragment_program_shared(s,rsxdraw::Reg{s.rsx});out.spans.clear();   // miss: parser; the hit below re-reads through the bulk check
+     const auto again=rsxdraw::load_fragment_program_shared(s,rsxdraw::Reg{s.rsx});if(again->size()!=out.program.size())throw std::runtime_error("cache hit changed the program");}
+    else{auto ref=reference(s,2,(page<<20)|0x40);for(const auto& r:ref){FpInst f{r.d,r.s0,r.s1,r.s2,r.constant,r.has_constant};f.word_offset=r.word_offset;out.program.push_back(f);}}
+   }catch(const std::exception& e){out.error=e.what();}
+   m.host_access_observer=nullptr;return out;
+  };
+  const auto expected=run(false),actual=run(true);
+  const std::string label=std::string("same-page split mapping")+(concurrent?" [concurrent]":" [serial]");
+  if(!expected.error.empty())throw std::runtime_error(label+": the reference failed (test bug): "+expected.error);
+  if(!actual.error.empty())throw std::runtime_error(label+": loader error '"+actual.error+"' although Range reads the block");
+  if(expected.program.size()!=1 || actual.program.size()!=1 || actual.program[0].d!=1)throw std::runtime_error(label+": program differs");
+ }
+ // a CACHE HIT whose bulk read fails in an observer: the failure propagates once and is not swallowed into a re-parse that succeeds
+ for(const bool concurrent:{false,true}){
+  PpuState s;setup_draw(s,8,8,32,false);auto& m=s.memory;
+  m.map(0x70200000,0x2000,6,nullptr,0);const unsigned page=6+concurrent;s.rsx.io[page]=0x70200000;
+  put_block(s,0x70200000+0x40,1,0x70202000);
+  s.rsx.registers[0x8e4]=value_of(2,(page<<20)|0x40);
+  if(concurrent)m.enable_concurrency();
+  const auto first=rsxdraw::load_fragment_program_shared(s,rsxdraw::Reg{s.rsx});          // populates the cache
+  unsigned calls=0;m.host_access_observer=[&](const void*,std::uint64_t,bool){if(!calls++)throw std::runtime_error("observer failure");};   // fails once, then succeeds
+  std::string error;
+  try{(void)rsxdraw::load_fragment_program_shared(s,rsxdraw::Reg{s.rsx});}catch(const std::exception& e){error=e.what();}
+  const unsigned failed_calls=calls;
+  m.host_access_observer=nullptr;
+  if(error!="observer failure" || failed_calls!=1)throw std::runtime_error(std::string(concurrent?"[concurrent] ":"[serial] ")+"cache-hit observer failure was swallowed or replayed: error '"+error+"' after "+std::to_string(failed_calls)+" observer calls");
+  if(rsxdraw::load_fragment_program_shared(s,rsxdraw::Reg{s.rsx})!=first)throw std::runtime_error("the cache entry did not survive a failed validation");
+ }
  // readable_span: a pure probe with the same verdict as Range admission
  for(const bool concurrent:{false,true}){
   PpuState s;setup_draw(s,8,8,32,false);auto& m=s.memory;
   m.map(0x70200000,0x1000,6,nullptr,0);m.map(0x70201000,0x1000,6,nullptr,0);m.map(0x70203000,0x1000,2,nullptr,0);
+  m.map(0x70204000,0x48,6,nullptr,0);m.map(0x70204048,0xfb8,6,nullptr,0);
   if(concurrent)m.enable_concurrency();
   unsigned fired=0;m.host_access_observer=[&](const void*,std::uint64_t,bool){++fired;};
   assert(m.readable_span(0x70200ff8,16) && m.readable_span(0x70200000,0x2000) && m.readable_span(0x70200ff8,0));
   assert(!m.readable_span(0x70201ff8,16) && !m.readable_span(0x70202000,1) && !m.readable_span(0x70203000,4) && !m.readable_span(0x70202ff8,16));
   assert(!m.readable_span(0xfffffff8u,16) && !m.readable_span(0x70200000,0x3000));
+  // transfer_admission: inside ONE guest page a concurrent transfer needs ONE mapping; across pages it may span mappings
+  assert(m.readable_span(0x70204040,16) && m.readable_span(0x70204040,16,true)==!concurrent);     // same page, two mappings
+  assert(m.readable_span(0x70200ff8,16,true) && m.readable_span(0x70204048,16,true) && m.readable_span(0x70204ff8,16,true)==false);   // across pages / inside one mapping / unmapped tail
   m.host_access_observer=nullptr;
   if(fired)throw std::runtime_error("readable_span notified an observer");
  }
