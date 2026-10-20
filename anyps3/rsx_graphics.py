@@ -528,7 +528,9 @@ struct Session {
         std::unique_ptr<NativeVulkan::GraphicsBatch> batch;
         std::vector<Pending> pending;std::vector<Label> labels;
         std::shared_ptr<std::vector<std::uint64_t>> results;
+        std::chrono::steady_clock::time_point submitted{};
     };
+    double flight_ns=300000;   // EWMA of submit -> retire latency of a flight (adaptive completion polling, ANYPS3_RSX_POLL=adaptive)
     // Three persistent mappings/command+descriptor pools; an arena cannot be
     // reused until its exact timeline value completed and results retired.
     std::deque<Flight> flights;
@@ -571,6 +573,7 @@ struct Session {
         try{while(!flights.empty() && flights.front().batch->completion<=through){auto& flight=flights.front();
             if(!vk.graphics_collect(*flight.batch,wait))break;
             retire_work(*flight.batch,flight.pending,flight.results,flight.labels);
+            flight_ns=0.8*flight_ns+0.2*double(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-flight.submitted).count());
             vk.graphics_reset(*flight.batch);vk.graphics_move_stats(*flight.batch,*batch);
             spare_batches.push_back(std::move(flight.batch));flights.pop_front();++async_retires;
         }}catch(...){failed=true;throw;}
@@ -600,7 +603,7 @@ struct Session {
             else if(flights.size()<2)next=vk.graphics_batch(batch->capacity);
             else{retire(true,flights.front().batch->completion);next=std::move(spare_batches.back());spare_batches.pop_back();}
             vk.graphics_move_stats(*batch,*next);
-            flights.push_back({std::move(batch),std::move(pending),std::move(labels),std::move(query_results)});
+            flights.push_back({std::move(batch),std::move(pending),std::move(labels),std::move(query_results),std::chrono::steady_clock::now()});
             batch=std::move(next);pending.clear();labels.clear();query_results=std::make_shared<std::vector<std::uint64_t>>();++async_submits;
         }catch(...){failed=true;throw;}
     }
@@ -1934,7 +1937,8 @@ template<class Vertex> static bool prepared(Session& session,const std::vector<s
     phase.next(HostStage::record);
     static thread_local std::shared_ptr<const std::string> pass_vertex;static thread_local bool pass_layered=false;
     if(!pass_vertex || pass_layered!=rsx_layered_shaders().load(std::memory_order_relaxed)){pass_layered=rsx_layered_shaders().load(std::memory_order_relaxed);pass_vertex=std::make_shared<const std::string>(vertex_source());}const auto& vertex_owner=raw_vertex?hw_vertex:pass_vertex;const auto& vertex_shader=*vertex_owner;
-    session.bind_draw_blocks(data,direct);
+    phase.next(HostStage::blocks);session.bind_draw_blocks(data,direct);
+    phase.next(HostStage::tail);
     if(tail_bytes && reuse==UINT64_MAX){
         const auto tail_at=vk.graphics_reserve_upload(*session.batch,tail_bytes);if(tail_at+tail_bytes>UINT_MAX)throw std::runtime_error("RSX graphics vertex slice offset overflow");
         for(unsigned a=0;a<16;++a)if(tail_attributes&(1u<<a))data[data[12]+a*8+1]=unsigned(tail_at)+tail_rel[a];
@@ -1943,6 +1947,7 @@ template<class Vertex> static bool prepared(Session& session,const std::vector<s
         else{input_reads.read(out);for(unsigned i=0;i<tail_pad_count;++i)std::memset(out+tail_pads[i].at,0,tail_pads[i].n);}
     }
     ::RsxPerfCounters::add(::RsxPerfCounters::blob_bytes,data.size()*4);
+    phase.next(HostStage::draw);
     const auto actual=[&]{
         NativeVulkan::ConditionalScope condition(vk,*session.batch,session.conditional?session.conditional->buffer:nullptr,session.conditional?session.conditional->offset:0);
         return vk.graphics_draw(*session.batch,fixed,images,z,vertex_shader,*fs,data,sequential_packed?3:vertices,positions,bits_float(r(0xa7c)),bits_float(r(0xa78)),bits_float(r(0x384)),bits_float(r.get(0x388,0x3f800000)),texture_images,sequential_packed?primitive*3:0,reuse,raw_buffers,vertex_owner,fs,nullptr,0,true);
@@ -1953,7 +1958,7 @@ template<class Vertex> static bool prepared(Session& session,const std::vector<s
     for(auto& surface:session.surfaces){for(unsigned i=0;i<count;++i)if(surface.image==images[i])session.dirty_surface(surface);
         if(surface.image==z && ((r(0xa70)&1) || fixed.z.stencilTestEnable))session.dirty_surface(surface);}
     }
-    session.kick_draws();
+    phase.next(HostStage::kick);session.kick_draws();
     state.rsx.draw.triangles+=vertices/3;::RsxPerfCounters::add(::RsxPerfCounters::gpu_draws);return true;
 }
 

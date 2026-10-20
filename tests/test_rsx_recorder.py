@@ -118,7 +118,21 @@ static void teardown(){
  {Gpu g("1");g.draw(0,0,0,16,16,1);g.b.reset();}                              // batch destroyed with a queued draw
  std::puts("PASS recorder teardown with queued draws");
 }
+// RECORDER_BENCH=1: main-thread cost of a draw (frontend only) with and without the recorder; not an assertion.
+static void bench(){
+ for(const char* mode:{"0","1","0","1"}){
+  Gpu g(mode);Model got{};double total=0;unsigned draws=0;std::uint32_t r=5;
+  for(unsigned round=0;round<30;++round){
+   const auto start=std::chrono::steady_clock::now();
+   for(unsigned i=0;i<800;++i){const unsigned x0=lcg(r)%8,y0=lcg(r)%8;g.draw(i&1,x0,y0,x0+8,y0+8,0xff000000u|i);++draws;}
+   total+=std::chrono::duration<double>(std::chrono::steady_clock::now()-start).count();
+   read_back(g,got);
+  }
+  std::printf("BENCH recorder=%s main-thread %.3f us/draw over %u draws\n",mode,total*1e6/draws,draws);
+ }
+}
 int main(){try{
+ if(std::getenv("RECORDER_BENCH")){bench();return 0;}
  for(const char* mode:{"0","1"})model_sequence(mode,12345,4,400);
  model_sequence("1",777,6,700);
  back_pressure();two_batches();failure();teardown();
