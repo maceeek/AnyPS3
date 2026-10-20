@@ -86,8 +86,8 @@ static void rsx_worker_start(PpuState& s){
     // the old immutable map snapshot is replaced, while its pins remain valid.
     m.renderer_barrier=[&w,&m,f](bool enter){
         if(enter){if(w.barrier_depth++)return;w.posted_put=UINT64_MAX;
-            ExecutionScope wait(ExecutionPhase::RsxWait);
-            try{w.queue->call(RsxOwnerQueue::Kind::MapBarrier,[&w]{w.paused=true;w.fifo_put_address.store(0,std::memory_order_release);++w.map_barriers;});}
+            ExecutionScope wait(ExecutionPhase::RsxWait);anyps3_ft::Span ft_barrier(anyps3_ft::BarrierReq,1);
+            try{w.queue->call(RsxOwnerQueue::Kind::MapBarrier,anyps3_ft::wrap(anyps3_ft::HostExec,1,[&w]{w.paused=true;w.fifo_put_address.store(0,std::memory_order_release);++w.map_barriers;}));}
             catch(...){--w.barrier_depth;throw;}
         }else{
             if(!w.barrier_depth)std::terminate();
@@ -114,8 +114,8 @@ static void rsx_worker_start(PpuState& s){
         }
         // Pure additions have no old GPU ownership to materialize.
         if(removed.empty())return;
-        ExecutionScope wait(ExecutionPhase::RsxWait);
-        w.queue->call(RsxOwnerQueue::Kind::MapBarrier,[f,removed=std::move(removed)]{
+        ExecutionScope wait(ExecutionPhase::RsxWait);anyps3_ft::Span ft_maps(anyps3_ft::BarrierReq,3);
+        w.queue->call(RsxOwnerQueue::Kind::MapBarrier,anyps3_ft::wrap(anyps3_ft::HostExec,3,[f,removed=std::move(removed)]{
 #ifdef ANYPS3_RSX_VK
             if(!f->rsx.graphics_owner)return;
             auto& session=*static_cast<rsxgraphics::Session*>(f->rsx.graphics_owner.get());
@@ -129,7 +129,7 @@ static void rsx_worker_start(PpuState& s){
 #else
             (void)f;(void)removed;
 #endif
-        });
+        }));
     };
     m.renderer_access=[&w,&m](const void* p,std::uint64_t n,bool write){
         if(m.observer_paused())return;
@@ -138,7 +138,9 @@ static void rsx_worker_start(PpuState& s){
             GuestMemory::ObserverPause pause(m);
             if(m.host_access_observer && (m.host_access_observer.interested(p,n) || m.raw_cpu_dirty_interested(p,n,write)))m.host_access_observer.callback(p,n,write);
         };
-        if(w.on_owner())invoke();else{ExecutionScope wait(ExecutionPhase::RsxWait);++w.host_requests;w.queue->call(RsxOwnerQueue::Kind::HostAccess,invoke);}
+        if(w.on_owner())invoke();else{ExecutionScope wait(ExecutionPhase::RsxWait);++w.host_requests;
+            anyps3_ft::Span ft_host(anyps3_ft::HostReq,reinterpret_cast<std::uintptr_t>(p),write?1:0,20000,n);
+            w.queue->call(RsxOwnerQueue::Kind::HostAccess,anyps3_ft::wrap(anyps3_ft::HostExec,reinterpret_cast<std::uintptr_t>(p),invoke));}
     };
     m.renderer_metadata_allowed=[&w]{w.check();return true;};
     m.renderer_pin=[&m](const std::function<void()>& invoke){
@@ -155,9 +157,11 @@ static void rsx_worker_start(PpuState& s){
         struct Retire {NativeRsxWorker& worker;~Retire(){worker.fifo_queued.store(false,std::memory_order_release);}} retire{w};
         if(w.paused)return;
         ExecutionScope phase(w.timing,ExecutionPhase::Rsx);
+        anyps3_ft::Span ft_run(anyps3_ft::FifoRun,f->rsx.draw.draws,0,0,anyps3_ft::on?anyps3_ft::now()-anyps3_ft::last_post_ns.load(std::memory_order_relaxed):0);
         w.progress.store(rsx_run_inline(*f,budget),std::memory_order_release);rsx_worker_publish(*f);
+        ft_run.a=f->rsx.draw.draws-ft_run.a;ft_run.c=f->rsx.flips;
     };
-    q.service=[&w,f]{if(w.paused)return;ExecutionScope phase(w.timing,ExecutionPhase::Rsx);
+    q.service=[&w,f]{if(w.paused)return;ExecutionScope phase(w.timing,ExecutionPhase::Rsx);anyps3_ft::Span ft_service(anyps3_ft::Service,0,0,50000);
         const auto now=std::chrono::steady_clock::now().time_since_epoch();
         (void)rsx_tick_vblank(*f,std::chrono::duration_cast<std::chrono::nanoseconds>(now).count());
 #ifdef ANYPS3_RSX_VK
@@ -246,7 +250,8 @@ static void rsx_worker_start(PpuState& s){
 #if defined(__linux__)
     w.faults=std::make_unique<NativeHostFaultService>([&w,&m](std::uintptr_t address){
         bool handled=false;++w.host_requests;
-        try{w.queue->call(RsxOwnerQueue::Kind::HostAccess,[&]{
+        anyps3_ft::Span ft_fault_req(anyps3_ft::HostReq,address,2,20000);
+        try{w.queue->call(RsxOwnerQueue::Kind::HostAccess,anyps3_ft::wrap(anyps3_ft::Fault,address,[&]{
             auto& local=m.local_state();local.fault_claim=true;
             struct Reset{bool& flag;~Reset(){flag=false;}} reset{local.fault_claim};
             for(auto* guard=GuestMemory::HostGuard::head;guard;guard=guard->next)if(guard->touches_any(reinterpret_cast<const void*>(address),1)){
@@ -268,7 +273,7 @@ static void rsx_worker_start(PpuState& s){
                 {guard->disarm();guard->synchronize();}
                 handled=true;break;
             }
-        });}catch(const std::exception& error){
+        }));}catch(const std::exception& error){
             // This callback runs on the bridge, outside the signal frame.
             const auto message=std::string("RSX protected backing synchronization failed: ")+error.what()+"\n";
             (void)!::write(2,message.data(),message.size());throw;
@@ -285,10 +290,11 @@ static void rsx_worker_start(PpuState& s){
 static std::uint32_t rsx_worker_display_call(PpuState& s){
     auto& w=s.process.rsx_worker;std::array<std::uint64_t,32> args;std::copy_n(s.r,32,args.begin());const auto pc=s.pc,tid=s.thread_id;std::uint32_t result=0;
     GuestMemory::RawYield yield(s.memory);ExecutionScope wait(ExecutionPhase::RsxWait);++w.host_requests;
-    w.queue->call(RsxOwnerQueue::Kind::HostAccess,[&]{
+    anyps3_ft::Span ft_display(anyps3_ft::DisplayReq,args[11],0,0);
+    w.queue->call(RsxOwnerQueue::Kind::HostAccess,anyps3_ft::wrap(anyps3_ft::DisplayExec,args[11],[&]{
         auto& f=*static_cast<PpuState*>(w.facade.get());std::copy(args.begin(),args.end(),f.r);f.pc=pc;f.thread_id=tid;
         ExecutionScope phase(w.timing,ExecutionPhase::Rsx);result=rsx_syscall(f);rsx_worker_publish(f);
-    });return result;
+    }));return result;
 }
 static void rsx_worker_perf(const PpuState& s){
     auto& w=s.process.rsx_worker;if(!w.enabled)return;
@@ -324,6 +330,7 @@ static EngineStepReply rsx_worker_request(PpuState& s,unsigned budget){
     const auto put=s.memory.load(address,4);
     if(put==w.posted_put && !w.fifo_work.load(std::memory_order_acquire))return {progress(),false};
     const auto pc=s.pc,tid=s.thread_id;w.fifo_queued.store(true,std::memory_order_release);
+    if(anyps3_ft::on){anyps3_ft::last_post_ns.store(anyps3_ft::now(),std::memory_order_relaxed);anyps3_ft::mark(anyps3_ft::PostFifo,put,budget);}
     try{w.queue->post(RsxOwnerQueue::Kind::RunFifo,[f=static_cast<PpuState*>(w.facade.get()),pc,tid]{f->pc=pc;f->thread_id=tid;},budget);w.posted_put=put;}
     catch(...){w.fifo_queued.store(false,std::memory_order_release);throw;}
     return {progress(),false};

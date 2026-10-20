@@ -57,6 +57,10 @@ struct PpuState : PpuContext {
  bool module_loading=false,reschedule=false;unsigned execution=0;
 };
 enum class ExecutionPhase {Coordinator,Idle,RsxWait};
+// FRAMETIME stamps (anyps3/frametime.py macros) compile to nothing in this fixture.
+#define ANYPS3_FT_BLOCK(s,kind,id) ((void)0)
+#define ANYPS3_FT_SPAN(var,kind,...) ((void)0)
+#define ANYPS3_FT_MARK(kind,...) ((void)0)
 struct SpuServiceScope {SpuServiceScope(PpuState&,bool){}};
 struct ExecutionScope {ExecutionScope(unsigned&,ExecutionPhase){}};
 static std::uint64_t clock_us=1000,engine_advance_us=0;

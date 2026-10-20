@@ -200,6 +200,7 @@ static RsxEventTicket rsx_event_ticket(PpuState& s,std::uint64_t flags,const cha
 }
 static void rsx_event_publish(PpuState& s,unsigned id,std::uint64_t name,std::uint64_t flags,const char* error,bool wake=true){
     if(!flags)return;
+    anyps3_ft::mark(anyps3_ft::EventPub,id,name,flags);
     // A raw fault may block the coordinator in its signal frame. Publish
     // memory on the owner and queue only the immutable LV2 event there; the
     // next coordinator safe point delivers it or poisons with the same error.
@@ -268,6 +269,7 @@ static bool rsx_tick_vblank(PpuState& s,std::uint64_t now_ns){
     m.store(head+0x1c,4,timebase);m.store(head+0x3c,4,timebase>>32);
     m.store(head+0x20,8,tick_ns/1000);m.store(head+0x30,8,ticks);
     gpu.vblank_ticks=ticks;
+    anyps3_ft::mark(anyps3_ft::Vblank,ticks,now_ns-tick_ns,flags);
     if(flags && !event.pending)rsx_event_publish(s,gpu.event_queue,event.name,flags,"RSX vblank event port is disconnected");
     return true;
 }
@@ -286,9 +288,11 @@ static void rsx_flip_display(PpuState& s,unsigned head,std::uint32_t value){
     const auto flags=(UINT64_C(8)<<head)&m.load(std::uint64_t(gpu.driver)+0x12c0,4);
     const auto event=rsx_event_ticket(s,flags,"RSX flip event cannot be delivered");
     m.range(address,0x18,true);m.range(std::uint64_t(gpu.reports)+0x10,16,true);
+    anyps3_ft::mark(anyps3_ft::FlipReq,id,gpu.flip_modes[head],gpu.vblank_ticks);
     if(gpu.flip_modes[head]==2 && gpu.vblank_epoch_ns){
         const auto next=gpu.vblank_ticks+1;
         const auto deadline=gpu.vblank_epoch_ns+(next/60)*1001000000+(next%60)*1001000000/60;
+        anyps3_ft::Span ft_vsync(anyps3_ft::FlipVsync,deadline,next);
         // SPUs keep running while the PPU waits for vblank; sleep only when idle.
         const auto until=std::chrono::steady_clock::time_point(std::chrono::nanoseconds(deadline));
         while(std::chrono::steady_clock::now()<until){
@@ -299,8 +303,10 @@ static void rsx_flip_display(PpuState& s,unsigned head,std::uint32_t value){
     // Unsaved frames may remain in flight. Guest completion fields and the
     // event are published only when that frame's timeline value completes.
     if(!gpu.perf_capture.replay && rsx_graphics_flip_async(s,id,address,std::uint64_t(gpu.reports)+0x10,gpu.event_queue,flags?event.name:0)){
+        anyps3_ft::mark(anyps3_ft::FlipAsync,1,0,id);
         rsx_capture_flip(s);return;
     }
+    anyps3_ft::mark(anyps3_ft::FlipAsync,0,0,id);
 #endif
     // Saved captures keep their durable-to-stdio completion contract.
     if(gpu.perf_capture.replay){
