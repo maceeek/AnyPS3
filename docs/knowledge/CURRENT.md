@@ -1,10 +1,11 @@
 # Current state and goal
 
-**2026-10-20 FAST2 wave (Claude Opus 5.5 + Sonnet 5.5 subagents, on the PC with the game and the RTX 4070 SUPER).**
-Goal: the game at 60 FPS with headroom. **Build 470 = live `main` b4547ab (460 + cloud round), measured `470a`: 29.70 FPS
-(median 29.97), correct image** — RSX worker 22.9 ms/frame (first limit), GPU busy ~13 ms/frame (was ~31), main thread busy
-15.8 ms/frame. Frames are VSYNC-quantized, so 60 FPS needs every path < 16.7 ms. Running: subagents GPUFAST / RSXCPU /
-CRITPATH on branches `fast2/*`, full suite over 470. Record: [FAST2 record](experiments/2026-10-20-fast2-wave.md).
+**2026-10-20 FAST2 wave (Claude Opus 5.5 + Sonnet 5.5 subagents, Codex gpt-6.1-sol reviews; on the PC with the RTX 4070 SUPER).**
+Goal: the game at 60 FPS with headroom. **Best verified build: 471 = live `main` (merge 412d94b), measured `471a`: 31.18 FPS mean
+(median 30.45, max 36.45), correct image** — rsx_worker 17.1 ms/frame (still the first limit), GPU busy 4.9 + 0.6 ms (DMA prelude),
+main thread busy 15.0 ms (~10 ms work + ~5 ms waiting for SPU jobs on the ig lanes). Frames are VSYNC-quantized: 60 FPS needs every path
+< 16.7 ms. Running: wave-2 agents RSXCPU2 / GPUFAST2 / SPUFAST2 on branches `fast2/*` from `integ/471`.
+Record: [FAST2 record](experiments/2026-10-20-fast2-wave.md).
 
 **2026-10-19/20 cloud optimization round (Claude Opus 5.5, cloud container without game data or GPU).**
 User goal unchanged: the game at 60 FPS with headroom. Record with all evidence, benchmarks and limitations:
