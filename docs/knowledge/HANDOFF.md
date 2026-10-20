@@ -19,7 +19,7 @@ first next action: [CURRENT.md](CURRENT.md).
   measurements, open items, PC commands).
 - **Not verified:** the game (no game data in the container), any FPS figure, frame correctness of a level image, the
   physical gamepad. Every number in the record is a synthetic micro-benchmark on a shared 4 vCPU CPU (Lavapipe, no GPU), relative only.
-  Whole-suite result of this round: see CURRENT (line is filled in by the main agent).
+  Whole suite: 158 modules, 782 tests, 774 pass; every failure environmental or pre-existing (CURRENT, record).
 - **Kill switches** (for A/B runs and bisection): `ANYPS3_RSX_PLANE_RUNS=0` (old MSAA recording, one pass switch per plane);
   `ANYPS3_SPU_POLL_PARK=0` (no busy-poll parking). Compile-time diagnostics only: `-DANYPS3_VMX_FORCE_SCALAR` (exact VMX
   lanes) and `-DANYPS3_FP_FORCE_SOFT` (no lazy FPSCR and no host FP fast path). Per the record, the parked poll is retried

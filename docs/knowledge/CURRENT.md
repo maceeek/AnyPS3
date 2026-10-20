@@ -42,7 +42,7 @@ by reasoning only; nothing is verified in the game):
 **Verification actually done:** native regression tests of the changed areas and synthetic micro-benchmarks on a shared
 cloud CPU (relative only, see [Measurements](experiments/2026-10-19-cloud-optimization.md#measurements-synthetic-this-cloud-cpu)).
 **Not done:** no game build, no game run, no FPS figure, no frame comparison, no physical gamepad.
-**Full regression suite of this round:** pending (main agent fills in).
+**Full regression suite of this round:** frozen worktree of `4b3723a` (same code as the final branch), `run_suite.py -j3`, real Vulkan (Lavapipe), split by a container restart (139 + 19 modules): **158 modules, 782 tests, 774 pass**. The 8 failing tests and 2 modules failing at import are environmental or pre-existing: tools under `local/ratchet/` that this container lacks (test_sample_profile, test_sample_profile_integration, test_spudyn_profile, test_spuperf2_capture ×2); the 30 s compile limit with this toolchain (test_program ×2, test_services ×1, all pass with a longer limit); two failures identical on a worktree of `43c6b27` and passing on the PC in the 386 suite (test_rsx_perf_decode `special_lanes`, test_savedata_vsh non-variadic `assert`). Details in the [record](experiments/2026-10-19-cloud-optimization.md#full-regression-suite).
 
 **Strongest open hypothesis:** part of the ~30 ms/frame GPU busy time in the level is render-pass switching;
 the level replay had ~1712 render passes per frame (verified from the comment at `anyps3/vulkan.py:222`; 76 with

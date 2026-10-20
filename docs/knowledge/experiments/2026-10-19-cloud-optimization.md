@@ -230,11 +230,38 @@ measurement of the indexed-mesh scenario (1200 BE16 indices) gave host 11.5 → 
 **Limitation:** none of these is a game frame; the level's RSX worker spends ~28 µs/draw on the PC (460a), with
 work these synthetic draws do not have (vertex arrays, texture uploads, surface cache, readbacks).
 
+## Full regression suite
+
+**Verified:** frozen worktree of `4b3723a` (no code change after it), `scratchpad/run_suite.py final-tree OUT -j 3`
+(per-module `python -m unittest`, `ANYPS3_REQUIRE_VULKAN=1`, `SDL_AUDIODRIVER=dummy`, `ANYPS3_AUDIO_SINK=null`), real
+Vulkan through Lavapipe. A container restart interrupted the run after 139 modules; the remaining 19 ran afterwards
+on the same worktree. **158 modules, 782 tests, 774 pass.** Failures:
+
+| module | tests | cause | evidence |
+| --- | --- | --- | --- |
+| test_sample_profile, test_sample_profile_integration | import | `local/ratchet/tools/sample_report.py` absent here | FileNotFoundError |
+| test_spudyn_profile | 1 | `local/ratchet/tools/spu_dynamic_profile.py` absent here | FileNotFoundError |
+| test_spuperf2_capture | 2 | `local/ratchet/codex/spuperf2/replay.py` absent here | FileNotFoundError |
+| test_program | 2 | 30 s compile limit (each compile ~70 s with this toolchain) | pass with a 600 s limit |
+| test_services | 1 | 30 s compile limit | 3/3 pass with a 600 s limit |
+| test_rsx_perf_decode | 1 | `special_lanes` assertion; identical on a worktree of `43c6b27` | see open items |
+| test_savedata_vsh | 1 | generated code passes `assert` a braced list with commas (needs a variadic `assert`); identical on `43c6b27` | compile error |
+
+Earlier serial reruns on the live tree (same code): test_par1–4/6/7/9, test_par10/14_deadlock, test_native_audio(_full),
+test_floating, test_hlefast1, test_fp_special, test_ppuperf3 all pass; the memory modules (test_memory,
+test_ppufast_memory, test_par5/8/10_memory/12_runtime/13_memory, the SPU reservation/poll tests) pass on the
+fast-path tree (104 tests).
+
 ## Not done / open
 
 - **No game build or FPS measurement** — the user must build and measure on the PC (commands below).
 - PPU `k_copy`/`k_struct` single-run differences are host noise (see Measurements).
 - RSX2 estimate from the FAST round stays valid: ≤10 ms/frame needs the RSX work split across threads.
+- test_rsx_perf_decode `special_lanes` fails with this GCC 15.3 build on base and final, but the assertion disappears
+  when the `assert` is replaced by a print (same comparison). **Hypothesis:** the test switches the host rounding
+  mode at run time and is compiled with plain `-O2` (no `-frounding-math`), so the optimizer may move FP operations
+  across the mode switches; the 386 suite on the PC passed it. Check with `-frounding-math` before touching the
+  RSX FP CPU interpreter.
 
 ## How to verify on the PC
 
