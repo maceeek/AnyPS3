@@ -67,10 +67,23 @@ static void rsx_graphics_reset_conditional(PpuState& s);
 static bool rsx_graphics_resolve_conditional(PpuState& s);
 static bool rsx_graphics_conditional_fault(PpuState& s);
 static bool rsx_graphics_flip_async(PpuState&,unsigned,std::uint64_t,std::uint64_t,unsigned,std::uint64_t);
+static void rsx_graphics_flip_prepare(PpuState&);
+static bool rsx_graphics_poll(PpuState&);
 static bool rsx_graphics_defer_label(PpuState&,std::uint64_t,unsigned);
 static bool rsx_graphics_defer_report(PpuState&,std::uint64_t,unsigned,bool,bool);
 [[maybe_unused]] static bool rsx_graphics_scanout(PpuState& s,unsigned id,std::vector<std::uint8_t>* capture,bool present);
 #endif
+// FRAMETIME wave: page-synchronisation requests of other threads (SPU lanes, PPU faults) used to wait for the owner's whole FIFO run or
+// vsync wait (measured: mean 1.7 ms behind a run, 9 ms behind a vsync wait, 9.8 ms/frame summed over the lanes). The game worker installs a
+// hook that serves such requests (RsxOwnerQueue::Request::put_generation == 1, kind HostAccess) at FIFO packet boundaries and inside the
+// vsync wait; requesters count themselves in rsx_host_waiters so that the check is one relaxed load per packet.
+// ANYPS3_RSX_HOST_DRAIN=0 and ANYPS3_RSX_FLIP_EARLY=0 restore the previous behaviour (A/B switches).
+static std::atomic<unsigned> rsx_host_waiters{0};
+static std::function<void()>& rsx_owner_hook(){static thread_local std::function<void()> hook;return hook;}
+[[maybe_unused]] static inline void rsx_owner_poll(){
+    if(__builtin_expect(rsx_host_waiters.load(std::memory_order_relaxed)!=0,0)){auto& hook=rsx_owner_hook();if(hook)hook();}
+}
+[[maybe_unused]] static bool rsx_flip_early_enabled(){static const bool on=[]{const char* v=std::getenv("ANYPS3_RSX_FLIP_EARLY");return !v || std::string(v)!="0";}();return on;}
 ''' + CAPTURE_CPP + SURFACE_CPP + DISPLAY_CPP + r'''
 [[maybe_unused]] static void rsx_set_flip_mode(PpuState& s,unsigned head){
     std::unique_ptr<GuestMemory::ConfigurationPermit> configuration;
@@ -200,6 +213,7 @@ static RsxEventTicket rsx_event_ticket(PpuState& s,std::uint64_t flags,const cha
 }
 static void rsx_event_publish(PpuState& s,unsigned id,std::uint64_t name,std::uint64_t flags,const char* error,bool wake=true){
     if(!flags)return;
+    anyps3_ft::mark(anyps3_ft::EventPub,id,name,flags);
     // A raw fault may block the coordinator in its signal frame. Publish
     // memory on the owner and queue only the immutable LV2 event there; the
     // next coordinator safe point delivers it or poisons with the same error.
@@ -268,8 +282,35 @@ static bool rsx_tick_vblank(PpuState& s,std::uint64_t now_ns){
     m.store(head+0x1c,4,timebase);m.store(head+0x3c,4,timebase>>32);
     m.store(head+0x20,8,tick_ns/1000);m.store(head+0x30,8,ticks);
     gpu.vblank_ticks=ticks;
+    anyps3_ft::mark(anyps3_ft::Vblank,ticks,now_ns-tick_ns,flags);
     if(flags && !event.pending)rsx_event_publish(s,gpu.event_queue,event.name,flags,"RSX vblank event port is disconnected");
     return true;
+}
+// Wait for the emulated vblank deadline `until` (the flip blocks the owner, which keeps the display ordering of later commands).
+// On the RSX owner the wait is not idle time: everything recorded before the flip command is independent of the display, so it is
+// submitted at once (the GPU finishes it, and the report/label writes that precede the flip become visible, before the vblank
+// instead of after it), completed GPU prefixes are published while waiting, and page-synchronisation requests of other threads
+// are served (rsx_owner_poll) instead of waiting for the end of the vblank.
+static void rsx_wait_vblank(PpuState& s,std::chrono::steady_clock::time_point until){
+#ifdef ANYPS3_RSX_VK
+    // A flip that is already late has no wait to hide the GPU time in: its own submission follows at once.
+    if(rsx_flip_early_enabled() && s.process.rsx_worker.on_owner() && std::chrono::steady_clock::now()<until)rsx_graphics_flip_prepare(s);
+#endif
+    // SPUs keep running while the PPU waits for vblank; sleep only when idle.
+    while(std::chrono::steady_clock::now()<until){
+        if(s.process.rsx_worker.on_owner()){
+            auto& q=*s.process.rsx_worker.queue;
+            std::unique_lock<std::mutex> lock(q.mutex);const auto seen=q.generation;lock.unlock();   // before serving: a later post wakes the wait
+            bool pending=false;
+#ifdef ANYPS3_RSX_VK
+            if(rsx_flip_early_enabled())pending=rsx_graphics_poll(s);
+#endif
+            rsx_owner_poll();
+            const auto step=std::chrono::steady_clock::now()+std::chrono::microseconds(pending?100:500);
+            lock.lock();
+            q.changed.wait_until(lock,std::min(until,step),[&]{return q.closing || q.generation!=seen;});
+        }else if(!spu_run(s,65536))std::this_thread::sleep_until(std::min(until,std::chrono::steady_clock::now()+std::chrono::microseconds(500)));
+    }
 }
 static void rsx_flip_display(PpuState& s,unsigned head,std::uint32_t value){
     auto& gpu=s.rsx;auto& m=s.memory;
@@ -286,21 +327,31 @@ static void rsx_flip_display(PpuState& s,unsigned head,std::uint32_t value){
     const auto flags=(UINT64_C(8)<<head)&m.load(std::uint64_t(gpu.driver)+0x12c0,4);
     const auto event=rsx_event_ticket(s,flags,"RSX flip event cannot be delivered");
     m.range(address,0x18,true);m.range(std::uint64_t(gpu.reports)+0x10,16,true);
+    anyps3_ft::mark(anyps3_ft::FlipReq,id,gpu.flip_modes[head],gpu.vblank_ticks);
+    {   // Diagnostic (ANYPS3_FRAMETIME_FLIPDUMP=N): the FIFO words around the first N flips, to see what the game queues next to a flip.
+        static const unsigned dump=[]{const char* v=std::getenv("ANYPS3_FRAMETIME_FLIPDUMP");return v?unsigned(std::strtoul(v,nullptr,10)):0u;}();
+        static unsigned dumped=0;
+        if(dump && dumped<dump && gpu.flips>=100){++dumped;
+            const auto get=static_cast<std::uint32_t>(m.load(gpu.dma+0x44,4)),put=static_cast<std::uint32_t>(m.load(gpu.dma+0x40,4));
+            std::fprintf(stderr,"FLIPDUMP flip=%llu get=%08x put=%08x:",(unsigned long long)gpu.flips,get,put);
+            for(int i=-24;i<48;++i){const auto at=std::int64_t(get)+4*i;if(at<0)continue;
+                try{std::fprintf(stderr," %s%08x",i==0?"|":"",unsigned(m.load(rsx_address(gpu,std::uint32_t(at)),4)));}catch(...){std::fprintf(stderr," ????????");}}
+            std::fprintf(stderr,"\n");}
+    }
     if(gpu.flip_modes[head]==2 && gpu.vblank_epoch_ns){
         const auto next=gpu.vblank_ticks+1;
         const auto deadline=gpu.vblank_epoch_ns+(next/60)*1001000000+(next%60)*1001000000/60;
-        // SPUs keep running while the PPU waits for vblank; sleep only when idle.
-        const auto until=std::chrono::steady_clock::time_point(std::chrono::nanoseconds(deadline));
-        while(std::chrono::steady_clock::now()<until){
-            if(s.process.rsx_worker.on_owner() || !spu_run(s,65536))std::this_thread::sleep_until(std::min(until,std::chrono::steady_clock::now()+std::chrono::microseconds(500)));
-        }
+        anyps3_ft::Span ft_vsync(anyps3_ft::FlipVsync,deadline,next);
+        rsx_wait_vblank(s,std::chrono::steady_clock::time_point(std::chrono::nanoseconds(deadline)));
     }
 #ifdef ANYPS3_RSX_VK
     // Unsaved frames may remain in flight. Guest completion fields and the
     // event are published only when that frame's timeline value completes.
     if(!gpu.perf_capture.replay && rsx_graphics_flip_async(s,id,address,std::uint64_t(gpu.reports)+0x10,gpu.event_queue,flags?event.name:0)){
+        anyps3_ft::mark(anyps3_ft::FlipAsync,1,0,id);
         rsx_capture_flip(s);return;
     }
+    anyps3_ft::mark(anyps3_ft::FlipAsync,0,0,id);
 #endif
     // Saved captures keep their durable-to-stdio completion contract.
     if(gpu.perf_capture.replay){
@@ -316,7 +367,22 @@ static void rsx_flip_display(PpuState& s,unsigned head,std::uint32_t value){
 }
 ''' + DRAW_CPP + r'''
 #ifdef ANYPS3_RSX_VK
+static void rsx_graphics_flip_prepare(PpuState& s){
+    auto* session=static_cast<rsxgraphics::Session*>(s.rsx.graphics_session?s.rsx.graphics_session:s.rsx.graphics_owner.get());
+    if(!session || !session->observer_installed || session->previous_observer || session->failed)return;
+    session->submit_async("flip_early");
+    if(!s.rsx.graphics_session)session->leave_fifo();
+}
+// Publish completed GPU prefixes; returns whether work is still in flight (the caller then polls again soon).
+static bool rsx_graphics_poll(PpuState& s){
+    auto* session=static_cast<rsxgraphics::Session*>(s.rsx.graphics_session?s.rsx.graphics_session:s.rsx.graphics_owner.get());
+    if(!session || session->failed || session->flights.empty())return false;
+    session->retire(false);
+    if(!s.rsx.graphics_session)session->leave_fifo();
+    return !session->flights.empty();
+}
 static bool rsx_graphics_flip_async(PpuState& s,unsigned id,std::uint64_t address,std::uint64_t reports,unsigned queue,std::uint64_t event_name){
+    anyps3_ft::Span ft_total(anyps3_ft::Mark,0xa0);
     auto* session=static_cast<rsxgraphics::Session*>(s.rsx.graphics_session?s.rsx.graphics_session:s.rsx.graphics_owner.get());
     if(!session || !session->observer_installed || session->previous_observer || id>=s.rsx.display_buffers.size() || s.video.format!=0)return false;
     const char* directory=std::getenv("ANYPS3_FRAME_DIR");const bool files=directory && *directory;
@@ -335,9 +401,10 @@ static bool rsx_graphics_flip_async(PpuState& s,unsigned id,std::uint64_t addres
         ++session->batch->frames;
         if(s.present.enabled){
             if(image->format==VK_FORMAT_R8G8B8A8_SRGB){auto raw=session->vk.graphics_image(*session->batch,VK_FORMAT_R8G8B8A8_UNORM,buffer.width,buffer.height,1);session->vk.graphics_copy(*session->batch,image,raw);image=std::move(raw);}
+            anyps3_ft::Span ft_present(anyps3_ft::Mark,0xa2);
             session->vk.graphics_present(*session->batch,image,buffer.width,buffer.height,s.rsx.vsync,true);++s.present.presented_frames;
         }
-        session->submit_async("flip");++s.rsx.flips;
+        {anyps3_ft::Span ft_submit(anyps3_ft::Mark,0xa3);session->submit_async("flip");}++s.rsx.flips;
     }catch(...){session->failed=true;throw;}
     if(!s.rsx.graphics_session)session->leave_fifo();
     return true;
@@ -559,6 +626,7 @@ static bool rsx_run_impl(PpuState& s,unsigned budget,bool idle_poll=false){
     auto publish=[&]{if(pending){m.store(gpu.dma+0x44,4,get);pending=false;}};
     try{
     for(unsigned step=0;step<budget;++step){
+        rsx_owner_poll();
         if(!cursor){put=static_cast<std::uint32_t>(m.load(gpu.dma+0x40,4));get=static_cast<std::uint32_t>(m.load(gpu.dma+0x44,4));cursor=true;}
         else if(get==put)put=static_cast<std::uint32_t>(m.load(gpu.dma+0x40,4));
         if((get|put)&3)throw std::runtime_error("unaligned RSX FIFO position");

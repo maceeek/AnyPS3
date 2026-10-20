@@ -571,7 +571,10 @@ struct Session {
         HostPhase phase(HostStage::flush);PerfTimer timer(fallback_stats().enabled?&fallback_stats().gpu_flush_ns:nullptr);
         if(failed)throw std::runtime_error("RSX graphics session poisoned");
         try{while(!flights.empty() && flights.front().batch->completion<=through){auto& flight=flights.front();
-            if(!vk.graphics_collect(*flight.batch,wait))break;
+            {anyps3_ft::Span ft_wait(anyps3_ft::WorkerWait,flight.batch->completion,wait?1:0,wait?20000:~std::uint64_t(0));
+                if(!vk.graphics_collect(*flight.batch,wait))break;}
+            anyps3_ft::mark(anyps3_ft::GpuRetire,flight.batch->completion,flight.pending.size(),wait?1:0,flight.labels.size());
+            anyps3_ft::current_completion=flight.batch->completion;
             retire_work(*flight.batch,flight.pending,flight.results,flight.labels);
             flight_ns=0.8*flight_ns+0.2*double(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-flight.submitted).count());
             vk.graphics_reset(*flight.batch);vk.graphics_move_stats(*flight.batch,*batch);
@@ -597,7 +600,8 @@ struct Session {
         auto& stats=fallback_stats();if(stats.enabled){++stats.flush_calls[reason];++stats.flush_submits[reason];}
         ::RsxPerfCounters::add(!std::strcmp(reason,"draw_prefix")?::RsxPerfCounters::submit_draw_prefix:!std::strcmp(reason,"fifo_labels")?::RsxPerfCounters::submit_labels: ::RsxPerfCounters::submit_other);
         try{
-            vk.graphics_submit(*batch);
+            const auto ft_completion=vk.graphics_submit(*batch);
+            anyps3_ft::mark(anyps3_ft::GpuSubmit,ft_completion,pending.size(),labels.size(),anyps3_ft::pack(reason));
             std::unique_ptr<NativeVulkan::GraphicsBatch> next;
             if(!spare_batches.empty()){next=std::move(spare_batches.back());spare_batches.pop_back();}
             else if(flights.size()<2)next=vk.graphics_batch(batch->capacity);
@@ -713,6 +717,7 @@ struct Session {
             for(const auto& label:completed_labels)claim->commit_spans(label.mapping,0,0,true);
         }
         for(const auto& label:completed_labels){invalidate_raw(label.identity(),label.size,"label_publish");
+            anyps3_ft::mark(anyps3_ft::LabelPub,label.address,label.value,label.kind,anyps3_ft::current_completion);
             std::array<std::uint8_t,24> bytes{};
             if(label.kind==1){
                 if(claim)claim->snapshot_into(label.mapping,0,24,bytes.data());else label.mapping.read(0,bytes.data(),24);
@@ -1057,6 +1062,7 @@ struct Session {
         HostPhase phase(HostStage::flush);
         if(failed)throw std::runtime_error("RSX graphics session poisoned");
         if(busy)return;
+        anyps3_ft::Span ft_flush(anyps3_ft::WorkerWait,anyps3_ft::pack(reason),download?2:3,100000);
         retire(true);
         auto& stats=fallback_stats();if(stats.enabled)++stats.flush_calls[reason];
         bool dirty_read=false;if(download)for(const auto& surface:surfaces)if(surface.dirty && (!pointer || surface.overlaps(pointer,size))){dirty_read=true;break;}
