@@ -49,3 +49,22 @@ for base, payload, insns, sl, dt in S:
     blocks_old += nblocks(old); blocks_new += nblocks(new); insn_total += len(insns)
 print(f'instructions {insn_total}: blocks with the global target union {blocks_old} (avg {insn_total/blocks_old:.2f}); '
       f'with own + cross-range targets only {blocks_new} (avg {insn_total/blocks_new:.2f})')
+
+# Why does each block end (new policy)?  leader = next instruction is a leader, kind = terminator class, max = MAX_BLOCK.
+import collections
+term = collections.Counter(); size = collections.defaultdict(int)
+for base, payload, insns, sl, dt in S:
+    hi = base + len(payload)
+    leaders = {p for p in sl | dt if base <= p < hi} | {base} | {p for b2, pl2, _, _, dt2 in S for p in dt2 if base <= p < hi and not (b2 <= p < b2 + len(pl2))}
+    cur = 0
+    for k, x in enumerate(insns):
+        if cur and x.pc in leaders:
+            term['leader'] += 1; size['leader'] += cur; cur = 0
+        elif cur == sb.MAX_BLOCK:
+            term['max'] += 1; size['max'] += cur; cur = 0
+        cur += 1
+        if x.kind not in ('plain', 'store'):
+            term[x.kind] += 1; size[x.kind] += cur; cur = 0
+    if cur: term['tail'] += 1; size['tail'] += cur
+tot = sum(term.values())
+print('block terminators (new policy):', ', '.join(f'{k} {v} ({100*v/tot:.0f}%, avg {size[k]/v:.1f})' for k, v in term.most_common()))
