@@ -808,6 +808,11 @@ template<class Thread> static void spu_update_decrementer(Thread& t,std::uint64_
 // One effect of the compare is not a published change: a synchronous host-access observer (RSX/GPU
 // coherence) materializes deferred writes when a CPU access reaches its range, and that write is what loses
 // the reservation. A reservation line such an observer covers therefore always takes the full compare.
+// SPUPUT: "covers" is byte-exact (as for GETLLAR/PUTLLC, which read/write the same line under HostByteAccess) whenever the
+// observer supports exact bytes: only a synchronous watch on bytes of THIS line can materialise a write into it. Polling watches
+// (RSX labels/reports: a poll may see the old value; their publication bumps versions and notifies like any write) and watches
+// elsewhere on the same 4 KiB page do not. The page-granular test sent every check of a line sharing a page with RSX reports to
+// the RSX owner (710t: ~115 owner RPCs per frame from the ig lanes, 1.4 ms/frame of lane wait).
 static void spu_collect_events(PpuState& s,NativeSpu::Thread& t,bool full=false){
     spu_stat(t,12);
     unsigned produced=0;
@@ -821,7 +826,7 @@ static void spu_collect_events(PpuState& s,NativeSpu::Thread& t,bool full=false)
         if(__builtin_expect(concurrent && t.reservation_observed_valid && t.reservation_observed_pointer==t.reservation.first &&
             t.reservation_observed_memory==memory.parallel->identity &&
             memory.parallel->notifications->observe(t.reservation.first)==t.reservation_observed &&
-            (!memory.host_access_observer || !memory.host_access_observer.synchronous(reinterpret_cast<const void*>(t.reservation.first),128)),1))return;
+            (!memory.host_access_observer || !memory.host_access_observer.synchronous(reinterpret_cast<const void*>(t.reservation.first),128,true)),1))return;
         // The token compare reads guest memory; give observers the SPU origin (pc, retired steps).
         HostAccessContext event_origin(HostAccessOrigin::Engine::Spu,t.id,t.pc,&t.steps);
         // Sample first, compare second: a bump after the sample either shows in the compare (the version
