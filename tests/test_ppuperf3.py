@@ -27,7 +27,7 @@ HEAD = r'''
 #if defined(__SSE2__)
 #include <xmmintrin.h>
 #endif
-struct PpuState { std::uint32_t fpscr=0,cr=0; };
+struct PpuState { std::uint32_t fpscr=0,cr=0; std::uint64_t fp_lazy_a=0,fp_lazy_b=0,fp_lazy_c=0;std::uint8_t fp_lazy_op=0,fp_lazy_precision=0; };
 '''
 
 

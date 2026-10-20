@@ -523,3 +523,17 @@ SPU blocks+FP, RSX draw cost) in isolated trees. See [FAST record](knowledge/exp
 End of session 2026-10-19 ~22:00: integration 386 = 21.35 FPS, **460 (386 + RSX2) = 22.59 FPS** in the original level
 (PPU 2.06 → 0.42 ns/instr, SPU 12.6 → 2.2 ns/instr, RSX worker 38.7 → 28.3 ms/frame). 60 FPS not reached;
 further progress in the [FAST record](knowledge/experiments/2026-10-19-fast-wave.md).
+
+## 2026-10-19/20 — cloud optimization round (Claude Opus 5.5, cloud container without game data or GPU)
+
+User goal unchanged (60 FPS with headroom). Branch `claude/happy-franklin-2eocfp`, commits `43c6b27..4b3723a` (`43c6b27` = snapshot 460).
+**No game build, no game run and no FPS figure:** the best verified build is still `native-virtual-460`, 22.59 FPS in the original level.
+Changes (each verified only by native regression tests, none in the game): PPU VMX host SIMD, rlwinm/rlwnm/rlwimi MB>ME wrap-mask
+semantic fix, lazy FR/FI/FPRF, spin hints, same-page indirect dispatch; SPU pool-lane slice 4096, exact change-counter filter for the
+reservation-lost check, busy-poll parking (`ANYPS3_SPU_POLL_PARK=0`); single-mapping reservation fast path (lwarx/stwcx., getllar/putllc);
+RSX register epochs, SIMD index decode, MSAA plane runs (`ANYPS3_RSX_PLANE_RUNS=0`) and a stale test oracle fixed; RSX owner thread no
+longer spins on `wait_until(steady_clock::time_point::max())` with the cloud toolchain's libstdc++. Synthetic cloud-CPU benchmarks only
+(for example VMX kernel 18.3–18.9 → 1.29–1.33 ns per guest instruction, atomic kernel 68.9–71.1 → 39.6–41.8, 2× MSAA draw wall time
+276.3 → 97.9 µs under Lavapipe). Open hypothesis: MSAA plane runs cut part of the ~30 ms/frame GPU busy time. First next
+action on the user's PC: new build N, `measure_level.sh N Na`, A/B runs with `ANYPS3_RSX_PLANE_RUNS=0/1` and `ANYPS3_SPU_POLL_PARK=0/1`.
+See [cloud optimization record](knowledge/experiments/2026-10-19-cloud-optimization.md) and [CURRENT](knowledge/CURRENT.md).

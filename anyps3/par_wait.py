@@ -13,6 +13,36 @@ TYPES = r'''
         // old locked lookup; an unrelated hot store no longer locks the
         // listener registry merely because some SPU is asleep elsewhere.
         std::array<std::atomic<unsigned>,4096> buckets{};
+        // Exact change filter for reservation holders (SPU threads), independent of subscriptions. Every
+        // guest-visible bump of a tracked granule (bump_scalar/bump_parallel run under the stripe lock,
+        // AFTER the version increment and BEFORE the guest bytes change) and every map-epoch change lands
+        // in notify() below and increments a per-line-hash counter (64-bit: no wrap in practice) or the
+        // global one. A holder samples observe() BEFORE a successful token compare; while observe() still
+        // returns the sampled value no bump has been published since that sample, so the token cannot
+        // have changed after the compare (a bump whose notify() is still in flight is ordered after the
+        // observer, exactly as if it had taken the stripe lock first). Hash collisions and spans wider
+        // than the table only make the holder fall back to the full compare.
+        // One cache line per counter: pollers read these at millions of checks per second, so an unrelated
+        // neighbouring granule's bump must not invalidate the line they hold (256 KB, only used lines are hot).
+        struct alignas(64) Counter {std::atomic<std::uint64_t> value{0};};
+        std::array<Counter,4096> touched{};
+        alignas(64) std::atomic<std::uint64_t> touched_all{0};
+        using Observation=std::array<std::uint64_t,3>;
+        Observation observe(std::uintptr_t pointer)const{
+            // A reservation granule is one 128-byte guest line; an odd mapping base can straddle two
+            // physical lines (same span as subscribe()).
+            const auto first=pointer/128,last=(pointer+127)/128;
+            return {touched[first%touched.size()].value.load(std::memory_order_acquire),
+                    touched[last%touched.size()].value.load(std::memory_order_acquire),
+                    touched_all.load(std::memory_order_acquire)};
+        }
+        void touch(const void* pointer,std::uint64_t size,bool all){
+            if(all){touched_all.fetch_add(1,std::memory_order_acq_rel);return;}
+            if(!size)return;
+            const auto first=reinterpret_cast<std::uintptr_t>(pointer)/128,last=(reinterpret_cast<std::uintptr_t>(pointer)+size-1)/128;
+            if(last-first>=touched.size()){touched_all.fetch_add(1,std::memory_order_acq_rel);return;}
+            for(auto line=first;line<=last;++line)touched[line%touched.size()].value.fetch_add(1,std::memory_order_acq_rel);
+        }
         std::shared_ptr<Listener> subscribe(std::uintptr_t pointer,std::function<void()> wake){
             auto listener=std::make_shared<Listener>();listener->wake=std::move(wake);
             std::lock_guard<std::mutex> lock(mutex);
@@ -31,6 +61,7 @@ TYPES = r'''
             count.fetch_sub(1,std::memory_order_release);
         }
         void notify(const void* pointer,std::uint64_t size,bool all=false){
+            touch(pointer,size,all);
             if(!count.load(std::memory_order_acquire) || (!size && !all))return;
             if(!all){const auto first=reinterpret_cast<std::uintptr_t>(pointer)/128,last=(reinterpret_cast<std::uintptr_t>(pointer)+size-1)/128;
                 if(last-first<buckets.size()){bool possible=false;for(auto line=first;line<=last;++line)possible|=buckets[line%buckets.size()].load(std::memory_order_acquire)!=0;if(!possible)return;}}

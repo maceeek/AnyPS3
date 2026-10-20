@@ -76,6 +76,9 @@ MEMORY_CPP = r'''
 #include <exception>
 
 #if defined(__linux__)
+#if defined(__SSE2__)
+#include <emmintrin.h>
+#endif
 #include <sys/mman.h>
 #include <sys/syscall.h>
 #include <unistd.h>
@@ -837,7 +840,9 @@ struct GuestMemory {
     }
     std::pair<std::uintptr_t,std::uint64_t> reservation_token(std::uint64_t address) {
         Lease lease(*this,address,128,false);
-        if(concurrent()){auto span=reservation_span(address,128);ScalarLock lock(*this,span.pointer,span.size);return parallel_token(address,128);}
+        if(concurrent()){
+            if(!(address&127))if(const auto line=reserved_line(address,128,false);line.map){ScalarLock lock(*this,line.pointer,128);return reserved_token(line);}
+            auto span=reservation_span(address,128);ScalarLock lock(*this,span.pointer,span.size);return parallel_token(address,128);}
         const auto pointer=reinterpret_cast<std::uintptr_t>(access_impl(address,128,false,false));
         auto version=write_versions[pointer/128];
         if((pointer+127)/128!=pointer/128){const auto tail=write_versions[(pointer+127)/128];if(tail>UINT64_MAX-version)throw std::runtime_error("guest reservation version overflow");version+=tail;}
@@ -852,7 +857,9 @@ struct GuestMemory {
     // shared with another region would escape write tracking, so it stops.
     std::pair<std::uintptr_t,std::uint64_t> reservation_token(std::uint64_t address,unsigned size) {
         Lease lease(*this,address,size,false);
-        if(concurrent()){auto span=reservation_span(address,size);ScalarLock lock(*this,span.pointer,span.size);return parallel_token(address,size);}
+        if(concurrent()){
+            if(const auto line=reserved_line(address,size,false);line.map){ScalarLock lock(*this,line.pointer,128);return reserved_token(line);}
+            auto span=reservation_span(address,size);ScalarLock lock(*this,span.pointer,span.size);return parallel_token(address,size);}
         const auto line=address&~UINT64_C(127);
         const auto loaded=reinterpret_cast<std::uintptr_t>(access_impl(address,size,false,false));
         const auto& region=regions[last_region];
@@ -1061,6 +1068,9 @@ public:
         HostByteAccess exact_bytes{host_access_observer.supports_exact_bytes.load(std::memory_order_acquire)};
         Lease lease(*this,address,size,false);
         if(concurrent()){
+            if(const auto line=reserved_line(address,size,false);line.map){
+                ScalarLock lock(*this,line.pointer,128);reserved_track(line);
+                const auto value=load(address,size);token=reserved_token(line);return value;}
             const auto span=reservation_span(address,size);ScalarLock lock(*this,span.pointer,span.size);
             track_reservation(span);
             const auto value=load(address,size);token=parallel_token(address,size);return value;
@@ -1071,6 +1081,15 @@ public:
         HostByteAccess exact_bytes{host_access_observer.supports_exact_bytes.load(std::memory_order_acquire)};
         Lease lease(*this,address,size,true);
         if(concurrent()){
+            // Fast path: write then read permission, as parallel_spans + reservation_span check them.
+            if(const auto line=reserved_line(address,size,true);line.map){
+                if(!(line.map->region.flags&4))throw std::runtime_error("guest memory permission fault");
+                ScalarLock lock(*this,line.pointer,128);
+                if(token!=reserved_token(line))return false;
+                std::uint8_t bytes[8]{};if(size>8)throw std::runtime_error("scalar store exceeds 64 bits");
+                for(unsigned i=size;i--;){bytes[i]=value;value>>=8;}
+                auto* pointer=line.map->region.bytes->data()+(address-line.map->region.base);
+                reserved_bump(line,pointer,size);atomic_write(byte_pointer(line.map->region.bytes,pointer),bytes,size);publish_cpu_write(pointer,size);return true;}
             const auto spans=parallel_spans(address,size,true,false);const auto reserved=reservation_span(address,size);ScalarLock lock(*this,reserved.pointer,reserved.size);
             if(token!=parallel_token(address,size))return false;
             std::uint8_t bytes[8]{};if(size>8)throw std::runtime_error("scalar store exceeds 64 bits");
@@ -1084,6 +1103,9 @@ public:
         HostByteAccess exact_bytes{host_access_observer.supports_exact_bytes.load(std::memory_order_acquire)};
         Lease lease(*this,address,128,false);
         if(concurrent()){
+            if(!(address&127))if(const auto line=reserved_line(address,128,false);line.map){
+                ScalarLock lock(*this,line.pointer,128);reserved_track(line);
+                atomic_read(byte_pointer(line.map->region.bytes,line.pointer),out,128);token=reserved_token(line);return;}
             const auto spans=parallel_spans(address,128,false,false);LineLocks locks(*this,spans);
             track_reservation(reservation_span(address,128));
             atomic_read(byte_pointer(spans[0].pin,spans[0].pointer),out,128);token=parallel_token(address,128);return;
@@ -1094,6 +1116,10 @@ public:
         HostByteAccess exact_bytes{host_access_observer.supports_exact_bytes.load(std::memory_order_acquire)};
         Lease lease(*this,address,128,true);
         if(concurrent()){
+            if(!(address&127))if(const auto line=reserved_line(address,128,true);line.map){
+                ScalarLock lock(*this,line.pointer,128);
+                if(!unconditional){if(!(line.map->region.flags&4))throw std::runtime_error("guest memory permission fault");if(token!=reserved_token(line))return false;}
+                reserved_bump(line,line.pointer,128);atomic_write(byte_pointer(line.map->region.bytes,line.pointer),input,128);publish_cpu_write(line.pointer,128);return true;}
             const auto spans=parallel_spans(address,128,true,false);LineLocks locks(*this,spans);
             if(!unconditional && token!=parallel_token(address,128))return false;
             bump_parallel(spans);atomic_write(byte_pointer(spans[0].pin,spans[0].pointer),input,128);publish_cpu_write(spans[0].pointer,128);return true;

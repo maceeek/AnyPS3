@@ -48,6 +48,7 @@ template<unsigned N,class S> void ppu_store(S& s,std::uint64_t ea,std::uint64_t 
 struct PpuState {
  std::uint32_t fpscr=0,cr=0,pc=0;
  std::array<std::uint64_t,32> fpr{},r{}; Memory memory;
+ std::uint64_t fp_lazy_a=0,fp_lazy_b=0,fp_lazy_c=0;std::uint8_t fp_lazy_op=0,fp_lazy_precision=0; // lazy FPSCR record (PpuContext)
 };
 ''' + FLOAT_CPP + '\nint main(){PpuState s;\n' + body + '\n}\n'
         with tempfile.TemporaryDirectory(prefix='anyps3-fpspecial-') as directory:

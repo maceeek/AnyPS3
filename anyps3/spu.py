@@ -287,6 +287,8 @@ def generate_parts(images: tuple[ElfImage,...], overlays: tuple[tuple[tuple[int,
     lines.append(r"""static void spu_step(PpuState& s,NativeSpu::Thread& t,std::uint8_t* ls,unsigned budget=1,std::uint64_t limit=UINT64_MAX,bool trace=false){
     HostAccessContext origin(HostAccessOrigin::Engine::Spu,t.id,t.pc,&t.steps);
     if(!budget)return;
+    // Only spu_prepare binds a thread to a translated image; never run unbound LS.
+    if(t.image_index==UINT32_MAX)throw std::runtime_error("unknown native SPU image");
     if(t.steps>=limit)throw std::runtime_error("SPU execution step limit reached");
     t.block_budget=budget;t.block_limit=limit;t.block_trace=trace || spu_capture.file;t.block_control_exit=false;
     // Budgets below one maximal superblock are exact; scheduler slices may end after a whole block.
@@ -795,19 +797,102 @@ template<class Thread> static void spu_update_decrementer(Thread& t,std::uint64_
 // over the whole interval latches the same underflow event and the same modulo-2^32 value. The clock is
 // read only while TM (0x20) is enabled, or with full=true before channels that read the value (8),
 // change the mask/acknowledge (1/2) or reload the decrementer (7).
+//
+// Reservation-lost check. With concurrent guest memory the full compare is GuestMemory::reservation_token():
+// reader admission, stripe lock, map lookup and tracking state. Pool lanes repeat this check on every
+// GETLLAR/PUTLLC, rchcnt/rdch of channel 0, branch-on-event and slice entry, and it contends for the very
+// stripe a worker's PUTLLUC or a PPU store needs. The filter keeps the result exact: notify() (par_wait.py)
+// publishes every bump of a tracked granule and every map-epoch change, and the counters observed BEFORE the
+// last successful full compare prove that nothing was published since (proof at
+// ReservationNotifications::touched). The full compare runs on the first check, after any published change
+// (hash collisions included) and for a different granule or memory; serial memory always compares fully.
+// One effect of the compare is not a published change: a synchronous host-access observer (RSX/GPU
+// coherence) materializes deferred writes when a CPU access reaches its range, and that write is what loses
+// the reservation. A reservation line such an observer covers therefore always takes the full compare.
 static void spu_collect_events(PpuState& s,NativeSpu::Thread& t,bool full=false){
     spu_stat(t,12);
-    HostAccessContext event_origin(HostAccessOrigin::Engine::Spu,t.id,t.pc,&t.steps);
     unsigned produced=0;
     const auto take=[](auto& flag){return flag.load(std::memory_order_relaxed) && flag.exchange(false,std::memory_order_acq_rel);};
     if(take(t.in_mailbox.state->event))produced|=0x10;
     for(unsigned i=0;i<2;++i)if(take(t.snr[i].state->event))produced|=i?0x100:0x200;
     t.event_status|=produced;if(produced&t.event_mask)t.event_ready=true;
     if(t.decrementer_running && (full || (t.event_mask&0x20)))spu_update_decrementer(t,timebase_ticks());
-    if(t.reservation_address!=UINT64_MAX && t.reservation!=s.memory.reservation_token(t.reservation_address)){
-        t.reservation_address=UINT64_MAX;t.event_status|=0x400;
-        if(t.event_mask&0x400)t.event_ready=true;
+    if(t.reservation_address!=UINT64_MAX){
+        auto& memory=s.memory;const bool concurrent=memory.concurrent();
+        if(__builtin_expect(concurrent && t.reservation_observed_valid && t.reservation_observed_pointer==t.reservation.first &&
+            t.reservation_observed_memory==memory.parallel->identity &&
+            memory.parallel->notifications->observe(t.reservation.first)==t.reservation_observed &&
+            (!memory.host_access_observer || !memory.host_access_observer.synchronous(reinterpret_cast<const void*>(t.reservation.first),128)),1))return;
+        // The token compare reads guest memory; give observers the SPU origin (pc, retired steps).
+        HostAccessContext event_origin(HostAccessOrigin::Engine::Spu,t.id,t.pc,&t.steps);
+        // Sample first, compare second: a bump after the sample either shows in the compare (the version
+        // is read under the stripe lock) or publishes later and invalidates the sample.
+        const auto observed=concurrent?memory.parallel->notifications->observe(t.reservation.first):std::array<std::uint64_t,3>{};
+        if(t.reservation!=s.memory.reservation_token(t.reservation_address)){
+            t.reservation_observed_valid=false;
+            t.reservation_address=UINT64_MAX;t.event_status|=0x400;
+            if(t.event_mask&0x400)t.event_ready=true;
+        }else if(concurrent){
+            t.reservation_observed=observed;t.reservation_observed_pointer=t.reservation.first;
+            t.reservation_observed_memory=memory.parallel->identity;t.reservation_observed_valid=true;
+        }
     }
+}
+// ---- Busy-poll parking (pool lanes only) ----
+// A pool lane that spins on an idempotent poll burns a host core and, for GETLLAR, contends for the stripe a
+// worker's PUTLLUC needs. The detector recognizes two polls and delays the retry of the SAME instruction
+// until the polled state can have changed:
+//   * GETLLAR of the line whose reservation this SPU still holds (spu_collect_events has just proved the
+//     line unwritten, so the read would return the same 128 bytes and re-arm the same reservation);
+//   * rchcnt of channel 0 reporting no event.
+// Only a fixed point parks: a window of >= SPU_POLL_REPEATS consecutive polls at the same site (kind, EA, PC),
+// with the register file identical to the previous visit of that site and no channel traffic besides
+// idempotent setup (DMA parameter/tag-mask/event-mask/ack writes, atomic-status and decrementer reads) in
+// between. Then only external state decides what the next iteration does. The park throws SpuBlocked from
+// the instruction BEFORE any side effect (pc stays on it, nothing retires); spu_lane_prepare_wait arms the
+// wake sources (write to the polled line, mailbox/signal, decrementer deadline) and a short timeout. A park
+// therefore only delays the retry and never changes a result. Serial spu_run never sets enabled.
+static constexpr unsigned SPU_POLL_REPEATS=16,SPU_POLL_WINDOW_MAX=1024;
+// ANYPS3_SPU_POLL_PARK=0 disables parking (diagnostics/A-B runs). Mutable for tests.
+inline std::atomic<bool> spu_poll_park_on{[]{const char* v=std::getenv("ANYPS3_SPU_POLL_PARK");return !v || std::string(v)!="0";}()};
+// A confirmed fixed point keeps polling for this long before the first park: a dependency that resolves
+// within one thread park/wake round trip is cheaper to keep polling than to sleep on (a park adds the host
+// wake latency to the poll). Mutable for tests.
+inline std::atomic<std::uint64_t> spu_poll_spin_ns{50000};
+// First park timeout and its cap; consecutive parks without a relevant change double the timeout. Writes to
+// the watched line, mailbox/signal pushes and owner scopes (LS writes, peer DMA, group control) wake a parked
+// lane at once; the timeout only bounds state that nothing signals. Mutable for tests.
+inline std::atomic<std::uint64_t> spu_poll_park_ns{100000},spu_poll_park_max_ns{1600000};
+[[maybe_unused]] static void spu_poll_reset(NativeSpu::Thread& t){
+    auto& p=t.idle_poll;p.count=0;p.parks=0;p.window=SPU_POLL_REPEATS;p.resume_pass=false;p.spinning=false;p.sites[0].valid=false;p.sites[1].valid=false;
+}
+[[maybe_unused]] static void spu_poll_note(NativeSpu::Thread& t,NativeSpu::Thread::PollState::Kind kind,std::uint64_t address){
+    auto& p=t.idle_poll;if(!p.enabled)return;
+    // The retry after a park executes the poll for real once, whatever woke it: only then can state the
+    // park does not watch (a timeout wake) be observed. The next iteration reaches this note again and,
+    // while still at the fixed point, parks again.
+    if(p.resume_pass){p.resume_pass=false;return;}
+    if(!p.window)p.window=SPU_POLL_REPEATS;
+    ++p.count;
+    using Site=NativeSpu::Thread::PollState::Site;
+    const auto remember=[&](Site& x){x.kind=kind;x.address=address;x.pc=t.pc;x.regs=t.gpr;x.fpscr=t.fpscr;x.valid=true;};
+    Site* site=nullptr;
+    for(auto& x:p.sites)if(x.valid && x.kind==kind && x.address==address && x.pc==t.pc){site=&x;break;}
+    if(!site){remember(p.sites[p.next_site]);p.next_site^=1;return;}
+    // Snapshot one poll before the decision so start-up transients are gone; a mismatch refreshes it and
+    // doubles the window, so a loop with a changing register (iteration counter, decrementer value) pays a
+    // 2 KB copy/compare per window and never parks.
+    if(p.count+1==p.window)remember(*site);
+    if(p.count<p.window)return;
+    if(std::memcmp(site->regs.data(),t.gpr.data(),sizeof(t.gpr)) || site->fpscr!=t.fpscr){
+        remember(*site);p.count=0;p.spinning=false;p.window=std::min(p.window*2,SPU_POLL_WINDOW_MAX);return;
+    }
+    // Fixed point confirmed: spin for spu_poll_spin_ns first (once per episode; later parks of the same
+    // episode go straight to sleep), then park.
+    const auto now=std::chrono::steady_clock::now();
+    if(!p.spinning){p.spinning=true;p.spin_start=now;}
+    if(now-p.spin_start<std::chrono::nanoseconds(spu_poll_spin_ns.load(std::memory_order_relaxed)))return;
+    p.count=p.window;++p.parks;++p.total_parks;p.parked=true;p.resume_pass=true;p.parked_kind=kind;throw SpuBlocked{};
 }
 void spu_interpret(PpuState&,NativeSpu::Thread&,std::uint8_t*);
 [[noreturn]] void spu_dynamic_fault(const NativeSpu::Thread&,const std::uint8_t*,const char*);
@@ -1108,6 +1193,9 @@ static void spu_tag_update(NativeSpu::Thread& t,unsigned mode){
     if(channel==1 || channel==2 || channel==7 || channel==30 ||
        (channel==21 && (value==0xd0 || value==0xb0 || value==0xb4)))
         spu_capture_unsupported("external channel write or reservation DMA");
+    // Only idempotent setup (DMA parameters, tag mask, event mask/ack) and the polling GETLLAR itself leave
+    // the busy-poll detector alive; any other write is externally visible activity and ends the candidate poll.
+    if(!(channel>=16 && channel<=20) && channel!=22 && channel!=1 && channel!=2 && !(channel==21 && value==0xd0))spu_poll_reset(t);
     if(channel==30 && NativeSpuWorker::current && NativeSpuWorker::current->parent){
         const unsigned code=value>>24,port=code&63;
         // Real connect syscalls pin the queue. Legacy fixtures which assign a
@@ -1196,6 +1284,10 @@ static void spu_tag_update(NativeSpu::Thread& t,unsigned mode){
             if(address%128 || local%128 || local>0x3ff80)throw std::runtime_error("misaligned SPU atomic DMA");
             spu_collect_events(s,t);
             if(value==0xd0){
+                // Re-reading the line whose reservation is still intact repeats the previous GETLLAR exactly;
+                // a fixed-point spin on it parks here, before the read has any effect (see spu_poll_note).
+                if(t.reservation_address==address)spu_poll_note(t,NativeSpu::Thread::PollState::Getllar,address);
+                else spu_poll_reset(t);
                 s.memory.getllar(address,ls+local,t.reservation);spu_ls_write(t,local,128,address);
                 t.reservation_address=address;t.atomic_status=4;
                 if(spu_profile_on){spu_profile.dma_bytes+=128;++spu_profile.dma_elements;}
@@ -1346,8 +1438,14 @@ static constexpr std::uint32_t spu_frsqest_exponent_lut[256]={
 [[maybe_unused]] static std::uint32_t spu_channel_count(PpuState& s,NativeSpu::Thread& t,unsigned channel){
     if(channel==0 || channel==3 || channel==4)spu_capture_unsupported("external channel count");
     SpuProfileScope profile(SpuProfile::CHANNEL);spu_stat(t,15);
+    // Only the polled counts (channel 0 here, the atomic status) keep the busy-poll detector alive.
+    if(channel!=0 && channel!=27)spu_poll_reset(t);
     switch(channel){
-    case 0:spu_stat(t,0);spu_collect_events(s,t);if(!t.event_ready)spu_stat(t,1);return t.event_ready?1:0;
+    case 0:
+        spu_stat(t,0);spu_collect_events(s,t);
+        // No event: a repeat of this poll at an unchanged SPU state may park (spu_poll_note) before returning.
+        if(t.event_ready)spu_poll_reset(t);else{spu_stat(t,1);spu_poll_note(t,NativeSpu::Thread::PollState::EventCount,0);}
+        return t.event_ready?1:0;
     case 3:case 4:return s.process.spu_worker.pool_mode?(t.snr[channel-3].ready()?1:0):(t.signal_ready[channel-3]?1:0);
     case 1:case 2:case 7:case 8:case 9:case 11:case 12:case 13:case 14:case 15:case 16:case 17:case 18:case 19:case 20:case 22:case 23:case 26:return 1;
     case 21:return 16;
@@ -1367,6 +1465,9 @@ static constexpr std::uint32_t spu_frsqest_exponent_lut[256]={
 [[maybe_unused]] static std::uint32_t spu_read_channel(PpuState& s,NativeSpu::Thread& t,unsigned channel){
     if(channel==0 || channel==3 || channel==4 || channel==8)spu_capture_unsupported("external channel read");
     SpuProfileScope profile(SpuProfile::CHANNEL);spu_stat(t,14);if(!channel)spu_stat(t,2);t.irq_next=0;
+    // Reads of private state (decrementer, event mask, tag mask, interrupt enable, SRR0, atomic status) are
+    // neutral for the busy-poll detector; every consuming or external read ends the candidate poll.
+    if(channel!=8 && channel!=11 && channel!=12 && channel!=13 && channel!=15 && channel!=27)spu_poll_reset(t);
     if(channel==29){
         std::uint32_t value=0;if(!t.in_mailbox.pop(value))throw SpuBlocked{};return value;
     }
@@ -1481,20 +1582,34 @@ static void spu_lane_prepare_wait(PpuState& s,NativeSpu::Thread& t){
     spu_stat(t,7);
     const auto blocked_pc=t.pc;
     auto& lane=*NativeSpuWorker::current;
+    // A poll park (spu_poll_note) waits for: a write to the polled reservation line, a mailbox/signal push
+    // (lane wake hooks), the decrementer deadline when TM is enabled, or the park timeout - whichever is first.
+    const bool poll=t.idle_poll.parked;
+    const bool poll_line=poll && t.idle_poll.parked_kind==NativeSpu::Thread::PollState::Getllar;
     lane.event_driven=true;lane.wait_deadline=std::chrono::steady_clock::time_point::max();
     // Arm first, then recheck the reservation. A write before arm is seen by
     // collect_events; a write after arm changes wake_generation before sleep.
-    if((t.waiting_event || t.interrupts_enabled) && (t.event_mask&0x400) && t.reservation_address!=UINT64_MAX)
+    const bool watch_lost_event=(t.waiting_event || t.interrupts_enabled || poll) && (t.event_mask&0x400);
+    if((watch_lost_event || poll_line) && t.reservation_address!=UINT64_MAX)
         lane.watch_reservation(s.memory,t.reservation.first);
     else lane.reservation_watch.reset();
     spu_collect_events(s,t);spu_take_interrupt(s,t);
-    if((t.waiting_event || t.interrupts_enabled) && !t.event_ready && (t.event_mask&0x20) && t.decrementer_running){
+    if((t.waiting_event || t.interrupts_enabled || poll) && !t.event_ready && (t.event_mask&0x20) && t.decrementer_running){
         const auto ticks=std::uint64_t(t.decrementer)+1;
         const auto ns=(ticks*UINT64_C(1000000000)+TIMEBASE_HZ-1)/TIMEBASE_HZ;
         lane.wait_deadline=std::chrono::steady_clock::now()+std::chrono::nanoseconds(ns);
     }
+    if(poll){
+        // Consecutive parks without a relevant change back off: base, 2x, 4x ... up to the cap.
+        const auto base=spu_poll_park_ns.load(std::memory_order_relaxed),cap=spu_poll_park_max_ns.load(std::memory_order_relaxed);
+        const unsigned shift=std::min(t.idle_poll.parks?t.idle_poll.parks-1:0u,20u);
+        const auto timeout=std::chrono::steady_clock::now()+std::chrono::nanoseconds(std::min(base<<shift,std::max(base,cap)));
+        lane.wait_deadline=std::min(lane.wait_deadline,timeout);
+    }
+    // After arming: a changed polled line (lost reservation) or a ready event means the retry can progress.
+    const bool poll_ready=poll && (poll_line?t.reservation_address==UINT64_MAX:t.event_ready);
     if((t.waiting_event && t.event_ready) || (t.waiting_signal && t.snr[t.waiting_signal-1].ready()) ||
-       (t.pc!=blocked_pc) || (!t.waiting_event && !t.waiting_signal && !t.in_mailbox.empty()))lane.wake();
+       (t.pc!=blocked_pc) || poll_ready || (!poll && !t.waiting_event && !t.waiting_signal && !t.in_mailbox.empty()))lane.wake();
 }
 [[maybe_unused]] static bool spu_run_thread(PpuState& s,NativeSpu::Group& group,unsigned index,unsigned budget){
     spu_profile_report();
@@ -1502,6 +1617,14 @@ static void spu_lane_prepare_wait(PpuState& s,NativeSpu::Thread& t){
     static const auto max_steps=spu_step_limit(std::getenv("ANYPS3_SPU_MAX_STEPS"));
     auto& t=group.threads[index];auto* ls=group.context.data()+index*0x40000;
     if(NativeSpuWorker::current->stop.load())return false;
+    // Busy-poll parking exists only for pool lanes: this function is their sole entry (serial spu_run and the
+    // legacy single worker never set it, so "SPU wait" reports and their timing stay as before).
+    const bool resumed_poll=t.idle_poll.parked;t.idle_poll.parked=false;
+    struct PollScope {
+        NativeSpu::Thread& thread;
+        explicit PollScope(NativeSpu::Thread& x):thread(x){thread.idle_poll.enabled=spu_poll_park_on.load(std::memory_order_relaxed);}
+        ~PollScope(){thread.idle_poll.enabled=false;}
+    } poll_scope(t);
     NativeSpuWorker::current->event_driven=group.state!=3;
     NativeSpuWorker::current->wait_deadline=std::chrono::steady_clock::time_point::max();
     if(group.state==3){
@@ -1523,7 +1646,8 @@ static void spu_lane_prepare_wait(PpuState& s,NativeSpu::Thread& t){
     spu_collect_events(s,t);spu_take_interrupt(s,t);
     if(t.waiting_event && !t.event_ready){spu_lane_prepare_wait(s,t);return false;}
     if(t.waiting_signal && !t.snr[t.waiting_signal-1].ready()){spu_lane_prepare_wait(s,t);return false;}
-    NativeSpuWorker::current->reservation_watch.reset();
+    // A poll park keeps its line watch armed for the retry; any other run drops it as before.
+    if(!resumed_poll)NativeSpuWorker::current->reservation_watch.reset();
     spu_stat(t,6);
     SpuCaptureScope capture(t,ls,budget);
     const auto start=t.steps;bool progress=false;
@@ -1533,7 +1657,11 @@ static void spu_lane_prepare_wait(PpuState& s,NativeSpu::Thread& t){
             spu_step(s,t,ls,budget-static_cast<unsigned>(t.steps-start),max_steps,trace);progress=true;
         }
     }catch(const SpuSliceEnd&){++t.steps;t.published_steps.value.store(t.steps,std::memory_order_relaxed);progress=true;}
-    catch(const SpuBlocked&){spu_stat(t,11);spu_lane_prepare_wait(s,t);return progress || t.steps!=start;}
+    catch(const SpuBlocked&){
+        spu_stat(t,11);spu_lane_prepare_wait(s,t);
+        // Spin iterations that preceded a poll park are no progress: the lane must sleep, not re-enter.
+        return !t.idle_poll.parked && (progress || t.steps!=start);
+    }
     catch(...){NativeSpuWorker::current->failed_context(t.pc,t.id);throw;}
     return progress;
 }

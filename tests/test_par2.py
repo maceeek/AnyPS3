@@ -117,7 +117,9 @@ class Parallel2Contracts(unittest.TestCase):
  // not pause any SPU executor; only an actual shared-memory access waits.
  {SpuServiceScope service(s);volatile unsigned sum=0;for(unsigned i=0;i<1000000;++i)sum+=i;(void)sum;}
  until([&]{SpuOwnerScope owner(s);unsigned i=0;for(auto& g:s.spu.groups)for(auto& t:g.threads)if(t.steps<=before[i++])return false;return true;});
- const auto metrics=worker.metrics();assert(metrics.first>0 && metrics.second>0);
+ // Quanta are always counted; their wall time (worker_ns) is measured only with ANYPS3_PERF_REPORT=1, and this
+ // binary runs with it off (test_spu_pool_quantum covers the enabled case).
+ const auto metrics=worker.metrics();assert(metrics.first==0 && metrics.second>0);
  const auto gid=s.spu.groups[0].id;assert(call(174,gid)==0);
  std::uint64_t suspended[3]{};{SpuOwnerScope owner(s);for(unsigned i=0;i<3;++i)suspended[i]=s.spu.groups[0].threads[i].steps;before[3]=s.spu.groups[1].threads[0].steps;}
  until([&]{SpuOwnerScope owner(s,s.spu.groups[1].id);return s.spu.groups[1].threads[0].steps>=before[3]+4096;});

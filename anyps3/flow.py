@@ -47,7 +47,7 @@ class Operation:
             if self.cpp.endswith(suffix):
                 body = self.cpp[:-len(suffix)]
                 calls = set(re.findall(r'\b([A-Za-z_]\w*)\s*\(', body))
-                if calls - {'UINT64_C', 'UINT32_C', 'INT64_C', 'Wide', 'for', 'if',
+                if calls - {'UINT64_C', 'UINT32_C', 'INT64_C', 'Wide', 'for', 'if', 'vmx_logic',
                             'rotl64', 'rotl32', 'compare', 'record', 'sign_word',
                             'signed_word', 'arithmetic_shift', 'leading_zeroes',
                             'divide_integer'}:
@@ -113,9 +113,7 @@ def lift(word: int, pc: int) -> Operation:
         return Operation(pc,word,('stdcx.' if width==8 else 'stwcx.') if store else ('ldarx' if width==8 else 'lwarx'),body+f' state.pc=0x{next_pc:x};',successors)
     vector_xo=word & 2047
     if op==4 and vector_xo in (1028,1092,1156,1220,1284):
-        a,b=f"state.vr[{ra}][i]",f"state.vr[{rb}][i]"
-        expression={1028:f"{a} & {b}",1092:f"{a} & ~{b}",1156:f"{a} | {b}",1220:f"{a} ^ {b}",1284:f"~({a} | {b})"}[vector_xo]
-        body=f"for (unsigned i=0;i<16;++i) {{ state.vr[{rt}][i] = static_cast<std::uint8_t>({expression}); }}"
+        body=f"vmx_logic<{vector_xo}>(state.vr[{rt}],state.vr[{ra}],state.vr[{rb}]);"
         return Operation(pc,word,'vector_logic',body+f" state.pc = 0x{next_pc:x};",successors)
     if op==31 and xo in (103,359,231,487) and not word & 1:
         base=f"r[{ra}]" if ra else "UINT64_C(0)"
@@ -263,7 +261,7 @@ def lift(word: int, pc: int) -> Operation:
             raise AnyPS3Error(f"Reserved mffs operand at 0x{pc:08x}.")
         name = {846:'fcfid',814:'fctid',815:'fctidz',583:'mffs',14:'fctiw',15:'fctiwz'}[xo]
         expression = (f"fp_from_integer(state, state.fpr[{rb}])" if xo == 846 else
-                      f"fp_to_integer(state, state.fpr[{rb}], {32 if xo in (14,15) else 64}, {'true' if xo in (15,815) else 'false'})" if xo in (14,15,814,815) else "state.fpscr")
+                      f"fp_to_integer(state, state.fpr[{rb}], {32 if xo in (14,15) else 64}, {'true' if xo in (15,815) else 'false'})" if xo in (14,15,814,815) else "fp_read_fpscr(state)")
         body = f"state.fpr[{rt}] = {expression};"
         if word & 1:
             body += " state.cr = (state.cr & ~UINT32_C(0x0f000000)) | ((state.fpscr >> 4) & 0x0f000000);"
@@ -283,7 +281,7 @@ def lift(word: int, pc: int) -> Operation:
             body += " state.cr = (state.cr & ~UINT32_C(0x0f000000)) | ((state.fpscr >> 4) & 0x0f000000);"
         return Operation(pc,word,'frsqrte' if op == 63 else 'fres',body+f" state.pc = 0x{next_pc:x};",successors)
     if op == 63 and xo == 12 and not ra:
-        body = (f"fp_mode(state); std::uint64_t special; if (fp_round_single_special(state, state.fpr[{rb}], special)) state.fpr[{rt}] = special; "
+        body = (f"fp_materialize(state); fp_mode(state); std::uint64_t special; if (fp_round_single_special(state, state.fpr[{rb}], special)) state.fpr[{rt}] = special; "
                 f"else {{ const auto value = fp_parts(state.fpr[{rb}]); state.fpr[{rt}] = fp_pack(state, value.sign, value.significand, value.exponent - 52, 24); }}")
         if word & 1:
             body += " state.cr = (state.cr & ~UINT32_C(0x0f000000)) | ((state.fpscr >> 4) & 0x0f000000);"
@@ -291,7 +289,7 @@ def lift(word: int, pc: int) -> Operation:
     if op in (59, 63) and (xo & 31) == 22:
         if ra or (word >> 6) & 31:
             raise AnyPS3Error(f"Reserved fsqrt operand at 0x{pc:08x}.")
-        body = f"state.fpr[{rt}] = fp_sqrt(state, state.fpr[{rb}], {24 if op == 59 else 53});"
+        body = f"state.fpr[{rt}] = fp_sqrt_lazy(state, state.fpr[{rb}], {24 if op == 59 else 53});"
         if word & 1:
             body += " state.cr = (state.cr & ~UINT32_C(0x0f000000)) | ((state.fpscr >> 4) & 0x0f000000);"
         return Operation(pc,word,'fsqrts' if op == 59 else 'fsqrt',body+f" state.pc = 0x{next_pc:x};",successors)
@@ -303,7 +301,7 @@ def lift(word: int, pc: int) -> Operation:
         # once to binary32 (implementation behaviour; Book I leaves
         # non-single-representable inputs undefined).
         body=''
-        body+=f"state.fpr[{rt}]=fp_fused(state,state.fpr[{ra}],state.fpr[{rc}],{addend},{24 if op==59 else 53},{'true' if variant>=30 else 'false'});"
+        body+=f"state.fpr[{rt}]=fp_fused_lazy(state,state.fpr[{ra}],state.fpr[{rc}],{addend},{24 if op==59 else 53},{'true' if variant>=30 else 'false'});"
         if word&1:body+=" state.cr = (state.cr & ~UINT32_C(0x0f000000)) | ((state.fpscr >> 4) & 0x0f000000);"
         return Operation(pc,word,{28:'fmsub',29:'fmadd',30:'fnmsub',31:'fnmadd'}[variant]+('s' if op==59 else ''),body+f" state.pc = 0x{next_pc:x};",successors)
     if op in (59,63) and (xo & 31) in (18, 20, 21, 25):
@@ -313,7 +311,7 @@ def lift(word: int, pc: int) -> Operation:
         right = f"state.fpr[{rc if variant == 25 else rb}]"
         if variant == 20:
             right = f"fp_subtract_operand({right})"
-        helper = {18:'fp_divide',20:'fp_add',21:'fp_add',25:'fp_multiply'}[variant]
+        helper = {18:'fp_divide_lazy',20:'fp_add_lazy',21:'fp_add_lazy',25:'fp_multiply_lazy'}[variant]
         body = ''
         body += f"state.fpr[{rt}] = {helper}(state, state.fpr[{ra}], {right}, {24 if op==59 else 53});"
         if word & 1:
@@ -485,9 +483,17 @@ def lift(word: int, pc: int) -> Operation:
             body += f" record(state, r[{ra}]);"
         mnemonic = ("rldicl", "rldicr", "rldic", "rldimi")[variant]
     elif op in (20, 21, 23):
-        m = mask((word >> 6) & 31, (word >> 1) & 31, 32)
+        mb, me = (word >> 6) & 31, (word >> 1) & 31
         shift = f"(r[{rb}] & 31)" if op == 23 else str(rb)
-        value = f"(rotl32(static_cast<std::uint32_t>(r[{rt}]), {shift}) & {literal(m)})"
+        if mb <= me:
+            m = mask(mb, me, 32)
+            value = f"(rotl32(static_cast<std::uint32_t>(r[{rt}]), {shift}) & {literal(m)})"
+        else:
+            # Book I: r=ROTL32 duplicates the rotated word into both halves and
+            # MASK(MB+32,ME+32) wraps over the whole upper word, which therefore
+            # receives the rotated word (not zero).
+            m = mask(mb + 32, me + 32, 64)
+            value = f"((UINT64_C(0x100000001) * rotl32(static_cast<std::uint32_t>(r[{rt}]), {shift})) & {literal(m)})"
         if op == 20:
             value = f"(r[{ra}] & {literal(~m)}) | {value}"
         body = f"r[{ra}] = {value};"
@@ -581,9 +587,8 @@ constexpr std::uint64_t TIMEBASE_HZ = 79800000;
     return amount ? (value >> amount) | (negative ? UINT64_MAX << (64 - amount) : 0) : value;
 }
 [[maybe_unused]] static unsigned leading_zeroes(std::uint64_t value, unsigned width) {
-    unsigned result = 0;
-    for (unsigned i = width; i && !(value & (UINT64_C(1) << (i - 1))); --i) ++result;
-    return result;
+    if (width == 32) value &= UINT32_MAX;
+    return value ? unsigned(__builtin_clzll(value)) - (64 - width) : width;
 }
 [[maybe_unused]] static bool branch_test(PpuState& state, unsigned bo, unsigned bi) {
     if (!(bo & 4)) --state.ctr;

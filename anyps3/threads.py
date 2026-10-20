@@ -21,6 +21,9 @@ struct PpuContext {
     // Timed kernel mutex wait (sys_mutex_lock timeout, steady-clock microseconds).
     std::uint64_t wait_deadline=0;bool wait_timed_out=false,lwcond_timed_out=false;
     std::uint32_t cancelled_event=0;
+    // Lazy FR/FI/FPRF (floating.py fp_lazy): the last arithmetic operation whose
+    // exact FPSCR update is still pending; fp_lazy_op==0 means none.
+    std::uint64_t fp_lazy_a=0,fp_lazy_b=0,fp_lazy_c=0;std::uint8_t fp_lazy_op=0,fp_lazy_precision=0;
 };
 '''
 

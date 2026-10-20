@@ -91,6 +91,9 @@ class ScalarFragmentTests(unittest.TestCase):
         root=Path(__file__).resolve().parents[1]
         script=root/'local/ratchet/codex/rsxvk/rsxvk11/run_corpus.py'
         corpus=root/'local/ratchet/codex/rsxvk/rsxvk9/corpus-311g-01'
+        if not script.exists():
+            # The corpus runner is local, unversioned tooling (local/ is never committed).
+            self.skipTest('local corpus runner not present in this checkout')
         with tempfile.TemporaryDirectory() as d:
             command=[os.sys.executable,str(script),str(Path(d)/'proxy')]
             if not list(corpus.glob('*.fpbin')):command.append('--synthetic-only')

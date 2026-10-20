@@ -1,5 +1,67 @@
 # Current state and goal
 
+**2026-10-19/20 cloud optimization round (Claude Opus 5.5, cloud container without game data or GPU).**
+User goal unchanged: the game at 60 FPS with headroom. Record with all evidence, benchmarks and limitations:
+[cloud optimization record](experiments/2026-10-19-cloud-optimization.md). Branch `claude/happy-franklin-2eocfp`,
+commits `43c6b27..4b3723a` (HEAD when this was written; `43c6b27` = snapshot 460).
+**The best verified game build is still `native-virtual-460` (22.59 FPS in the original level). This round has NO game
+build and NO FPS figure:** the container has 4 vCPU, no GPU (Vulkan = Lavapipe) and no game data. 60 FPS not reached;
+menu/gamepad status unchanged (physical gamepad not verified). The working tree of this branch is snapshot 460 plus the
+changes below, so it is no longer identical to snapshot 460 or to any built and measured game tree.
+
+What changed (status: **verified** = by the named native regression test with an independent expectation, **derived** =
+by reasoning only; nothing is verified in the game):
+
+- **PPU** ([record, PPU](experiments/2026-10-19-cloud-optimization.md#ppu)): host SIMD paths for the VMX subset
+  (verified, `tests/test_vmx_simd.py`); **semantic fix** of rlwinm/rlwnm/rlwimi with MB>ME (wrap mask, verified,
+  `tests/test_ppu_rotate_count.py` red on the previous lifter); lazy FR/FI/FPRF (verified by `tests/test_ppu_fp_lazy.py`;
+  applies only once XX is set, measured +13% on a synthetic float kernel while XX is clear); spin hints, one host `pause`
+  per block (guest steps unchanged, verified; benefit derived); same-page indirect dispatch (verified; no measurable
+  effect in the synthetic call kernel); 8-aligned 16-byte loads as two 8-byte atomic loads (covered by existing tests,
+  no dedicated one).
+- **SPU** ([record, SPU](experiments/2026-10-19-cloud-optimization.md#spu)): unbound-image stop restored; pool-lane
+  slice 4096; exact change-counter filter for the reservation-lost check (exactness derived, behaviour verified by
+  `tests/test_spu_reservation_filter.py`); busy-poll parking (verified for results and wake sources by
+  `tests/test_spu_pool_poll.py`; kill switch `ANYPS3_SPU_POLL_PARK=0`; that the level's CellSpursKernel0 matches a
+  parked pattern is a **hypothesis**).
+- **Memory** ([record, Memory](experiments/2026-10-19-cloud-optimization.md#memory-ppu-and-spu-reservations); PPU
+  lwarx/stwcx. and SPU getllar/putllc): single-mapping reservation fast path, verified by
+  `tests/test_reservation_fast_path.py`; synthetic `k_atomic` 70.7 → 40.5 ns per guest instruction.
+- **RSX** ([record, RSX](experiments/2026-10-19-cloud-optimization.md#rsx)): register-bank change epochs, SIMD index
+  decode, fragment prologue interpolating only used inputs (each verified by its test; the prologue effect is GPU-side
+  and not measurable here); **MSAA plane runs** (verified for pixels and validation, effect unmeasured; kill switch
+  `ANYPS3_RSX_PLANE_RUNS=0`); the stale `tests/test_rsx_gpu_upload.py` oracle fixed (test only, no runtime change);
+  occlusion-query elision is a **candidate only, not implemented**.
+- **Runtime fix** ([toolchain pitfall](experiments/2026-10-19-cloud-optimization.md#environment-limits-verified)):
+  the RSX owner thread waited on `steady_clock::time_point::max()`, which overflows on the cloud's conda libstdc++ and
+  made `test_par6` hang in 6 of 8 cases (diagnosis verified with gdb on the cloud toolchain); the owner loop now waits
+  without a timeout when there is no deadline, as `par_worker.py` already did for SPU lanes.
+- **Scheduler** ([record](experiments/2026-10-19-cloud-optimization.md#scheduler)): an Audio engine slot whose next tick
+  is in the future returns immediately; the record states no dedicated test for it.
+
+**Verification actually done:** native regression tests of the changed areas and synthetic micro-benchmarks on a shared
+cloud CPU (relative only, see [Measurements](experiments/2026-10-19-cloud-optimization.md#measurements-synthetic-this-cloud-cpu)).
+**Not done:** no game build, no game run, no FPS figure, no frame comparison, no physical gamepad.
+**Full regression suite of this round:** frozen worktree of `4b3723a` (same code as the final branch), `run_suite.py -j3`, real Vulkan (Lavapipe), split by a container restart (139 + 19 modules): **158 modules, 782 tests, 774 pass**. The 8 failing tests and 2 modules failing at import are environmental or pre-existing: tools under `local/ratchet/` that this container lacks (test_sample_profile, test_sample_profile_integration, test_spudyn_profile, test_spuperf2_capture ×2); the 30 s compile limit with this toolchain (test_program ×2, test_services ×1, all pass with a longer limit); two failures identical on a worktree of `43c6b27` and passing on the PC in the 386 suite (test_rsx_perf_decode `special_lanes`, test_savedata_vsh non-variadic `assert`). Details in the [record](experiments/2026-10-19-cloud-optimization.md#full-regression-suite).
+
+**Strongest open hypothesis:** part of the ~30 ms/frame GPU busy time in the level is render-pass switching;
+the level replay had ~1712 render passes per frame (verified from the comment at `anyps3/vulkan.py:222`; 76 with
+multiview), and MSAA plane runs should cut passes to roughly the multiview count. Unverified; distinguishing test on the
+PC: the same level window with `ANYPS3_RSX_PLANE_RUNS=0` and `=1`, comparing `PERF GPU busy_ns`, render passes per
+frame and FPS ([RSX item 5](experiments/2026-10-19-cloud-optimization.md#rsx)). Caveat from the code comment
+`anyps3/vulkan.py:222-224` (historical RTX 4070 SUPER measurement, not repeated in this round): the opt-in multiview
+variant with 76 passes raised GPU wait 5.6 → 30 ms/frame with no CPU gain, so fewer passes alone has not been shown to
+lower GPU time.
+
+**First next action on the user's PC:** build a new unused `N` (record section
+[How to verify on the PC](experiments/2026-10-19-cloud-optimization.md#how-to-verify-on-the-pc): `build_game` →
+`virtual_pad.py build` → `local/ratchet/tools/measure_level.sh N Na`), compare `native-virtual-Na/level-summary.json`
+with 460a (22.59 FPS; RSX worker 28.3 ms, main_idle 23.2 ms, GPU busy 30.0 ms per frame) and check that
+`level-frame.ppm` matches. Then A/B runs of the same level window without rebuilding:
+`ANYPS3_RSX_PLANE_RUNS=0` vs `=1` and `ANYPS3_SPU_POLL_PARK=0` vs `=1`. Run the whole suite there with
+`ANYPS3_REQUIRE_VULKAN=1`. Audio stays silent (`SDL_AUDIODRIVER=dummy`, `ANYPS3_AUDIO_SINK=null`, never
+`ANYPS3_AUDIO_AUDIBLE=1`). Handoff details: [HANDOFF.md](HANDOFF.md).
+
 **2026-10-19 afternoon — new round (Claude Opus 5.5), user goal: the game at 60 FPS with headroom.**
 Verified: in the `great_clock_a` level the game runs in mode 0 (VSYNC without a cap, `G+84=0`, `G+24=0`) → target 59.94 FPS;
 ~15 FPS is a performance plateau, not a game cap. Baseline measurement `measure_level.sh 380 380base`: **14.25 FPS** (median 14.97),

@@ -55,12 +55,16 @@ static void fp_exception(PpuState& s, std::uint32_t flag) {
     if(s.fpscr & UINT32_C(0x01f80700))s.fpscr |= UINT32_C(0x20000000);
     if((s.fpscr>>22)&s.fpscr&0xf8)s.fpscr |= UINT32_C(0x40000000);
 }
+static inline void fp_materialize(PpuState& s);
 [[maybe_unused]] static void fp_write_fields(PpuState& s,std::uint32_t value,std::uint32_t mask) {
+    fp_materialize(s);
     mask &= ~UINT32_C(0x60000800);
     s.fpscr=(s.fpscr&~mask)|(value&mask);
     fp_summaries(s); // mtfsf/mtfsfi never set FX implicitly.
 }
+static inline void fp_materialize(PpuState& s);
 [[maybe_unused]] static void fp_write_bit(PpuState& s,unsigned bit,bool set) {
+    fp_materialize(s);
     const auto mask=UINT32_C(0x80000000)>>bit;
     if(mask & UINT32_C(0x60000800))return;
     if(set){
@@ -69,7 +73,9 @@ static void fp_exception(PpuState& s, std::uint32_t flag) {
     }else s.fpscr&=~mask;
     fp_summaries(s);
 }
+static inline void fp_materialize(PpuState& s);
 [[maybe_unused]] static void fp_move_field(PpuState& s,unsigned target,unsigned source) {
+    fp_materialize(s);
     const unsigned shift=28-4*source,cr_shift=28-4*target;
     const auto value=(s.fpscr>>shift)&15u;
     s.cr=(s.cr&~(15u<<cr_shift))|(value<<cr_shift);
@@ -273,7 +279,7 @@ static std::uint64_t fp_pack(PpuState& s, bool sign, Wide magnitude, int scale, 
     return fp_result(s, sign, int(bits) - 1 + scale, q, inexact, up, precision);
 }
 [[maybe_unused]] static std::uint64_t fp_from_integer(PpuState& s, std::uint64_t value) {
-    fp_mode(s);
+    fp_materialize(s);fp_mode(s);
     const bool sign = bool(value >> 63);
     return fp_pack(s, sign, sign ? UINT64_C(0) - value : value, 0);
 }
@@ -398,7 +404,7 @@ static std::uint64_t fp_fused_sum(PpuState& s, std::uint64_t a, std::uint64_t c,
     // Book I pp.125-126 permits implementation-dependent estimates. Use
     // rounded 1/b or the reciprocal of rounded sqrt(b), not Cell LUT bits.
     // XX/FR/FI are undefined for estimates; choose to preserve the old XX.
-    const auto before=s.fpscr;
+    fp_materialize(s);const auto before=s.fpscr;
     const auto value=root && b==UINT64_C(0x7ff0000000000000) ? (fp_mode(s),fp_result(s,false,0,0,false,false))
         : fp_divide(s,UINT64_C(0x3ff0000000000000),root?fp_sqrt(s,b):b,root?53:24);
     const bool added=s.fpscr&~before&UINT32_C(0x1df80700); // new exception bits other than XX
@@ -432,7 +438,7 @@ static std::uint64_t fp_fused_sum(PpuState& s, std::uint64_t a, std::uint64_t c,
                          : fp_pack(s, y.sign, small - large, scale, precision);
 }
 [[maybe_unused]] static std::uint64_t fp_to_integer(PpuState& s, std::uint64_t value, unsigned width=64, bool truncate=true) {
-    fp_mode(s);
+    fp_materialize(s);fp_mode(s);
     // Book I fctiw[z]/fctid[z]: NaN, infinities and out-of-range values give the
     // saturated integer with VXCVI (plus VXSNAN for SNaN); FR/FI cleared, FPRF
     // undefined (preserved). The 32-bit forms sign-extend into the undefined
@@ -515,7 +521,7 @@ static void fp_nan_flag(PpuState& s, std::uint32_t flag) {
     s.fpscr |= flag | UINT32_C(0x20000000);                  // and the VX summary.
 }
 [[maybe_unused]] static void fp_compare(PpuState& s, unsigned field, std::uint64_t a, std::uint64_t b, bool ordered = false) {
-    fp_mode(s);
+    fp_materialize(s);fp_mode(s);
     const auto am = a & UINT64_C(0x7fffffffffffffff), bm = b & UINT64_C(0x7fffffffffffffff);
     const bool sign = a >> 63;
     unsigned result;
@@ -533,5 +539,90 @@ static void fp_nan_flag(PpuState& s, std::uint32_t flag) {
     const unsigned shift = (7 - field) * 4;
     s.cr = (s.cr & ~(UINT32_C(15) << shift)) | (result << shift);
     s.fpscr = (s.fpscr & ~UINT32_C(0xf000)) | (result << 12);
+}
+
+// ---- Lazy FR/FI/FPRF ---------------------------------------------------------
+// With XX already set, RN rounding and every exception disabled, an arithmetic
+// operation on in-range operands (fp_host_operand: zero or normal with exponent
+// in [-400,400]) cannot set any other sticky bit: no overflow, underflow,
+// invalid operation or zero divide (zero divisors and negative square roots
+// are excluded). FX therefore cannot change, and the operation only rewrites
+// the non-sticky FR, FI and FPRF. The fast path returns the host result and
+// records the operation; fp_materialize replays its exact FPSCR update before
+// FPSCR is observed (mffs/mcrfs/mtfs*, compares, conversions, estimates, frsp,
+// VMX scopes, any exact arithmetic, and anyps3_entry exit). A later lazy
+// operation overwrites FR/FI/FPRF completely, so only the last one is kept.
+// Results: one IEEE rounding on the host; binary32 forms reuse the
+// fp_host_arithmetic midpoint/range guards (no double-rounding hazard).
+[[gnu::noinline,gnu::cold]] static void fp_materialize_pending(PpuState& s){
+    const unsigned op=s.fp_lazy_op,precision=s.fp_lazy_precision;s.fp_lazy_op=0;
+    const auto a=s.fp_lazy_a,b=s.fp_lazy_b,c=s.fp_lazy_c;
+    switch(op){
+    case 1:(void)fp_add(s,a,b,precision);break;
+    case 2:(void)fp_multiply(s,a,b,precision);break;
+    case 3:(void)fp_divide(s,a,b,precision);break;
+    case 4:(void)fp_sqrt(s,a,precision);break;
+    case 5:(void)fp_fused(s,a,c,b,precision,false);break;
+    case 6:(void)fp_fused(s,a,c,b,precision,true);break;
+    default:throw std::runtime_error("invalid lazy PPU FP operation");
+    }
+}
+static inline void fp_materialize(PpuState& s){if(__builtin_expect(s.fp_lazy_op!=0,0))fp_materialize_pending(s);}
+[[maybe_unused]] static std::uint32_t fp_read_fpscr(PpuState& s){fp_materialize(s);return s.fpscr;}
+// Op: 1 add (a+b), 2 multiply (a*b), 3 divide (a/b), 4 sqrt(a), 5 a*c+b, 6 -(a*c+b).
+// Small (no residual, no FPSCR read-modify-write): inlined into the lifted
+// pages. Contraction cannot fuse across these single operations: every result
+// leaves through an integer bit copy and the build uses -ffp-contract=off/ISO.
+[[maybe_unused,gnu::always_inline]] static inline bool fp_lazy(PpuState& s,std::uint64_t a,std::uint64_t b,std::uint64_t c,unsigned precision,unsigned op,std::uint64_t& out){
+#if defined(__SSE2__) && FLT_EVAL_METHOD == 0 && FLT_RADIX == 2 && DBL_MANT_DIG == 53 && FLT_MANT_DIG == 24 && !defined(__FAST_MATH__) && !defined(ANYPS3_FP_FORCE_SOFT)
+#if defined(__clang__)
+#pragma clang fp contract(off)
+#endif
+    if((s.fpscr&UINT32_C(0x020000fb))!=UINT32_C(0x02000000) || (precision!=53 && precision!=24) || !fp_host_operand(a) ||
+       (op!=4 && !fp_host_operand(b)) || (op>=5 && !fp_host_operand(c)) || (_mm_getcsr()&0xffc0u)!=0x1f80u)return false;
+    double x,y,z;std::memcpy(&x,&a,8);std::memcpy(&y,&b,8);std::memcpy(&z,&c,8);
+    double rounded;
+    switch(op){
+    case 1:rounded=x+y;break;
+    case 2:rounded=x*y;break;
+    case 3:if(!y)return false;rounded=x/y;break;
+    case 4:if(x<0)return false;rounded=std::sqrt(x);break;
+    default:rounded=std::fma(x,z,y);break;
+    }
+    std::uint64_t bits;std::memcpy(&bits,&rounded,8);
+    if(precision==24){
+        const unsigned exponent=(bits>>52)&2047;
+        if((bits&UINT64_C(0x7fffffffffffffff)) && (exponent<898 || exponent>1149))return false;
+        if((bits&UINT64_C(0x1fffffff))==UINT64_C(0x10000000))return false;
+        const double single=static_cast<double>(static_cast<float>(rounded));std::memcpy(&bits,&single,8);
+    }
+    // fnmadd/fnmsub negate after rounding (never a NaN here).
+    if(op==6)bits^=UINT64_C(0x8000000000000000);
+    s.fp_lazy_a=a;s.fp_lazy_b=b;s.fp_lazy_c=c;s.fp_lazy_op=static_cast<std::uint8_t>(op);s.fp_lazy_precision=static_cast<std::uint8_t>(precision);
+    out=bits;return true;
+#else
+    (void)s;(void)a;(void)b;(void)c;(void)precision;(void)op;(void)out;
+    return false;
+#endif
+}
+// Lifted code uses the lazy forms; the plain helpers stay exact (eager FPSCR).
+// The XX/mode test is inlined so a cleared XX costs no extra call. An exact
+// arithmetic operation rewrites FR/FI/FPRF completely, but a pending one is
+// still replayed first so that a STOP inside it reports the exact FPSCR.
+[[gnu::always_inline]] static inline bool fp_lazy_mode(const PpuState& s){return (s.fpscr&UINT32_C(0x020000fb))==UINT32_C(0x02000000);}
+[[maybe_unused]] static std::uint64_t fp_add_lazy(PpuState& s, std::uint64_t a, std::uint64_t b, unsigned precision = 53) {
+    std::uint64_t r;return fp_lazy_mode(s) && fp_lazy(s,a,b,0,precision,1,r)?r:(fp_materialize(s),fp_add(s,a,b,precision));
+}
+[[maybe_unused]] static std::uint64_t fp_multiply_lazy(PpuState& s, std::uint64_t a, std::uint64_t b, unsigned precision = 53) {
+    std::uint64_t r;return fp_lazy_mode(s) && fp_lazy(s,a,b,0,precision,2,r)?r:(fp_materialize(s),fp_multiply(s,a,b,precision));
+}
+[[maybe_unused]] static std::uint64_t fp_divide_lazy(PpuState& s, std::uint64_t a, std::uint64_t b, unsigned precision = 53) {
+    std::uint64_t r;return fp_lazy_mode(s) && fp_lazy(s,a,b,0,precision,3,r)?r:(fp_materialize(s),fp_divide(s,a,b,precision));
+}
+[[maybe_unused]] static std::uint64_t fp_sqrt_lazy(PpuState& s, std::uint64_t b, unsigned precision = 53) {
+    std::uint64_t r;return fp_lazy_mode(s) && fp_lazy(s,b,0,0,precision,4,r)?r:(fp_materialize(s),fp_sqrt(s,b,precision));
+}
+[[maybe_unused]] static std::uint64_t fp_fused_lazy(PpuState& s, std::uint64_t a, std::uint64_t c, std::uint64_t b, unsigned precision = 53, bool negate = false) {
+    std::uint64_t r;return fp_lazy_mode(s) && fp_lazy(s,a,b,c,precision,negate?6:5,r)?r:(fp_materialize(s),fp_fused(s,a,c,b,precision,negate));
 }
 '''

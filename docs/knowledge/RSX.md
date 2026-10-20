@@ -27,3 +27,23 @@ Distinguish guest command production, FIFO decoding, draw submission, shader exe
 **Open ACIT question:** does the real guest get as far as draw, or is it still executing initialization? The answer should come from the current log, not from four historical black images. The host window, PPM file, clear and flip are separate results. The original menu requires real geometry/content and subsequently a verified gamepad state change.
 
 The public CELL PDFs describe the CPU/MFC, not the RSX shader ISA. For RSX use the public implementations above and record the derivation and its limitations.
+
+## Host cost of draws: cloud optimization round (2026-10-19/20)
+
+Scope: AnyPS3 runtime and its native tests, Lavapipe in a container without a GPU; no game frame was rendered. Evidence, benchmarks and
+limitations: [cloud optimization record, RSX](experiments/2026-10-19-cloud-optimization.md#rsx).
+
+- **Register epochs (verified by `tests/test_rsx_register_epochs.py`):** per-256-byte-block epochs are bumped only when a tracked `write`
+  changes presence or value; a mutable borrow marks the block exposed, so it is always verified by value, and copy/assignment forces a full rebuild.
+- **MSAA plane runs (verified for pixels/depth/stencil and Khronos plus sync validation; effect on GPU time unmeasured):** plane 0 of
+  consecutive draws on the same attachments stays in one render pass and planes >=1 are recorded as runs when that pass ends; every
+  command outside a pass replays pending planes first. `ANYPS3_RSX_PLANE_RUNS=0` restores the old recording. **Hypothesis (weak):** part
+  of the ~30 ms/frame GPU busy time in the level is render-pass switching (~1712 passes per frame before this change). Caveat
+  (code comment `anyps3/vulkan.py:222-224`): the opt-in multiview variant with 76 passes raised GPU wait 5.6 → 30 ms/frame on the RTX 4070 SUPER.
+  Distinguishing test: A/B `ANYPS3_RSX_PLANE_RUNS=0/1` in the same level window, comparing `PERF GPU busy_ns`, passes per frame and FPS.
+- **Stale `tests/test_rsx_gpu_upload.py` oracle (verified on a worktree of `43c6b27`):** it pasted `raw_vertex_glsl` into its own compute
+  shader, but since build 460 that code reads the state arena (`state_`), so the module failed with `'state_' : undeclared identifier`.
+  The oracle now maps `state_` to its single buffer; no runtime change was needed (production vertex shaders insert `state_glsl`).
+- **Occlusion-query elision is a candidate only, not implemented:** every draw wraps each plane in a precise occlusion query; the counts
+  are guest-visible only while ZPASS pixel counting (register 0x17cc) is enabled, otherwise they feed the diagnostic `draw.pixels`, an
+  oracle of 20 test modules. Eliding queries while 0x17cc is 0 needs a separate diagnostic mode and is worth it only if a PC profile shows query cost.

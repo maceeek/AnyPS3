@@ -220,7 +220,7 @@ class FloatingTests(unittest.TestCase):
         body += f' s.fpscr=0;assert(fp_fused(s,UINT64_C(0x{inf:016x}),0,UINT64_C(0x{qnan:016x}))==UINT64_C(0x{qnan:016x}) && s.fpscr==0xa0111000u);\n'
         # Original ACIT 0x637098 fmuls f0,f5,f11 after normalizing a zero vector (1/sqrt(0)).
         self.assertEqual(lift(0xec0502f2, 0x637098).mnemonic, 'fmul')
-        body += f' s.fpr[5]=0;s.fpr[11]=UINT64_C(0x{inf:016x});s.fpscr=0x86008000u;{{auto& state=s;' + lift(0xec0502f2, 0x637098).cpp + '}\n'
+        body += f' s.fpr[5]=0;s.fpr[11]=UINT64_C(0x{inf:016x});s.fpscr=0x86008000u;{{auto& state=s;' + lift(0xec0502f2, 0x637098).cpp + '}fp_materialize(s);\n'
         body += f' assert(s.fpr[0]==UINT64_C(0x{qnan:016x}) && s.fpscr==0xa6111000u);\n'
         RuntimeObjectsTests().run_native(body)
 
@@ -306,7 +306,9 @@ class FloatingTests(unittest.TestCase):
  s.fpscr=0;assert(fp_sqrt(s,UINT64_C(0x7ff0000000000000))==UINT64_C(0x7ff0000000000000) && s.fpscr==0x5000);
  s.fpr[1]=UINT64_C(0x4000000000000000);s.fpscr=0x82002000;
 '''
-        body+='{auto& state=s;'+lift(0xfc00082c,0x6b2d48).cpp+'}'
+        # Lifted FP bodies may defer FR/FI/FPRF (fp_lazy) until FPSCR is observed;
+        # anyps3_entry materializes on exit, a standalone body needs it explicitly.
+        body+='{auto& state=s;'+lift(0xfc00082c,0x6b2d48).cpp+'}fp_materialize(s);'
         body+=r'''
  assert(s.fpr[0]==UINT64_C(0x3ff6a09e667f3bcd) && s.fpscr==0x82064000);
 '''
@@ -335,7 +337,7 @@ class FloatingTests(unittest.TestCase):
  // both source registers survive a destination alias and stfs stores NaN.
  s.fpr[13]=0;s.fpr[1]=UINT64_C(0xffffffffe0000000);s.fpscr=0x82002000;
 '''
-        body+='{auto& state=s;'+lift(0xec0d0828,0x3acfc0).cpp+'}'
+        body+='{auto& state=s;'+lift(0xec0d0828,0x3acfc0).cpp+'}fp_materialize(s);'
         body+=r'''
  assert(s.fpr[0]==UINT64_C(0xffffffffe0000000) && s.fpscr==0x82011000);
  assert(fp_narrow_exact(s.fpr[0])==UINT32_MAX && s.fpr[1]==s.fpr[0]);

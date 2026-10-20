@@ -313,13 +313,15 @@ static void rsx_worker_perf(const PpuState& s){
 }
 static EngineStepReply rsx_worker_request(PpuState& s,unsigned budget){
     auto& w=s.process.rsx_worker;rsx_worker_pump(s);
+    // Consume the progress flag without a locked RMW when nothing was published.
+    auto progress=[&w]{return w.progress.load(std::memory_order_relaxed) && w.progress.exchange(false,std::memory_order_acq_rel);};
     const auto address=w.fifo_put_address.load(std::memory_order_acquire);
-    if(!address || w.fifo_queued.load(std::memory_order_acquire))return {w.progress.exchange(false,std::memory_order_acq_rel),false};
+    if(!address || w.fifo_queued.load(std::memory_order_acquire))return {progress(),false};
     const auto put=s.memory.load(address,4);
-    if(put==w.posted_put && !w.fifo_work.load(std::memory_order_acquire))return {w.progress.exchange(false,std::memory_order_acq_rel),false};
+    if(put==w.posted_put && !w.fifo_work.load(std::memory_order_acquire))return {progress(),false};
     const auto pc=s.pc,tid=s.thread_id;w.fifo_queued.store(true,std::memory_order_release);
     try{w.queue->post(RsxOwnerQueue::Kind::RunFifo,[f=static_cast<PpuState*>(w.facade.get()),pc,tid]{f->pc=pc;f->thread_id=tid;},budget);w.posted_put=put;}
     catch(...){w.fifo_queued.store(false,std::memory_order_release);throw;}
-    return {w.progress.exchange(false,std::memory_order_acq_rel),false};
+    return {progress(),false};
 }
 '''

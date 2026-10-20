@@ -134,7 +134,9 @@ static void raw_attribute_oracles(){
   // Exact BE byte stream stored in the native little-endian SSBO word.
   words[200]=((c.word&255)<<24)|((c.word&0xff00)<<8)|((c.word>>8)&0xff00)|(c.word>>24);
   std::string source="#version 450\nlayout(local_size_x=1) in;layout(std430,binding=0) buffer Data{uint w[];};\nvec4 load4(uint a){return uintBitsToFloat(uvec4(w[a],w[a+1u],w[a+2u],w[a+3u]));}\n";
-  source+=rsxgraphics::raw_vertex_glsl;source+="void main(){uvec4 v=floatBitsToUint(attribute_(0u,0u));for(uint i=0u;i<4u;++i)w[240u+i]=v[i];}";
+  // raw_vertex_glsl reads vertex bytes from the state arena (binding 37 in a draw); this
+  // single-buffer oracle keeps the byte stream in w[], so state_ names the same buffer.
+  source+="#define state_ w\n";source+=rsxgraphics::raw_vertex_glsl;source+="void main(){uvec4 v=floatBitsToUint(attribute_(0u,0u));for(uint i=0u;i<4u;++i)w[240u+i]=v[i];}";
   vk.compute(source,words,1);for(unsigned i=0;i<4;++i)assert(rsxdraw::bits_float(words[240+i])==c.expected[i]);
  }
  std::puts("PASS independent GPU vertex-format oracles");
