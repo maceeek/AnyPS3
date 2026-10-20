@@ -567,10 +567,12 @@ TYPES = RESERVATION_WAIT_TYPES + r'''
         // false: translation-only admission (GuestMemory::range of a read-only Range): reader gate, map snapshot and observer
         // coherence as usual, but no page-broker cell increments, because no payload byte is read or written under it.
         bool brokered_=true;
-        [[gnu::always_inline]] Lease(GuestMemory& m,std::uint64_t address,unsigned size,bool write,bool split=false,bool brokered=true):memory(m),origin_address(address,m.concurrent() || bool(m.host_access_observer)),brokered_(brokered){
+        // one_page: the caller proved [address,address+size) lies in one 4 KiB guest page (hence one region) and reads or
+        // writes it as one span (SPU DMA): admission may use the scalar path, which resolves one physical page directly.
+        [[gnu::always_inline]] Lease(GuestMemory& m,std::uint64_t address,unsigned size,bool write,bool split=false,bool brokered=true,bool one_page=false):memory(m),origin_address(address,m.concurrent() || bool(m.host_access_observer)),brokered_(brokered){
             if(!m.concurrent())return;
             m.suspend_scalar_batch(m.local_state());
-            if(!split && size && size<=8){auto& local=m.local_state();
+            if((!split && size && size<=8) || one_page){auto& local=m.local_state();
                 if(!local.raw && !local.leases && scalar_enter(address,size,write))return;}
             enter(address,size,write,split);
         }
