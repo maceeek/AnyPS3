@@ -100,9 +100,10 @@ struct NativeSpu {
         std::uint32_t reloc_image_index=UINT32_MAX;
         SpuPublished<std::uint64_t> relocated_entries{0},interpreted_instructions{0};
         // ANYPS3_SPU_STATS=1 diagnostic counters (single writer: the lane; see spu_stat).
-        std::array<SpuPublished<std::uint64_t>,20> stats{};
+        std::array<SpuPublished<std::uint64_t>,28> stats{};
         // ANYPS3_SPU_STATS: interpreter entry PCs (pc<<32|count), open addressing, lane-written.
         std::shared_ptr<std::array<std::atomic<std::uint64_t>,1024>> interp_entries;
+        std::shared_ptr<std::array<std::atomic<std::uint64_t>,1024>> native_entries; // ANYPS3_SPU_STATS: dispatcher entry PCs (pc+1)<<32|count
         struct DmaWrite {unsigned base,end;std::uint64_t ea;};
         std::vector<DmaWrite> dma_writes;
         std::set<std::string> dynamic_blocks;
@@ -114,7 +115,7 @@ struct NativeSpu {
         // MFC list stall-and-notify (CBEA v1.02 9.1.4; RPCS3 ffba2bf0 SPUThread.cpp do_list_transfer): the rest of a
         // stalled list per tag, stall mask/status (channel 25) and a pending ANY/ALL tag update (mode 1/2).
         struct StalledList {bool active=false,put=false;std::uint64_t high=0;std::uint32_t next=0,end=0,local=0;};
-        std::array<StalledList,32> stalled_lists{};std::uint32_t stall_mask=0,stall_stat=0;bool stall_stat_ready=false;
+        std::array<StalledList,32> stalled_lists{};std::uint32_t stall_mask=0,stall_stat=0,stalled_active=0 /* bit per stalled_lists[tag].active */;bool stall_stat_ready=false;
         unsigned tag_update_pending=0;
         bool tag_status_ready=false;
         std::uint32_t out_mailbox=0;
@@ -167,6 +168,8 @@ struct NativeSpu {
 };
 using SpuNativeFunction=void(*)(PpuState&,NativeSpu::Thread&,std::uint8_t*);
 struct SpuNativeRange {std::uint32_t lo,hi;const std::uint8_t* code;SpuNativeFunction fn;const std::uint8_t* leaders;};
+// ANYPS3_SPU_STATS=1: diagnostic counters (spu_stat), read by the lane worker and the PERF report.
+inline const bool spu_stats_on=[](){const char* v=std::getenv("ANYPS3_SPU_STATS");return v && v[0]=='1' && !v[1];}();
 '''
 
 CPP = r'''

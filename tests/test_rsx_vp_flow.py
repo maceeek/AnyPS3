@@ -282,6 +282,37 @@ static void errors(NativeVulkan& vk){
   assert(!rsxvk::vertex_shader(g,0,true,false));}                                                                       // control flow needs the checked mode
  std::puts("PASS error conditions raise the GPU error flag exactly where the interpreter stops; BRA/CLI/unwritten reachable instructions and unchecked mode are not translated");
 }
+// ---- instruction budget: run_vertex_program executes at most 65,536 instructions; the 65,537th stops the program ----
+// A counted loop whose executed-instruction count is known by construction (not by running either implementation):
+//   t6 = 0; do { 4 x MOV (or CAL to a 2 x MOV + RET subroutine) ; t6.x += 1 ; cc1.x = t6.x < c30.x } while (cc1.x > 0); [extra x MOV]; o0 = t6, END
+// plain loop: 1 + n*(4+3) + extra + 1 executed instructions; call loop: 1 + n*(1+2+1+3) + extra + 1. With n = 9362: 65,536 + extra.
+// The old GPU budget counted switch dispatches (one per taken back branch = ~9362), so it accepted 65,537 and more.
+static std::vector<Ins> counted_program(bool calls,unsigned extra){
+ std::vector<Ins> p;p.push_back(alu(1,6,C(0)));
+ const unsigned head=unsigned(p.size());unsigned call_at=0;
+ if(calls){call_at=unsigned(p.size());p.push_back(cal(0));}
+ else for(unsigned k=0;k<4;++k)p.push_back(alu(1,5,C(1)));
+ p.push_back(alu(3,6,T(6),C(1),Src{},8));
+ p.push_back(set_cc(11,T(6,0x00),C(30,0x00),8,1));
+ Ins back=bri(head,4,0x00);back.cc_index=1;p.push_back(back);
+ for(unsigned k=0;k<extra;++k)p.push_back(alu(1,5,C(1)));
+ p.push_back(out(0,T(6),8));p.back().end=true;
+ if(calls){p[call_at].imm=unsigned(p.size());p.push_back(alu(1,5,C(1)));p.push_back(alu(1,5,C(1)));p.push_back(ret());}
+ return p;
+}
+static void budget_boundary(NativeVulkan& vk){
+ for(const bool calls:{false,true}){
+  std::uint32_t r=17;
+  auto setup=[&](NativeRsx& g,unsigned extra){set_constants(g,r,40);for(unsigned c=0;c<4;++c){g.transform_constants[30*4+c]=float_bits(9362.f);g.transform_constants_written[30*4+c]=true;}
+   put_all(g,counted_program(calls,extra));};
+  {NativeRsx g;setup(g,0);   // exactly 65,536 instructions: both implementations finish with t6 = 9362
+   const auto in=make_inputs(r,3);compare(vk,g,0,in,0,"65,536 executed instructions");
+   const auto gpu=run_gpu(vk,g,0,in,0);if(gpu.outputs[0][0][0]!=9362.f)throw std::runtime_error("65,536-instruction loop: o0.x "+std::to_string(gpu.outputs[0][0][0])+" instead of 9362");}
+  {NativeRsx g;setup(g,1);expect_error(vk,g,0,calls?"65,537 executed instructions (call loop)":"65,537 executed instructions (fall-through loop)");}   // 65,537th instruction: both stop
+  {NativeRsx g;setup(g,3);expect_error(vk,g,0,"65,539 executed instructions");}
+ }
+ std::puts("PASS the GPU instruction budget counts every executed instruction (fall-through, calls, RET): 65,536 run, 65,537 stop, like the interpreter");
+}
 // ---- hardware vertex cache key covers branch targets after the first END ----
 static void cache_key(){
  std::uint32_t r=5;NativeRsx g;set_constants(g,r,40);
@@ -291,7 +322,7 @@ static void cache_key(){
  const auto after=rsxgraphics::hardware_vertex(g);assert(after && *after!=*before);
  std::puts("PASS the hardware vertex cache key covers instructions reached only by a branch behind the first END");
 }
-int main(){try{NativeVulkan vk;directed(vk);errors(vk);random_programs(vk);cache_key();}catch(const std::exception& e){std::fprintf(stderr,"FAIL %s\n",e.what());return 1;}}
+int main(){try{NativeVulkan vk;directed(vk);errors(vk);budget_boundary(vk);random_programs(vk);cache_key();}catch(const std::exception& e){std::fprintf(stderr,"FAIL %s\n",e.what());return 1;}}
 '''
 
 
@@ -311,7 +342,7 @@ class RsxVpFlowTests(unittest.TestCase):
             env = dict(os.environ, LP_NUM_THREADS='4', ANYPS3_VK_DEVICE='lavapipe', VK_DRIVER_FILES='/usr/share/vulkan/icd.d/lvp_icd.json')
             result = subprocess.run([str(root / 'test')], env=env, capture_output=True, text=True, timeout=600)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            self.assertEqual(result.stdout.count('PASS '), 4, result.stdout)
+            self.assertEqual(result.stdout.count('PASS '), 5, result.stdout)
 
 
 if __name__ == '__main__':

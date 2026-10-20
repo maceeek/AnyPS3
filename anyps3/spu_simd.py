@@ -308,6 +308,33 @@ SPU_VI std::uint32_t spu_int_to_float_fast(SpuRegister& fpscr,unsigned lane,std:
     const std::uint32_t mantissa=top>=23?m>>(top-23):m<<(23-top);
     return (std::uint32_t(sign)<<31)|(std::uint32_t(exponent+127)<<23)|(mantissa&0x7fffff);
 }
+#if defined(__AVX2__)
+// CFLTS/CFLTU on all four lanes (SPU ISA v1.2 PDF p.113-114; semantics of spu_float_to_int): no NaN/Inf, exponent 0 = 0,
+// exponent 255 is an ordinary large number; magnitude m*2^e truncated, saturated to 0x7fffffff/0x80000000 (signed) or
+// 0xffffffff (unsigned, negative inputs give 0).  e = exponent + (scale-150).
+SPU_VI SpuV spu_vfloat_to_int(SpuV x,int scale,bool unsign){
+    const SpuV zero=_mm_setzero_si128(),ones=_mm_set1_epi32(-1);
+    const SpuV exp=_mm_and_si128(_mm_srli_epi32(x,23),_mm_set1_epi32(255));
+    const SpuV mant=_mm_or_si128(_mm_and_si128(x,_mm_set1_epi32(0x7fffff)),_mm_set1_epi32(0x800000));
+    const SpuV sign=_mm_srai_epi32(x,31);
+    const SpuV e=_mm_add_epi32(exp,_mm_set1_epi32(scale-150));
+    const SpuV limit=unsign?ones:_mm_blendv_epi8(_mm_set1_epi32(0x7fffffff),_mm_set1_epi32(int(0x80000000u)),sign);
+    const SpuV epos=_mm_cmpgt_epi32(e,ones);
+    const SpuV c32=_mm_set1_epi32(32);
+    const SpuV ec=_mm_min_epi32(_mm_max_epi32(e,zero),c32);
+    const SpuV lim_e=_mm_srlv_epi32(limit,ec);
+    const SpuV over=_mm_or_si128(_mm_cmpgt_epi32(e,c32),_mm_xor_si128(_mm_cmpeq_epi32(_mm_min_epu32(mant,lim_e),mant),ones));
+    const SpuV left=_mm_blendv_epi8(_mm_sllv_epi32(mant,ec),limit,over);
+    const SpuV right=_mm_srlv_epi32(mant,_mm_min_epi32(_mm_max_epi32(_mm_sub_epi32(zero,e),zero),c32));
+    SpuV r=_mm_blendv_epi8(right,left,epos);
+    r=_mm_sub_epi32(_mm_xor_si128(r,sign),sign);
+    const SpuV drop=_mm_or_si128(_mm_cmpeq_epi32(exp,zero),unsign?sign:zero);
+    return _mm_andnot_si128(drop,r);
+}
+SPU_VI SpuV spu_vfloat_to_int_any(SpuV x,int scale,bool unsign){return spu_vfloat_to_int(x,scale,unsign);}
+#else
+SPU_VI SpuV spu_vfloat_to_int_any(SpuV x,int scale,bool unsign){return spu_vmap32(x,[&](unsigned,std::uint32_t v){return spu_float_to_int(v,scale,unsign);});}
+#endif
 // FI fast path: base and step products as one exact integer; normal results only.
 SPU_VI std::uint32_t spu_interpolate_fast(SpuRegister& fpscr,unsigned lane,std::uint32_t a,std::uint32_t b){
     const unsigned be=(b>>23)&255;
@@ -357,6 +384,20 @@ def _fields(word):
     return dict(t=word & 127, a=(word >> 7) & 127, b=(word >> 14) & 127, d=(word >> 21) & 127,
                 i7=(word >> 14) & 127, i10=_signed((word >> 14) & 1023, 10),
                 i16=(word >> 7) & 65535, i18=(word >> 7) & 0x3ffff)
+
+
+# WRCH to the MFC parameter channels 16..20 (LSA, EAH, EAL, size, tag id) and the tag mask (22): the same effect as spu_write_channel for these
+# channels (statistics aside), including the unchanged busy-poll detector state; with ANYPS3_SPU_PROFILE the original call
+# keeps the profile categories exact. The interrupt sampling boundary of a channel instruction (irq_next=0 in spu_write_channel) is not part
+# of this template: spu_block.emit_function appends BlockValues.interrupt_boundary() after it (one not-taken branch while interrupts are off).
+@_reg([0x10d])
+def _wrch_mfc_parameter(E, word, pc):
+    f = _fields(word)
+    if not (16 <= f['a'] <= 20 or f['a'] == 22):
+        raise Unsupported('channel')
+    target = f't.dma[{f["a"] - 16}]' if f['a'] != 22 else 't.tag_mask'
+    E.emit(f'{{const std::uint32_t wv={E.word0(f["t"])};if(__builtin_expect(spu_profile_on,0))spu_write_channel(s,t,ls,{f["a"]},wv);'
+           f'else{{spu_stat(t,13);{target}=wv;}}}}')
 
 
 # ---- constants ----
@@ -784,7 +825,7 @@ def _convert(E, word, pc):
     a = E.get(f['a'], 'w')
     unsign = str(kind in (0x1d9, 0x1db)).lower()
     if kind in (0x1d8, 0x1d9):
-        E.set(f['t'], 'w', f'spu_vmap32({a},[](unsigned,std::uint32_t x){{return spu_float_to_int(x,{scale},{unsign});}})')
+        E.set(f['t'], 'w', f'spu_vfloat_to_int_any({a},{scale},{unsign})')
     else:
         E.set(f['t'], 'w', f'spu_vmap32({a},[&](unsigned i,std::uint32_t x){{return spu_int_to_float_fast(t.fpscr,i,x,{scale},{unsign});}})',
               effect=True)

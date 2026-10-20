@@ -50,12 +50,21 @@ static void rsx_host_request(NativeRsxWorker& w,std::function<void()> invoke){
     struct Waiter {Waiter(){rsx_host_waiters.fetch_add(1,std::memory_order_relaxed);}~Waiter(){rsx_host_waiters.fetch_sub(1,std::memory_order_relaxed);}} waiter;
     w.queue->await(w.queue->post(RsxOwnerQueue::Kind::HostAccess,std::move(invoke),0,1));
 }
-static void rsx_owner_drain(NativeRsxWorker& w,PpuState* f){
+// Serves the drainable requests that are queued when the poll starts, at most that many and in queue order. Producers may refill the
+// queue while it is served (every served request wakes its requester, which can post the next one); looping until the queue is empty
+// would then keep the owner here indefinitely and starve the FIFO (GET, labels) and the vblank deadline. Requests posted meanwhile are
+// served by the next poll (every FIFO packet, every vsync-wait step). The front barrier (any other request kind, or an untagged one)
+// and the recursion guard are unchanged; `served` (optional) receives the number of requests executed.
+static void rsx_owner_drain(NativeRsxWorker& w,PpuState* f,unsigned* served=nullptr){
     static thread_local bool active=false;
     if(active)return;
     active=true;struct Reset {~Reset(){active=false;}} reset;
     auto& q=*w.queue;
-    for(;;){
+    std::size_t admitted=0;
+    {std::lock_guard<std::mutex> lock(q.mutex);
+        if(q.closing || q.error)return;
+        for(const auto& request:q.queue){if(request->kind!=RsxOwnerQueue::Kind::HostAccess || request->put_generation!=1)break;++admitted;}}
+    for(;admitted;--admitted){
         std::shared_ptr<RsxOwnerQueue::Request> request;
         {std::lock_guard<std::mutex> lock(q.mutex);
             if(q.closing || q.error || q.queue.empty())return;
@@ -63,6 +72,7 @@ static void rsx_owner_drain(NativeRsxWorker& w,PpuState* f){
             if(front->kind!=RsxOwnerQueue::Kind::HostAccess || front->put_generation!=1)return;
             request=front;q.queue.pop_front();++q.generation;q.changed.notify_all();}
         anyps3_ft::mark(anyps3_ft::Mark,0xd1);
+        if(served)++*served;
         try{HostAccessContext origin(request->origin);HostByteAccess bytes(request->byte_access,true);if(request->invoke)request->invoke();}
         catch(...){
             {std::lock_guard<std::mutex> lock(q.mutex);request->error=std::current_exception();request->done=true;++q.generation;q.changed.notify_all();}
@@ -197,7 +207,10 @@ static void rsx_worker_start(PpuState& s){
         ft_run.a=f->rsx.draw.draws-ft_run.a;ft_run.c=f->rsx.flips;
     };
     q.service=[&w,f]{if(w.paused)return;ExecutionScope phase(w.timing,ExecutionPhase::Rsx);
-        rsxdraw::HostPhase service_phase(rsxdraw::HostStage::service);const auto service_start=std::chrono::steady_clock::now();struct ServiceTime{std::chrono::steady_clock::time_point start;~ServiceTime(){rsx_service_calls().fetch_add(1,std::memory_order_relaxed);rsx_service_ns().fetch_add(std::uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-start).count()),std::memory_order_relaxed);}} service_time{service_start};anyps3_ft::Span ft_service(anyps3_ft::Service,0,0,50000);
+        rsxdraw::HostPhase service_phase(rsxdraw::HostStage::service);
+        // PERF RSX_SERVICE only: two clock reads and two atomics per idle tick are taken for ANYPS3_PERF_REPORT=1 runs alone.
+        const bool timed=anyps3_perf_report();const auto service_start=timed?std::chrono::steady_clock::now():std::chrono::steady_clock::time_point{};
+        struct ServiceTime{bool timed;std::chrono::steady_clock::time_point start;~ServiceTime(){if(!timed)return;rsx_service_calls().fetch_add(1,std::memory_order_relaxed);rsx_service_ns().fetch_add(std::uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-start).count()),std::memory_order_relaxed);}} service_time{timed,service_start};anyps3_ft::Span ft_service(anyps3_ft::Service,0,0,50000);
         const auto now=std::chrono::steady_clock::now().time_since_epoch();
         (void)rsx_tick_vblank(*f,std::chrono::duration_cast<std::chrono::nanoseconds>(now).count());
 #ifdef ANYPS3_RSX_VK
@@ -224,7 +237,7 @@ static void rsx_worker_start(PpuState& s){
         if(f->rsx.graphics_owner && !static_cast<rsxgraphics::Session*>(f->rsx.graphics_owner.get())->flights.empty()){
             // ANYPS3_RSX_POLL=adaptive: the first poll of the oldest flight comes when ~70% of its expected GPU time has passed
             // (EWMA of earlier flights), then every 40 us; default: every 100 us.
-            static const bool adaptive=[]{const char* v=std::getenv("ANYPS3_RSX_POLL");if(v && std::strcmp(v,"adaptive") && std::strcmp(v,"fixed"))throw std::runtime_error("invalid ANYPS3_RSX_POLL");return v && !std::strcmp(v,"adaptive");}();
+            const bool adaptive=rsx_poll_adaptive();
             const auto now=std::chrono::steady_clock::now();
             if(f->rsx.renderer && f->rsx.renderer->completion_notifier_enabled())due=now+std::chrono::milliseconds(2);   // safety net: completions poke the queue
             else if(adaptive){auto& session=*static_cast<rsxgraphics::Session*>(f->rsx.graphics_owner.get());
@@ -289,8 +302,9 @@ static void rsx_worker_start(PpuState& s){
         // Only this thread: a timed wait (the vsync deadline, the 100 us retire poll) ends at its deadline instead of up to the kernel's
         // default 50 us timer slack later; the vsync wake-up is on the critical path of the guest's pacing label (measured +51 us).
         // ANYPS3_RSX_TIMER_SLACK_NS=N selects N ns, 0 keeps the inherited slack.
-        {static const unsigned long slack=[]{const char* v=std::getenv("ANYPS3_RSX_TIMER_SLACK_NS");if(!v)return 1ul;char* end=nullptr;const auto n=std::strtoul(v,&end,10);
-                if(end==v || *end){std::fprintf(stderr,"invalid ANYPS3_RSX_TIMER_SLACK_NS\n");std::_Exit(2);}return n;}();
+        {static const unsigned long slack=[]{const char* v=std::getenv("ANYPS3_RSX_TIMER_SLACK_NS");if(!v)return 1ul;char* end=nullptr;errno=0;const auto n=std::strtoul(v,&end,10);
+                // same grammar as ANYPS3_TIMER_SLACK_NS (program.py): digits only (strtoul accepts a sign and leading blanks), no overflow
+                if(*v<'0' || *v>'9' || *end || errno==ERANGE){std::fprintf(stderr,"invalid ANYPS3_RSX_TIMER_SLACK_NS: expected a decimal nanosecond count that fits unsigned long\n");std::_Exit(2);}return n;}();
             if(slack && prctl(PR_SET_TIMERSLACK,slack,0,0,0)!=0){std::fprintf(stderr,"RSX owner: prctl(PR_SET_TIMERSLACK) failed: %s\n",std::strerror(errno));std::_Exit(2);}}
         if(!anyps3_sample::config().selected(anyps3_sample::Role::Rsx))return {};
         return std::make_shared<anyps3_sample::Thread>(anyps3_sample::Role::Rsx);

@@ -1,6 +1,32 @@
 # Handoff to the next instance
 
+## Manager worktree — 2026-10-20
+
+Continue from [manager implementation](experiments/2026-10-20-manager-gui.md)
+and [usage](../manager/README.md). Worktree:
+`local/ratchet/work/manager-gui/tree`, branch `fast2/manager-gui`, base `abf2450`.
+Manager/Qt tests use synthetic data; original-game build/play/rebuild/save and
+physical-controller acceptance remain outstanding. Keep audio silent and use the
+specified memory-capped scopes. No diagnostic game build is registered as a
+manager build. The primary checkout and its existing edits were preserved.
+Thirty scoped synthetic tests pass, including regressions for the five findings
+in the [GPT-6-Astra review](../manager/ASTRA-REVIEW.md). Logs and source hashes are
+under `docs/manager/evidence/`; commands and limitations are in the topic record.
+Astra's recheck resolved all five reported issues and found no new confirmed
+finding. No manager test/preview worker or scope remained at handoff.
+
 The handing-over party fills in CURRENT and the links to verification. The receiving party checks the working tree, opens the latest log and verifies the paths and the profile. A handoff is not a request for a new plan: continue from the nearest concrete question.
+
+## Latest assessment — 2026-10-20 sandbox analysis
+
+Read the top of [CURRENT.md](CURRENT.md) and the [analysis record](experiments/2026-10-20-sandbox-analysis.md) first.
+603a is the best checked steady run without sampling (54.045 FPS); main is 472 + ZeroTable, integration 473 is unbuilt.
+New offline 603w attribution: approximately 4.24 ms/frame in the two wait regions; 45.6% of engine-counter wait samples
+have all ig lanes sampled and classified as parked. Proposed first work: fix integration correctness findings, include
+SPU through `87dce76`, hold the unbuilt `b2a0544` AVX DMA change, keep recorder OFF, then validate and measure.
+642a's diagnostic ring wrapped; fix its commit protocol before precise percentile claims.
+No runtime changes or new tests/runs in this analysis. Host processes were not visible; check them before starting work.
+The handoffs below are historical and their “current”/“first next action” statements are superseded.
 
 ## Handoff 2026-10-20 — FAST2 wave (Claude Opus 5.5 coordinator; Sonnet 5.5 xhigh agents; Codex gpt-6.1-sol reviews)
 

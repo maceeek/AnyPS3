@@ -53,6 +53,7 @@ class SpuFloatTests(unittest.TestCase):
 #include <stdexcept>
 #include <cassert>
 using SpuRegister=std::array<std::uint8_t,16>;
+inline const bool spu_stats_on=false; // defined by the runtime types (spu_runtime.py) in a real program
 """ + helpers + r"""
 template<class F> void fault(F f){bool hit=false;try{f();}catch(const std::runtime_error&){hit=true;}assert(hit);}
 int main(){struct {std::array<SpuRegister,128> gpr{};SpuRegister fpscr{};unsigned pc=0x100;} t;

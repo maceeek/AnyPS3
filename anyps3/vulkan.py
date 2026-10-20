@@ -30,6 +30,16 @@ struct RsxPerfCounters {
     static inline std::array<std::atomic<std::uint64_t>,count> values{};
     static void add(Id id,std::uint64_t n=1){auto& v=values[id];v.store(v.load(std::memory_order_relaxed)+n,std::memory_order_relaxed);}
 };
+#include <cstdlib>
+#include <cstring>
+#include <stdexcept>
+// Diagnostic switches of the render path. ANYPS3_PERF_REPORT=1 (set by every measurement run): wall-clock reads that only feed PERF
+// lines (service ticks, per-draw recording time) are taken only then. ANYPS3_RSX_POLL=adaptive: flight submit timestamps and the
+// latency EWMA exist only for the adaptive completion poll (default and "fixed": a fixed 100 us poll, no timestamps).
+inline bool anyps3_perf_report(){static const bool value=[]{const char* v=std::getenv("ANYPS3_PERF_REPORT");return v && v[0]=='1' && !v[1];}();return value;}
+inline bool rsx_poll_adaptive(){static const bool value=[]{const char* v=std::getenv("ANYPS3_RSX_POLL");
+    if(v && std::strcmp(v,"adaptive") && std::strcmp(v,"fixed")){throw std::runtime_error("invalid ANYPS3_RSX_POLL");}
+    return v && !std::strcmp(v,"adaptive");}();return value;}
 #endif
 #ifdef ANYPS3_VULKAN
 #include <vulkan/vulkan.h>

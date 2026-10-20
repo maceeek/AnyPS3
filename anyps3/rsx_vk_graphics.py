@@ -816,7 +816,7 @@ public:
         const auto& positions=j.positions;const float bias_constant=j.bias_constant,bias_slope=j.bias_slope,min_bounds=j.min_bounds,max_bounds=j.max_bounds;
         const unsigned vertices=j.vertices,first_vertex=j.first_vertex,query=j.query,passes=j.passes;const bool layered=j.layered,multiview=j.multiview,defer_planes=j.defer_planes;
         const std::uint64_t at=j.at,range=j.range;
-        auto t=std::chrono::steady_clock::now();
+        const bool timed=anyps3_perf_report();const auto t=timed?std::chrono::steady_clock::now():std::chrono::steady_clock::time_point{};   // record_back_ms is a PERF statistic
         typename GraphicsBatch::DescriptorKey descriptor_key{};descriptor_key[0]=reinterpret_cast<std::uint64_t>(p.descriptors);descriptor_key[1]=range;
         for(unsigned u=0;u<20;++u)descriptor_key[2+u]=textures[u]?reinterpret_cast<std::uint64_t>(u>=16?textures[u]->array_view:textures[u]->views[0]):0;
         for(unsigned u=0;u<16;++u)descriptor_key[22+u]=raw_textures[u]?reinterpret_cast<std::uint64_t>(raw_textures[u]->buffer):0;
@@ -925,7 +925,7 @@ public:
             if(b.plane_draws.empty()){b.plane_framebuffers=plane_fb;b.plane_pass=p.pass;b.plane_extent={s.width,s.height};b.plane_count=passes;}
             b.plane_draws.push_back(deferred);++b.plane_deferred;
         }
-        graphics_stamp(b,0,true);++b.draws;b.record_back_ms+=resident_ms(t);
+        graphics_stamp(b,0,true);++b.draws;if(timed)b.record_back_ms+=resident_ms(t);
     }
     std::uint64_t graphics_draw(GraphicsBatch& b,const GraphicsState& s,const std::array<std::shared_ptr<GraphicsImage>,4>& colors,
                        const std::shared_ptr<GraphicsImage>& depth,const std::string& vs,const std::string& fs,
