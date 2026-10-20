@@ -180,6 +180,12 @@ class SampleProfileTests(unittest.TestCase):
         # 200 ms of sleep at a 200 us period is about 1000 samples; allow generous scheduling slack.
         self.assertGreater(len(file['records']), 200)
         self.assertTrue(all(r['guest_steps'] == 987654321 and r['flags'] & 1 for r in file['records']))
+        # Side file with the CLOCK_MONOTONIC arming time lets several threads share one time axis.
+        start = next(directory.glob('thread-*.samples.start')).read_text().split()
+        self.assertEqual(start[1:], ['200000', 'wall'])
+        now_ns = time.clock_gettime_ns(time.CLOCK_MONOTONIC)  # arming time is in the past, within the last minute
+        self.assertLess(now_ns - int(start[0]), 60 * 10**9)
+        self.assertGreater(now_ns - int(start[0]), 0)
         # Roles not listed keep thread CPU time.
         directory, _ = self.run_profile('sleep', ANYPS3_SAMPLE_PROFILE_WALL='spu')
         self.assertEqual(reporter.report(directory, self.program)['samples'], 0)
@@ -204,6 +210,10 @@ class SampleProfileTests(unittest.TestCase):
         directory, _ = self.run_profile('guest')
         file = reporter.read_samples(next(directory.glob('thread-*.samples')))
         self.assertTrue(all(len(r['addresses']) == 1 and r['flags'] == 1 for r in file['records']))
+
+    def test_cpu_mode_start_file_is_marked_cpu(self):
+        directory, _ = self.run_profile()
+        self.assertEqual(next(directory.glob('thread-*.samples.start')).read_text().split()[1:], ['200000', 'cpu'])
 
     def test_ring_drop_accounting_and_rip_only_default(self):
         directory, _ = self.run_profile(ANYPS3_SAMPLE_PROFILE_CAPACITY='16', ANYPS3_SAMPLE_PROFILE_FLUSH_MS='5000')

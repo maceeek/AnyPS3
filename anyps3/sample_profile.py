@@ -249,7 +249,7 @@ struct Config {
 inline Config& config(){static Config value;return value;}
 
 class Thread {
-    Config* owner=nullptr;Slot* slot=nullptr;sigset_t old_mask{};bool mask_saved=false;
+    Config* owner=nullptr;Slot* slot=nullptr;sigset_t old_mask{};bool mask_saved=false;std::string start_path;
 public:
     explicit Thread(Role role,const std::uint32_t* pc=nullptr,const std::uint32_t* tid=nullptr,const std::uint64_t* steps=nullptr,
                     const std::uint64_t* guest_lr=nullptr,const std::uint64_t* guest_r1=nullptr,const std::uint8_t* const* guest_base=nullptr){
@@ -276,6 +276,7 @@ public:
                 if(!cfg.failure.empty())throw std::runtime_error(cfg.failure);
                 const auto path=cfg.directory+"/thread-"+std::to_string(host_tid)+"-"+std::to_string(cfg.slots.size())+".samples";
                 fresh->fd=::open(path.c_str(),O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC,0600);if(fresh->fd<0)throw error("open samples");
+                start_path=path+".start";
                 const char magic[]="APS3SP01";std::vector<unsigned char> header(magic,magic+8);
                 put32(header,1);put32(header,sizeof(Record));put64(header,std::uint64_t(cfg.period_us)*1000);put64(header,host_tid);
                 put32(header,unsigned(role));put32(header,8);put64(header,std::uint64_t(::getpid()));put64(header,0);
@@ -289,7 +290,16 @@ public:
             struct itimerspec spec{};spec.it_interval.tv_sec=cfg.period_us/1000000;
             spec.it_interval.tv_nsec=long(cfg.period_us%1000000)*1000;spec.it_value=spec.it_interval;
             slot->active.store(true,std::memory_order_release);
+            struct timespec armed{};::clock_gettime(CLOCK_MONOTONIC,&armed);
             if(::timer_settime(slot->timer,0,&spec,nullptr))throw error("timer_settime");
+            // Side file (the .samples wire ABI stays untouched): CLOCK_MONOTONIC time at which the timer was armed. Record k
+            // (its `sequence`, counted from 1) was taken about k periods later, so the timelines of several threads can be
+            // laid on one time axis (wall mode: ANYPS3_SAMPLE_PROFILE_WALL).
+            {const int fd=::open(start_path.c_str(),O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC,0600);
+                if(fd<0)throw error("open start file");
+                const auto text=std::to_string(std::int64_t(armed.tv_sec)*1000000000+armed.tv_nsec)+" "+std::to_string(std::uint64_t(cfg.period_us)*1000)+" "+
+                    (clock==CLOCK_MONOTONIC?"wall":"cpu")+"\n";
+                write_all(fd,text.data(),text.size());::close(fd);}
             // Restore every other signal's state; this timer must be unblocked.
             auto run_mask=old_mask;::sigdelset(&run_mask,cfg.signo);
             const int c=::pthread_sigmask(SIG_SETMASK,&run_mask,nullptr);if(c){errno=c;throw error("unblock timer signal");}
