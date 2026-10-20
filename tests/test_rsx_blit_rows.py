@@ -23,6 +23,7 @@ CPP = r'''
 static void setup(PpuState& s){
  auto& g=s.rsx;g.local_size=0x80000;s.memory.map(0xc0000000,g.local_size,6,nullptr,0);
  s.memory.map(0x70000000,0x300000,6,nullptr,0);g.io[0]=0x70000000;g.io[1]=0x70100000;g.io[2]=0x70200000;
+ s.memory.map(0x70300000,0x10000,4,nullptr,0);g.io[3]=0x70300000;   // IO page 3 is read-only: destination writes fault
  s.memory.map(0x10000,0x2000,6,nullptr,0);g.dma=0x10000;g.fifo_enabled=true;
 }
 static std::uint32_t lcg(std::uint32_t& x){x=x*1664525u+1013904223u;return x>>10;}
@@ -30,6 +31,7 @@ static unsigned src_bpp_of(unsigned f){return f==8?1:(f==1||f==2||f==7||f==9)?2:
 struct Case {
  unsigned src_format,dst_format,filter,origin,w,h,src_pitch,ow,oh,dst_pitch,ox,oy,cx,cy,cw,ch,point;
  std::int32_t dx,dy;bool src_io,dst_io,in_place,tile;unsigned src_offset,dst_offset;
+ unsigned io1;   // IO page 1: 0 contiguous with page 0, 1 discontiguous, 2 unmapped hole
 };
 static void program_case(PpuState& s,const Case& c){
  auto& R=s.rsx.registers;
@@ -38,6 +40,7 @@ static void program_case(PpuState& s,const Case& c){
     {0xc318,std::uint32_t(c.dx)},{0xc31c,std::uint32_t(c.dy)},{0xc400,(c.h<<16)|c.w},
     {0xc404,(c.filter<<24)|(c.origin<<16)|c.src_pitch},{0xc408,c.src_offset},
     {0x6188,c.dst_io?0xfeed0001u:0xfeed0000u},{0x6300,c.dst_format},{0x6304,c.dst_pitch<<16},{0x630c,c.dst_offset}};
+ s.rsx.io[1]=c.io1==0?0x70100000u:c.io1==1?0x70200000u:UINT32_MAX;
  auto& t=s.rsx.tiles[0];t=NativeRsx::Tile{};
  if(c.tile){t.bound=true;t.location=c.dst_io?1:0;t.offset=c.dst_offset&~0xffffu;t.size=0x10000;t.pitch=256;t.bank=1;}
 }
@@ -47,13 +50,19 @@ static std::string run(PpuState& s,const Case& c){
  try{rsxblit::scaled(s,c.point);}catch(const std::runtime_error& e){return e.what();}
  return "";
 }
+// Observed guest regions: linear IO, VRAM, both sides of the IO page 0/1 edge, the discontiguous page-1 alias, the read-only page.
+struct Window {std::uint64_t address;unsigned size;bool writable;};
+static const Window windows[]={{0x70001000,0x6000,true},{0xc0000000,0x20000,true},{0x700fe000,0x4000,true},{0x70200000,0x2000,true},{0x70300000,0x1000,false}};
 static std::vector<std::uint8_t> dump(PpuState& s){
- std::vector<std::uint8_t> out(0x6000+0x20000);
- s.memory.transfer(0x70001000,out.data(),0x6000,false);s.memory.transfer(0xc0000000,out.data()+0x6000,0x20000,false);return out;
+ std::vector<std::uint8_t> out;
+ for(const auto& w:windows){const auto at=out.size();out.resize(at+w.size);s.memory.transfer(w.address,out.data()+at,w.size,false);}
+ return out;
 }
 static void fill(PpuState& a,PpuState& b,std::uint32_t seed){
- std::vector<std::uint8_t> bytes(0x6000+0x20000);std::uint32_t r=seed;for(auto& x:bytes)x=std::uint8_t(lcg(r));
- for(auto* s:{&a,&b}){s->memory.transfer(0x70001000,bytes.data(),0x6000,true);s->memory.transfer(0xc0000000,bytes.data()+0x6000,0x20000,true);}
+ std::uint32_t r=seed;
+ for(const auto& w:windows){if(!w.writable)continue;
+  std::vector<std::uint8_t> bytes(w.size);for(auto& x:bytes)x=std::uint8_t(lcg(r));
+  for(auto* s:{&a,&b})s->memory.transfer(w.address,bytes.data(),w.size,true);}
 }
 static Case random_case(std::uint32_t& r){
  static const unsigned sources[]={1,2,3,4,7,8,9,12,13};
@@ -80,6 +89,17 @@ static Case random_case(std::uint32_t& r){
  c.in_place=lcg(r)%7==0;
  if(c.in_place){c.dst_io=c.src_io;c.dst_offset=c.src_offset+4*(lcg(r)%40);}
  c.tile=lcg(r)%12==0;
+ // Mapping edges: rows that straddle the 1 MiB IO page boundary (contiguous / discontiguous / unmapped next page),
+ // a destination in the read-only IO page, a source reaching past the end of VRAM.
+ c.io1=0;
+ if(lcg(r)%5==0){
+  const unsigned edge=1+lcg(r)%5;c.io1=lcg(r)%3;
+  if(edge==1){c.src_io=true;c.in_place=false;c.src_offset=0x100000-4*(1+lcg(r)%40);}
+  else if(edge==2){c.dst_io=true;c.in_place=false;c.dst_offset=0x100000-4*(1+lcg(r)%40);}
+  else if(edge==3){c.dst_io=true;c.in_place=false;c.dst_offset=0x300000+0x100+4*(lcg(r)%16);}
+  else if(edge==4){c.src_io=false;c.src_offset=0x7ffc0-4*(lcg(r)%30);}
+  else {c.dst_io=false;c.in_place=false;c.dst_offset=0x7ffc0-4*(lcg(r)%30);}
+ }
  // Invalid parameters are part of the sweep: zero pitch, pitch below the row, unsupported combinations.
  if(lcg(r)%40==0)c.src_pitch=c.w*bpp>1?c.w*bpp-1:0;
  return c;
@@ -97,7 +117,7 @@ static void differential(bool concurrent){
   if(e_fast!=e_slow)throw std::runtime_error("case "+std::to_string(n)+": fast error '"+e_fast+"' reference '"+e_slow+"'");
   const auto a=dump(fast),b=dump(slow);
   if(a!=b){unsigned at=0;while(a[at]==b[at])++at;throw std::runtime_error("case "+std::to_string(n)+": destination differs at byte "+std::to_string(at)+" (fmt "+std::to_string(c.src_format)+"->"+std::to_string(c.dst_format)+")");}
-  e_fast.empty()?++ok:++failed;tiled+=c.tile;if(!e_fast.empty())++errors[e_fast];
+  e_fast.empty()?++ok:++failed;tiled+=c.tile;if(!e_fast.empty())++errors[e_fast.substr(0,26)];
  }
  const auto taken=rsxblit::rows_executed-start;
  std::printf("INFO %s: %u transfers ok, %u rejected identically, %u with a bound tile, row-wise path taken %llu times\n",concurrent?"concurrent":"serial",ok,failed,tiled,(unsigned long long)taken);
