@@ -44,10 +44,12 @@ TIMER_SLACK_CPP = r'''
 #if defined(__linux__) && defined(PR_SET_TIMERSLACK)
     unsigned long ns = 0;
     if (const char* v = std::getenv("ANYPS3_TIMER_SLACK_NS")) {
-        char* end = nullptr; ns = std::strtoul(v, &end, 10);
-        if (*v < '0' || *v > '9' || *end) { std::fprintf(stderr, "invalid ANYPS3_TIMER_SLACK_NS: expected a decimal nanosecond count\n"); std::exit(2); }
+        char* end = nullptr; errno = 0; ns = std::strtoul(v, &end, 10);
+        if (*v < '0' || *v > '9' || *end || errno == ERANGE) {
+            std::fprintf(stderr, "invalid ANYPS3_TIMER_SLACK_NS: expected a decimal nanosecond count that fits unsigned long\n"); std::exit(2); }
     }
-    if (ns) prctl(PR_SET_TIMERSLACK, ns, 0, 0, 0);
+    if (ns && prctl(PR_SET_TIMERSLACK, ns, 0, 0, 0) != 0) {
+        std::fprintf(stderr, "ANYPS3_TIMER_SLACK_NS=%lu: prctl(PR_SET_TIMERSLACK) failed: %s\n", ns, std::strerror(errno)); std::exit(2); }
 #endif
 }
 '''
@@ -162,7 +164,7 @@ class Program:
         else:
             spu_core, spu_functions, spu_dispatch = "", [], ""
         lines = ["// AnyPS3 AOT diagnostic program. No PPU/SPU instruction decoding occurs at runtime.",
-                 "#include <cstdint>", "#include <sys/prctl.h>", "#include <cstdio>", "#include <cinttypes>", "#include <set>", "#include <chrono>", "#include <optional>", "#include <atomic>", "#include <array>", "#include <thread>", SAMPLE_PROFILE_TYPES, MEMORY_CPP,
+                 "#include <cstdint>", "#include <sys/prctl.h>", "#include <cerrno>", "#include <cstring>", "#include <cstdio>", "#include <cinttypes>", "#include <set>", "#include <chrono>", "#include <optional>", "#include <atomic>", "#include <array>", "#include <thread>", SAMPLE_PROFILE_TYPES, MEMORY_CPP,
                  memory_loader(self.image), "constexpr std::uint32_t RETURN_SENTINEL = 0xfffffffc;",
                  MMAPPER_TYPES, SYNC_TYPES, EVENT_TYPES, SYSUTIL_TYPES, FS_TYPES, PAD_TYPES, HID_TYPES, AUDIO_TYPES, PRESENT_TYPES, EXECUTION_TYPES, instrument_gpu_waits(VULKAN_CPP), RSX_TYPES, SPU_TYPES, THREAD_TYPES, FS_EXT_TYPES, SYNC_EXT_TYPES, SPU_EXT_TYPES, RSX_NET_EXT_TYPES,
                  WORKER_TYPES, EXECUTION_STATE_CPP, "bool spu_owner_call(PpuState&,NativeSpu::Thread&,const std::function<void()>&);", FLOW_CPP, FLOAT_CPP, VECTOR_CPP, FS_CPP]

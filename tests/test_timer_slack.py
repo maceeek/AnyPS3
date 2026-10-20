@@ -1,8 +1,9 @@
-"""Timer slack: Linux gives a thread 50 us of timer slack, so a timed host wait ends 30-50 us late.
+"""Timer slack: Linux gives a thread 50 us of timer slack by default, so a timed host wait ends 30-50 us late.
 
 The generated program lowers the slack of its first thread (and so of every thread it creates later) only on request:
-ANYPS3_TIMER_SLACK_NS=N selects N ns; unset or 0 keeps the kernel default (opt-in because the level measured worse with 1 ns). Expected values are the kernel's
-literal numbers (default 50000 ns, PR_GET_TIMERSLACK), not derived from the implementation.
+ANYPS3_TIMER_SLACK_NS=N selects N ns; unset or 0 keeps the inherited slack (opt-in because the level measured worse with 1 ns).
+The inherited initial value is whatever the test runner's process has (the kernel default is 50000 ns, but a service manager can
+change it), so the probe reports it and the expectations compare against that measurement. Explicit values are literal.
 """
 from pathlib import Path
 import os
@@ -16,12 +17,21 @@ from anyps3.program import TIMER_SLACK_CPP, compile_program
 from anyps3.prx import make_image
 
 PROBE = r'''
+#include <cerrno>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <stdexcept>
 #include <thread>
 #include <sys/prctl.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+// Failure injection for the prctl inside the snippet: FAKE_PRCTL_FAIL=1 makes PR_SET_TIMERSLACK fail with EPERM.
+static int fake_prctl(int option, unsigned long a = 0, unsigned long b = 0, unsigned long c = 0, unsigned long d = 0) {
+    if (option == PR_SET_TIMERSLACK && std::getenv("FAKE_PRCTL_FAIL")) { errno = EPERM; return -1; }
+    return int(syscall(SYS_prctl, option, a, b, c, d));
+}
+#define prctl fake_prctl
 ''' + TIMER_SLACK_CPP + r'''
 int main() {
     const long before = prctl(PR_GET_TIMERSLACK);
@@ -50,38 +60,63 @@ class TimerSlack(unittest.TestCase):
     def tearDownClass(cls):
         cls.directory.cleanup()
 
-    def run_probe(self, value=None):
-        env = {k: v for k, v in os.environ.items() if k != 'ANYPS3_TIMER_SLACK_NS'}
+    def run_probe(self, value=None, **extra):
+        env = {k: v for k, v in os.environ.items() if k not in ('ANYPS3_TIMER_SLACK_NS', 'FAKE_PRCTL_FAIL')}
         if value is not None:
             env['ANYPS3_TIMER_SLACK_NS'] = value
+        env.update(extra)
         return subprocess.run([self.probe], capture_output=True, text=True, timeout=60, env=env)
 
-    def test_default_keeps_the_kernel_slack(self):
+    def initial(self):
         run = self.run_probe()
         self.assertEqual(run.returncode, 0, run.stderr)
-        self.assertEqual(list(map(int, run.stdout.split())), [50000, 50000, 50000])  # kernel default of a fresh process
+        return int(run.stdout.split()[0])
+
+    def test_default_keeps_the_inherited_slack(self):
+        run = self.run_probe()
+        self.assertEqual(run.returncode, 0, run.stderr)
+        before, after, worker = map(int, run.stdout.split())
+        self.assertGreater(before, 0)
+        self.assertEqual((after, worker), (before, before))
 
     def test_one_nanosecond_is_inherited_by_later_threads(self):
+        before = self.initial()
         run = self.run_probe('1')
         self.assertEqual(run.returncode, 0, run.stderr)
-        self.assertEqual(list(map(int, run.stdout.split())), [50000, 1, 1])
+        self.assertEqual(list(map(int, run.stdout.split())), [before, 1, 1])
 
     def test_explicit_value(self):
+        before = self.initial()
         run = self.run_probe('777')
         self.assertEqual(run.returncode, 0, run.stderr)
-        self.assertEqual(list(map(int, run.stdout.split()))[1:], [777, 777])
+        self.assertEqual(list(map(int, run.stdout.split())), [before, 777, 777])
 
-    def test_zero_keeps_kernel_default(self):
+    def test_zero_keeps_the_inherited_slack(self):
+        before = self.initial()
         run = self.run_probe('0')
         self.assertEqual(run.returncode, 0, run.stderr)
-        self.assertEqual(list(map(int, run.stdout.split())), [50000, 50000, 50000])
+        self.assertEqual(list(map(int, run.stdout.split())), [before, before, before])
 
-    def test_invalid_value_is_an_explicit_error(self):
-        for bad in ('', 'fast', '12x', '-1', '-1 ', ' 5'):
+    def test_invalid_and_overflowing_values_are_explicit_errors(self):
+        for bad in ('', 'fast', '12x', '-1', '-1 ', ' 5', '18446744073709551616', '99999999999999999999999999'):
             run = self.run_probe(bad)
             self.assertEqual(run.returncode, 2, (bad, run.stdout, run.stderr))
             self.assertIn('invalid ANYPS3_TIMER_SLACK_NS', run.stderr)
             self.assertEqual(run.stdout, '')
+
+    def test_largest_unsigned_long_is_accepted_by_the_parser(self):
+        # 2^64-1 is a valid unsigned long: the parser must not call it an overflow (the kernel decides what it does with it).
+        run = self.run_probe('18446744073709551615')
+        self.assertNotIn('invalid ANYPS3_TIMER_SLACK_NS', run.stderr)
+
+    def test_prctl_failure_is_reported_not_ignored(self):
+        run = self.run_probe('5', FAKE_PRCTL_FAIL='1')
+        self.assertEqual(run.returncode, 2, (run.stdout, run.stderr))
+        self.assertIn('prctl(PR_SET_TIMERSLACK) failed', run.stderr)
+        self.assertIn('Operation not permitted', run.stderr)
+        self.assertEqual(run.stdout, '')
+        # Nothing requested: prctl is never called, so the injected failure is irrelevant.
+        self.assertEqual(self.run_probe(None, FAKE_PRCTL_FAIL='1').returncode, 0)
 
     def test_program_main_sets_slack_before_anything_else(self):
         code = struct.pack('>I', 0x4e800020)  # blr
