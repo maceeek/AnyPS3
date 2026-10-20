@@ -1905,6 +1905,7 @@ template<class Vertex> static bool prepared(Session& session,const std::vector<s
     const unsigned line_base=data.size();if(lines){data[10]=line_base;data.insert(data.end(),line_data.begin(),line_data.end());}
     std::array<std::shared_ptr<NativeVulkan::GraphicsBuffer>,16> raw_buffers{};
     std::array<std::shared_ptr<NativeVulkan::GraphicsImage>,20> texture_images{};
+    phase.next(HostStage::g_tex);
     for(unsigned unit=0;unit<16;++unit){const auto& t=textures[unit];if(!t.valid)continue;
         texture_images[unit]=t.resident_image?t.resident_image:(!alias?session.texture_image(t):nullptr);
         const unsigned desc=(alias?2064:48)+unit*32;data[desc]=data.size();data[desc+1]=t.mip_count;data[desc+2]=t.unnormalized;data[desc+3]=t.wrap_s;data[desc+4]=t.wrap_t;
@@ -1925,6 +1926,7 @@ template<class Vertex> static bool prepared(Session& session,const std::vector<s
     attempt.path("scalar_fragment");
     if(session.batch->used+data.size()*4+32*1024*1024>session.batch->capacity || session.batch->visibility_count+samples>=1000 || session.batch->pipeline_pins.size()>=64)session.submit_async("batch_capacity");
     std::array<std::shared_ptr<NativeVulkan::GraphicsImage>,4> images{};std::shared_ptr<NativeVulkan::GraphicsImage> z;
+    phase.next(HostStage::g_bind);
     for(unsigned i=0;i<count;++i)images[i]=colors[i].base?session.bind(colors[i],width,height,samples,format,false,srgb,packed).image:session.history_image(fixed.color,width,height,samples,4+i);
     if(depth.base)z=session.bind(depth,width,height,samples,(r(0x208)>>5)&7,true).image;
     const std::array<std::array<float,2>,4> positions=aa==3?std::array<std::array<float,2>,4>{{{.75f,.75f},{.25f,.25f},{0,0},{0,0}}}:
