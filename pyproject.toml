@@ -12,9 +12,12 @@ readme = "README.md"
 
 [project.optional-dependencies]
 self = ["cryptography"]
+gui = ["PySide6>=6.8,<7"]
 
 [project.scripts]
 anyps3 = "anyps3.cli:main"
+anyps3-manager = "anyps3_manager.cli:main"
+anyps3-gui = "anyps3_gui.app:main"
 
 [tool.setuptools.packages.find]
 include = ["anyps3*"]

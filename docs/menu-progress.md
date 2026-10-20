@@ -1,5 +1,12 @@
 # Progress toward the menu
 
+**2026-10-20 manager worktree:** CLI-backed game library and PySide6 wrapper added
+on `fast2/manager-gui`, with scoped synthetic tests and a real-CLI offscreen
+preview. All 30 manager/GUI tests pass. GPT-6-Astra's five findings were fixed and
+rechecked. Save preservation, build verification and detached jobs are tested.
+No new original-game run or physical-controller acceptance.
+See [manager record](knowledge/experiments/2026-10-20-manager-gui.md).
+
 Goal: the original menu of Ratchet & Clank: A Crack in Time and navigation with a gamepad.
 The menu has not yet been reached. The PPU/SPU continue to run exclusively from static translation;
 the Vulkan backend is our own, RPCS3 serves only as a local technical reference.
@@ -545,3 +552,19 @@ per-draw membarrier claim (rsx_worker 22.9 → 18.1); GPU alias merge for 1/2-by
 FP loader/blit/plan caches (rsx_worker → 13.4); scheduler fast pass. Refuted: FIFO prefetch window, timer slack 1 ns, register residency
 across SPU blocks; lane 0x100 is not on the critical path (the main thread waits ~6.6 ms/frame for ig SPU jobs). 60 FPS with headroom
 not reached; whole suite over 472 not run. See [FAST2 record](knowledge/experiments/2026-10-20-fast2-wave.md) and [HANDOFF](knowledge/HANDOFF.md).
+
+**2026-10-20 sandbox analysis (Codex, documentation and offline evidence only).** Rechecked the later artifacts:
+603a **54.045 FPS**, independent pacing candidate 642a **52.405 FPS**, integration 473 unbuilt.
+Main is 472 + ZeroTable; the suite over 472 did run (813 tests, one timeout module).
+Source/artifact hashes and original PT_LOAD bytes match. New analysis of saved 603w samples estimates
+3.19 + 1.05 = **4.24 ms/frame** in the engine-counter/job-flag wait regions; 45.6% of engine-counter wait samples
+have all five ig lanes sampled and classified as parked. Investigate completion publication/wakeup as well as SPU execution.
+Documented integration fixes, the unbuilt AVX DMA concurrency concern, and actual wrap of 642a's diagnostic ring.
+Proposed next candidate: corrected integration + SPU through `87dce76`, recorder OFF, without the late AVX DMA patch.
+No new game/test/build or runtime/profile changes. Host processes inaccessible in this sandbox.
+See [analysis](knowledge/experiments/2026-10-20-sandbox-analysis.md) and the updated [CURRENT](knowledge/CURRENT.md).
+
+**2026-10-20 FAST2 wave 4 (to ~22:25, ended on user instruction).** 660a **55.96 FPS** (integration of RSXCPU3 +
+FRAMETIME + rsxblit batch path; first 30 s 32.7 FPS, sustained 30 FPS after 12 s). The post-load slow phase was CPU-side
+scaled blits, not GPU waits. Main-thread SPU wait is 94 % lane compute (wake trace). Build 473 (all combined + review fixes)
+unmeasured; blit batch review findings (1 High) not yet committed. See [CURRENT](knowledge/CURRENT.md).

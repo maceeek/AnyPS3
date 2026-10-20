@@ -1,5 +1,95 @@
 # Current state and goal
 
+## FAST2 wave 4 handoff — 2026-10-20 ~22:25 (ended on user instruction; Claude Opus 5.5 + Sonnet 5.5 agents, gpt-6-astra reviews)
+
+**Goal (60 FPS with headroom) not reached.** Best measured steady run: **`660a` 55.96 FPS mean** (median 58.5, two-second min 47.5,
+max 60; repeat `660b` 55.06), correct level frame, no STOP. Build 660 = `fast2/integ473`@7da3eb3 (main 6ce888b + RSXCPU3 + FRAMETIME)
++ `fast2/warmup` cd781d8 (rsxblit batch path) + d1d8417 (diagnostics); it does **not** contain the SPU work of 603.
+Cold phase after level load in 660a: first 30 s **32.7 FPS**, sustained >= 30 FPS after **12 s** (472a: 13.5 FPS / 36 s).
+Cause (WARMUP, verified): CPU-side NV3089 scaled blits on the per-pixel path, not GPU waits.
+`603a` 54.04 FPS (SPU translation) remains the best build with the SPU work. **`main` runtime = 472 + ZeroTable (46.7 FPS class);
+no runtime promotion this wave.**
+
+**Open at handoff (first next actions):**
+1. **Build 473** (`fast2/integ473` bee67ff = SPU through 87dce76 + RSXCPU3 + FRAMETIME + review fixes 1a–1f + both review rounds +
+   warmup cd781d8/d1d8417) was **still compiling** at handoff (scope `anyps3-compile-473`, log `local/ratchet/compile-473.log`, last
+   lines `rc=…` and the source-hash check). Measure: `measure_with_gpu.sh 473 473a ANYPS3_RSX_HOST_PROFILE=1`; compare with 660a/603a.
+2. **Blit batch review (gpt-6-astra, `local/ratchet/work/_reviews/review-warmup-blit-1.md`): 1 High (destination aliases), 3 Medium
+   (gap notifications, swallowed observer failure, sparse enumeration) — NOT fixed in any commit.** Fixes are written but uncommitted in
+   `local/ratchet/work/warmup/tree` (backup `local/ratchet/work/warmup/wip-review-fixes.patch`, `wip-rsx_blit_frozen.py`); one observer
+   test has a test bug; mutation checks pending. Commit them, re-merge `fast2/warmup` into the integration and rebuild before promotion.
+3. SPUWAKE: the main-thread SPU wait (5.09 ms/frame in 680a) is **94 % lane compute**, not parked lanes; lanes lose 10–26 % of run
+   wall time off CPU. 681a (traced, 48.71 FPS, perturbed): 5.69 ms/frame off CPU inside lane runs = owner calls 0.97 (lane 0x1000200
+   polls lane 0x200's LS ~106×/frame, each pausing the peer), pauses 0.41, reader gate 0.04 (gate/raw permits **ruled out**), 4.50
+   uninstrumented (3.03 on the critical path, lanes 0x2/3/4000200). **First fix (derived, strong):** lane PUTs into RSX local memory
+   (EA 0xc2xxxxxx) block on a synchronous `queue->call(HostAccess)` to the RSX owner (`GuestMemory::notify_parallel` →
+   `renderer_access`, `anyps3/rsx_game_worker.py:134–142`): ~75/44 µs off CPU per PUT on lanes 0x3/0x4000200, ~43 PUTs/frame ≈ 1.0 ms/frame
+   on the critical path. Verify with a `HostAccessWait` trace event, then make the request non-blocking with exact ordering semantics.
+   Details: `local/ratchet/work/spuwake/RESULT.md` (branch `fast2/spuwake` 626d9c8, build 681).
+4. Then: full suite on the final integration, gpt-6-astra review of the merge, promotion to main.
+
+Agents' handoffs: `local/ratchet/work/{integ473,warmup,spuwake}/{STATUS,RESULT}.md`. Record:
+[FAST2 record, wave 4](experiments/2026-10-20-fast2-wave.md). Also new on main this wave: the game-library manager CLI + Qt GUI
+([usage](../manager/README.md), synthetic tests only; no original-game or physical-controller acceptance yet).
+No game run is live at handoff; build 473 may still be compiling (it ends by itself).
+
+## Latest assessment — 2026-10-20, sandbox analysis
+
+**Goal remains unmet:** the original game with functional gamepad control and 60 FPS with headroom.
+**Best checked steady run without the sampling profiler: build 603, `native-virtual-603a`, 54.045 FPS**
+over 60.060 s (median two-second rate 55.95, range 31.5–60). The saved original level frame was inspected.
+This is existing-run evidence rechecked now, not a new game run. Physical gamepad remains unverified.
+
+**Verified source state:** initial clean `main` = `abf2450`; runtime = build 472 plus ZeroTable (`6ce888b`),
+not snapshot 472 verbatim. SPUFAST3 and FRAMETIME are separate branches.
+`fast2/integ473` = `7da3eb3` includes RSXCPU3 + FRAMETIME, not SPUFAST3, and is not a verified game build.
+The independent pacing candidate 642a reached 52.405 FPS; do not add its gain to 603's gain.
+Snapshot source hashes for 472/603/642, artifact hashes of 472a/603a/603w/642a and original PT_LOAD bytes
+were rechecked successfully. The four additional 603 SPU overlay source hashes match original EBOOT bytes.
+
+**New offline analysis:** the existing 603w capture attributes approximately **3.19 ms/frame to the engine-counter
+wait and 1.05 ms/frame to the job-flag wait** (sampling estimates). In 45.6% of engine-counter wait samples,
+all five ig lanes were sampled and classified as parked; missing lane samples do not explain this observation.
+The ≤2 ms target is not demonstrated. Trace completion publication and wakeup latency before attributing every wait
+to slow SPU arithmetic. Seven sample files passed committed-chunk integrity checks, with no dropped records or torn tails.
+
+**First next actions (proposed, not implemented):**
+
+1. Fix integration 473's FP whole-block admission, per-instruction GPU VP budget, bounded host-request drain and
+   real page-coherence/flip-order tests. Check SPU inline WRCH interrupt-boundary equivalence.
+2. Include the SPU changes through `87dce76` (measured build 603), **keep the later `b2a0544` AVX DMA change out**
+   pending a valid concurrent-memory protocol. Plain vector accesses plus signal fences do not replace atomic shared accesses.
+3. Repair the frametime ring's completion protocol before relying on precise percentile results:
+   **642a's ring actually wrapped** (9,093,360 reservations / 8,388,608 slots). This does not invalidate its separate FPS log.
+4. Keep the asynchronous recorder OFF (624b teal frames unresolved). Validate targeted semantics, build a fresh snapshot,
+   measure repeated quiet-machine A/B runs and cold start, then complete the full suite including Vulkan before promotion.
+
+**Tests:** suite 472 did run: 813 tests, zero skips/drift, one failing module (`test_ppu_fp_lazy`, recorded timeout).
+The existing isolated pass and ZeroTable fix do not constitute a full-suite pass of the combined candidate.
+No tests, builds or game runs were performed in this analysis.
+**Processes:** host process/GPU/input visibility is restricted by the sandbox; host inactivity was not verified.
+Runtime/profile unchanged by this round; documentation and offline analysis artifacts added.
+
+Full findings, source locations, fixes, verification contracts and commands:
+[sandbox analysis](experiments/2026-10-20-sandbox-analysis.md).
+Evidence: [analysis JSON](../../local/ratchet/analysis-2026-10-20-sandbox/evidence.json).
+
+## Manager worktree — 2026-10-20
+
+**Verified manager milestone:** CLI and PySide6 wrapper implemented on
+`fast2/manager-gui` (base `abf2450`), fast-forwarded into `main` at `30c322d`; 30 scoped manager/GUI tests and a real-CLI
+offscreen integration preview pass. Original-game and physical-controller
+acceptance were not performed. Runtime player-mode and pad-config work packages
+remain separate. The original game/menu/gamepad performance goal is unchanged.
+See the [manager record](experiments/2026-10-20-manager-gui.md)
+and [usage](../manager/README.md). Runtime notes below are historical;
+this wrapper does not establish a new best game build or FPS result.
+
+## Historical notes — superseded by the assessment above
+
+The older “live tree”, “first next action”, test and process statements below describe their original rounds.
+They are retained as history and must not override the latest assessment.
+
 **2026-10-20 FAST2 wave — ended on user instruction ~15:15 (Claude Opus 5.5 + Sonnet 5.5 subagents, Codex gpt-6.1-sol reviews; PC with
 the game and the RTX 4070 SUPER).** Goal: the game at 60 FPS with headroom — **not reached**. **Best verified build: 472 = live `main`
 b3281ed (live tree = `source-snapshot-472`), measured `472a`: 46.68 FPS mean (median 45.97, min 32.0, max 58.0), correct image, no
