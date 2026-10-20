@@ -428,6 +428,16 @@ TYPES = RESERVATION_WAIT_TYPES + r'''
         }
         return &map;
     }
+    // Reader-admitted probe: does one mapping of the current snapshot contain [address,address+size)?  No cache update.
+    bool single_mapping(std::uint64_t address,unsigned size){
+        if(address>UINT32_MAX || size>UINT64_C(0x100000000)-address)return false;
+        auto& local=local_state();const auto& maps=local.snapshot->maps;
+        auto matches=[&](const auto& r){return address>=r.base && address-r.base<r.bytes->size() && size<=r.bytes->size()-(address-r.base);};
+        const auto& cached=local.cache[(address>>12)%local.cache.size()];
+        if(cached.first==local.snapshot->epoch && cached.second<maps.size() && matches(maps[cached.second].region))return true;
+        for(const auto& map:maps)if(matches(map.region))return true;
+        return false;
+    }
     [[gnu::always_inline]] const ParallelMemory::Mapping& translate_parallel(std::uint64_t address,unsigned size,bool write){
         if(address>UINT32_MAX || size>UINT64_C(0x100000000)-address)throw std::runtime_error("guest address outside 32-bit space");
         auto& local=local_state();const auto& maps=local.snapshot->maps;
@@ -567,13 +577,14 @@ TYPES = RESERVATION_WAIT_TYPES + r'''
         // false: translation-only admission (GuestMemory::range of a read-only Range): reader gate, map snapshot and observer
         // coherence as usual, but no page-broker cell increments, because no payload byte is read or written under it.
         bool brokered_=true;
-        // one_page: the caller proved [address,address+size) lies in one 4 KiB guest page (hence one region) and reads or
-        // writes it as one span (SPU DMA): admission may use the scalar path, which resolves one physical page directly.
+        // one_page: the caller proved [address,address+size) lies in one 4 KiB guest page and reads or writes it as one
+        // span (SPU DMA, HLE memset/memcpy): admission may use the scalar path, which resolves one physical page directly.
+        // One page may still hold several mappings (or a hole): then the scalar path declines and enter() splits the span.
         [[gnu::always_inline]] Lease(GuestMemory& m,std::uint64_t address,unsigned size,bool write,bool split=false,bool brokered=true,bool one_page=false):memory(m),origin_address(address,m.concurrent() || bool(m.host_access_observer)),brokered_(brokered){
             if(!m.concurrent())return;
             m.suspend_scalar_batch(m.local_state());
             if((!split && size && size<=8) || one_page){auto& local=m.local_state();
-                if(!local.raw && !local.leases && scalar_enter(address,size,write))return;}
+                if(!local.raw && !local.leases && scalar_enter(address,size,write,one_page))return;}
             enter(address,size,write,split);
         }
         // Keep the serial guard independent of the growing page/coherence
@@ -646,8 +657,11 @@ TYPES = RESERVATION_WAIT_TYPES + r'''
         // Scalar accesses overwhelmingly touch one physical page and no watched
         // bytes. Resolve directly under reader admission: no span/pin/key array
         // is constructed. The immutable snapshot already pins its backing.
-        [[gnu::always_inline]] bool scalar_enter(std::uint64_t address,unsigned size,bool write){
+        [[gnu::always_inline]] bool scalar_enter(std::uint64_t address,unsigned size,bool write,bool decline_split=false){
             auto& m=memory;auto& local=m.local_state();m.enter_reader(local);
+            // decline_split (one-page transfer): a span that no single mapping contains is not an error here; the general
+            // admission (enter) splits it per mapping and reports a real hole or permission fault itself.
+            if(decline_split && !m.single_mapping(address,size)){m.leave_reader(local);return false;}
             try{const auto& map=m.translate_parallel(address,size,write);
                 const auto* pointer=map.region.bytes->data()+address-map.region.base;
                 const auto at=reinterpret_cast<std::uintptr_t>(pointer);
