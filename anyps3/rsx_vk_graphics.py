@@ -205,6 +205,8 @@ private:
 public:
     // TEST HOOK (tests/test_rsx_async_upload.py): makes the next graphics submit fail AFTER its DMA prelude was submitted.
     bool graphics_test_submit_fault=false;
+    // TEST HOOK: N>0 makes the Nth graphics submission of the ANYPS3_RSX_GPU_LOOP benchmark fail (earlier iterations are then still pending).
+    unsigned graphics_test_loop_fault=0;
     std::uint64_t graphics_busy_ns=0,graphics_profile_frames=0,graphics_completed_batches=0,graphics_prelude_ns=0;
     std::array<std::uint64_t,256> graphics_mark_ns{},graphics_mark_count{};
     std::uint64_t graphics_loop_ns=0,graphics_loop_warm_ns=0,graphics_loop_batches=0;
@@ -867,7 +869,11 @@ public:
                 const unsigned warm=loop/2,timed=loop-warm;
                 // With an async prelude each iteration also issues a same-sized prelude copy into a scratch buffer on the DMA queue
                 // (the steady state of consecutive batches: batch k+1's upload overlaps batch k's graphics work).
-                const bool overlap=transfer_queue && !b.uploads.empty();VkCommandBuffer loop_copy=VK_NULL_HANDLE;
+                const bool overlap=transfer_queue && !b.uploads.empty();
+                // The DMA copy command buffer is freed on every exit path, but only after both queues drained (see the catch below).
+                struct LoopCopy{NativeVulkan* owner;VkCommandBuffer command=VK_NULL_HANDLE;~LoopCopy(){if(command)vkFreeCommandBuffers(owner->device,owner->transfer_pool,1,&command);}} loop_copy_owner{this};
+                VkCommandBuffer& loop_copy=loop_copy_owner.command;
+                try{
                 if(!graphics_loop_timeline){VkSemaphoreTypeCreateInfo tt{};tt.sType=VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO;tt.semaphoreType=VK_SEMAPHORE_TYPE_TIMELINE;
                     VkSemaphoreCreateInfo ti{};ti.sType=VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;ti.pNext=&tt;check(vkCreateSemaphore(device,&ti,nullptr,&graphics_loop_timeline),"graphics loop timeline");}
                 if(overlap){
@@ -903,25 +909,31 @@ public:
                 auto run=[&](unsigned n){for(unsigned k=0;k<n;++k){
                     std::uint64_t waits_value[2]{};VkSemaphore waits_semaphore[2]{};VkPipelineStageFlags waits_stage[2]{};unsigned wait_count=0;
                     if(overlap){
-                        const std::uint64_t before=graphics_upload_serial,u=++graphics_upload_serial;
+                        const std::uint64_t before=graphics_upload_serial,u=before+1; // the serial advances only after the submission succeeded
                         // The previous DMA submission (real prelude or earlier iteration) completes before this one starts: no scratch WAW overlap.
                         VkTimelineSemaphoreSubmitInfo ut{};ut.sType=VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;ut.waitSemaphoreValueCount=1;ut.pWaitSemaphoreValues=&before;ut.signalSemaphoreValueCount=1;ut.pSignalSemaphoreValues=&u;
                         const VkPipelineStageFlags transfer_stage=VK_PIPELINE_STAGE_TRANSFER_BIT;
                         VkSubmitInfo ui{};ui.sType=VK_STRUCTURE_TYPE_SUBMIT_INFO;ui.pNext=&ut;ui.commandBufferCount=1;ui.pCommandBuffers=&loop_copy;ui.waitSemaphoreCount=1;ui.pWaitSemaphores=&graphics_upload_timeline;ui.pWaitDstStageMask=&transfer_stage;ui.signalSemaphoreCount=1;ui.pSignalSemaphores=&graphics_upload_timeline;
-                        check(vkQueueSubmit(transfer_queue,1,&ui,VK_NULL_HANDLE),"graphics loop upload submit");
+                        check(vkQueueSubmit(transfer_queue,1,&ui,VK_NULL_HANDLE),"graphics loop upload submit");graphics_upload_serial=u;
                         waits_value[wait_count]=u;waits_semaphore[wait_count]=graphics_upload_timeline;waits_stage[wait_count++]=VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
                     }
                     // The previous graphics iteration has completed before this one starts (no overlap of one command buffer with itself).
-                    const std::uint64_t previous=graphics_loop_serial,current=++graphics_loop_serial;
+                    const std::uint64_t previous=graphics_loop_serial,current=previous+1;
                     waits_value[wait_count]=previous;waits_semaphore[wait_count]=graphics_loop_timeline;waits_stage[wait_count++]=VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
                     VkTimelineSemaphoreSubmitInfo gt{};gt.sType=VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;gt.waitSemaphoreValueCount=wait_count;gt.pWaitSemaphoreValues=waits_value;gt.signalSemaphoreValueCount=1;gt.pSignalSemaphoreValues=&current;
                     VkSubmitInfo gi{};gi.sType=VK_STRUCTURE_TYPE_SUBMIT_INFO;gi.pNext=&gt;gi.commandBufferCount=command_count;gi.pCommandBuffers=commands;gi.waitSemaphoreCount=wait_count;gi.pWaitSemaphores=waits_semaphore;gi.pWaitDstStageMask=waits_stage;gi.signalSemaphoreCount=1;gi.pSignalSemaphores=&graphics_loop_timeline;
-                    check(vkQueueSubmit(queue,1,&gi,VK_NULL_HANDLE),"graphics loop submit");}
+                    if(graphics_test_loop_fault && !--graphics_test_loop_fault)throw std::runtime_error("injected graphics loop submit failure (test hook)");
+                    check(vkQueueSubmit(queue,1,&gi,VK_NULL_HANDLE),"graphics loop submit");graphics_loop_serial=current;}
                     check(vkQueueWaitIdle(queue),"graphics loop idle");if(overlap)check(vkQueueWaitIdle(transfer_queue),"graphics loop transfer idle");};
                 const auto t0=std::chrono::steady_clock::now();run(warm);const auto t1=std::chrono::steady_clock::now();run(timed);const auto t2=std::chrono::steady_clock::now();
                 graphics_loop_warm_ns+=std::chrono::duration_cast<std::chrono::nanoseconds>(t1-t0).count()/std::max(1u,warm);
                 graphics_loop_ns+=std::chrono::duration_cast<std::chrono::nanoseconds>(t2-t1).count()/timed;++graphics_loop_batches;
-                if(loop_copy)vkFreeCommandBuffers(device,transfer_pool,1,&loop_copy);
+                }catch(...){
+                    // Earlier iterations may still be pending: drain both queues (ignoring their errors) before anything is released,
+                    // then surface the original failure.
+                    vkQueueWaitIdle(queue);if(transfer_queue)vkQueueWaitIdle(transfer_queue);
+                    throw;
+                }
                 std::fprintf(stderr,"PERF GPU_LOOP batches=%llu steady_ns=%llu warm_ns=%llu\n",(unsigned long long)graphics_loop_batches,(unsigned long long)graphics_loop_ns,(unsigned long long)graphics_loop_warm_ns);
             }
             if(graphics_test_submit_fault){graphics_test_submit_fault=false;throw std::runtime_error("injected graphics submit failure (test hook)");}

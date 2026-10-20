@@ -104,10 +104,34 @@ static void fault_oracle(){
  vk.graphics_reset(*batch);
  std::printf("PASS fault injection rounds=4 async=1\n");
 }
-int main(int argc,char** argv){try{if(argc>1 && !std::strcmp(argv[1],"fault")){fault_oracle();return 0;}const char* a=std::getenv("ANYPS3_RSX_ASYNC_UPLOAD");async_oracle(std::getenv("ANYPS3_REQUIRE_NVIDIA")!=nullptr && !(a && !std::strcmp(a,"0")));}catch(const std::exception& e){std::fprintf(stderr,"ASYNC UPLOAD TEST STOP %s\n",e.what());return 1;}}
+// Failure of the second ANYPS3_RSX_GPU_LOOP graphics submission while the first is still pending (diagnostic path, review-gpufast2-1):
+// the destructor must not free pending command buffers/buffers/recycled memory. Needs ANYPS3_RSX_GPU_LOOP>=2 in the environment.
+static void loop_fault_oracle(){
+ NativeVulkan vk;
+ std::printf("LOOP_FAULT_DEVICE %s async=%d\n",vk.device_name.c_str(),int(vk.graphics_async_upload()));
+ const unsigned stride=8192,words=64*stride;
+ NativeVulkan::GraphicsState s{};s.width=s.height=8;s.samples=1;s.colors=1;s.color=VK_FORMAT_R8G8B8A8_UNORM;s.scissor={{0,0},{8,8}};s.blend[0].colorWriteMask=15;
+ std::array<std::array<float,2>,4> positions{};for(auto& p:positions)p={.5f,.5f};
+ for(unsigned round=0;round<3;++round){
+  auto batch=vk.graphics_batch(48*1024*1024);auto& b=*batch;
+  auto color=vk.graphics_image(b,s.color,8,8,1);
+  const auto at=vk.graphics_reserve_upload(b,std::uint64_t(words)*4);
+  auto* out=reinterpret_cast<unsigned*>(static_cast<char*>(b.map)+at);for(unsigned k=0;k<words;++k)out[k]=pattern(200+round,k);
+  std::array<std::shared_ptr<NativeVulkan::GraphicsImage>,4> images{color};
+  std::vector<unsigned> data(16,0);data[0]=unsigned(at/4);
+  vk.graphics_draw(b,s,images,{},ORACLE_VS,ORACLE_FS,data,3,positions);
+  vk.graphics_transfer(b,color,VK_IMAGE_ASPECT_COLOR_BIT,4);
+  vk.graphics_test_loop_fault=2;bool failed=false;
+  try{vk.graphics_submit(b);}catch(const std::runtime_error& e){failed=std::string(e.what()).find("injected graphics loop")!=std::string::npos;}
+  if(!failed)throw std::runtime_error("injected loop submit failure did not surface");
+  batch.reset();
+ }
+ std::printf("PASS loop fault injection rounds=3 async=%d\n",int(vk.graphics_async_upload()));
+}
+int main(int argc,char** argv){try{if(argc>1 && !std::strcmp(argv[1],"fault")){fault_oracle();return 0;}if(argc>1 && !std::strcmp(argv[1],"loopfault")){loop_fault_oracle();return 0;}const char* a=std::getenv("ANYPS3_RSX_ASYNC_UPLOAD");async_oracle(std::getenv("ANYPS3_REQUIRE_NVIDIA")!=nullptr && !(a && !std::strcmp(a,"0")));}catch(const std::exception& e){std::fprintf(stderr,"ASYNC UPLOAD TEST STOP %s\n",e.what());return 1;}}
 '''
 class AsyncUploadTests(unittest.TestCase):
- def run_variant(self,async_upload,args=(),passed='PASS async upload'):
+ def run_variant(self,async_upload,args=(),passed='PASS async upload',extra_env=None):
   with tempfile.TemporaryDirectory() as d:
    root=Path(d);source=native_source().split('int main(int argc,char** argv)')[0]
    (root/'test.cpp').write_text(source+MAIN)
@@ -115,6 +139,7 @@ class AsyncUploadTests(unittest.TestCase):
    self.assertEqual(build.returncode,0,build.stderr)
    env=dict(os.environ,SDL_AUDIODRIVER='dummy',ANYPS3_AUDIO_SINK='null',LP_NUM_THREADS='4',VK_INSTANCE_LAYERS='VK_LAYER_KHRONOS_validation',VK_LAYER_VALIDATE_SYNC='1');env.pop('ANYPS3_AUDIO_AUDIBLE',None)
    if async_upload is not None:env['ANYPS3_RSX_ASYNC_UPLOAD']=async_upload
+   if extra_env:env.update(extra_env)
    if not env.get('ANYPS3_REQUIRE_NVIDIA') and not env.get('VK_DRIVER_FILES') and not env.get('VK_ICD_FILENAMES'):env.update(ANYPS3_VK_DEVICE='lavapipe',VK_DRIVER_FILES='/usr/share/vulkan/icd.d/lvp_icd.json')
    elif env.get('ANYPS3_REQUIRE_NVIDIA'):env.update(ANYPS3_VK_DEVICE='gpu')
    result=subprocess.run([str(root/'test'),*args],capture_output=True,text=True,env=env,timeout=300)
@@ -128,6 +153,10 @@ class AsyncUploadTests(unittest.TestCase):
  def test_submit_failure_after_prelude(self):
   # Review finding 1: a graphics submit that fails after the DMA prelude was submitted must not free/recycle pending resources.
   out=self.run_variant(None,('fault',),'PASS fault injection')
+  if os.environ.get('ANYPS3_REQUIRE_NVIDIA'):self.assertIn('async=1',out)
+ def test_gpu_loop_submit_failure(self):
+  # review-gpufast2-1: a failing diagnostic loop submission leaves earlier iterations pending; both queues are drained before release.
+  out=self.run_variant(None,('loopfault',),'PASS loop fault injection',{'ANYPS3_RSX_GPU_LOOP':'4'})
   if os.environ.get('ANYPS3_REQUIRE_NVIDIA'):self.assertIn('async=1',out)
  def test_single_queue_fallback(self):
   out=self.run_variant('0');self.assertIn('async=0',out)
