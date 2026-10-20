@@ -368,9 +368,10 @@ static void analytic_observer(){
  if(same_effects(c,{},init,"unfiltered observer"))throw std::runtime_error("a fast path ran although every access is observed");
  // A watched gap byte the reference never touches: the fast path may run, no callback on either side.
  if(same_effects(c,{{{0x70002000,4}}},init,"watched gap byte")!=1)throw std::runtime_error("the batch path declined a transfer whose touched bytes are unobserved");
- // A watched touched byte: the fast path must decline; the reference's callbacks appear unchanged.
- if(same_effects(c,{{{0x70003000,4}}},init,"watched source byte"))throw std::runtime_error("a fast path ran over a watched source byte");
- if(same_effects(c,{{{0xc0003000,4}}},init,"watched destination byte"))throw std::runtime_error("a fast path ran over a watched destination byte");
+ // A watched touched byte (second row): its row runs through the reference (row 0 may be a batch segment); callbacks, errors
+ // and bytes equal the reference's.
+ same_effects(c,{{{0x70003000,4}}},init,"watched source byte");
+ same_effects(c,{{{0xc0003000,4}}},init,"watched destination byte");
  // Callback order: the first destination acquisition rewrites the second source pixel (alpha 0 -> discarded in the reference).
  {ObserverSpec poke;poke.poke_at=2;poke.poke_address=0x70003000;poke.poke_value=0;same_effects(c,poke,init,"observer rewrites a later source pixel");}
  // Interest that the reference's first access removes (a coherence sync): after one reference row the remainder is admitted and
@@ -382,6 +383,15 @@ static void analytic_observer(){
   ObserverSpec stay;stay.watch={{0x70001000,4},{0x70003000,4}};stay.unwatch_at=-1;
   const auto escapes2=rsxblit::prefix_escapes;same_effects(c,stay,init,"persistent interest");
   if(rsxblit::prefix_escapes!=escapes2)throw std::runtime_error("a remainder with observed bytes took the batch path");}
+ // Three rows, only the middle source row watched (persistent): rows 0 and 2 are batch segments, row 1 the reference; the middle
+ // row's callback rewrites row 2's source colour, which row 2 (read after row 1 in raster order) must see on both sides.
+ {Case t=c;t.h=3;t.oh=3;t.ch=3;
+  const auto init3=[&init](PpuState& s){init(s);for(unsigned i=0;i<4;++i)s.memory.store(0x70005000+i,1,i==0?0xff:0x50+i);};
+  ObserverSpec middle;middle.watch={{0x70003000,4}};middle.poke_at=0;middle.poke_address=0x70005002;middle.poke_value=0x88;
+  const auto escapes=rsxblit::prefix_escapes;same_effects(t,middle,init3,"observed middle row");
+  if(rsxblit::prefix_escapes!=escapes+1)throw std::runtime_error("the unobserved rows around an observed one were not batched");
+  // The same callback rewriting row 0's source: row 0 was read before it on both sides (old colour stays).
+  middle.poke_address=0x70001002;same_effects(t,middle,init3,"observed middle row rewrites an earlier row");}
  // One-shot observer failures at every position propagate exactly like the reference's.
  for(int at=0;at<6;++at){ObserverSpec one;one.throw_at=at;same_effects(c,one,init,"one-shot observer failure");}
  // First fault: destination on the read-only IO page 3; the observer throws on the second source row. The reference acquires the
@@ -394,7 +404,7 @@ static void analytic_observer(){
   const auto rows=[](PpuState& s){for(unsigned i=0;i<16;++i)s.memory.store(0x70001000+i,1,0x40+i);};
   if(same_effects(r,{{{0x70020000,4}}},rows,"row path, unrelated watch")!=1)throw std::runtime_error("the row path declined an unobserved transfer");
   for(int at=0;at<4;++at){ObserverSpec one;one.throw_at=at;same_effects(r,one,rows,"row path one-shot failure");}
-  if(same_effects(r,{{{0xc0002008,4}}},rows,"row path, watched destination"))throw std::runtime_error("a fast path ran over a watched destination byte");}
+  same_effects(r,{{{0xc0002008,4}}},rows,"row path, watched destination");}
  // Row path covering read: 2048x1 -> 2x1 nearest downscale (dx 0x7ff00000) taps 0x70000800 and 0x700027fc; a watched byte at
  // 0x70001800 between them is never touched by the reference, so no callback may report it.
  {Case d{};d.op=3;d.src_format=3;d.dst_format=10;d.origin=2;d.w=2048;d.h=1;d.src_pitch=8192;d.ow=2;d.oh=1;d.cw=2;d.ch=1;d.dst_pitch=8;

@@ -328,7 +328,7 @@ struct Pieces {
     }
 };
 static bool admission_dynamic=false;   // the last decline came from observer interest or a guard (may vanish after an access)
-static std::uint64_t prefix_escapes=0;   // transfers finished by a batch remainder after reference rows (test hook)
+static std::uint64_t prefix_escapes=0;   // transfers mixing reference rows and admitted batch row segments (test hook)
 static constexpr std::uint64_t source_slack=256;   // unused source bytes a covering read may include (only when unobserved)
 // Side-effect-free admission of `intervals` of one DMA context (see the contract above). `distinct`: destination intervals must
 // not share backing bytes.
@@ -624,27 +624,32 @@ static void scaled(PpuState& s,unsigned point){
         ::RsxPerfCounters::add(ns,std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-path_start).count());};
     if(operation==3 && !force_pixel_path && scaled_rows(s,src,dst,src_format,dst_format,raw_copy,filter,dx,dy,u,v,ox,oy,x0,y0,x1,y1)){
         account(::RsxPerfCounters::blit_rows,::RsxPerfCounters::blit_rows_ns);return;}
-    Prepared remainder;admission_dynamic=false;
-    if(!force_pixel_path && !force_no_batch && scaled_batch(s,src,dst,src_format,dst_format,raw_copy,operation,filter,dx,dy,u,v,ox,oy,x0,y0,x1,y1,remainder)){
-        remainder.commit(s,dst);account(::RsxPerfCounters::blit_batch,::RsxPerfCounters::blit_batch_ns);return;}
-    // Reference path. When the batch declined only because of observer interest or a guard, the reference's own first accesses
-    // (callbacks, guard synchronization) may remove it: after 1, 2, 4, ... complete reference rows the remaining rows are planned
-    // and admitted again. An admitted remainder has no observable effect besides its bytes, so reading its source now equals the
-    // reference's later phase-A reads; the reference's prefix pixels are written first and the remainder after them, as in the
-    // reference's raster-ordered write phase (shared backing between prefix and remainder therefore keeps raster order too).
-    bool escape=!force_pixel_path && !force_no_batch && admission_dynamic,escaped=false;unsigned next_check=1;
+    Prepared whole;admission_dynamic=false;
+    if(!force_pixel_path && !force_no_batch && scaled_batch(s,src,dst,src_format,dst_format,raw_copy,operation,filter,dx,dy,u,v,ox,oy,x0,y0,x1,y1,whole)){
+        whole.commit(s,dst);account(::RsxPerfCounters::blit_batch,::RsxPerfCounters::blit_batch_ns);return;}
+    // Reference path with batch row segments. When the whole-transfer batch declined only because of observer interest or a guard
+    // (admission_dynamic), each next group of rows is planned and admitted as a batch segment (1 row, doubling while admitted, back
+    // to 1 after a decline); rows that are still observed run through the reference. The reference reads every source in raster
+    // order in its phase A and writes every pixel in raster order afterwards. A batch segment's accesses have no observable effect
+    // besides their bytes, so reading its source at its raster position equals the reference's reads of those rows (nothing
+    // observable happens in between), and phase B below writes the segments in raster order: the reference's pixels of a segment
+    // in pixel order, a batch segment's chunks (admitted: distinct backing bytes) in any order. Admission never runs a callback.
+    struct Segment {bool batch;std::size_t first,last;Prepared prepared;};std::vector<Segment> segments;
+    bool batching=!force_pixel_path && !force_no_batch && admission_dynamic;unsigned group=1;
     // Keep the ordinary pixel descriptor compact. Only a physical pixel that
     // straddles mappings needs a retained scatter range; mappings cannot change
     // during this synchronous command.
     struct Pixel {std::uint8_t* direct;std::shared_ptr<GuestMemory::Range> split;Color color;};
     std::vector<Pixel> pixels;pixels.reserve(std::size_t(x1-x0)*(y1-y0));
     auto sample=[&](std::int64_t x,std::int64_t y){return read(src.pixel(s,std::clamp<std::int64_t>(x,0,src.width-1),std::clamp<std::int64_t>(y,0,src.height-1),false),src_format);};
-    for(unsigned y=y0;y<y1 && !escaped;++y){
-      if(escape && y>y0 && y-y0==next_check){
-        next_check*=2;admission_dynamic=false;
-        if(scaled_batch(s,src,dst,src_format,dst_format,raw_copy,operation,filter,dx,dy,u,v,ox,oy,x0,y,x1,y1,remainder)){escaped=true;break;}
-        escape=admission_dynamic;
+    for(unsigned y=y0;y<y1;++y){
+      if(batching){
+        const unsigned end=unsigned(std::min<std::uint64_t>(y1,std::uint64_t(y)+group));admission_dynamic=false;Prepared prepared;
+        if(scaled_batch(s,src,dst,src_format,dst_format,raw_copy,operation,filter,dx,dy,u,v,ox,oy,x0,y,x1,end,prepared)){
+            segments.push_back({true,0,0,std::move(prepared)});y=end-1;group=std::min(group*2,4096u);continue;}
+        batching=admission_dynamic;group=1;
       }
+      if(segments.empty() || segments.back().batch)segments.push_back({false,pixels.size(),pixels.size(),{}});
       for(unsigned x=x0;x<x1;++x){
         const auto fx=u+std::int64_t(x-ox)*dx,fy=v+std::int64_t(y-oy)*dy;
         const auto ix=floor_fixed(fx),iy=floor_fixed(fy);
@@ -665,14 +670,20 @@ static void scaled(PpuState& s,unsigned point){
         auto scatter=direct?nullptr:std::make_shared<GuestMemory::Range>(std::move(range));
         pixels.push_back({direct,std::move(scatter),c});
       }
+      segments.back().last=pixels.size();
     }
     // Snapshot also makes in-place conversion/scaling and IO aliases safe.
-    for(const auto& p:pixels){
-        if(p.direct){const auto bytes=packed(dst_format,p.color);const auto n=dest_bpp(dst_format);
-            s.memory.mark_write(p.direct,n);std::copy_n(bytes.data(),n,p.direct);
-        }else write(s,*p.split,dst_format,p.color);
+    bool any_batch=false,any_reference=false;
+    for(auto& segment:segments){
+        if(segment.batch){segment.prepared.commit(s,dst);any_batch=true;continue;}
+        any_reference=true;
+        for(std::size_t i=segment.first;i<segment.last;++i){const auto& p=pixels[i];
+            if(p.direct){const auto bytes=packed(dst_format,p.color);const auto n=dest_bpp(dst_format);
+                s.memory.mark_write(p.direct,n);std::copy_n(bytes.data(),n,p.direct);
+            }else write(s,*p.split,dst_format,p.color);
+        }
     }
-    if(escaped){remainder.commit(s,dst);++prefix_escapes;account(::RsxPerfCounters::blit_batch,::RsxPerfCounters::blit_batch_ns);return;}
+    if(any_batch){if(any_reference)++prefix_escapes;account(::RsxPerfCounters::blit_batch,::RsxPerfCounters::blit_batch_ns);return;}
     account(::RsxPerfCounters::blit_pixel,::RsxPerfCounters::blit_pixel_ns);
 }
 static void cpu(PpuState& s,unsigned reg,unsigned value){
