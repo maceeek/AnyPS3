@@ -352,7 +352,6 @@ inline thread_local SpuProfile spu_profile;
 // Process-wide copies of the diagnostic switches: hot paths test a plain global,
 // never the dynamically initialized TLS profile (TLS wrapper call per access).
 inline bool spu_profile_on=[](){const char* v=std::getenv("ANYPS3_SPU_PROFILE");return v && v[0]=='1' && !v[1];}();
-inline const bool spu_stats_on=[](){const char* v=std::getenv("ANYPS3_SPU_STATS");return v && v[0]=='1' && !v[1];}();
 template<class T> [[gnu::always_inline]] static inline void spu_stat(T& t,unsigned i){
     if(__builtin_expect(spu_stats_on,0)){auto& c=t.stats[i].value;c.store(c.load(std::memory_order_relaxed)+1,std::memory_order_relaxed);}
 }
@@ -858,7 +857,11 @@ inline std::atomic<bool> spu_poll_park_on{[]{const char* v=std::getenv("ANYPS3_S
 // A confirmed fixed point keeps polling for this long before the first park: a dependency that resolves
 // within one thread park/wake round trip is cheaper to keep polling than to sleep on (a park adds the host
 // wake latency to the poll). Mutable for tests.
-inline std::atomic<std::uint64_t> spu_poll_spin_ns{50000};
+inline std::atomic<std::uint64_t> spu_poll_spin_ns{[]()->std::uint64_t{
+    const char* v=std::getenv("ANYPS3_SPU_POLL_SPIN_US");
+    if(!v || !*v)return 50000;
+    char* end=nullptr;const std::uint64_t us=std::strtoull(v,&end,10);
+    return (*end || us>10000)?50000:us*1000;}()};
 // First park timeout and its cap; consecutive parks without a relevant change double the timeout. Writes to
 // the watched line, mailbox/signal pushes and owner scopes (LS writes, peer DMA, group control) wake a parked
 // lane at once; the timeout only bounds state that nothing signals. Mutable for tests.
@@ -1168,7 +1171,7 @@ static bool spu_list_run(PpuState& s,NativeSpu::Thread& t,std::uint8_t* ls,unsig
         local+=size;if(size<16)local=(local+15)&~15u; // short elements resume on a quadword
         if((lts&0x80000000u) && at+8<end){
             spu_capture_unsupported("DMA list stall-and-notify");
-            auto& stalled=t.stalled_lists[tag];stalled.active=true;stalled.put=list_put;stalled.high=high;
+            auto& stalled=t.stalled_lists[tag];stalled.active=true;t.stalled_active|=1u<<tag;stalled.put=list_put;stalled.high=high;
             stalled.next=at+8;stalled.end=end;stalled.local=local;
             t.stall_mask|=1u<<tag;
             if(!t.stall_stat_ready){t.event_status|=0x2;if(t.event_mask&0x2)t.event_ready=true;}
@@ -1176,10 +1179,10 @@ static bool spu_list_run(PpuState& s,NativeSpu::Thread& t,std::uint8_t* ls,unsig
             return false;
         }
     }
-    t.stalled_lists[tag].active=false;return true;
+    t.stalled_lists[tag].active=false;t.stalled_active&=~(1u<<tag);return true;
 }
 static std::uint32_t spu_incomplete_tags(const NativeSpu::Thread& t){
-    std::uint32_t mask=0;for(unsigned i=0;i<32;++i)if(t.stalled_lists[i].active)mask|=1u<<i;return mask;
+    return t.stalled_active;
 }
 // Tag update request (channel 23): 0 immediate, 1 ANY, 2 ALL. Only stalled lists are incomplete; other transfers
 // complete synchronously. An unsatisfied ANY/ALL stays pending until a stall is acknowledged and its list completes.
