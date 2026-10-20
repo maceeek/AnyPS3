@@ -594,17 +594,16 @@ static std::shared_ptr<const std::vector<FpInst>> load_fragment_program_shared(P
     // The extent of an unknown program is only discovered by decoding: the original parser reads one 16-byte block at a time
     // (an instruction, plus one constant block when an operand selects it) until END, and every observer (surface readback,
     // label synchronization) sees exactly those spans. A read-ahead chunk would also touch bytes behind END, so every block is
-    // read on its own, as two scalar 64-bit loads (the cheapest admitted access: the same bytes reach the same observers, a block
-    // inside one 1 MiB IO page needs no Range); any failure, and a block straddling an IO page edge, repeats the read through
-    // Range, which raises the original error at the original block.
+    // read on its own, as ONE admitted 16-byte transfer inside one 1 MiB IO page (no Range): the transfer validates the complete
+    // block before any observer sees a byte, so a block that is half readable notifies nothing, exactly like Range. A block
+    // straddling an IO page edge, and a block whose admission faults, take the Range path, which raises the original error at
+    // the original block; a failure of an admitted block (an observer error) propagates and is never replayed.
     auto block=[&](std::uint32_t at){
         std::array<std::uint8_t,16> bytes{};bool loaded=false;
         if(((at&0xfffff)+16)<=0x100000){
-            try{const auto address=location_address(s.rsx,location-1,at,16);
-                HostByteAccess exact_bytes{s.memory.host_access_observer.supports_exact_bytes.load(std::memory_order_acquire)};   // byte-exact observer interest, as Range::read
-                const auto first=s.memory.load(address,8),second=s.memory.load(address+8,8);
-                for(unsigned i=0;i<8;++i){bytes[i]=std::uint8_t(first>>(56-8*i));bytes[8+i]=std::uint8_t(second>>(56-8*i));}loaded=true;}
-            catch(const std::exception&){}
+            const auto address=location_address(s.rsx,location-1,at,16);   // the Range path below would raise the same error
+            try{s.memory.transfer(address,bytes.data(),16,false);loaded=true;}
+            catch(const std::exception&){if(s.memory.readable_span(address,16))throw;}
         }
         if(!loaded)read_fragment_bytes(s,location,at,bytes.data(),16);
         image.insert(image.end(),bytes.begin(),bytes.end());

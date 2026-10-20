@@ -143,6 +143,95 @@ static void observer_spans(){
  assert(cases==12);
  std::puts("PASS a miss reads exactly the original parser's bytes (VRAM and IO, with/without constants); a watched region behind END is never touched");
 }
+// A block whose second half faults must notify NO observer for its readable first half: the original parser validated the complete
+// 16-byte Range before any observer saw a byte (RSXCPU3's two scalar loads notified the first half and then faulted).
+// Spans are recorded as (host offset, size) relative to the first mapped page; the expectation is the literal Range-based reference (observed bytes).
+using SpanList=std::vector<std::pair<long,std::uint64_t>>;
+static void put_block(PpuState& s,std::uint64_t address,unsigned d,std::uint64_t mapped_end){   // instruction with plain input operands (no constant block)
+ const unsigned w[4]={d,1,0,1};
+ for(unsigned i=0;i<4;++i)if(address+4*i+4<=mapped_end)put_word(s,address+4*i,w[i]);
+}
+struct Admission {
+ std::string error;SpanList spans;std::vector<FpInst> program;
+};
+static void admission_case(bool concurrent,unsigned flags_second,const char* name,unsigned blocks_before_fault,bool second_region){
+ // IO page 0 -> guest 0x70200000; first region [0x70200000,+0x1000) readable; the second region (if any) continues it, or nothing does.
+ // Fresh states: reference and loader never share observer state; the loader caches successful programs by register value, so the
+ // two modes use different IO pages (value = page<<20 | offset | location).
+ auto run=[&](bool use_loader){
+  PpuState s;setup_draw(s,8,8,32,false);auto& m=s.memory;
+  m.map(0x70200000,0x1000,6,nullptr,0);if(second_region)m.map(0x70201000,0x1000,flags_second,nullptr,0);
+  const unsigned page=concurrent?1:0;s.rsx.io[page]=0x70200000;
+  const std::uint64_t mapped_end=0x70201000+(second_region && (flags_second&2)?0x1000:0);   // bytes the test may store (the permission case is writable, not readable)
+  // blocks_before_fault readable blocks (no END) precede the block at 0xff8, which has END
+  const std::uint32_t first=0xff8-16*blocks_before_fault;
+  for(unsigned i=0;i<blocks_before_fault;++i)put_block(s,0x70200000+first+16*i,0,mapped_end);
+  put_block(s,0x70200000+0xff8,1,mapped_end);
+  s.rsx.registers[0x8e4]=value_of(2,(page<<20)|first);
+  const auto base=host_of(s,0x70200000);
+  if(concurrent)m.enable_concurrency();
+  Admission out;
+  m.host_access_observer=[&](const void* p,std::uint64_t n,bool write){if(!write)out.spans.push_back({long(reinterpret_cast<std::uintptr_t>(p))-long(base),n});};
+  try{
+   if(use_loader){const auto loaded=rsxdraw::load_fragment_program_shared(s,rsxdraw::Reg{s.rsx});out.program=*loaded;}
+   else{auto ref=reference(s,2,(page<<20)|first);for(const auto& r:ref){FpInst f{r.d,r.s0,r.s1,r.s2,r.constant,r.has_constant};f.word_offset=r.word_offset;out.program.push_back(f);}}
+  }catch(const std::exception& e){out.error=e.what();}
+  m.host_access_observer=nullptr;
+  return out;
+ };
+ const auto expected=run(false),actual=run(true);
+ const std::string label=std::string(name)+(concurrent?" [concurrent]":" [serial]");
+ if(expected.error!=actual.error)throw std::runtime_error(label+": error '"+actual.error+"' vs reference '"+expected.error+"'");
+ // Range notifies at creation and again at read, so multiplicity differs by design: the observed BYTES must be equal.
+ auto covered=[](const SpanList& spans){std::set<long> bytes;for(const auto& p:spans)for(std::uint64_t i=0;i<p.second;++i)bytes.insert(p.first+long(i));return bytes;};
+ if(covered(expected.spans)!=covered(actual.spans)){
+  std::string text=label+": observed bytes differ; reference";for(const auto& p:expected.spans)text+=" ("+std::to_string(p.first)+","+std::to_string(p.second)+")";
+  text+=" loader";for(const auto& p:actual.spans)text+=" ("+std::to_string(p.first)+","+std::to_string(p.second)+")";throw std::runtime_error(text);}
+ if(!expected.error.empty() && covered(actual.spans).size()%16)throw std::runtime_error(label+": a faulting block leaked a partial span");
+ if(expected.error.empty()){
+  if(expected.program.size()!=actual.program.size())throw std::runtime_error(label+": program length differs");
+  for(std::size_t i=0;i<expected.program.size();++i)if(expected.program[i].d!=actual.program[i].d || expected.program[i].s0!=actual.program[i].s0)throw std::runtime_error(label+": program differs");
+ }
+ std::printf("INFO %s: %s, %zu observed spans\n",label.c_str(),expected.error.empty()?"program loaded":("error '"+expected.error.substr(0,48)+"'").c_str(),expected.spans.size());
+}
+static void partial_block_admission(){
+ for(const bool concurrent:{false,true}){
+  // 1. the first block of the program is half readable (8 bytes at the end of the only region): error, no notification at all
+  admission_case(concurrent,0,"first block half readable",0,false);
+  // 2. two readable blocks, then the half readable block: exactly the two blocks (16 bytes each) were observed, nothing of the faulting one
+  admission_case(concurrent,0,"second block half readable",2,false);
+  // 3. the block continues into an adjacent readable region: loads, observed as the two parts Range::read reports
+  admission_case(concurrent,6,"block across two regions",1,true);
+  // 4. the second half is mapped but not readable: permission fault, nothing observed for the first half
+  admission_case(concurrent,2,"second half not readable",1,true);
+ }
+ // an admitted block whose observer fails is not an admission fault: the failure propagates and the observer is not called again
+ for(const bool concurrent:{false,true}){
+  PpuState s;setup_draw(s,8,8,32,false);auto& m=s.memory;
+  m.map(0x70200000,0x2000,6,nullptr,0);const unsigned page=2+concurrent;s.rsx.io[page]=0x70200000;
+  put_block(s,0x70200000+0x40,1,0x70202000);
+  s.rsx.registers[0x8e4]=value_of(2,(page<<20)|0x40);
+  if(concurrent)m.enable_concurrency();
+  unsigned calls=0;m.host_access_observer=[&](const void*,std::uint64_t,bool){++calls;throw std::runtime_error("observer failure");};
+  std::string error;
+  try{(void)rsxdraw::load_fragment_program_shared(s,rsxdraw::Reg{s.rsx});}catch(const std::exception& e){error=e.what();}
+  m.host_access_observer=nullptr;
+  if(error!="observer failure" || calls!=1)throw std::runtime_error(std::string(concurrent?"[concurrent] ":"[serial] ")+"observer failure was replayed or masked: error '"+error+"' after "+std::to_string(calls)+" observer calls");
+ }
+ // readable_span: a pure probe with the same verdict as Range admission
+ for(const bool concurrent:{false,true}){
+  PpuState s;setup_draw(s,8,8,32,false);auto& m=s.memory;
+  m.map(0x70200000,0x1000,6,nullptr,0);m.map(0x70201000,0x1000,6,nullptr,0);m.map(0x70203000,0x1000,2,nullptr,0);
+  if(concurrent)m.enable_concurrency();
+  unsigned fired=0;m.host_access_observer=[&](const void*,std::uint64_t,bool){++fired;};
+  assert(m.readable_span(0x70200ff8,16) && m.readable_span(0x70200000,0x2000) && m.readable_span(0x70200ff8,0));
+  assert(!m.readable_span(0x70201ff8,16) && !m.readable_span(0x70202000,1) && !m.readable_span(0x70203000,4) && !m.readable_span(0x70202ff8,16));
+  assert(!m.readable_span(0xfffffff8u,16) && !m.readable_span(0x70200000,0x3000));
+  m.host_access_observer=nullptr;
+  if(fired)throw std::runtime_error("readable_span notified an observer");
+ }
+ std::puts("PASS a half readable FP block notifies no observer and raises the original error; split blocks observe the Range parts; readable_span is side-effect free");
+}
 static void tail_of_memory(){
  // The END block is the last readable block of VRAM: nothing may be read past it.
  PpuState s;setup_draw(s,8,8,32,false);auto& R=s.rsx.registers;std::uint32_t r=7;
@@ -176,7 +265,7 @@ static void sharing_and_eviction(){
  (void)r;
  std::puts("PASS equal programs share one result; eviction past 1024 entries never returns a wrong program; rewrites are seen");
 }
-int main(){try{random_programs();observer_spans();tail_of_memory();sharing_and_eviction();}catch(const std::exception& e){std::fprintf(stderr,"FAIL %s\n",e.what());return 1;}}
+int main(){try{random_programs();observer_spans();partial_block_admission();tail_of_memory();sharing_and_eviction();}catch(const std::exception& e){std::fprintf(stderr,"FAIL %s\n",e.what());return 1;}}
 '''
 
 
@@ -196,7 +285,7 @@ class RsxFpCacheTests(unittest.TestCase):
             env = dict(os.environ, ANYPS3_VK_DEVICE='lavapipe', VK_DRIVER_FILES='/usr/share/vulkan/icd.d/lvp_icd.json')
             result = subprocess.run([str(root / 'test')], env=env, capture_output=True, text=True, timeout=300)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            self.assertEqual(result.stdout.count('PASS '), 4, result.stdout)
+            self.assertEqual(result.stdout.count('PASS '), 5, result.stdout)
 
 
 if __name__ == '__main__':

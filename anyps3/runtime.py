@@ -945,6 +945,28 @@ struct GuestMemory {
         Lease lease(*this,address,size,write);
         translate_parallel(address,size,write);
     }
+    // Side-effect-free admission test: true when [address,address+size) is wholly mapped and readable (the span may cross adjacent
+    // regions). It calls no observer, takes no page-broker cell and reads no guest byte, so a caller that reads one logical block
+    // through an admitted transfer can tell an admission fault (nothing was notified) from any other failure (not to be replayed).
+    bool readable_span(std::uint64_t address,unsigned size){
+        if(address>UINT32_MAX || size>UINT64_C(0x100000000)-address)return false;
+        if(!concurrent()){
+            auto next=address;auto remaining=size;
+            while(remaining){
+                const auto region=std::find_if(regions.begin(),regions.end(),[&](const auto& r){return next>=r.base && next-r.base<r.bytes->size();});
+                if(region==regions.end() || !(region->flags&4))return false;
+                const auto count=static_cast<unsigned>(std::min<std::uint64_t>(remaining,region->bytes->size()-(next-region->base)));
+                next+=count;remaining-=count;
+            }
+            return true;
+        }
+        Lease lease(*this,address,0,false,true,false);   // zero-byte translation-only admission: reader gate and map snapshot, no span reaches an observer
+        try{auto next=address;unsigned left=size;
+            while(left){const auto& map=translate_parallel(next,1,false);const auto& r=map.region;
+                const unsigned n=std::min<std::uint64_t>(left,r.bytes->size()-(next-r.base));next+=n;left-=n;}
+        }catch(const std::runtime_error&){return false;}
+        return true;
+    }
     std::uint8_t* access(std::uint64_t address, unsigned size, bool write) {
         require_raw();
         return access_impl(address,size,write,true);
