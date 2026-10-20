@@ -1123,6 +1123,21 @@ struct Session {
     }
     void host_access(const void* p,std::uint64_t size,bool write){
         if(busy){if(anyps3_ft::on)anyps3_ft::exec_class|=4;return;}
+        // ANYPS3_SPUPUT_DUMP=N (diagnostic, default off): describe the first N foreign read requests: exact sync/poll bits of the
+        // span, overlapping labels, surfaces and raw texture spans (which watch made the requester synchronise?).
+        static const unsigned dump_limit=[]{const char* v=std::getenv("ANYPS3_SPUPUT_DUMP");return v?unsigned(std::strtoul(v,nullptr,0)):0u;}();
+        static unsigned dumped=0;
+        if(dump_limit && dumped<dump_limit && !write){const auto origin=HostAccessContext::sample();
+            if(origin.engine==HostAccessOrigin::Engine::Spu || origin.engine==HostAccessOrigin::Engine::Dma || origin.ea!=UINT64_MAX){++dumped;
+            auto& o=state.memory.host_access_observer;const auto at=reinterpret_cast<std::uintptr_t>(p);
+            std::fprintf(stderr,"SPUPUT DUMP host=0x%llx size=%llu engine=%s ea=0x%llx pc=0x%x id=0x%x sync_exact=%d all_exact=%d sync_page=%d\n",(unsigned long long)at,(unsigned long long)size,origin.name(),
+                (unsigned long long)origin.ea,origin.guest_pc,origin.guest_id,int(o.synchronous(p,size,true)),int(o.interested(p,size,true)),int(o.synchronous(p,size,false)));
+            each_label([&](const auto& label){const auto q=reinterpret_cast<std::uintptr_t>(label.identity());if(label_page_overlap(label,p,size))
+                std::fprintf(stderr,"SPUPUT DUMP  label address=0x%llx size=%u kind=%u value=0x%x exact=%d\n",(unsigned long long)label.address,label.size,unsigned(label.kind),label.value,int(at<q+label.size && q<at+size));});
+            for(const auto& surface:surfaces){bool page=false;for(const auto& span:surface.physical)if((span.begin>>12)<=((at+size-1)>>12) && (at>>12)<=((span.end-1)>>12))page=true;
+                if(page)std::fprintf(stderr,"SPUPUT DUMP  surface base=0x%llx pitch=%u %ux%u fmt=%u depth=%d dirty=%d exact=%d spans=%zu\n",(unsigned long long)reinterpret_cast<std::uintptr_t>(surface.target.base),surface.target.pitch,surface.width,surface.height,surface.format,int(surface.depth),int(surface.dirty),int(surface.overlaps(p,size)),surface.physical.size());}
+            for(const auto& entry:raw_textures){bool hit=false;raw_spans(entry,[&](const void* a,std::uint64_t n){const auto x=reinterpret_cast<std::uintptr_t>(a);if((x>>12)<=((at+size-1)>>12) && (at>>12)<=((x+n-1)>>12))hit=true;});
+                if(hit)std::fprintf(stderr,"SPUPUT DUMP  raw source=0x%llx size=%llu dirty_inputs=%d buffer=%d plan=%d\n",(unsigned long long)reinterpret_cast<std::uintptr_t>(entry.source),(unsigned long long)entry.size,int(bool(entry.dirty_inputs)),int(bool(entry.buffer)),int(bool(entry.plan)));}}}
         const auto ft_invalidations=raw_invalidations;
         struct FtClass {const decltype(raw_invalidations)& now;decltype(raw_invalidations) before;~FtClass(){if(anyps3_ft::on && now!=before)anyps3_ft::exec_class|=32;}} ft_class{raw_invalidations,ft_invalidations};
         ::RsxPerfCounters::add(::RsxPerfCounters::host_access);
