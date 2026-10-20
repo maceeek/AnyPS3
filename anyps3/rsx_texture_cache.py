@@ -6,9 +6,13 @@ MEMBERS = r'''
     static constexpr unsigned texture_cache_entries=512;
     static constexpr std::uint64_t raw_cache_limit=UINT64_C(512)*1024*1024;
     struct MetadataEntry {Texture texture;std::uint64_t used;};
-    std::map<std::array<unsigned,4>,MetadataEntry> texture_plans;
+    // Looked up once per sampled texture unit and draw: a hash lookup instead of a 9-level ordered-tree walk. Eviction scans
+    // for the least recently used entry (unique clock values), so iteration order is irrelevant.
+    struct PlanKeyHash {std::size_t operator()(const std::array<unsigned,4>& k)const{
+        std::uint64_t h=UINT64_C(0xcbf29ce484222325);for(const auto w:k){h^=w;h*=UINT64_C(0x100000001b3);h^=h>>29;}return std::size_t(h);}};
+    std::unordered_map<std::array<unsigned,4>,MetadataEntry,PlanKeyHash> texture_plans;
     struct PlanEntry {std::shared_ptr<TexturePlan> plan;std::uint64_t used;};
-    std::map<std::array<unsigned,4>,PlanEntry> layout_plans;
+    std::unordered_map<std::array<unsigned,4>,PlanEntry,PlanKeyHash> layout_plans;
     std::uint64_t layout_plan_bytes=0,layout_clock=0;
     std::uint64_t texture_plan_bytes=0;
     std::vector<std::uint64_t> texture_context,context_scratch;
