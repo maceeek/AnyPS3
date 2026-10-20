@@ -137,6 +137,48 @@ def summarize(values):
     return f'mean {statistics.fmean(values):7.3f}  p50 {q(.5):7.3f}  p90 {q(.9):7.3f}  p99 {q(.99):7.3f}  max {values[-1]:7.3f}'
 
 
+
+def trace_frame(events, k, frames, index, margin_ms=2.0):
+    """Time-ordered compressed trace around frame `index` (previous vsync end - margin .. flip request + vsync + margin)."""
+    f = frames[index]
+    lo = frames[index - 1]['vs_end'] - int(margin_ms * MS)
+    hi = f['vs_end'] + int(margin_ms * MS)
+    lines = []
+    ep = None
+    for e in events:
+        if e.ns < lo or e.ns > hi:
+            continue
+        t = (e.ns - frames[index - 1]['vs_end']) / MS
+        name = ft.NAMES[e.kind]
+        if e.kind == ft.BLOCK:
+            key = (e.a >> 32, e.a & 0xffffffff, e.c & 0xffffffff, e.c >> 32)
+            if ep and ep['key'] == key and e.ns - ep['last'] < 400_000:
+                ep['last'] = e.ns
+                ep['n'] += 1
+                ep['peek'] = e.d
+                continue
+            if ep:
+                lines.append((ep['first'], f"{(ep['first'] - frames[index - 1]['vs_end']) / MS:9.3f}  Block   guest{ep['key'][2]} kind{ep['key'][3]} lr={ep['key'][0]:08x} pc={ep['key'][1]:08x} x{ep['n']} for {(ep['last'] - ep['first']) / 1e3:.0f} us peek={ep['peek'] >> 32:08x}:{ep['peek'] & 0xffffffff:08x}"))
+            ep = dict(key=key, first=e.ns, last=e.ns, n=1, peek=e.d)
+            continue
+        if e.kind == ft.SWITCH:
+            continue
+        if e.kind in ft.SPAN_KINDS:
+            if e.b < 100_000 and e.kind in (ft.IDLE, ft.HOST_EXEC):
+                continue
+            lines.append((e.ns, f"{t:9.3f}  {name:8s} dur {e.b / MS:7.3f} ms a={e.a:x} c={e.c:x} d={e.d:x}"))
+        elif e.kind == ft.LABEL_PUB and e.c != 1:
+            continue
+        else:
+            extra = ''
+            if e.kind == ft.GPU_SUBMIT:
+                extra = f' reason={ft.unpack_text(e.d)}'
+            lines.append((e.ns, f"{t:9.3f}  {name:8s} a={e.a:x} b={e.b:x} c={e.c:x} d={e.d:x}{extra}"))
+    if ep:
+        lines.append((ep['first'], f"{(ep['first'] - frames[index - 1]['vs_end']) / MS:9.3f}  Block   guest{ep['key'][2]} kind{ep['key'][3]} lr={ep['key'][0]:08x} pc={ep['key'][1]:08x} x{ep['n']} for {(ep['last'] - ep['first']) / 1e3:.0f} us peek={ep['peek'] >> 32:08x}:{ep['peek'] & 0xffffffff:08x}"))
+    lines.sort(key=lambda x: x[0])
+    return [l for _, l in lines]
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('ring')
@@ -145,6 +187,7 @@ def main():
     ap.add_argument('--worst', type=int, default=12)
     ap.add_argument('--top-lr', type=int, default=8)
     ap.add_argument('--json')
+    ap.add_argument('--trace-frame', type=int, action='append', default=[])
     args = ap.parse_args()
     header, events = ft.read_ring(args.ring, args.seconds, args.skip_end)
     k = by_kind(events)
@@ -208,7 +251,9 @@ def main():
     for (lr, pc, wkind), v in ranked:
         v.sort()
         p(f'  {lr:08x}  {pc:08x}  {wkind:4d} {len(v):6d} {sum(v) / 1e3:10.1f} {statistics.fmean(v):8.1f} {v[int(.99 * (len(v) - 1))]:8.1f}')
-    # Pacing-wait correlation: end of the longest-running wait episodes against candidate events.
+    for index in args.trace_frame:
+        p(f'\nTRACE frame {index} (t=0 at the previous flip vsync end, period {frames[index].get("periods")})')
+        out.extend(trace_frame(events, k, frames, index))
     print('\n'.join(out))
     if args.json:
         Path(args.json).write_text(json.dumps(dict(periods=dict(periods), frames=rows), indent=1))
