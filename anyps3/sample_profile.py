@@ -60,6 +60,9 @@ struct Slot {
     // addresses (read through process_vm_readv, which fails with EFAULT instead of faulting in the handler).
     const std::uint64_t* guest_lr=nullptr;const std::uint64_t* guest_r1=nullptr;const std::uint8_t* const* guest_base=nullptr;
     bool guest_stack=false;
+    // Wall mode (or ANYPS3_SAMPLE_PROFILE_STAMP=1): addresses[7] holds the CLOCK_MONOTONIC time in ns of the sample and
+    // depth is capped at 7, so threads can be laid on one time axis even when timer notifications coalesce.
+    bool stamp=false;
     timer_t timer{};bool timer_created=false;
     int fd=-1;
     std::uint64_t written_attempted=UINT64_MAX;
@@ -71,8 +74,11 @@ struct Slot {
 // snapshot is NOT a transaction: a context switch can be interrupted halfway.
 // PPUGEN1 also publishes PC/steps only at its existing checkpoints. Host RIP is
 // the precise interrupted instruction; guest PC is the last published context.
+// A handler interrupts arbitrary code, so it must leave errno untouched (process_vm_readv below sets it on failure).
+struct ErrnoGuard {int saved;ErrnoGuard():saved(errno){}~ErrnoGuard(){errno=saved;}};
 inline void handler(int, siginfo_t* info, void* context) noexcept {
 #if defined(__linux__) && defined(__x86_64__)
+    ErrnoGuard errno_guard;
     if(!info || info->si_code!=SI_TIMER)return;
     auto* slot=static_cast<Slot*>(info->si_value.sival_ptr);
     if(!slot || !slot->active.load(std::memory_order_acquire))return;
@@ -106,14 +112,14 @@ inline void handler(int, siginfo_t* info, void* context) noexcept {
             out=__builtin_bswap64(raw);return true;};
         r.addresses[r.depth++]=__atomic_load_n(slot->guest_lr,__ATOMIC_RELAXED);
         std::uint64_t frame=__atomic_load_n(slot->guest_r1,__ATOMIC_RELAXED);
-        while(r.depth<8){
+        while(r.depth<(slot->stamp?7u:8u)){
             std::uint64_t parent=0,ret=0;
             if(!be64(frame,parent) || parent<=frame || parent-frame>0x100000 || !be64(parent+16,ret) || !ret)break;
             r.addresses[r.depth++]=ret;frame=parent;
         }
     }else if(slot->frames && sp>=slot->stack_low && sp<slot->stack_high){
         auto lower=sp;
-        while(r.depth<8 && !(fp&7) && fp>=lower && fp>=slot->stack_low &&
+        while(r.depth<(slot->stamp?7u:8u) && !(fp&7) && fp>=lower && fp>=slot->stack_low &&
               fp<=slot->stack_high-2*sizeof(std::uintptr_t)){
             const auto* frame=reinterpret_cast<const std::uintptr_t*>(fp);
             const auto next=__atomic_load_n(frame,__ATOMIC_RELAXED);
@@ -121,6 +127,10 @@ inline void handler(int, siginfo_t* info, void* context) noexcept {
             if(!ret)break;
             r.addresses[r.depth++]=ret;lower=fp+2*sizeof(std::uintptr_t);fp=next;
         }
+    }
+    if(slot->stamp){
+        struct timespec now{};::clock_gettime(CLOCK_MONOTONIC,&now);
+        r.addresses[7]=std::uint64_t(now.tv_sec)*1000000000u+std::uint64_t(now.tv_nsec);
     }
     slot->head.store(head+1,std::memory_order_release);
 #else
@@ -150,7 +160,7 @@ inline unsigned setting(const char* name,unsigned fallback,unsigned low,unsigned
 }
 struct Config {
     bool enabled=false,frames=false,stopping=false;
-    unsigned roles=14,period_us=200,flush_ms=100,capacity=8192,wall_roles=0;bool guest_stack=false;
+    unsigned roles=14,period_us=200,flush_ms=100,capacity=8192,wall_roles=0;bool guest_stack=false,stamp_all=false;
     int signo=0;std::string directory;
     std::mutex mutex;std::condition_variable changed;
     std::vector<std::unique_ptr<Slot>> slots;
@@ -183,6 +193,7 @@ struct Config {
                 start=end+1;}
         }
         guest_stack=setting("ANYPS3_SAMPLE_PROFILE_GUEST_STACK",0,0,1)!=0;
+        stamp_all=setting("ANYPS3_SAMPLE_PROFILE_STAMP",0,0,1)!=0;
         signo=SIGRTMIN+6;if(signo>SIGRTMAX)throw std::runtime_error("SAMPLE_PROFILE: no realtime signal");
         struct sigaction previous{};if(::sigaction(signo,nullptr,&previous))throw error("sigaction query");
         if(previous.sa_handler!=SIG_DFL)throw std::runtime_error("SAMPLE_PROFILE: SIGRTMIN+6 already in use");
@@ -249,7 +260,7 @@ struct Config {
 inline Config& config(){static Config value;return value;}
 
 class Thread {
-    Config* owner=nullptr;Slot* slot=nullptr;sigset_t old_mask{};bool mask_saved=false;std::string start_path;
+    Config* owner=nullptr;Slot* slot=nullptr;sigset_t old_mask{};bool mask_saved=false;
 public:
     explicit Thread(Role role,const std::uint32_t* pc=nullptr,const std::uint32_t* tid=nullptr,const std::uint64_t* steps=nullptr,
                     const std::uint64_t* guest_lr=nullptr,const std::uint64_t* guest_r1=nullptr,const std::uint8_t* const* guest_base=nullptr){
@@ -276,7 +287,6 @@ public:
                 if(!cfg.failure.empty())throw std::runtime_error(cfg.failure);
                 const auto path=cfg.directory+"/thread-"+std::to_string(host_tid)+"-"+std::to_string(cfg.slots.size())+".samples";
                 fresh->fd=::open(path.c_str(),O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC,0600);if(fresh->fd<0)throw error("open samples");
-                start_path=path+".start";
                 const char magic[]="APS3SP01";std::vector<unsigned char> header(magic,magic+8);
                 put32(header,1);put32(header,sizeof(Record));put64(header,std::uint64_t(cfg.period_us)*1000);put64(header,host_tid);
                 put32(header,unsigned(role));put32(header,8);put64(header,std::uint64_t(::getpid()));put64(header,0);
@@ -284,22 +294,15 @@ public:
             }
             struct sigevent event{};event.sigev_notify=SIGEV_THREAD_ID;event.sigev_signo=cfg.signo;
             event.sigev_value.sival_ptr=slot;event._sigev_un._tid=pid_t(host_tid);
-            const clockid_t clock=(cfg.wall_roles&(1u<<unsigned(role)))?CLOCK_MONOTONIC:CLOCK_THREAD_CPUTIME_ID;
+            const bool wall=(cfg.wall_roles&(1u<<unsigned(role)))!=0;
+            const clockid_t clock=wall?CLOCK_MONOTONIC:CLOCK_THREAD_CPUTIME_ID;
+            slot->stamp=wall || cfg.stamp_all;
             if(::timer_create(clock,&event,&slot->timer))throw error("timer_create");
             slot->timer_created=true;
             struct itimerspec spec{};spec.it_interval.tv_sec=cfg.period_us/1000000;
             spec.it_interval.tv_nsec=long(cfg.period_us%1000000)*1000;spec.it_value=spec.it_interval;
             slot->active.store(true,std::memory_order_release);
-            struct timespec armed{};::clock_gettime(CLOCK_MONOTONIC,&armed);
             if(::timer_settime(slot->timer,0,&spec,nullptr))throw error("timer_settime");
-            // Side file (the .samples wire ABI stays untouched): CLOCK_MONOTONIC time at which the timer was armed. Record k
-            // (its `sequence`, counted from 1) was taken about k periods later, so the timelines of several threads can be
-            // laid on one time axis (wall mode: ANYPS3_SAMPLE_PROFILE_WALL).
-            {const int fd=::open(start_path.c_str(),O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC,0600);
-                if(fd<0)throw error("open start file");
-                const auto text=std::to_string(std::int64_t(armed.tv_sec)*1000000000+armed.tv_nsec)+" "+std::to_string(std::uint64_t(cfg.period_us)*1000)+" "+
-                    (clock==CLOCK_MONOTONIC?"wall":"cpu")+"\n";
-                write_all(fd,text.data(),text.size());::close(fd);}
             // Restore every other signal's state; this timer must be unblocked.
             auto run_mask=old_mask;::sigdelset(&run_mask,cfg.signo);
             const int c=::pthread_sigmask(SIG_SETMASK,&run_mask,nullptr);if(c){errno=c;throw error("unblock timer signal");}

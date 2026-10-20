@@ -20,9 +20,24 @@ reporter = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = reporter
 spec.loader.exec_module(reporter)
 
+def raw_records(path):
+    """Records including the timestamp slot addresses[7] (read_samples keeps only addresses[:depth])."""
+    data = path.read_bytes()
+    offset, result = reporter.HEADER.size, []
+    while offset + reporter.CHUNK.size <= len(data):
+        _, length, count, *_ = reporter.CHUNK.unpack_from(data, offset)
+        payload = data[offset + reporter.CHUNK.size:offset + reporter.CHUNK.size + length]
+        for values in reporter.RECORD.iter_unpack(payload):
+            sequence, overrun, steps, pc, guest_tid, depth, flags, *addresses = values
+            result.append(dict(sequence=sequence, overrun=overrun, depth=depth, stamp=addresses[7], addresses=addresses))
+        offset += reporter.CHUNK.size + length + 16
+    return result
+
+
 HARNESS = r'''
 #include <iostream>
 #include <sys/mman.h>
+#include <cerrno>
 extern "C" [[gnu::noinline]] std::uint64_t sample_hot_known(std::uint64_t n){
     volatile std::uint64_t bound=n;asm volatile("" : "+m"(bound));
     n=bound;std::uint64_t value=0;
@@ -52,7 +67,22 @@ int main(int argc,char** argv){
         return 0;
     }
     std::uint32_t pc=0x12345000,tid=77;std::uint64_t steps=987654321;
-    if(mode=="guest" || mode=="guest-fault"){
+    if(mode=="blocked"){
+        // Delivery of the sampling signal blocked for 50 ms: the kernel coalesces the missed ticks into one notification
+        // with an overrun count, so a sample's position in time cannot be derived from its sequence number.
+        anyps3_sample::Thread sampling(anyps3_sample::Role::Ppu,&pc,&tid,&steps);
+        sigset_t set;sigemptyset(&set);sigaddset(&set,SIGRTMIN+6);
+        pthread_sigmask(SIG_BLOCK,&set,nullptr);
+        const auto t_block=clock_ns(CLOCK_MONOTONIC);
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        const auto t_unblock=clock_ns(CLOCK_MONOTONIC);
+        pthread_sigmask(SIG_UNBLOCK,&set,nullptr);
+        std::this_thread::sleep_for(std::chrono::milliseconds(30));
+        std::printf("{\"block\":%llu,\"unblock\":%llu,\"end\":%llu}\n",(unsigned long long)t_block,(unsigned long long)t_unblock,
+            (unsigned long long)clock_ns(CLOCK_MONOTONIC));
+        return 0;
+    }
+    if(mode=="guest" || mode=="guest-fault" || mode=="errno"){
         // Fake guest address space: a 4 GiB PROT_NONE reservation with one readable page at guest 0x20000000.
         // PPC64 stack: 0(r1) = back chain, 16(parent) = return address saved by the callee.
         const std::uint64_t reserve=UINT64_C(1)<<32;
@@ -61,11 +91,17 @@ int main(int argc,char** argv){
         auto put=[&](std::uint64_t ea,std::uint64_t v){for(unsigned i=0;i<8;++i)base[ea+i]=std::uint8_t(v>>(56-8*i));};
         std::uint64_t lr=0x666070,r1=0x20000100;
         if(mode=="guest"){put(0x20000100,0x20000200);put(0x20000210,0x696d54);put(0x20000200,0x20000300);put(0x20000310,0x123458);put(0x20000300,0);}
-        else{r1=0x20000f00;put(0x20000f00,0x20001000);}  // parent frame lies in the unreadable next page
+        else{r1=0x20000f00;put(0x20000f00,0x20001000);}  // parent frame (guest-fault, errno): lies in the unreadable next page
         const std::uint8_t* base_pointer=base;
         anyps3_sample::Thread sampling(anyps3_sample::Role::Ppu,&pc,&tid,&steps,&lr,&r1,&base_pointer);
+        // The failed process_vm_readv of the handler sets EFAULT; the interrupted code must still see 777. A volatile access
+        // keeps the compiler from proving errno unchanged across the (visible) workload function.
+        volatile int* error_slot=&errno;
+        *error_slot=777;
         const auto result=sample_caller_known(n);
-        return result==n*(n-1)/2+1?0:3;
+        const int seen=*error_slot;
+        if(result!=n*(n-1)/2+1)return 3;
+        return mode=="errno" && seen!=777?5:0;
     }
     anyps3_sample::Thread sampling(anyps3_sample::Role::Ppu,&pc,&tid,&steps);
     if(mode=="wait"){
@@ -180,12 +216,13 @@ class SampleProfileTests(unittest.TestCase):
         # 200 ms of sleep at a 200 us period is about 1000 samples; allow generous scheduling slack.
         self.assertGreater(len(file['records']), 200)
         self.assertTrue(all(r['guest_steps'] == 987654321 and r['flags'] & 1 for r in file['records']))
-        # Side file with the CLOCK_MONOTONIC arming time lets several threads share one time axis.
-        start = next(directory.glob('thread-*.samples.start')).read_text().split()
-        self.assertEqual(start[1:], ['200000', 'wall'])
-        now_ns = time.clock_gettime_ns(time.CLOCK_MONOTONIC)  # arming time is in the past, within the last minute
-        self.assertLess(now_ns - int(start[0]), 60 * 10**9)
-        self.assertGreater(now_ns - int(start[0]), 0)
+        # Wall mode stamps every record with its CLOCK_MONOTONIC time (addresses[7], depth capped at 7).
+        stamps = [raw['stamp'] for raw in raw_records(next(directory.glob('thread-*.samples')))]
+        now_ns = time.clock_gettime_ns(time.CLOCK_MONOTONIC)
+        self.assertEqual(stamps, sorted(stamps))
+        self.assertGreater(stamps[0], now_ns - 60 * 10**9)
+        self.assertLess(stamps[-1], now_ns)
+        self.assertGreater(stamps[-1] - stamps[0], 150 * 10**6)  # about 200 ms of sleep
         # Roles not listed keep thread CPU time.
         directory, _ = self.run_profile('sleep', ANYPS3_SAMPLE_PROFILE_WALL='spu')
         self.assertEqual(reporter.report(directory, self.program)['samples'], 0)
@@ -211,9 +248,28 @@ class SampleProfileTests(unittest.TestCase):
         file = reporter.read_samples(next(directory.glob('thread-*.samples')))
         self.assertTrue(all(len(r['addresses']) == 1 and r['flags'] == 1 for r in file['records']))
 
-    def test_cpu_mode_start_file_is_marked_cpu(self):
+    def test_stamps_follow_real_time_when_delivery_is_delayed(self):
+        directory, run = self.run_profile('blocked', ANYPS3_SAMPLE_PROFILE_WALL='ppu')
+        marks = json.loads(run.stdout)
+        records = raw_records(next(directory.glob('thread-*.samples')))
+        self.assertTrue(records)
+        stamps = [r['stamp'] for r in records]
+        self.assertEqual(stamps, sorted(stamps))
+        # While delivery was blocked nothing was recorded; the first record afterwards carries the coalesced ticks as an
+        # overrun and its stamp is the delivery time (the sequence number alone would place it near the start).
+        self.assertTrue(all(not (marks['block'] + 2 * 10**6 < t < marks['unblock'] - 2 * 10**6) for t in stamps))
+        first_after = next(r for r in records if r['stamp'] >= marks['unblock'])
+        self.assertLess(first_after['stamp'] - marks['unblock'], 5 * 10**6)
+        self.assertGreater(first_after['overrun'], 100)  # 50 ms / 200 us = 250 ticks coalesced
+        self.assertLessEqual(stamps[-1], marks['end'])
+        # Stamps are off in CPU-time mode, which keeps the full 8-frame depth.
         directory, _ = self.run_profile()
-        self.assertEqual(next(directory.glob('thread-*.samples.start')).read_text().split()[1:], ['200000', 'cpu'])
+        self.assertTrue(all(r['stamp'] == 0 for r in raw_records(next(directory.glob('thread-*.samples')))))
+
+    def test_errno_of_the_interrupted_thread_survives_failing_guest_stack_reads(self):
+        for mode in ('errno', 'guest'):  # unreadable parent frame (EFAULT inside the handler) / readable chain
+            directory, run = self.run_profile(mode, ANYPS3_SAMPLE_PROFILE_GUEST_STACK='1')
+            self.assertGreater(len(reporter.read_samples(next(directory.glob('thread-*.samples')))['records']), 20)
 
     def test_ring_drop_accounting_and_rip_only_default(self):
         directory, _ = self.run_profile(ANYPS3_SAMPLE_PROFILE_CAPACITY='16', ANYPS3_SAMPLE_PROFILE_FLUSH_MS='5000')
