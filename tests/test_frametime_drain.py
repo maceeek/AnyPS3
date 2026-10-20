@@ -58,9 +58,10 @@ static void vsync(const char* mode){
  SpuWorkerSession life(s);auto& w=s.process.rsx_worker;assert(w.enabled);
  assert(!rsx_worker_request(s,1024).completed);w.queue->drain();assert(s.memory.load(0x70008044,4)==put);   // session exists, idle
  auto* f=static_cast<PpuState*>(w.facade.get());
- std::atomic<std::uint64_t> wait_start{0},wait_end{0},deadline{0};
+ std::atomic<std::uint64_t> wait_start{0},wait_end{0},deadline{0};std::atomic<long> owner_slack{-1};
  w.queue->post(RsxOwnerQueue::Kind::HostAccess,[&]{
   auto& session=*static_cast<rsxgraphics::Session*>(f->rsx.graphics_owner.get());
+  owner_slack=prctl(PR_GET_TIMERSLACK);
   session.enter_fifo();f->rsx.graphics_session=&session;     // as inside a FIFO run
   assert(session.defer_label(0x70008400,0x55667788));
   const auto until_ns=mono_ns()+40'000'000;deadline=until_ns;wait_start=mono_ns();
@@ -79,14 +80,18 @@ static void vsync(const char* mode){
  if(m=="default"){assert(served_ns<deadline.load()-20'000'000);assert(!label_pending && label_value==0x55667788);}
  else if(m=="drain_off"){assert(served_ns>=deadline.load());}
  else if(m=="early_off"){assert(served_ns<deadline.load()-20'000'000);assert(label_pending && label_value==0);}
+ else if(m=="slack_off"){assert(served_ns<deadline.load()-20'000'000);}
  else assert(false);
+ const long main_slack=prctl(PR_GET_TIMERSLACK);
+ if(m=="slack_off")assert(owner_slack.load()==main_slack);else assert(owner_slack.load()==1);   // the owner thread alone gets 1 ns
+ assert(main_slack!=1 || m=="slack_off");                   // the process's other threads keep the kernel default
  life.finish();
  std::printf("PASS vsync %s: request served %.1f ms into a 40 ms wait, label_pending=%d\n",mode,served_after_ms,int(label_pending));
 }
 int main(int argc,char** argv){try{
  const std::string mode=argc>1?argv[1]:"";
  if(mode=="midrun_on")midrun(true);else if(mode=="midrun_off")midrun(false);
- else if(mode=="vsync_default")vsync("default");else if(mode=="vsync_drain_off")vsync("drain_off");else if(mode=="vsync_early_off")vsync("early_off");
+ else if(mode=="vsync_default")vsync("default");else if(mode=="vsync_drain_off")vsync("drain_off");else if(mode=="vsync_early_off")vsync("early_off");else if(mode=="vsync_slack_off")vsync("slack_off");
  else return 3;
 }catch(const std::exception& e){std::fprintf(stderr,"FAIL %s\n",e.what());return 1;}}
 '''
@@ -129,6 +134,10 @@ class OwnerResponsiveness(unittest.TestCase):
 
     def test_vsync_wait_without_early_submit_keeps_label_pending(self):
         self.run_mode('vsync_early_off', ANYPS3_RSX_FLIP_EARLY='0')
+
+    def test_owner_timer_slack_is_private_and_switchable(self):
+        # default: owner thread 1 ns, other threads untouched (checked inside vsync_default); switch off: inherited value
+        self.run_mode('vsync_slack_off', ANYPS3_RSX_TIMER_SLACK_NS='0')
 
 
 if __name__ == '__main__':

@@ -272,6 +272,12 @@ static void rsx_worker_start(PpuState& s){
         s.supervisor.record(ExecutionEngine::Rsx,sequence,origin.guest_pc,origin.guest_id,error);
     };
     q.thread_scope=[]()->std::shared_ptr<void>{
+        // Only this thread: a timed wait (the vsync deadline, the 100 us retire poll) ends at its deadline instead of up to the kernel's
+        // default 50 us timer slack later; the vsync wake-up is on the critical path of the guest's pacing label (measured +51 us).
+        // ANYPS3_RSX_TIMER_SLACK_NS=N selects N ns, 0 keeps the inherited slack.
+        {static const unsigned long slack=[]{const char* v=std::getenv("ANYPS3_RSX_TIMER_SLACK_NS");if(!v)return 1ul;char* end=nullptr;const auto n=std::strtoul(v,&end,10);
+                if(end==v || *end){std::fprintf(stderr,"invalid ANYPS3_RSX_TIMER_SLACK_NS\n");std::_Exit(2);}return n;}();
+            if(slack && prctl(PR_SET_TIMERSLACK,slack,0,0,0)!=0){std::fprintf(stderr,"RSX owner: prctl(PR_SET_TIMERSLACK) failed: %s\n",std::strerror(errno));std::_Exit(2);}}
         if(!anyps3_sample::config().selected(anyps3_sample::Role::Rsx))return {};
         return std::make_shared<anyps3_sample::Thread>(anyps3_sample::Role::Rsx);
     };

@@ -328,6 +328,16 @@ static void rsx_flip_display(PpuState& s,unsigned head,std::uint32_t value){
     const auto event=rsx_event_ticket(s,flags,"RSX flip event cannot be delivered");
     m.range(address,0x18,true);m.range(std::uint64_t(gpu.reports)+0x10,16,true);
     anyps3_ft::mark(anyps3_ft::FlipReq,id,gpu.flip_modes[head],gpu.vblank_ticks);
+    {   // Diagnostic (ANYPS3_FRAMETIME_FLIPDUMP=N): the FIFO words around the first N flips, to see what the game queues next to a flip.
+        static const unsigned dump=[]{const char* v=std::getenv("ANYPS3_FRAMETIME_FLIPDUMP");return v?unsigned(std::strtoul(v,nullptr,10)):0u;}();
+        static unsigned dumped=0;
+        if(dump && dumped<dump && gpu.flips>=100){++dumped;
+            const auto get=static_cast<std::uint32_t>(m.load(gpu.dma+0x44,4)),put=static_cast<std::uint32_t>(m.load(gpu.dma+0x40,4));
+            std::fprintf(stderr,"FLIPDUMP flip=%llu get=%08x put=%08x:",(unsigned long long)gpu.flips,get,put);
+            for(int i=-24;i<48;++i){const auto at=std::int64_t(get)+4*i;if(at<0)continue;
+                try{std::fprintf(stderr," %s%08x",i==0?"|":"",unsigned(m.load(rsx_address(gpu,std::uint32_t(at)),4)));}catch(...){std::fprintf(stderr," ????????");}}
+            std::fprintf(stderr,"\n");}
+    }
     if(gpu.flip_modes[head]==2 && gpu.vblank_epoch_ns){
         const auto next=gpu.vblank_ticks+1;
         const auto deadline=gpu.vblank_epoch_ns+(next/60)*1001000000+(next%60)*1001000000/60;
@@ -372,6 +382,7 @@ static bool rsx_graphics_poll(PpuState& s){
     return !session->flights.empty();
 }
 static bool rsx_graphics_flip_async(PpuState& s,unsigned id,std::uint64_t address,std::uint64_t reports,unsigned queue,std::uint64_t event_name){
+    anyps3_ft::Span ft_total(anyps3_ft::Mark,0xa0);
     auto* session=static_cast<rsxgraphics::Session*>(s.rsx.graphics_session?s.rsx.graphics_session:s.rsx.graphics_owner.get());
     if(!session || !session->observer_installed || session->previous_observer || id>=s.rsx.display_buffers.size() || s.video.format!=0)return false;
     const char* directory=std::getenv("ANYPS3_FRAME_DIR");const bool files=directory && *directory;
@@ -390,9 +401,10 @@ static bool rsx_graphics_flip_async(PpuState& s,unsigned id,std::uint64_t addres
         ++session->batch->frames;
         if(s.present.enabled){
             if(image->format==VK_FORMAT_R8G8B8A8_SRGB){auto raw=session->vk.graphics_image(*session->batch,VK_FORMAT_R8G8B8A8_UNORM,buffer.width,buffer.height,1);session->vk.graphics_copy(*session->batch,image,raw);image=std::move(raw);}
+            anyps3_ft::Span ft_present(anyps3_ft::Mark,0xa2);
             session->vk.graphics_present(*session->batch,image,buffer.width,buffer.height,s.rsx.vsync,true);++s.present.presented_frames;
         }
-        session->submit_async("flip");++s.rsx.flips;
+        {anyps3_ft::Span ft_submit(anyps3_ft::Mark,0xa3);session->submit_async("flip");}++s.rsx.flips;
     }catch(...){session->failed=true;throw;}
     if(!s.rsx.graphics_session)session->leave_fifo();
     return true;
