@@ -122,6 +122,30 @@ inline void anyps3_trace_dma(const char* format,...){
 ''' + GUEST_BACKING_CPP + r'''
 
 ''' + HOST_ACCESS_CPP + HOST_FAULT_CPP + r'''
+// Fixed-size zeroed table on anonymous mmap storage: the kernel's zero pages replace a value-initialising memset, so
+// creating one costs two syscalls and faults only the pages later used, independent of malloc trim/mmap heuristics
+// (a 4 MiB std::vector fill per address space dominated tests that create fixture states by the hundred thousand).
+template<class T> class ZeroTable {
+    static_assert(std::is_trivially_copyable_v<T>);
+    std::size_t count=0;T* data=nullptr;
+    static T* map(std::size_t n){
+        void* p=mmap(nullptr,n*sizeof(T),PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0);
+        if(p==MAP_FAILED)throw std::bad_alloc();
+        return static_cast<T*>(p);}
+    void release(){if(data)munmap(data,count*sizeof(T));data=nullptr;count=0;}
+public:
+    explicit ZeroTable(std::size_t n):count(n),data(map(n)){}
+    ZeroTable(const ZeroTable& o):count(o.count),data(map(o.count)){std::memcpy(data,o.data,count*sizeof(T));}
+    ZeroTable(ZeroTable&& o)noexcept:count(std::exchange(o.count,0)),data(std::exchange(o.data,nullptr)){}
+    ZeroTable& operator=(ZeroTable o)noexcept{std::swap(count,o.count);std::swap(data,o.data);return *this;}
+    ~ZeroTable(){release();}
+    T& operator[](std::size_t i){return data[i];}
+    const T& operator[](std::size_t i)const{return data[i];}
+    T* begin(){return data;}
+    T* end(){return data+count;}
+    std::size_t size()const{return count;}
+};
+
 struct GuestMemory {
     inline static std::atomic<std::uint64_t> next_region_identity{1};
     static std::uint64_t region_identity(){auto id=next_region_identity.fetch_add(1,std::memory_order_relaxed);if(!id || id==UINT64_MAX)throw std::runtime_error("guest mapping identity overflow");return id;}
@@ -188,7 +212,7 @@ struct GuestMemory {
     } last_region;
     // 4 MiB per address space; zero means cache miss, otherwise index+1.
     // Heap storage keeps PpuState and temporary fixture states off the stack.
-    std::vector<std::uint32_t> page_regions=std::vector<std::uint32_t>(1u<<20,0);
+    ZeroTable<std::uint32_t> page_regions=ZeroTable<std::uint32_t>(1u<<20);
     // RSX coherence observer. Host spans cover guest aliases too.
     // Raw pointers retained across GPU writes still require separate guards.
     struct HostObserver {
