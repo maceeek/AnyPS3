@@ -12,12 +12,12 @@ assert HEADER.size == 64 and EVENT.size == 48 and EVENT2.size == 64
 Event = namedtuple('Event', 'ns kind tid a b c d')
 
 (POST_FIFO, FIFO_RUN, VBLANK, FLIP_REQ, FLIP_VSYNC, FLIP_ASYNC, GPU_SUBMIT, GPU_RETIRE, LABEL_PUB, HOST_REQ, HOST_EXEC,
- BLOCK, IDLE, SERVICE, FAULT, DISPLAY_REQ, DISPLAY_EXEC, BARRIER_REQ, SWITCH, EVENT_PUB, WORKER_WAIT, MARK) = range(1, 23)
+ BLOCK, IDLE, SERVICE, FAULT, DISPLAY_REQ, DISPLAY_EXEC, BARRIER_REQ, SWITCH, EVENT_PUB, WORKER_WAIT, MARK, LEASE_WAIT) = range(1, 24)
 NAMES = {POST_FIFO: 'PostFifo', FIFO_RUN: 'FifoRun', VBLANK: 'Vblank', FLIP_REQ: 'FlipReq', FLIP_VSYNC: 'FlipVsync',
          FLIP_ASYNC: 'FlipAsync', GPU_SUBMIT: 'GpuSubmit', GPU_RETIRE: 'GpuRetire', LABEL_PUB: 'LabelPub',
          HOST_REQ: 'HostReq', HOST_EXEC: 'HostExec', BLOCK: 'Block', IDLE: 'Idle', SERVICE: 'Service', FAULT: 'Fault',
          DISPLAY_REQ: 'DisplayReq', DISPLAY_EXEC: 'DisplayExec', BARRIER_REQ: 'BarrierReq', SWITCH: 'Switch',
-         EVENT_PUB: 'EventPub', WORKER_WAIT: 'WorkerWait', MARK: 'Mark'}
+         EVENT_PUB: 'EventPub', WORKER_WAIT: 'WorkerWait', MARK: 'Mark', LEASE_WAIT: 'LeaseWait'}
 
 
 def unpack_text(value):

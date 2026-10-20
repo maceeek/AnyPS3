@@ -9,6 +9,7 @@ from .host_access import CPP as HOST_ACCESS_CPP
 from .host_fault import CPP as HOST_FAULT_CPP
 from .guest_backing import CPP as GUEST_BACKING_CPP
 from .ppu_memory import CPP as PPU_MEMORY_CPP
+from .frametime import CPP as FRAMETIME_CPP
 from .elf import ElfImage
 from .errors import AnyPS3Error
 
@@ -50,7 +51,8 @@ def memory_loader(image: ElfImage) -> str:
     return "\n".join(lines)
 
 
-MEMORY_CPP = r'''
+# FRAMETIME (guarded) precedes the memory model: the SPUPUT LeaseWait spans in par_memory use anyps3_ft.
+MEMORY_CPP = FRAMETIME_CPP + r'''
 #include <cstdint>
 #include <vector>
 #include <list>
@@ -867,6 +869,9 @@ struct GuestMemory {
         }
     }
     std::pair<std::uintptr_t,std::uint64_t> reservation_token(std::uint64_t address) {
+        // The 128-byte line token of GETLLAR/PUTLLC/SPU reservation-lost checks reads versions only, never a payload byte through
+        // a raw pointer: admit it with the same byte-exact observer interest as getllar() (SPUPUT, see spu_collect_events).
+        HostByteAccess exact_bytes{host_access_observer.supports_exact_bytes.load(std::memory_order_acquire)};
         Lease lease(*this,address,128,false);
         if(concurrent()){
             if(!(address&127))if(const auto line=reserved_line(address,128,false);line.map){ScalarLock lock(*this,line.pointer,128);return reserved_token(line);}

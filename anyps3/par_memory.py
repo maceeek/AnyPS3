@@ -625,8 +625,8 @@ TYPES = RESERVATION_WAIT_TYPES + r'''
                         pages.emplace(m.page_broker,requested);
                         if(!pages->admitted){pages.reset();m.leave_reader(local);
                             // CPU coherence must run outside all admission.
-                            if(m.page_broker.coherence)m.notify_spans(requested,write);
-                            m.page_broker.wait_change(m.memory_owner());continue;}
+                            {anyps3_ft::Span ft(anyps3_ft::LeaseWait,address,1|(write?256:0),0,size);if(m.page_broker.coherence)m.notify_spans(requested,write);}
+                            {anyps3_ft::Span ft(anyps3_ft::LeaseWait,address,3|(write?256:0),0,size);m.page_broker.wait_change(m.memory_owner());}continue;}
                     }
                     if(m.observer_paused() || !m.host_access_observer){if(pages)local.leased_pages=&pages->pages;++local.leases;++local.quiet;active=true;return;}
                     bool interested=false;auto next=address;unsigned left=size;
@@ -640,12 +640,14 @@ TYPES = RESERVATION_WAIT_TYPES + r'''
                     const auto epoch=local.snapshot->epoch;
                     auto spans=m.cpu_spans(address,size,write,split);
                     pages.reset();m.leave_reader(local);
-                    const auto generation=m.notify_spans(spans,write);
+                    std::uint64_t generation;{anyps3_ft::Span ft(anyps3_ft::LeaseWait,address,2|(write?256:0),0,size);generation=m.notify_spans(spans,write);}
                     m.enter_reader(local);
                     if(epoch==local.snapshot->epoch && generation==m.parallel->raw_generation.load(std::memory_order_acquire)){
                         if(brokered_ && m.page_broker.enabled.load(std::memory_order_acquire)){
                             pages.emplace(m.page_broker,m.cpu_spans(address,size,write,split));
-                            if(!pages->admitted){pages.reset();m.leave_reader(local);if(m.page_broker.coherence)m.notify_spans(spans,write);m.page_broker.wait_change(m.memory_owner());continue;}
+                            if(!pages->admitted){pages.reset();m.leave_reader(local);
+                                {anyps3_ft::Span ft(anyps3_ft::LeaseWait,address,1|(write?256:0),0,size);if(m.page_broker.coherence)m.notify_spans(spans,write);}
+                                {anyps3_ft::Span ft(anyps3_ft::LeaseWait,address,3|(write?256:0),0,size);m.page_broker.wait_change(m.memory_owner());}continue;}
                         }
                         if(pages)local.leased_pages=&pages->pages;
                         ++local.leases;++local.quiet;active=true;return;

@@ -808,6 +808,11 @@ template<class Thread> static void spu_update_decrementer(Thread& t,std::uint64_
 // One effect of the compare is not a published change: a synchronous host-access observer (RSX/GPU
 // coherence) materializes deferred writes when a CPU access reaches its range, and that write is what loses
 // the reservation. A reservation line such an observer covers therefore always takes the full compare.
+// SPUPUT: "covers" is byte-exact (as for GETLLAR/PUTLLC, which read/write the same line under HostByteAccess) whenever the
+// observer supports exact bytes: only a synchronous watch on bytes of THIS line can materialise a write into it. Polling watches
+// (RSX labels/reports: a poll may see the old value; their publication bumps versions and notifies like any write) and watches
+// elsewhere on the same 4 KiB page do not. The page-granular test sent every check of a line sharing a page with RSX reports to
+// the RSX owner (710t: ~115 owner RPCs per frame from the ig lanes, 1.4 ms/frame of lane wait).
 static void spu_collect_events(PpuState& s,NativeSpu::Thread& t,bool full=false){
     spu_stat(t,12);
     unsigned produced=0;
@@ -821,7 +826,7 @@ static void spu_collect_events(PpuState& s,NativeSpu::Thread& t,bool full=false)
         if(__builtin_expect(concurrent && t.reservation_observed_valid && t.reservation_observed_pointer==t.reservation.first &&
             t.reservation_observed_memory==memory.parallel->identity &&
             memory.parallel->notifications->observe(t.reservation.first)==t.reservation_observed &&
-            (!memory.host_access_observer || !memory.host_access_observer.synchronous(reinterpret_cast<const void*>(t.reservation.first),128)),1))return;
+            (!memory.host_access_observer || !memory.host_access_observer.synchronous(reinterpret_cast<const void*>(t.reservation.first),128,true)),1))return;
         // The token compare reads guest memory; give observers the SPU origin (pc, retired steps).
         HostAccessContext event_origin(HostAccessOrigin::Engine::Spu,t.id,t.pc,&t.steps);
         // Sample first, compare second: a bump after the sample either shows in the compare (the version
@@ -1036,8 +1041,41 @@ static void spu_transfer_main(GuestMemory& memory,std::uint64_t address,std::uin
     memory.transfer(address,local,size,put);
 }
 static void spu_transfer(PpuState&,NativeSpu::Thread&,std::uint64_t,std::uint8_t*,std::uint32_t,bool);
+// SPUPUT: a pool lane's GET from a peer's LS (thread group EA window) without the owner RPC + peer pause, when the peer is provably
+// quiescent: its lane is inactive (parked or paused at a quantum boundary -- it can only become active again under its mutex, which
+// we hold), no owner scope has it paused (pauses == 0: an owner scope may be writing its LS) and it is not inside its own owner_call
+// (owner_rpc_depth == 0: inactive mid-instruction, the owner may be writing its LS for that request). That is exactly the state the
+// owner path establishes by pausing the peer, so the copied bytes are identical. Every lock is try_lock: any contention, a running
+// peer, a self-LS access or an unexpected mapping falls back to the owner RPC. ANYPS3_SPU_PEER_LS_DIRECT=0 disables it (A/B).
+static bool spu_peer_ls_read_direct(NativeSpu::Thread& t,std::uint64_t address,std::uint8_t* local,std::uint32_t size){
+    static const bool enabled=[]{const char* v=std::getenv("ANYPS3_SPU_PEER_LS_DIRECT");return !v || std::string(v)!="0";}();
+    auto* lane=NativeSpuWorker::current;
+    if(!enabled || address<0xf0000000u || address>UINT32_MAX || !lane || !lane->parent || lane->context!=&t || !lane->group)return false;
+    const auto index=static_cast<std::uint32_t>((address-0xf0000000u)/0x100000),offset=static_cast<std::uint32_t>((address-0xf0000000u)%0x100000);
+    if(offset>=0x40000 || size>0x40000-offset)return false;
+    auto& group=*lane->group;
+    if(!group.metadata_mutex)return false;
+    std::unique_lock<std::recursive_mutex> metadata(*group.metadata_mutex,std::try_to_lock);
+    if(!metadata){NativeSpuWorker::peer_direct_fallbacks.fetch_add(1,std::memory_order_relaxed);return false;}
+    for(std::size_t j=0;j<group.threads.size();++j){
+        auto& target=group.threads[j];
+        if(target.number!=index)continue;
+        if(&target==&t || group.context.size()<(j+1)*0x40000)return false;
+        auto* peer=static_cast<NativeSpuWorker*>(__atomic_load_n(&target.pool_lane,__ATOMIC_ACQUIRE));
+        if(!peer || peer==lane)return false;
+        std::unique_lock<std::mutex> lock(peer->mutex,std::try_to_lock);
+        if(!lock || peer->active || peer->pauses || peer->owner_rpc_depth || peer->context!=&target){
+            NativeSpuWorker::peer_direct_fallbacks.fetch_add(1,std::memory_order_relaxed);return false;}
+        std::memmove(local,group.context.data()+j*0x40000+offset,size);
+        NativeSpuWorker::peer_direct_reads.fetch_add(1,std::memory_order_relaxed);
+        if(spu_profile_on){spu_profile.dma_bytes+=size;++spu_profile.dma_elements;}
+        return true;
+    }
+    return false;
+}
 static void spu_transfer_impl(PpuState& s,NativeSpu::Thread& t,std::uint64_t address,std::uint8_t* local,std::uint32_t size,bool put){
     if(address>=0xe0000000u && NativeSpuWorker::current && NativeSpuWorker::current->parent){
+        if(!put && spu_peer_ls_read_direct(t,address,local,size))return;
         if(spu_owner_call(s,t,[&]{spu_transfer(s,t,address,local,size,put);},{SpuOwnerOperation::Transfer,address,size,put}))return;
     }
     if(address<0xe0000000u){spu_transfer_main(s.memory,address,local,size,put);if(spu_profile_on){spu_profile.dma_bytes+=size;++spu_profile.dma_elements;}return;}
