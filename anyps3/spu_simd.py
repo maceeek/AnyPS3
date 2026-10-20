@@ -388,7 +388,8 @@ def _fields(word):
 
 # WRCH to the MFC parameter channels 16..20 (LSA, EAH, EAL, size, tag id) and the tag mask (22): the same effect as spu_write_channel for these
 # channels (statistics aside), including the unchanged busy-poll detector state; with ANYPS3_SPU_PROFILE the original call
-# keeps the profile categories exact.
+# keeps the profile categories exact. The interrupt sampling boundary of a channel instruction (irq_next=0 in spu_write_channel) is not part
+# of this template: spu_block.emit_function appends BlockValues.interrupt_boundary() after it (one not-taken branch while interrupts are off).
 @_reg([0x10d])
 def _wrch_mfc_parameter(E, word, pc):
     f = _fields(word)

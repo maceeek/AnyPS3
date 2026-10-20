@@ -51,6 +51,11 @@ class Insn:
         self.body, self.nxt, self.target = body, nxt, target
 
 
+def is_mfc_parameter_wrch(word):
+    """WRCH of an MFC parameter channel (LSA, EAH, EAL, size, tag id: 16..20) or of the tag mask (22)."""
+    return word >> 21 == 0x10d and (16 <= ((word >> 7) & 127) <= 20 or ((word >> 7) & 127) == 22)
+
+
 def decode(pc, word, lift_parts):
     """Classify one original instruction; bodies use the relocated address."""
     op = word >> 21
@@ -67,10 +72,12 @@ def decode(pc, word, lift_parts):
         return Insn(pc, word, 'brc', body, nxt, (pc + si16 * 4) & 0x3fffc)
     if op in _INDIRECT:
         return Insn(pc, word, 'ind', body, nxt)
-    if op == 0x10d and (16 <= ((word >> 7) & 127) <= 20 or ((word >> 7) & 127) == 22):
+    if is_mfc_parameter_wrch(word):
         # WRCH of an MFC parameter channel (LSA, EAH, EAL, size, tag id) or of the tag mask only stores into t.dma[] /
-        # t.tag_mask: no LS access, no blocking, no event or interrupt state, cannot throw (spu_write_channel does exactly
-        # this for channels 16-20 and 22), so it neither ends a block nor invalidates validated code.
+        # t.tag_mask: no LS access, no blocking, no event state, cannot throw (spu_write_channel does exactly this for
+        # channels 16-20 and 22), so it neither ends a block nor invalidates validated code.  The one thing the generic
+        # path adds is the interrupt sampling boundary after a channel instruction (t.irq_next=0): emit_function appends
+        # BlockValues.interrupt_boundary() after it, which costs one predictable branch while interrupts are disabled.
         return Insn(pc, word, 'plain', body, nxt)
     if any(token in body for token in _EFFECT_TOKENS):
         return Insn(pc, word, 'effect', body, nxt)
@@ -234,6 +241,21 @@ class BlockValues(Values):
             return (f'if(__builtin_expect(prov|({hit}),0)){{if(prov)spu_ls_forget(t,{address},16);if({hit}){{{leave}}}}}')
         return f'if(__builtin_expect({hit},0)){{{leave}}}'
 
+    def interrupt_boundary(self, pc):
+        """Sampling boundary after an inline MFC-parameter WRCH.  The exact interpreter samples SPU interrupts after every
+        channel instruction (spu_take_interrupt), and the generic spu_write_channel path sets irq_next=0 so that the next
+        block entry does.  The inline form stores the parameter without a call, so with interrupts enabled the same
+        boundary is reproduced here: sample now, leave the call if the handler was entered (registers flushed, retired
+        count and pc exact), otherwise restart the sampling interval.  Interrupts disabled (the common case): one
+        not-taken branch; irq_next is not consulted while they are disabled and spu_branch_interrupts zeroes it on enable."""
+        nxt = f'(a+0x{pc + 4 - self.block_start:x}u)'
+        leave = f'{self.pending_stores()}return;'
+        return ('if(__builtin_expect(t.interrupts_enabled,0)){'
+                f'const std::uint32_t irq_pc=t.pc;const auto irq_ex=block.executed;t.pc={nxt};block.executed=ex+{self.insn_index(pc) + 1};'
+                't.irq_next=0;spu_take_interrupt(s,t);'
+                f'if(!t.interrupts_enabled){{{leave}}}'
+                't.irq_next=t.steps+block.executed+SPU_IRQ_INTERVAL;t.pc=irq_pc;block.executed=irq_ex;}')
+
     def load(self, t, address):
         name = self.fresh()
         self.emit(f'const unsigned a{name}={address};')
@@ -387,6 +409,8 @@ def emit_function(name, code_name, lo, words, lift_parts, templates=True, insns=
                 else:
                     lines.append(f'{{[[maybe_unused]] SpuRegister out{{}};{x.body}}}')
                 values.drop(used)
+            if is_mfc_parameter_wrch(x.word):
+                lines.append(values.interrupt_boundary(x.pc))
         n = len(block)
         if last.kind in ('plain', 'store'):
             values.flush()
