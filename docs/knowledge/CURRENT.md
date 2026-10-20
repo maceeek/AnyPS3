@@ -1,15 +1,61 @@
 # Current state and goal
 
+## Latest assessment — 2026-10-20, sandbox analysis
+
+**Goal remains unmet:** the original game with functional gamepad control and 60 FPS with headroom.
+**Best checked steady run without the sampling profiler: build 603, `native-virtual-603a`, 54.045 FPS**
+over 60.060 s (median two-second rate 55.95, range 31.5–60). The saved original level frame was inspected.
+This is existing-run evidence rechecked now, not a new game run. Physical gamepad remains unverified.
+
+**Verified source state:** initial clean `main` = `abf2450`; runtime = build 472 plus ZeroTable (`6ce888b`),
+not snapshot 472 verbatim. SPUFAST3 and FRAMETIME are separate branches.
+`fast2/integ473` = `7da3eb3` includes RSXCPU3 + FRAMETIME, not SPUFAST3, and is not a verified game build.
+The independent pacing candidate 642a reached 52.405 FPS; do not add its gain to 603's gain.
+Snapshot source hashes for 472/603/642, artifact hashes of 472a/603a/603w/642a and original PT_LOAD bytes
+were rechecked successfully. The four additional 603 SPU overlay source hashes match original EBOOT bytes.
+
+**New offline analysis:** the existing 603w capture attributes approximately **3.19 ms/frame to the engine-counter
+wait and 1.05 ms/frame to the job-flag wait** (sampling estimates). In 45.6% of engine-counter wait samples,
+all five ig lanes were sampled and classified as parked; missing lane samples do not explain this observation.
+The ≤2 ms target is not demonstrated. Trace completion publication and wakeup latency before attributing every wait
+to slow SPU arithmetic. Seven sample files passed committed-chunk integrity checks, with no dropped records or torn tails.
+
+**First next actions (proposed, not implemented):**
+
+1. Fix integration 473's FP whole-block admission, per-instruction GPU VP budget, bounded host-request drain and
+   real page-coherence/flip-order tests. Check SPU inline WRCH interrupt-boundary equivalence.
+2. Include the SPU changes through `87dce76` (measured build 603), **keep the later `b2a0544` AVX DMA change out**
+   pending a valid concurrent-memory protocol. Plain vector accesses plus signal fences do not replace atomic shared accesses.
+3. Repair the frametime ring's completion protocol before relying on precise percentile results:
+   **642a's ring actually wrapped** (9,093,360 reservations / 8,388,608 slots). This does not invalidate its separate FPS log.
+4. Keep the asynchronous recorder OFF (624b teal frames unresolved). Validate targeted semantics, build a fresh snapshot,
+   measure repeated quiet-machine A/B runs and cold start, then complete the full suite including Vulkan before promotion.
+
+**Tests:** suite 472 did run: 813 tests, zero skips/drift, one failing module (`test_ppu_fp_lazy`, recorded timeout).
+The existing isolated pass and ZeroTable fix do not constitute a full-suite pass of the combined candidate.
+No tests, builds or game runs were performed in this analysis.
+**Processes:** host process/GPU/input visibility is restricted by the sandbox; host inactivity was not verified.
+Runtime/profile unchanged by this round; documentation and offline analysis artifacts added.
+
+Full findings, source locations, fixes, verification contracts and commands:
+[sandbox analysis](experiments/2026-10-20-sandbox-analysis.md).
+Evidence: [analysis JSON](../../local/ratchet/analysis-2026-10-20-sandbox/evidence.json).
+
 ## Manager worktree — 2026-10-20
 
-**Verified manager milestone:** CLI and PySide6 wrapper implemented in isolated
-`fast2/manager-gui` (base `abf2450`); 30 scoped manager/GUI tests and a real-CLI
+**Verified manager milestone:** CLI and PySide6 wrapper implemented on
+`fast2/manager-gui` (base `abf2450`), fast-forwarded into `main` at `30c322d`; 30 scoped manager/GUI tests and a real-CLI
 offscreen integration preview pass. Original-game and physical-controller
 acceptance were not performed. Runtime player-mode and pad-config work packages
 remain separate. The original game/menu/gamepad performance goal is unchanged.
 See the [manager record](experiments/2026-10-20-manager-gui.md)
 and [usage](../manager/README.md). Runtime notes below are historical;
 this wrapper does not establish a new best game build or FPS result.
+
+## Historical notes — superseded by the assessment above
+
+The older “live tree”, “first next action”, test and process statements below describe their original rounds.
+They are retained as history and must not override the latest assessment.
 
 **2026-10-20 FAST2 wave — ended on user instruction ~15:15 (Claude Opus 5.5 + Sonnet 5.5 subagents, Codex gpt-6.1-sol reviews; PC with
 the game and the RTX 4070 SUPER).** Goal: the game at 60 FPS with headroom — **not reached**. **Best verified build: 472 = live `main`
