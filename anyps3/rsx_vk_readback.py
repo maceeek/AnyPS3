@@ -7,7 +7,7 @@ MEMBERS = r'''
     std::uint64_t graphics_readback_dispatches=0,graphics_rebind_packs=0;
     std::uint64_t graphics_pack_readback(GraphicsBatch& b,const std::shared_ptr<GraphicsImage>& image,
             unsigned format,bool depth,unsigned bpp,unsigned pitch,unsigned samples,
-            const std::vector<unsigned>& words,std::shared_ptr<GraphicsBuffer>& word_buffer,bool download=true){
+            const std::vector<unsigned>& words,std::shared_ptr<GraphicsBuffer>& word_buffer,bool download=true){b.sync();
         GraphicsSite site(SitePack);
         if(words.empty() || !pitch || (samples!=1 && samples!=2 && samples!=4))throw std::runtime_error("invalid RSX readback layout");
         unsigned image_bpp=4;

@@ -869,6 +869,7 @@ struct Session {
     std::vector<SurfaceImage> surface_images;
     std::uint64_t surface_image_bytes=0,surface_image_hits=0,surface_image_misses=0;
     static void release_idle_framebuffers(NativeVulkan::GraphicsBatch& b,const std::shared_ptr<NativeVulkan::GraphicsImage>& image){
+        b.sync();   // framebuffers are recorder-owned
         for(auto it=b.framebuffers.begin();it!=b.framebuffers.end();){
             const auto& fb=it->second;
             if(fb.use_count()==1 && std::find(fb->images.begin(),fb->images.end(),image)!=fb->images.end())it=b.framebuffers.erase(it);

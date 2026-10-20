@@ -80,6 +80,7 @@ public:
         NativeVulkan* owner;
         VkBuffer buffer=VK_NULL_HANDLE,data_buffer=VK_NULL_HANDLE;VkDeviceMemory memory=VK_NULL_HANDLE,data_memory=VK_NULL_HANDLE;void* map=nullptr;
         VkCommandBuffer command=VK_NULL_HANDLE,upload_command=VK_NULL_HANDLE,transfer_command=VK_NULL_HANDLE;VkFence fence=VK_NULL_HANDLE;
+        VkCommandPool command_pool=VK_NULL_HANDLE;   // owns `command`: the draw recorder records it while the frontend resets/frees other batches' buffers
         // Async prelude (NativeVulkan::transfer_queue): staging->device copies on the DMA queue, timestamps in their own 2-slot pool.
         VkQueryPool transfer_queries=VK_NULL_HANDLE;bool transfer_pending=false;std::uint64_t upload_wait=0;VkDescriptorPool descriptors=VK_NULL_HANDLE;
         // Further pools chained when one batch records more sets than `descriptors` holds.
@@ -146,8 +147,14 @@ public:
         std::vector<std::shared_ptr<ComputePipeline>> compute_pins;
         double upload_ms=0,draw_ms=0,download_ms=0,wait_ms=0,pipeline_ms=0,record_ms=0;
         std::uint64_t upload_bytes=0,download_bytes=0,submissions=0,draws=0;
+        double record_back_ms=0;   // recorder-owned (back half of graphics_draw)
+        bool inline_draws=false;   // ConditionalScope: draws are recorded inline while a conditional-rendering scope is open
+        // Waits until the draw recorder has recorded every queued draw (see DrawJob). Required before any use of recorder-owned state.
+        std::atomic<unsigned> pending_jobs{0};   // queued, not yet recorded draws of this batch
+        void sync(){if(pending_jobs.load(std::memory_order_acquire) || owner->recorder_failed())owner->recorder_drain();}
         explicit GraphicsBatch(NativeVulkan* o):owner(o){}
         ~GraphicsBatch(){
+            if(pending_jobs.load(std::memory_order_acquire))owner->recorder_quiesce();
             if(submitted)vkWaitForFences(owner->device,1,&fence,VK_TRUE,UINT64_MAX);
             // A prelude submitted on the DMA queue before a failing graphics submit (or before an abandoned batch) still reads our staging
             // buffer and writes our device buffer: wait for its upload timeline value before anything is freed. upload_wait is set by
@@ -165,7 +172,8 @@ public:
             if(upload_command)vkFreeCommandBuffers(owner->device,owner->pool,1,&upload_command);
             if(transfer_command)vkFreeCommandBuffers(owner->device,owner->transfer_pool,1,&transfer_command);
             if(transfer_queries)vkDestroyQueryPool(owner->device,transfer_queries,nullptr);
-            if(command)vkFreeCommandBuffers(owner->device,owner->pool,1,&command);
+            if(command)vkFreeCommandBuffers(owner->device,command_pool,1,&command);
+            if(command_pool)vkDestroyCommandPool(owner->device,command_pool,nullptr);
             if(map)vkUnmapMemory(owner->device,memory);
             if(data_buffer)vkDestroyBuffer(owner->device,data_buffer,nullptr);
             if(data_memory)vkFreeMemory(owner->device,data_memory,nullptr);
@@ -262,6 +270,7 @@ private:
         b.plane_draws.clear();b.plane_count=0;
     }
     static void graphics_end_pass(GraphicsBatch& b){
+        b.sync();
         if(b.active_framebuffer){vkCmdEndRenderPass(b.command);graphics_mark(b,MarkPassEnd);b.active_framebuffer=VK_NULL_HANDLE;::RsxPerfCounters::add(::RsxPerfCounters::pass_ends);}
         if(!b.plane_draws.empty())graphics_replay_planes(b);
     }
@@ -286,6 +295,7 @@ private:
         if(b.marks){vkCmdResetQueryPool(b.command,b.marks,0,4096);b.mark_count=0;b.mark_kinds.clear();graphics_mark(b,MarkStart);}
     }
     void graphics_stamp(GraphicsBatch& b,unsigned phase,bool end=false){
+        b.sync();
         if(!b.queries)return;
         if(b.query_count>=4096)throw std::runtime_error("RSX graphics query budget exhausted; finish batch");
         if(!end)b.phases.push_back(phase);
@@ -482,7 +492,9 @@ public:
         vkGetBufferMemoryRequirements(device,b->data_buffer,&r);ai.allocationSize=r.size;ai.memoryTypeIndex=memory_type(r.memoryTypeBits,VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
         check(vkAllocateMemory(device,&ai,nullptr,&b->data_memory),"graphics device memory");check(vkBindBufferMemory(device,b->data_buffer,b->data_memory,0),"graphics device buffer bind");
         VkCommandBufferAllocateInfo ci{};ci.sType=VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;ci.commandPool=pool;ci.level=VK_COMMAND_BUFFER_LEVEL_PRIMARY;ci.commandBufferCount=1;
-        check(vkAllocateCommandBuffers(device,&ci,&b->command),"graphics command buffer");
+        {VkCommandPoolCreateInfo pi{};pi.sType=VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;pi.queueFamilyIndex=family;pi.flags=VK_COMMAND_POOL_CREATE_TRANSIENT_BIT|VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+            check(vkCreateCommandPool(device,&pi,nullptr,&b->command_pool),"graphics batch command pool");}
+        ci.commandPool=b->command_pool;check(vkAllocateCommandBuffers(device,&ci,&b->command),"graphics command buffer");ci.commandPool=pool;
         check(vkAllocateCommandBuffers(device,&ci,&b->upload_command),"graphics upload command buffer");
         if(transfer_queue){ci.commandPool=transfer_pool;check(vkAllocateCommandBuffers(device,&ci,&b->transfer_command),"graphics transfer command buffer");ci.commandPool=pool;}
         VkFenceCreateInfo fi{};fi.sType=VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;check(vkCreateFence(device,&fi,nullptr,&b->fence),"graphics fence");
@@ -501,7 +513,7 @@ public:
         return b;
     }
     std::uint64_t graphics_image_creations=0;
-    std::shared_ptr<GraphicsImage> graphics_image(GraphicsBatch& b,VkFormat f,unsigned w,unsigned h,unsigned layers,bool depth=false){
+    std::shared_ptr<GraphicsImage> graphics_image(GraphicsBatch& b,VkFormat f,unsigned w,unsigned h,unsigned layers,bool depth=false){b.sync();
         if(!w || !h || !layers || layers>4 || !graphics_format(f,depth))throw std::runtime_error("unsupported graphics image format/extent");
         ++graphics_image_creations;auto image=std::make_shared<GraphicsImage>(this,f,w,h,layers,depth);
         VkImageCreateInfo ii{};ii.sType=VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;ii.imageType=VK_IMAGE_TYPE_2D;ii.format=f;ii.extent={w,h,1};ii.mipLevels=1;ii.arrayLayers=layers;
@@ -522,12 +534,12 @@ public:
     // Host bytes copied into the device data buffer at their command-order
     // position (not the batch prelude): later commands of this batch may
     // overwrite them on the device before the consumer runs.
-    std::uint64_t graphics_device_upload(GraphicsBatch& b,const void* data,std::uint64_t bytes){
+    std::uint64_t graphics_device_upload(GraphicsBatch& b,const void* data,std::uint64_t bytes){b.sync();
         GraphicsSite site(SiteDeviceUpload);
         const auto at=graphics_upload(b,data,bytes);graphics_barrier(b);
         VkBufferCopy copy{at,at,bytes};vkCmdCopyBuffer(b.command,b.buffer,b.data_buffer,1,&copy);graphics_barrier(b);return at;
     }
-    void graphics_device_copies(GraphicsBatch& b,const std::vector<VkBufferCopy>& regions){
+    void graphics_device_copies(GraphicsBatch& b,const std::vector<VkBufferCopy>& regions){b.sync();
         if(regions.empty())return;
         GraphicsSite site(SiteDeviceCopies);
         graphics_begin(b);graphics_barrier(b);vkCmdCopyBuffer(b.command,b.data_buffer,b.data_buffer,unsigned(regions.size()),regions.data());graphics_barrier(b);
@@ -553,7 +565,7 @@ public:
             b.uploads.push_back({at,at,size});
         }
     }
-    std::shared_ptr<GraphicsBuffer> graphics_buffer(GraphicsBatch& b,const void* data,std::uint64_t size){
+    std::shared_ptr<GraphicsBuffer> graphics_buffer(GraphicsBatch& b,const void* data,std::uint64_t size){b.sync();
         GraphicsSite site(SiteRawBuffer);
         const auto bytes=(size+3)&~UINT64_C(3);
         if(!bytes || bytes>graphics_properties.limits.maxStorageBufferRange)throw std::runtime_error("RSX texture buffer storage limit");
@@ -567,7 +579,7 @@ public:
     }
 ''' + READBACK_MEMBERS + UPLOAD_MEMBERS + DECODE_MEMBERS + r'''
     // Images stay GENERAL, allowing explicit cross-draw transfer barriers.
-    std::uint64_t graphics_transfer(GraphicsBatch& b,const std::shared_ptr<GraphicsImage>& image,VkImageAspectFlags aspect,unsigned bpp,const void* data=nullptr){
+    std::uint64_t graphics_transfer(GraphicsBatch& b,const std::shared_ptr<GraphicsImage>& image,VkImageAspectFlags aspect,unsigned bpp,const void* data=nullptr){b.sync();
         GraphicsSite site(SiteTransfer);
         graphics_begin(b);const auto bytes=std::uint64_t(image->width)*image->height*image->layers*bpp;
         const auto at=data?graphics_upload(b,data,bytes):graphics_space(b,bytes);
@@ -577,7 +589,7 @@ public:
         else {vkCmdCopyImageToBuffer(b.command,image->image,VK_IMAGE_LAYOUT_GENERAL,b.buffer,1,&copy);b.download_bytes+=bytes;}
         graphics_stamp(b,0,true);b.pins.push_back(image);return at;
     }
-    std::shared_ptr<GraphicsImage> graphics_aspect_image(GraphicsBatch& b,const std::shared_ptr<GraphicsImage>& source,VkImageAspectFlags aspect,const std::shared_ptr<GraphicsImage>& destination={},std::shared_ptr<GraphicsBuffer>* scratch=nullptr){
+    std::shared_ptr<GraphicsImage> graphics_aspect_image(GraphicsBatch& b,const std::shared_ptr<GraphicsImage>& source,VkImageAspectFlags aspect,const std::shared_ptr<GraphicsImage>& destination={},std::shared_ptr<GraphicsBuffer>* scratch=nullptr){b.sync();
         GraphicsSite site(SiteAspect);
         const bool depth=source->depth && source->format==VK_FORMAT_D24_UNORM_S8_UINT && (aspect==VK_IMAGE_ASPECT_DEPTH_BIT || aspect==VK_IMAGE_ASPECT_STENCIL_BIT);
         const bool color=!source->depth && aspect==VK_IMAGE_ASPECT_COLOR_BIT && (source->format==VK_FORMAT_R16G16B16A16_SFLOAT || source->format==VK_FORMAT_R32G32B32A32_SFLOAT || source->format==VK_FORMAT_R32_SFLOAT);
@@ -607,7 +619,7 @@ public:
         b.buffer_pins.push_back(transfer);b.pins.push_back(source);b.pins.push_back(result);return result;
     }
     std::uint64_t graphics_full_clears=0;
-    void graphics_clear_image(GraphicsBatch& b,const std::shared_ptr<GraphicsImage>& image,const VkClearColorValue& color,float depth,unsigned stencil,VkImageAspectFlags aspects){
+    void graphics_clear_image(GraphicsBatch& b,const std::shared_ptr<GraphicsImage>& image,const VkClearColorValue& color,float depth,unsigned stencil,VkImageAspectFlags aspects){b.sync();
         GraphicsSite site(SiteClear);
         graphics_begin(b);graphics_barrier(b);
         const VkImageSubresourceRange range{aspects,0,1,0,image->layers};
@@ -615,7 +627,7 @@ public:
         else vkCmdClearColorImage(b.command,image->image,VK_IMAGE_LAYOUT_GENERAL,&color,1,&range);
         b.pins.push_back(image);++graphics_full_clears;
     }
-    void graphics_copy(GraphicsBatch& b,const std::shared_ptr<GraphicsImage>& from,const std::shared_ptr<GraphicsImage>& to){
+    void graphics_copy(GraphicsBatch& b,const std::shared_ptr<GraphicsImage>& from,const std::shared_ptr<GraphicsImage>& to){b.sync();
         if(from==to)return;
         GraphicsSite site(SiteSurfaceCopy);
         const bool rgba_compatible=(from->format==VK_FORMAT_R8G8B8A8_SRGB && to->format==VK_FORMAT_R8G8B8A8_UNORM) ||
@@ -630,33 +642,142 @@ public:
             vkCmdCopyImage(b.command,from->image,VK_IMAGE_LAYOUT_GENERAL,to->image,VK_IMAGE_LAYOUT_GENERAL,1,&c);}
         b.pins.push_back(from);b.pins.push_back(to);
     }
-    std::uint64_t graphics_draw(GraphicsBatch& b,const GraphicsState& s,const std::array<std::shared_ptr<GraphicsImage>,4>& colors,
-                       const std::shared_ptr<GraphicsImage>& depth,const std::string& vs,const std::string& fs,
-                       const std::vector<unsigned>& data,unsigned vertices,const std::array<std::array<float,2>,4>& positions,
-                       float bias_constant=0,float bias_slope=0,float min_bounds=0,float max_bounds=1,const std::array<std::shared_ptr<GraphicsImage>,20>& textures={},unsigned first_vertex=0,std::uint64_t reuse=UINT64_MAX,const std::array<std::shared_ptr<GraphicsBuffer>,16>& raw_textures={},const std::shared_ptr<const std::string>& vs_owner={},const std::shared_ptr<const std::string>& fs_owner={},const std::uint8_t* tail=nullptr,std::uint64_t tail_bytes=0,bool layered_ok=false){
-        // Layered planes: every attachment must be a samples-layer array (else per-plane passes).
-        bool layered=layered_ok && graphics_layered_output && s.samples>1;
-        if(layered){for(unsigned i=0;i<s.colors;++i)if(colors[i]->layers!=s.samples)layered=false;if(depth && depth->layers!=s.samples)layered=false;}
-        const bool multiview=layered && graphics_multiview;
-        auto t=std::chrono::steady_clock::now();auto pipeline=graphics_pipeline(s,vs,fs,vs_owner,fs_owner,multiview);auto& p=*pipeline;b.pipeline_pins.push_back(pipeline);b.pipeline_ms+=resident_ms(t);t=std::chrono::steady_clock::now();
-        // An optional tail (vertex input bytes) directly follows the words in
-        // the same immutable slice; the blob addresses it past data.size()*4.
-        const auto words=data.size()*4,bytes=words+tail_bytes;if(bytes>graphics_properties.limits.maxStorageBufferRange)throw std::runtime_error("RSX graphics storage range limit");
-        std::uint64_t at=reuse;
-        if(reuse==UINT64_MAX){graphics_begin(b);at=graphics_space(b,bytes);auto* out=static_cast<char*>(b.map)+at;std::memcpy(out,data.data(),words);if(tail_bytes)std::memcpy(out+words,tail,tail_bytes);
-            b.upload_bytes+=bytes;::RsxPerfCounters::add(::RsxPerfCounters::upload_bytes,bytes);}
-        // The dynamic blob binding's range is not observable by the shaders
-        // (no length(), no robust access): round it to a power-of-two bucket
-        // that still fits after this offset so equal texture sets share one
-        // descriptor across draws. The exact size is used when no bucket fits.
-        std::uint64_t range=bytes;
-        {std::uint64_t bucket=4096;while(bucket<bytes)bucket<<=1;
-            if(bucket<=graphics_properties.limits.maxStorageBufferRange && at+bucket<=b.capacity)range=bucket;}
+    // ---- asynchronous draw recorder (ANYPS3_RSX_RECORDER=1) ----
+    // graphics_draw is split into a front half (pipeline lookup, staging copy, pins, query/status accounting; RSX worker thread) and a back
+    // half (graphics_record_draw: descriptor set, framebuffer, render pass, dynamic state, draw; recorder thread, FIFO). Batch state is
+    // partitioned by owner: the front half owns recording/used/capacity/map/uploads/state_*/pins/buffer_pins/pipeline_pins/status_offsets/
+    // visibility_count/draws and the staging bytes; the recorder owns the command buffer, descriptor cache and pools, framebuffers,
+    // framebuffer_pins, active_framebuffer, bound pipeline, dynamic state, plane runs, timestamps and marks. Every other entry point that
+    // receives a GraphicsBatch calls b.sync() first, which waits until all queued draws are recorded (and rethrows a recorder failure);
+    // the frontend-only entry points (graphics_begin of a fresh batch, graphics_space/upload/reserve_upload/state_blocks) do not.
+    // Each batch records into its own command pool, so resetting/freeing another batch never races with the recorder.
+    struct DrawJob {
+        GraphicsBatch* batch=nullptr;std::shared_ptr<GraphicsPipeline> pipeline;GraphicsState s;
+        std::array<std::shared_ptr<GraphicsImage>,4> colors;std::shared_ptr<GraphicsImage> depth;
+        std::array<std::shared_ptr<GraphicsImage>,20> textures;std::array<std::shared_ptr<GraphicsBuffer>,16> raw_textures;
+        std::array<std::array<float,2>,4> positions{};
+        float bias_constant=0,bias_slope=0,min_bounds=0,max_bounds=1;
+        unsigned vertices=0,first_vertex=0,query=0,passes=1;bool indexed=false,layered=false,multiview=false,defer_planes=false;
+        std::uint64_t at=0,range=0,index_offset=0;
+        void reset(){batch=nullptr;pipeline.reset();depth.reset();for(auto& x:colors)x.reset();for(auto& x:textures)x.reset();for(auto& x:raw_textures)x.reset();}
+    };
+    static bool& in_recorder_thread(){static thread_local bool recorder=false;return recorder;}
+    static void recorder_relax(){
+#if defined(__x86_64__) || defined(__i386__)
+        __builtin_ia32_pause();
+#else
+        std::this_thread::yield();
+#endif
+    }
+    // TEST HOOK (tests/test_rsx_recorder.py): the Nth recorded draw (0 = off) throws on the recorder thread.
+    std::atomic<unsigned> graphics_test_recorder_fault{0};
+    std::uint64_t recorder_clock=0;   // LRU stamps of the batch-local caches, recorder-thread only
+    struct DrawRecorder {
+        static constexpr std::size_t slots=256;
+        NativeVulkan* owner;std::vector<DrawJob> ring=std::vector<DrawJob>(slots);
+        alignas(64) std::atomic<std::uint64_t> produced{0};alignas(64) std::atomic<std::uint64_t> consumed{0};alignas(64) std::atomic<int> waiters{0};
+        std::atomic<bool> sleeping{false},stopping{false},failed{false};
+        std::mutex mutex;std::condition_variable wake,done;std::exception_ptr error;std::uint64_t recorded=0;std::thread thread;
+        explicit DrawRecorder(NativeVulkan* o):owner(o){thread=std::thread([this]{run();});}
+        ~DrawRecorder(){
+            {std::lock_guard<std::mutex> lock(mutex);stopping.store(true,std::memory_order_seq_cst);}
+            wake.notify_all();if(thread.joinable())thread.join();
+        }
+        [[noreturn]] void rethrow(){std::exception_ptr e;{std::lock_guard<std::mutex> lock(mutex);e=error;}std::rethrow_exception(e);}
+        void run(){
+            in_recorder_thread()=true;::pthread_setname_np(::pthread_self(),"rsx-record");
+            for(;;){
+                const auto c=consumed.load(std::memory_order_relaxed);
+                if(produced.load(std::memory_order_acquire)>c){
+                    auto& job=ring[c%slots];
+                    if(!failed.load(std::memory_order_acquire)){
+                        try{
+                            const auto fault=owner->graphics_test_recorder_fault.load(std::memory_order_relaxed);
+                            if(fault && ++recorded==fault)throw std::runtime_error("RSX draw recorder test fault");
+                            owner->graphics_record_draw(job);
+                        }catch(...){{std::lock_guard<std::mutex> lock(mutex);error=std::current_exception();}failed.store(true,std::memory_order_release);}
+                    }
+                    auto* batch=job.batch;job.reset();
+                    if(batch)batch->pending_jobs.fetch_sub(1,std::memory_order_release);
+                    consumed.store(c+1,std::memory_order_release);
+                    std::atomic_thread_fence(std::memory_order_seq_cst);
+                    if(waiters.load(std::memory_order_relaxed)>0){std::lock_guard<std::mutex> lock(mutex);done.notify_all();}
+                    continue;
+                }
+                if(stopping.load(std::memory_order_acquire))return;
+                bool found=false;
+                for(unsigned spin=0;spin<4000;++spin){recorder_relax();if(produced.load(std::memory_order_acquire)>c){found=true;break;}}
+                if(found)continue;
+                std::unique_lock<std::mutex> lock(mutex);
+                sleeping.store(true,std::memory_order_seq_cst);std::atomic_thread_fence(std::memory_order_seq_cst);
+                wake.wait(lock,[&]{return produced.load(std::memory_order_acquire)>c || stopping.load(std::memory_order_acquire);});
+                sleeping.store(false,std::memory_order_relaxed);
+            }
+        }
+    };
+    std::unique_ptr<DrawRecorder> draw_recorder;
+    bool recorder_failed()const{return draw_recorder && draw_recorder->failed.load(std::memory_order_acquire);}
+    void recorder_start(){
+        const char* v=std::getenv("ANYPS3_RSX_RECORDER");
+        if(v && std::strcmp(v,"0") && std::strcmp(v,"1"))throw std::runtime_error("invalid ANYPS3_RSX_RECORDER");
+        if(v && !std::strcmp(v,"1") && !graphics_gpu_loop())draw_recorder=std::make_unique<DrawRecorder>(this);
+    }
+    // Waits until every queued draw is recorded. No-op on the recorder thread and without a recorder.
+    void recorder_drain(){
+        if(!draw_recorder || in_recorder_thread())return;
+        auto& r=*draw_recorder;const auto target=r.produced.load(std::memory_order_acquire);
+        if(r.consumed.load(std::memory_order_acquire)<target){
+            for(unsigned spin=0;spin<4000 && r.consumed.load(std::memory_order_acquire)<target;++spin)recorder_relax();
+            if(r.consumed.load(std::memory_order_acquire)<target){
+                std::unique_lock<std::mutex> lock(r.mutex);
+                r.waiters.fetch_add(1,std::memory_order_seq_cst);std::atomic_thread_fence(std::memory_order_seq_cst);
+                r.done.wait(lock,[&]{return r.consumed.load(std::memory_order_acquire)>=target;});
+                r.waiters.fetch_sub(1,std::memory_order_relaxed);
+            }
+        }
+        if(r.failed.load(std::memory_order_acquire))r.rethrow();
+    }
+    // Same wait without reporting a recorder failure (destructors, teardown).
+    void recorder_quiesce()noexcept{
+        if(!draw_recorder || in_recorder_thread())return;
+        auto& r=*draw_recorder;const auto target=r.produced.load(std::memory_order_acquire);
+        std::unique_lock<std::mutex> lock(r.mutex);
+        r.waiters.fetch_add(1,std::memory_order_seq_cst);std::atomic_thread_fence(std::memory_order_seq_cst);
+        r.done.wait(lock,[&]{return r.consumed.load(std::memory_order_acquire)>=target;});
+        r.waiters.fetch_sub(1,std::memory_order_relaxed);
+    }
+    void recorder_stop()noexcept{if(draw_recorder){recorder_quiesce();draw_recorder.reset();}}
+    DrawJob& recorder_slot(){
+        auto& r=*draw_recorder;if(r.failed.load(std::memory_order_acquire))r.rethrow();
+        const auto n=r.produced.load(std::memory_order_relaxed);
+        for(unsigned spin=0;n-r.consumed.load(std::memory_order_acquire)>=DrawRecorder::slots;++spin){
+            if(spin<2000){recorder_relax();continue;}
+            std::unique_lock<std::mutex> lock(r.mutex);
+            r.waiters.fetch_add(1,std::memory_order_seq_cst);std::atomic_thread_fence(std::memory_order_seq_cst);
+            r.done.wait(lock,[&]{return n-r.consumed.load(std::memory_order_acquire)<DrawRecorder::slots;});
+            r.waiters.fetch_sub(1,std::memory_order_relaxed);
+            if(r.failed.load(std::memory_order_acquire))r.rethrow();
+        }
+        return r.ring[n%DrawRecorder::slots];
+    }
+    void recorder_publish(){
+        auto& r=*draw_recorder;r.produced.store(r.produced.load(std::memory_order_relaxed)+1,std::memory_order_release);
+        std::atomic_thread_fence(std::memory_order_seq_cst);
+        if(r.sleeping.load(std::memory_order_relaxed)){std::lock_guard<std::mutex> lock(r.mutex);r.wake.notify_one();}
+    }
+    // Back half of graphics_draw: descriptor set, framebuffer, render pass, dynamic state and the draw itself. Runs inline or on the
+    // draw recorder thread; it only touches recorder-owned batch state (see DrawJob) and immutable objects.
+    void graphics_record_draw(DrawJob& j){
+        auto& b=*j.batch;auto& p=*j.pipeline;const auto& s=j.s;const auto& colors=j.colors;const auto& depth=j.depth;const auto& textures=j.textures;const auto& raw_textures=j.raw_textures;
+        const auto& positions=j.positions;const float bias_constant=j.bias_constant,bias_slope=j.bias_slope,min_bounds=j.min_bounds,max_bounds=j.max_bounds;
+        const unsigned vertices=j.vertices,first_vertex=j.first_vertex,query=j.query,passes=j.passes;const bool layered=j.layered,multiview=j.multiview,defer_planes=j.defer_planes;
+        const std::uint64_t at=j.at,range=j.range;
+        auto t=std::chrono::steady_clock::now();
         typename GraphicsBatch::DescriptorKey descriptor_key{};descriptor_key[0]=reinterpret_cast<std::uint64_t>(p.descriptors);descriptor_key[1]=range;
         for(unsigned u=0;u<20;++u)descriptor_key[2+u]=textures[u]?reinterpret_cast<std::uint64_t>(u>=16?textures[u]->array_view:textures[u]->views[0]):0;
         for(unsigned u=0;u<16;++u)descriptor_key[22+u]=raw_textures[u]?reinterpret_cast<std::uint64_t>(raw_textures[u]->buffer):0;
         auto cached_set=b.descriptor_cache.find(descriptor_key);VkDescriptorSet set;
-        if(cached_set!=b.descriptor_cache.end()){set=cached_set->second.set;cached_set->second.last_use=++cache_clock;++b.descriptor_hits;}
+        if(cached_set!=b.descriptor_cache.end()){set=cached_set->second.set;cached_set->second.last_use=++recorder_clock;++b.descriptor_hits;}
         else{++b.descriptor_misses;
         set=graphics_descriptor_set(b,p.descriptors,"graphics draw descriptor");
         // One update call carries every binding (same writes, same order).
@@ -678,27 +799,9 @@ public:
         ::RsxPerfCounters::add(::RsxPerfCounters::descriptor_writes,n);vkUpdateDescriptorSets(device,n,writes.data(),0,nullptr);
         if(b.descriptor_cache.size()>=128){auto old=std::min_element(b.descriptor_cache.begin(),b.descriptor_cache.end(),[](const auto& a,const auto& b){return a.second.last_use<b.second.last_use;});b.descriptor_cache.erase(old);}
         // Descriptor storage stays in the bounded pool until the batch fence.
-        b.descriptor_cache.emplace(std::move(descriptor_key),typename GraphicsBatch::DescriptorEntry{set,++cache_clock});
+        b.descriptor_cache.emplace(std::move(descriptor_key),typename GraphicsBatch::DescriptorEntry{set,++recorder_clock});
         }
-        for(unsigned i=0;i<s.colors;++i)b.pins.push_back(colors[i]);
-        if(depth)b.pins.push_back(depth);
-        for(const auto& image:textures)if(image)b.pins.push_back(image);
-        for(const auto& raw:raw_textures)if(raw)b.buffer_pins.push_back(raw);
-        if(reuse==UINT64_MAX)b.uploads.push_back({at,at,bytes});
         graphics_stamp(b,1);if(b.queries){b.phase_pipelines.resize(b.phases.size(),nullptr);b.phase_pipelines.back()=&p;}
-        if(b.visibility_count+s.samples>1024)throw std::runtime_error("RSX graphics visibility budget");
-        const auto query=b.visibility_count++;::RsxPerfCounters::add(::RsxPerfCounters::draw_layers,s.samples);
-        // Layered: every sample plane is one instance of a single draw into
-        // a layered framebuffer. Per plane the primitive order is unchanged;
-        // planes are distinct layers, so their relative order is unobservable.
-        const unsigned passes=layered?1:s.samples;graphics_last_queries=multiview?s.samples:passes;
-        // Plane runs (GraphicsBatch::PlaneDraw): planes >=1 of a per-plane draw
-        // are recorded after plane 0's pass. ANYPS3_RSX_PLANE_RUNS=0 records
-        // every plane immediately (one pass switch per plane).
-        static const bool plane_runs=[]{const char* v=std::getenv("ANYPS3_RSX_PLANE_RUNS");
-            if(v && std::strcmp(v,"0") && std::strcmp(v,"1")){throw std::runtime_error("invalid ANYPS3_RSX_PLANE_RUNS");}
-            return !v || !std::strcmp(v,"1");}();
-        const bool defer_planes=plane_runs && passes>1;
         typename GraphicsBatch::PlaneDraw deferred{};std::array<VkFramebuffer,4> plane_fb{};
         for(unsigned layer=0;layer<passes;++layer){
             std::array<VkImageView,5> views{};unsigned view_count=0;for(unsigned i=0;i<s.colors;++i)views[view_count++]=layered?graphics_attachment_array(*colors[i]):colors[i]->views[layer];
@@ -710,8 +813,8 @@ public:
             std::array<std::uint64_t,10> framebuffer_key{};framebuffer_key[0]=s.colors;framebuffer_key[1]=s.color;framebuffer_key[2]=s.depth;framebuffer_key[3]=s.width;framebuffer_key[4]=s.height;
             for(unsigned i=0;i<view_count;++i)framebuffer_key[5+i]=reinterpret_cast<std::uint64_t>(views[i]);
             auto found=b.framebuffers.find(framebuffer_key);
-            if(found!=b.framebuffers.end()){framebuffer=found->second->handle;found->second->last_use=++cache_clock;b.framebuffer_pins.push_back(found->second);++b.framebuffer_hits;}
-            else{check(vkCreateFramebuffer(device,&fi,nullptr,&framebuffer),"graphics framebuffer");auto entry=std::make_shared<typename GraphicsBatch::Framebuffer>();entry->owner=this;entry->handle=framebuffer;entry->last_use=++cache_clock;entry->pipeline=pipeline;
+            if(found!=b.framebuffers.end()){framebuffer=found->second->handle;found->second->last_use=++recorder_clock;b.framebuffer_pins.push_back(found->second);++b.framebuffer_hits;}
+            else{check(vkCreateFramebuffer(device,&fi,nullptr,&framebuffer),"graphics framebuffer");auto entry=std::make_shared<typename GraphicsBatch::Framebuffer>();entry->owner=this;entry->handle=framebuffer;entry->last_use=++recorder_clock;entry->pipeline=j.pipeline;
                 for(unsigned i=0;i<s.colors;++i)entry->images.push_back(colors[i]);
                 if(depth)entry->images.push_back(depth);
                 if(b.framebuffers.size()>=framebuffer_limit)b.framebuffers.erase(lru_entry(b.framebuffers));
@@ -761,12 +864,12 @@ public:
             if(changed(18,2))vkCmdSetDepthBounds(b.command,min_bounds,max_bounds);
             b.dynamic_state=dynamic;b.dynamic_valid=true;
             const unsigned instances=layered&&!multiview?s.samples:1;
-            if(data.size()>15 && data[15]==1){vkCmdBindIndexBuffer(b.command,b.data_buffer,at+std::uint64_t(data[13])*4,VK_INDEX_TYPE_UINT32);vkCmdDrawIndexed(b.command,vertices,instances,first_vertex,0,0);}
+            if(j.indexed){vkCmdBindIndexBuffer(b.command,b.data_buffer,at+j.index_offset,VK_INDEX_TYPE_UINT32);vkCmdDrawIndexed(b.command,vertices,instances,first_vertex,0,0);}
             else vkCmdDraw(b.command,vertices,instances,first_vertex,0);
             vkCmdEndQuery(b.command,b.occlusion,query+layer);graphics_mark(b,MarkDraw);
             if(defer_planes){deferred.pipeline=p.pipeline;deferred.layout=p.layout;deferred.set=set;deferred.offset=dynamic_at;deferred.dynamic=dynamic;
                 deferred.vertices=vertices;deferred.instances=instances;deferred.first_vertex=first_vertex;deferred.query=query;
-                deferred.indexed=data.size()>15 && data[15]==1;deferred.index_offset=deferred.indexed?at+std::uint64_t(data[13])*4:0;
+                deferred.indexed=j.indexed;deferred.index_offset=deferred.indexed?at+j.index_offset:0;
                 deferred.query_flags=graphics_features.occlusionQueryPrecise?VK_QUERY_CONTROL_PRECISE_BIT:0;}
         }
         if(defer_planes){
@@ -778,14 +881,64 @@ public:
             if(b.plane_draws.empty()){b.plane_framebuffers=plane_fb;b.plane_pass=p.pass;b.plane_extent={s.width,s.height};b.plane_count=passes;}
             b.plane_draws.push_back(deferred);++b.plane_deferred;
         }
-        b.visibility_count+=(multiview?s.samples:passes)-1;graphics_stamp(b,0,true);
+        graphics_stamp(b,0,true);++b.draws;b.record_back_ms+=resident_ms(t);
+    }
+    std::uint64_t graphics_draw(GraphicsBatch& b,const GraphicsState& s,const std::array<std::shared_ptr<GraphicsImage>,4>& colors,
+                       const std::shared_ptr<GraphicsImage>& depth,const std::string& vs,const std::string& fs,
+                       const std::vector<unsigned>& data,unsigned vertices,const std::array<std::array<float,2>,4>& positions,
+                       float bias_constant=0,float bias_slope=0,float min_bounds=0,float max_bounds=1,const std::array<std::shared_ptr<GraphicsImage>,20>& textures={},unsigned first_vertex=0,std::uint64_t reuse=UINT64_MAX,const std::array<std::shared_ptr<GraphicsBuffer>,16>& raw_textures={},const std::shared_ptr<const std::string>& vs_owner={},const std::shared_ptr<const std::string>& fs_owner={},const std::uint8_t* tail=nullptr,std::uint64_t tail_bytes=0,bool layered_ok=false){
+        // Layered planes: every attachment must be a samples-layer array (else per-plane passes).
+        bool layered=layered_ok && graphics_layered_output && s.samples>1;
+        if(layered){for(unsigned i=0;i<s.colors;++i)if(colors[i]->layers!=s.samples)layered=false;if(depth && depth->layers!=s.samples)layered=false;}
+        const bool multiview=layered && graphics_multiview;
+        auto t=std::chrono::steady_clock::now();auto pipeline=graphics_pipeline(s,vs,fs,vs_owner,fs_owner,multiview);b.pipeline_pins.push_back(pipeline);b.pipeline_ms+=resident_ms(t);t=std::chrono::steady_clock::now();
+        // An optional tail (vertex input bytes) directly follows the words in
+        // the same immutable slice; the blob addresses it past data.size()*4.
+        const auto words=data.size()*4,bytes=words+tail_bytes;if(bytes>graphics_properties.limits.maxStorageBufferRange)throw std::runtime_error("RSX graphics storage range limit");
+        std::uint64_t at=reuse;
+        if(reuse==UINT64_MAX){graphics_begin(b);at=graphics_space(b,bytes);auto* out=static_cast<char*>(b.map)+at;std::memcpy(out,data.data(),words);if(tail_bytes)std::memcpy(out+words,tail,tail_bytes);
+            b.upload_bytes+=bytes;::RsxPerfCounters::add(::RsxPerfCounters::upload_bytes,bytes);}
+        // The dynamic blob binding's range is not observable by the shaders
+        // (no length(), no robust access): round it to a power-of-two bucket
+        // that still fits after this offset so equal texture sets share one
+        // descriptor across draws. The exact size is used when no bucket fits.
+        std::uint64_t range=bytes;
+        {std::uint64_t bucket=4096;while(bucket<bytes)bucket<<=1;
+            if(bucket<=graphics_properties.limits.maxStorageBufferRange && at+bucket<=b.capacity)range=bucket;}
+        for(unsigned i=0;i<s.colors;++i)b.pins.push_back(colors[i]);
+        if(depth)b.pins.push_back(depth);
+        for(const auto& image:textures)if(image)b.pins.push_back(image);
+        for(const auto& raw:raw_textures)if(raw)b.buffer_pins.push_back(raw);
+        if(reuse==UINT64_MAX)b.uploads.push_back({at,at,bytes});
+        if(b.visibility_count+s.samples>1024)throw std::runtime_error("RSX graphics visibility budget");
+        const auto query=b.visibility_count++;::RsxPerfCounters::add(::RsxPerfCounters::draw_layers,s.samples);
+        // Layered: every sample plane is one instance of a single draw into
+        // a layered framebuffer. Per plane the primitive order is unchanged;
+        // planes are distinct layers, so their relative order is unobservable.
+        const unsigned passes=layered?1:s.samples;graphics_last_queries=multiview?s.samples:passes;
+        // Plane runs (GraphicsBatch::PlaneDraw): planes >=1 of a per-plane draw
+        // are recorded after plane 0's pass. ANYPS3_RSX_PLANE_RUNS=0 records
+        // every plane immediately (one pass switch per plane).
+        static const bool plane_runs=[]{const char* v=std::getenv("ANYPS3_RSX_PLANE_RUNS");
+            if(v && std::strcmp(v,"0") && std::strcmp(v,"1")){throw std::runtime_error("invalid ANYPS3_RSX_PLANE_RUNS");}
+            return !v || !std::strcmp(v,"1");}();
+        const bool defer_planes=plane_runs && passes>1;
+        b.visibility_count+=(multiview?s.samples:passes)-1;
         // Keep the existing logical readback accounting at record time. The
         // submit combines these requests; it does not create new requests.
         b.status_offsets.push_back(at+28);b.download_bytes+=4;
-        ++b.draws;++graphics_draws;b.record_ms+=resident_ms(t);return at;
+        ++graphics_draws;b.record_ms+=resident_ms(t);
+        const bool asynchronous=draw_recorder && !b.inline_draws && !b.queries && !b.marks && !graphics_gpu_loop();
+        std::optional<DrawJob> inline_job;DrawJob* job=asynchronous?&recorder_slot():&inline_job.emplace();
+        job->batch=&b;job->pipeline=std::move(pipeline);job->s=s;job->colors=colors;job->depth=depth;job->textures=textures;job->raw_textures=raw_textures;job->positions=positions;
+        job->bias_constant=bias_constant;job->bias_slope=bias_slope;job->min_bounds=min_bounds;job->max_bounds=max_bounds;job->vertices=vertices;job->first_vertex=first_vertex;
+        job->query=query;job->passes=passes;job->layered=layered;job->multiview=multiview;job->defer_planes=defer_planes;job->at=at;job->range=range;
+        job->indexed=data.size()>15 && data[15]==1;job->index_offset=job->indexed?std::uint64_t(data[13])*4:0;
+        if(asynchronous){b.pending_jobs.fetch_add(1,std::memory_order_relaxed);recorder_publish();}else graphics_record_draw(*job);
+        return at;
     }
     // A value identifies one queue prefix. Submission never waits for it.
-    std::uint64_t graphics_submit(GraphicsBatch& b){
+    std::uint64_t graphics_submit(GraphicsBatch& b){b.sync();
         if(b.failed)throw std::runtime_error("RSX graphics batch poisoned");
         if(!b.recording)return b.completion;
         try{
@@ -941,7 +1094,7 @@ public:
         }catch(...){b.failed=true;throw;}
     }
     std::uint64_t graphics_completed(){::RsxPerfCounters::add(::RsxPerfCounters::timeline_polls);std::uint64_t value=0;check(vkGetSemaphoreCounterValue(device,graphics_timeline,&value),"graphics timeline counter");return value;}
-    bool graphics_collect(GraphicsBatch& b,bool wait=true){
+    bool graphics_collect(GraphicsBatch& b,bool wait=true){b.sync();
         if(b.failed)throw std::runtime_error("RSX graphics batch poisoned");
         if(!b.submitted)return true;
         try{
@@ -1004,10 +1157,16 @@ public:
     }
     void graphics_finish(GraphicsBatch& b){::RsxPerfCounters::add(::RsxPerfCounters::finish_waits);graphics_submit(b);graphics_collect(b);}
     static void graphics_move_stats(GraphicsBatch& from,GraphicsBatch& to){
+        from.sync();
+        // Counters the draw recorder increments move only while the destination has no queued draws (otherwise they stay with `from`).
+        if(!to.pending_jobs.load(std::memory_order_acquire)){
+            to.draws+=from.draws;to.record_back_ms+=from.record_back_ms;to.descriptor_hits+=from.descriptor_hits;to.descriptor_misses+=from.descriptor_misses;to.framebuffer_hits+=from.framebuffer_hits;to.framebuffer_misses+=from.framebuffer_misses;
+            from.draws=0;from.record_back_ms=0;from.descriptor_hits=from.descriptor_misses=from.framebuffer_hits=from.framebuffer_misses=0;
+        }
         to.upload_ms+=from.upload_ms;to.draw_ms+=from.draw_ms;to.download_ms+=from.download_ms;to.wait_ms+=from.wait_ms;to.pipeline_ms+=from.pipeline_ms;to.record_ms+=from.record_ms;
         from.upload_ms=from.draw_ms=from.download_ms=from.wait_ms=from.pipeline_ms=from.record_ms=0;
-        to.upload_bytes+=from.upload_bytes;to.download_bytes+=from.download_bytes;to.submissions+=from.submissions;to.draws+=from.draws;to.descriptor_hits+=from.descriptor_hits;to.descriptor_misses+=from.descriptor_misses;to.framebuffer_hits+=from.framebuffer_hits;to.framebuffer_misses+=from.framebuffer_misses;
-        from.upload_bytes=from.download_bytes=from.submissions=from.draws=from.descriptor_hits=from.descriptor_misses=from.framebuffer_hits=from.framebuffer_misses=0;
+        to.upload_bytes+=from.upload_bytes;to.download_bytes+=from.download_bytes;to.submissions+=from.submissions;
+        from.upload_bytes=from.download_bytes=from.submissions=0;
     }
     VkDescriptorPool graphics_descriptor_pool(){
         VkDescriptorPoolSize sizes[]={{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC,1024},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,17*1024},{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,20*1024}};VkDescriptorPoolCreateInfo pi{};pi.sType=VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;pi.maxSets=1024;pi.poolSizeCount=3;pi.pPoolSizes=sizes;
@@ -1016,7 +1175,7 @@ public:
     // One batch can record more draws and texture decodes than a single pool
     // holds (a real frame has thousands of draws); exhaustion chains a further
     // pool until graphics_reset. A failure on an empty pool is a real error.
-    VkDescriptorSet graphics_descriptor_set(GraphicsBatch& b,VkDescriptorSetLayout layout,const char* operation){
+    VkDescriptorSet graphics_descriptor_set(GraphicsBatch& b,VkDescriptorSetLayout layout,const char* operation){b.sync();
         VkDescriptorSetAllocateInfo si{};si.sType=VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;si.descriptorSetCount=1;si.pSetLayouts=&layout;
         bool fresh=false;
         for(;;){
@@ -1031,7 +1190,7 @@ public:
             ++b.overflow_used;fresh=true;
         }
     }
-    void graphics_reset(GraphicsBatch& b){
+    void graphics_reset(GraphicsBatch& b){b.sync();
         if(b.recording || b.submitted || b.failed)throw std::runtime_error("RSX graphics reset pending/failed batch");
         b.framebuffer_pins.clear();b.pipeline_pins.clear();b.pins.clear();b.buffer_pins.clear();b.compute_pins.clear();
         check(vkResetFences(device,1,&b.fence),"graphics reset fence");check(vkResetCommandBuffer(b.command,0),"graphics reset commands");

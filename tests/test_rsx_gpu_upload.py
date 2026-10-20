@@ -36,7 +36,7 @@ static void upload_cache(){
  const auto cpu_vp=rsxdraw::host_stats().cpu_vertex,cpu_clip=rsxdraw::host_stats().cpu_clip;
  rsx_execute_draw(s);const auto cpu_texel=rsxdraw::host_stats().cpu_texel;assert(cpu_texel==0 && s.rsx.renderer->graphics_texture_decodes>=1);repeat_draw(s);repeat_draw(s);
  assert(session.raw_misses==1 && session.raw_hits==2);
- assert(session.batch->descriptor_misses==1 && session.batch->descriptor_hits==2);
+ session.batch->sync();assert(session.batch->descriptor_misses==1 && session.batch->descriptor_hits==2);
  assert(session.batch->framebuffer_misses==1 && session.batch->framebuffer_hits==2);
  assert(s.rsx.renderer->graphics_draws==3 && rsxdraw::host_stats().cpu_vertex==cpu_vp && rsxdraw::host_stats().cpu_texel==cpu_texel && rsxdraw::host_stats().cpu_clip==cpu_clip);
  session.flush();assert(near_argb(s.memory.load(0xc0100000,4),0xff112233));

@@ -42,6 +42,8 @@ inline std::atomic<bool>& rsx_multiview_shaders(){static std::atomic<bool> value
 #include <cstring>
 #include <dlfcn.h>
 #include <thread>
+#include <condition_variable>
+#include <optional>
 #include <mutex>
 #include <functional>
 #include <exception>
@@ -112,6 +114,7 @@ class NativeVulkan {
     }
     void destroy()noexcept{
 #ifdef ANYPS3_RSX_VK
+        recorder_stop();
         graphics_wsi.reset();
 #endif
         if(device){
@@ -302,6 +305,9 @@ public:
             VkCommandPoolCreateInfo pi{};pi.sType=VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
             pi.queueFamilyIndex=family;pi.flags=VK_COMMAND_POOL_CREATE_TRANSIENT_BIT|VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
             check(vkCreateCommandPool(device,&pi,nullptr,&pool),"vkCreateCommandPool");
+#ifdef ANYPS3_RSX_VK
+            recorder_start();
+#endif
             std::fprintf(stderr,"native Vulkan device=%s type=%u\n",device_name.c_str(),device_type);
         }catch(...){destroy();throw;}
     }

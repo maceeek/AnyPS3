@@ -86,14 +86,14 @@ static void dynamic_state(){
  PpuState s;setup_draw(s,8,8,32,false);s.rsx.renderer=std::make_unique<NativeVulkan>();rsxgraphics::Session session(*s.rsx.renderer,s);s.rsx.graphics_session=&session;session.observe();
  setenv("ANYPS3_RSX_BACKEND","gpu",1);
  auto run=[&]{s.rsx.draw.ranges={{0,4}};rsx_execute_draw(s);};
- run();const auto emits=session.batch->dynamic_emits,binds=session.batch->pipeline_binds;run();
+ run();session.batch->sync();const auto emits=session.batch->dynamic_emits,binds=session.batch->pipeline_binds;run();session.batch->sync();
  assert(session.batch->dynamic_emits==emits && session.batch->dynamic_reuses>=11 && session.batch->pipeline_binds==binds);
  const auto descriptors=session.batch->descriptor_misses,pipelines=s.rsx.renderer->compile_stats.graphics_pipelines;
- s.rsx.registers[0x310]=1;s.rsx.registers[0x314]=0x10001;s.rsx.registers[0x318]=0;s.rsx.registers[0x320]=0x80068006;run();
+ s.rsx.registers[0x310]=1;s.rsx.registers[0x314]=0x10001;s.rsx.registers[0x318]=0;s.rsx.registers[0x320]=0x80068006;run();session.batch->sync();
  assert(s.rsx.renderer->compile_stats.graphics_pipelines==pipelines+1 && session.batch->descriptor_misses==descriptors);s.rsx.registers[0x310]=0;
  session.flush();assert(near_argb(s.memory.load(0xc0100000,4),0x80ff8040));
  // Command reset must re-emit state even when values/pipeline are identical.
- assert(!session.batch->dynamic_valid && session.batch->bound_graphics_pipeline==VK_NULL_HANDLE);run();assert(session.batch->dynamic_valid);
+ assert(!session.batch->dynamic_valid && session.batch->bound_graphics_pipeline==VK_NULL_HANDLE);run();session.batch->sync();assert(session.batch->dynamic_valid);
  session.flush();
  // Change a dynamic scissor and the shader constant independently. Only the
  // right half changes, with a fixed final guest pixel at each side.
