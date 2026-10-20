@@ -31,7 +31,7 @@ class SampleProfileIntegrationTests(unittest.TestCase):
         for hook in hooks:
             self.assertEqual(code.count(hook), 1)
         self.assertIn('q.launch();', code)
-        self.assertIn('anyps3_sample::Thread sample_profile(anyps3_sample::Role::Ppu,&state.pc,&state.thread_id,&state.steps)', code)
+        self.assertIn('anyps3_sample::Thread sample_profile(anyps3_sample::Role::Ppu,&state.pc,&state.thread_id,&state.steps,&state.lr,&state.r[1],&state.memory.inline_flat.base)', code)
         code = code.replace('int main(int argc, char** argv)', 'int original_main(int argc, char** argv)', 1)
         code += HARNESS[:HARNESS.index('int main(int argc,char** argv)')]
         code += r'''
