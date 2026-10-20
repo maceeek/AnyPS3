@@ -115,7 +115,7 @@ struct NativeSpu {
         // MFC list stall-and-notify (CBEA v1.02 9.1.4; RPCS3 ffba2bf0 SPUThread.cpp do_list_transfer): the rest of a
         // stalled list per tag, stall mask/status (channel 25) and a pending ANY/ALL tag update (mode 1/2).
         struct StalledList {bool active=false,put=false;std::uint64_t high=0;std::uint32_t next=0,end=0,local=0;};
-        std::array<StalledList,32> stalled_lists{};std::uint32_t stall_mask=0,stall_stat=0;bool stall_stat_ready=false;
+        std::array<StalledList,32> stalled_lists{};std::uint32_t stall_mask=0,stall_stat=0,stalled_active=0 /* bit per stalled_lists[tag].active */;bool stall_stat_ready=false;
         unsigned tag_update_pending=0;
         bool tag_status_ready=false;
         std::uint32_t out_mailbox=0;
