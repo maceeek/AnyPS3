@@ -22,6 +22,7 @@ spec.loader.exec_module(reporter)
 
 HARNESS = r'''
 #include <iostream>
+#include <sys/mman.h>
 extern "C" [[gnu::noinline]] std::uint64_t sample_hot_known(std::uint64_t n){
     volatile std::uint64_t bound=n;asm volatile("" : "+m"(bound));
     n=bound;std::uint64_t value=0;
@@ -51,6 +52,21 @@ int main(int argc,char** argv){
         return 0;
     }
     std::uint32_t pc=0x12345000,tid=77;std::uint64_t steps=987654321;
+    if(mode=="guest" || mode=="guest-fault"){
+        // Fake guest address space: a 4 GiB PROT_NONE reservation with one readable page at guest 0x20000000.
+        // PPC64 stack: 0(r1) = back chain, 16(parent) = return address saved by the callee.
+        const std::uint64_t reserve=UINT64_C(1)<<32;
+        auto* base=static_cast<std::uint8_t*>(mmap(nullptr,reserve,PROT_NONE,MAP_PRIVATE|MAP_ANONYMOUS|MAP_NORESERVE,-1,0));
+        if(base==MAP_FAILED || mprotect(base+0x20000000,0x1000,PROT_READ|PROT_WRITE))return 4;
+        auto put=[&](std::uint64_t ea,std::uint64_t v){for(unsigned i=0;i<8;++i)base[ea+i]=std::uint8_t(v>>(56-8*i));};
+        std::uint64_t lr=0x666070,r1=0x20000100;
+        if(mode=="guest"){put(0x20000100,0x20000200);put(0x20000210,0x696d54);put(0x20000200,0x20000300);put(0x20000310,0x123458);put(0x20000300,0);}
+        else{r1=0x20000f00;put(0x20000f00,0x20001000);}  // parent frame lies in the unreadable next page
+        const std::uint8_t* base_pointer=base;
+        anyps3_sample::Thread sampling(anyps3_sample::Role::Ppu,&pc,&tid,&steps,&lr,&r1,&base_pointer);
+        const auto result=sample_caller_known(n);
+        return result==n*(n-1)/2+1?0:3;
+    }
     anyps3_sample::Thread sampling(anyps3_sample::Role::Ppu,&pc,&tid,&steps);
     if(mode=="wait"){
         std::puts("READY");std::fflush(stdout);
@@ -156,6 +172,38 @@ class SampleProfileTests(unittest.TestCase):
         self.assertEqual(set(reporter.report(directory, self.program)['roles']), {'rsx', 'spu'})
         directory, _ = self.run_profile('sleep')
         self.assertEqual(reporter.report(directory, self.program)['samples'], 0)
+
+    def test_wall_clock_mode_samples_a_sleeping_thread(self):
+        # Default CPU-time sampling sees nothing while the thread sleeps (test above); wall mode samples where it sleeps.
+        directory, _ = self.run_profile('sleep', ANYPS3_SAMPLE_PROFILE_WALL='ppu')
+        file = reporter.read_samples(next(directory.glob('thread-*.samples')))
+        # 200 ms of sleep at a 200 us period is about 1000 samples; allow generous scheduling slack.
+        self.assertGreater(len(file['records']), 200)
+        self.assertTrue(all(r['guest_steps'] == 987654321 and r['flags'] & 1 for r in file['records']))
+        # Roles not listed keep thread CPU time.
+        directory, _ = self.run_profile('sleep', ANYPS3_SAMPLE_PROFILE_WALL='spu')
+        self.assertEqual(reporter.report(directory, self.program)['samples'], 0)
+        run = subprocess.run([str(self.program), 'sleep'], env=self.environment(self.root / 'bad-wall', ANYPS3_SAMPLE_PROFILE_WALL='gpu'),
+                             capture_output=True, text=True, timeout=10)
+        self.assertEqual(run.returncode, 2)
+        self.assertIn('invalid wall role list', run.stderr)
+
+    def test_guest_stack_records_lr_and_back_chain_and_survives_unreadable_frames(self):
+        directory, _ = self.run_profile('guest', ANYPS3_SAMPLE_PROFILE_GUEST_STACK='1')
+        file = reporter.read_samples(next(directory.glob('thread-*.samples')))
+        self.assertGreater(len(file['records']), 20)
+        for record in file['records']:
+            self.assertEqual(record['addresses'][1:], [0x666070, 0x696d54, 0x123458])  # live LR, then two saved return addresses
+            self.assertEqual(record['flags'], 3)
+        # The parent frame lives in an unreadable page: the chain ends there (EFAULT is not a crash), LR is kept.
+        directory, _ = self.run_profile('guest-fault', ANYPS3_SAMPLE_PROFILE_GUEST_STACK='1')
+        file = reporter.read_samples(next(directory.glob('thread-*.samples')))
+        self.assertGreater(len(file['records']), 20)
+        self.assertTrue(all(r['addresses'][1:] == [0x666070] for r in file['records']))
+        # Off by default: only the interrupted host RIP.
+        directory, _ = self.run_profile('guest')
+        file = reporter.read_samples(next(directory.glob('thread-*.samples')))
+        self.assertTrue(all(len(r['addresses']) == 1 and r['flags'] == 1 for r in file['records']))
 
     def test_ring_drop_accounting_and_rip_only_default(self):
         directory, _ = self.run_profile(ANYPS3_SAMPLE_PROFILE_CAPACITY='16', ANYPS3_SAMPLE_PROFILE_FLUSH_MS='5000')

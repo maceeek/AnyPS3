@@ -316,7 +316,7 @@ class Program:
                       '    if (argc < 2 || argc > 3) { std::fprintf(stderr, "Usage: program SOURCE.elf [--trace]\\n"); return 2; }',
                       '    const bool trace = argc == 3 && std::string(argv[2]) == "--trace";',
                       '    if (argc == 3 && !trace) { std::fprintf(stderr, "Unknown option\\n"); return 2; }',
-                      "    PpuState state; state.rsx.trace=trace; try { anyps3_sample::Thread sample_profile(anyps3_sample::Role::Ppu,&state.pc,&state.thread_id,&state.steps); load_image(state.memory, argv[1]);",
+                      "    PpuState state; state.rsx.trace=trace; try { anyps3_sample::Thread sample_profile(anyps3_sample::Role::Ppu,&state.pc,&state.thread_id,&state.steps,&state.lr,&state.r[1],&state.memory.inline_flat.base); load_image(state.memory, argv[1]);",
                       '    state.fs.mount(std::getenv("ANYPS3_DISC_ROOT"));' if self.process_entry else "",
                       '    state.fs.configure_cache(std::getenv("ANYPS3_CACHE_ROOT"));' if self.process_entry else "",
                       '    state.fs.configure_hdd(std::getenv("ANYPS3_HDD_ROOT"));' if self.process_entry else "",

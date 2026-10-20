@@ -10,6 +10,7 @@ TYPES = r'''
 #include <signal.h>
 #include <ucontext.h>
 #include <sys/syscall.h>
+#include <sys/uio.h>
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -55,6 +56,10 @@ struct Slot {
     const std::uint64_t* steps=nullptr;
     std::uintptr_t stack_low=0,stack_high=0;
     bool frames=false;
+    // PPU role, ANYPS3_SAMPLE_PROFILE_GUEST_STACK=1: addresses[1..] carry guest LR and the PPC64 back-chain return
+    // addresses (read through process_vm_readv, which fails with EFAULT instead of faulting in the handler).
+    const std::uint64_t* guest_lr=nullptr;const std::uint64_t* guest_r1=nullptr;const std::uint8_t* const* guest_base=nullptr;
+    bool guest_stack=false;
     timer_t timer{};bool timer_created=false;
     int fd=-1;
     std::uint64_t written_attempted=UINT64_MAX;
@@ -83,14 +88,30 @@ inline void handler(int, siginfo_t* info, void* context) noexcept {
     r.guest_steps=slot->steps?__atomic_load_n(slot->steps,__ATOMIC_RELAXED):0;
     r.guest_pc=slot->pc?__atomic_load_n(slot->pc,__ATOMIC_RELAXED):0;
     r.guest_tid=slot->guest_tid?__atomic_load_n(slot->guest_tid,__ATOMIC_RELAXED):0;
-    r.flags=(slot->pc?1u:0u)|(slot->frames?2u:0u);
+    r.flags=(slot->pc?1u:0u)|((slot->frames||slot->guest_stack)?2u:0u);
     const auto& g=static_cast<ucontext_t*>(context)->uc_mcontext.gregs;
     r.addresses[0]=std::uint64_t(g[REG_RIP]);r.depth=1;
     for(unsigned i=1;i<8;++i)r.addresses[i]=0;
     const auto sp=std::uintptr_t(g[REG_RSP]);auto fp=std::uintptr_t(g[REG_RBP]);
     // Opt-in only for builds with frame pointers. Never use backtrace/unwind,
     // never inspect a foreign thread, guard page, alternate or unknown stack.
-    if(slot->frames && sp>=slot->stack_low && sp<slot->stack_high){
+    if(slot->guest_stack && slot->guest_lr && slot->guest_r1 && slot->guest_base){
+        // Diagnostic: guest call chain. state.lr is current (write-through registers); then the back chain
+        // 0(r1) -> parent frame, LR save slot 16(parent). Every read is bounds-checked and EFAULT-safe.
+        const auto base=reinterpret_cast<std::uintptr_t>(__atomic_load_n(slot->guest_base,__ATOMIC_RELAXED));
+        auto be64=[&](std::uint64_t ea,std::uint64_t& out)->bool{
+            if(!base || (ea&7) || ea<0x10000 || ea>=0xfffffff0u)return false;
+            std::uint64_t raw=0;struct iovec local{&raw,8},remote{reinterpret_cast<void*>(base+ea),8};
+            if(::syscall(SYS_process_vm_readv,::getpid(),&local,1,&remote,1,0)!=8)return false;
+            out=__builtin_bswap64(raw);return true;};
+        r.addresses[r.depth++]=__atomic_load_n(slot->guest_lr,__ATOMIC_RELAXED);
+        std::uint64_t frame=__atomic_load_n(slot->guest_r1,__ATOMIC_RELAXED);
+        while(r.depth<8){
+            std::uint64_t parent=0,ret=0;
+            if(!be64(frame,parent) || parent<=frame || parent-frame>0x100000 || !be64(parent+16,ret) || !ret)break;
+            r.addresses[r.depth++]=ret;frame=parent;
+        }
+    }else if(slot->frames && sp>=slot->stack_low && sp<slot->stack_high){
         auto lower=sp;
         while(r.depth<8 && !(fp&7) && fp>=lower && fp>=slot->stack_low &&
               fp<=slot->stack_high-2*sizeof(std::uintptr_t)){
@@ -129,7 +150,7 @@ inline unsigned setting(const char* name,unsigned fallback,unsigned low,unsigned
 }
 struct Config {
     bool enabled=false,frames=false,stopping=false;
-    unsigned roles=14,period_us=200,flush_ms=100,capacity=8192;
+    unsigned roles=14,period_us=200,flush_ms=100,capacity=8192,wall_roles=0;bool guest_stack=false;
     int signo=0;std::string directory;
     std::mutex mutex;std::condition_variable changed;
     std::vector<std::unique_ptr<Slot>> slots;
@@ -151,6 +172,17 @@ struct Config {
                 if(end==std::string::npos)break;
                 start=end+1;}
         }
+        // Diagnostics: ANYPS3_SAMPLE_PROFILE_WALL=ppu,spu samples those roles on wall time (CLOCK_MONOTONIC, so a sleeping or
+        // parked thread is sampled where it sleeps; the signal interrupts and restarts the sleep) instead of thread CPU time.
+        if(const char* value=std::getenv("ANYPS3_SAMPLE_PROFILE_WALL")){
+            std::string text=value;std::size_t start=0;
+            for(;;){auto end=text.find(',',start);auto role=text.substr(start,end-start);
+                if(role=="ppu")wall_roles|=2;else if(role=="rsx")wall_roles|=4;else if(role=="spu")wall_roles|=8;
+                else throw std::runtime_error("SAMPLE_PROFILE: invalid wall role list");
+                if(end==std::string::npos)break;
+                start=end+1;}
+        }
+        guest_stack=setting("ANYPS3_SAMPLE_PROFILE_GUEST_STACK",0,0,1)!=0;
         signo=SIGRTMIN+6;if(signo>SIGRTMAX)throw std::runtime_error("SAMPLE_PROFILE: no realtime signal");
         struct sigaction previous{};if(::sigaction(signo,nullptr,&previous))throw error("sigaction query");
         if(previous.sa_handler!=SIG_DFL)throw std::runtime_error("SAMPLE_PROFILE: SIGRTMIN+6 already in use");
@@ -219,7 +251,8 @@ inline Config& config(){static Config value;return value;}
 class Thread {
     Config* owner=nullptr;Slot* slot=nullptr;sigset_t old_mask{};bool mask_saved=false;
 public:
-    explicit Thread(Role role,const std::uint32_t* pc=nullptr,const std::uint32_t* tid=nullptr,const std::uint64_t* steps=nullptr){
+    explicit Thread(Role role,const std::uint32_t* pc=nullptr,const std::uint32_t* tid=nullptr,const std::uint64_t* steps=nullptr,
+                    const std::uint64_t* guest_lr=nullptr,const std::uint64_t* guest_r1=nullptr,const std::uint8_t* const* guest_base=nullptr){
         auto& cfg=config();if(!cfg.selected(role))return;
         owner=&cfg;sigset_t set;::sigemptyset(&set);::sigaddset(&set,cfg.signo);
         const int mask_error=::pthread_sigmask(SIG_BLOCK,&set,&old_mask);
@@ -229,7 +262,9 @@ public:
             fresh->storage=std::make_unique<Record[]>(fresh->capacity); // zero before arming
             fresh->ring=fresh->storage.get(); // raw scalar access only in handler
             fresh->pc=pc;fresh->guest_tid=tid;fresh->steps=steps;fresh->frames=cfg.frames;
-            if(cfg.frames){pthread_attr_t attr;const int a=::pthread_getattr_np(::pthread_self(),&attr);
+            if(cfg.guest_stack && role==Role::Ppu && guest_lr && guest_r1 && guest_base){
+                fresh->guest_lr=guest_lr;fresh->guest_r1=guest_r1;fresh->guest_base=guest_base;fresh->guest_stack=true;fresh->frames=false;}
+            if(fresh->frames){pthread_attr_t attr;const int a=::pthread_getattr_np(::pthread_self(),&attr);
                 if(a){errno=a;throw error("get stack attributes");}
                 void* base=nullptr;std::size_t size=0;const int b=::pthread_attr_getstack(&attr,&base,&size);::pthread_attr_destroy(&attr);
                 if(b || size<16){errno=b;throw error("get stack bounds");}
@@ -248,7 +283,8 @@ public:
             }
             struct sigevent event{};event.sigev_notify=SIGEV_THREAD_ID;event.sigev_signo=cfg.signo;
             event.sigev_value.sival_ptr=slot;event._sigev_un._tid=pid_t(host_tid);
-            if(::timer_create(CLOCK_THREAD_CPUTIME_ID,&event,&slot->timer))throw error("timer_create");
+            const clockid_t clock=(cfg.wall_roles&(1u<<unsigned(role)))?CLOCK_MONOTONIC:CLOCK_THREAD_CPUTIME_ID;
+            if(::timer_create(clock,&event,&slot->timer))throw error("timer_create");
             slot->timer_created=true;
             struct itimerspec spec{};spec.it_interval.tv_sec=cfg.period_us/1000000;
             spec.it_interval.tv_nsec=long(cfg.period_us%1000000)*1000;spec.it_value=spec.it_interval;
