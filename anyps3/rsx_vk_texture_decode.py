@@ -6,6 +6,7 @@ from .rsx_graphics_raw_texture import GLSL as RAW_GLSL
 MEMBERS = r'''
     std::uint64_t graphics_texture_decodes=0,graphics_texture_decode_bytes=0;
     std::uint64_t graphics_decode_texture(GraphicsBatch& b,const std::vector<unsigned>& data,std::uint64_t output_bytes){
+        GraphicsSite site(SiteDecode);
         const auto input_bytes=data.size()*4;
         const auto at=graphics_upload(b,data.data(),input_bytes),output=graphics_space(b,output_bytes);
         // Descriptor offsets are relative to at; outputs follow the input in

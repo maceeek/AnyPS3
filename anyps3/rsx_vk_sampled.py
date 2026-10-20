@@ -21,6 +21,7 @@ public:
     std::shared_ptr<SampledImage> graphics_sampled_image(GraphicsBatch& b,VkFormat format,unsigned width,unsigned height,unsigned depth,unsigned faces,unsigned mips,
             const std::vector<std::uint8_t>& pixels,std::vector<VkBufferImageCopy> copies,const VkSamplerCreateInfo& sampler,std::uint64_t device_offset=UINT64_MAX,
             const std::shared_ptr<SampledImage>& reusable={}){
+        GraphicsSite site(SiteTexUpload);
         const bool depth_format=format==VK_FORMAT_D24_UNORM_S8_UINT || format==VK_FORMAT_D16_UNORM;
         const VkImageAspectFlags aspect=depth_format?VK_IMAGE_ASPECT_DEPTH_BIT:VK_IMAGE_ASPECT_COLOR_BIT;
         const VkImageAspectFlags transition=aspect|(format==VK_FORMAT_D24_UNORM_S8_UINT?VK_IMAGE_ASPECT_STENCIL_BIT:0);
