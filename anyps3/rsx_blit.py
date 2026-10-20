@@ -53,6 +53,12 @@ static void copy(PpuState& s,unsigned notify){
     if(format>>16 || (in_step<1 || in_step>4) || (out_step<1 || out_step>4))
         throw std::runtime_error("unsupported NV0039 byte strides");
     if(!cols || !rows)return;
+    const auto m2mf_start=std::chrono::steady_clock::now();
+    struct M2mfAccount {std::chrono::steady_clock::time_point start;std::uint64_t bytes;~M2mfAccount(){
+        if(std::uncaught_exceptions())return;
+        ::RsxPerfCounters::add(::RsxPerfCounters::m2mf_calls);::RsxPerfCounters::add(::RsxPerfCounters::m2mf_bytes,bytes);
+        ::RsxPerfCounters::add(::RsxPerfCounters::m2mf_ns,std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-start).count());}
+    } m2mf_account{m2mf_start,std::uint64_t(cols)*rows};
     if(std::uint64_t(cols)*rows>0x10000000)throw std::runtime_error("NV0039 transfer exceeds native snapshot budget");
     const std::uint64_t in_span=std::uint64_t(cols-1)*in_step+1,out_span=std::uint64_t(cols-1)*out_step+1;
     if(in_span>UINT32_MAX || out_span>UINT32_MAX)throw std::runtime_error("NV0039 row span overflow");
@@ -83,7 +89,13 @@ static void copy(PpuState& s,unsigned notify){
 struct Image {
     unsigned context=0,offset=0,pitch=0,bpp=0,width=0,height=0,log_w=0,log_h=0;
     bool swizzled=false;
-    GuestMemory::Range pixel(PpuState& s,unsigned x,unsigned y,bool write)const{
+    // Same-32-byte-group memo of the tile permutation (batch path only): every byte of an aligned 32-byte group shares
+    // all address bits above bit 4 (rsx_tiled_offset keeps byte_address&31 and derives the rest from linear>>5).
+    struct Memo {const NativeRsx::Tile* tile=nullptr;std::uint64_t group=UINT64_MAX,base=0;};
+    GuestMemory::Range pixel(PpuState& s,unsigned x,unsigned y,bool write)const{return access(s,context,locate(s.rsx,x,y,nullptr),bpp,write);}
+    // Physical byte offset inside the DMA context of pixel (x,y) after swizzle and tile permutation; the single place
+    // that validates blit addressing (the per-pixel reference and the batch path both call it).
+    std::uint64_t locate(const NativeRsx& gpu,unsigned x,unsigned y,Memo* memo)const{
         if(x>=width || y>=height)throw std::runtime_error("RSX blit coordinate outside image");
         std::uint64_t at=0;
         if(swizzled){
@@ -99,7 +111,7 @@ struct Image {
         // pitch describes the memory permutation, not necessarily this subimage's
         // row stride. Apply it also to main-memory tiles before IO translation.
         const NativeRsx::Tile* selected=nullptr;
-        for(const auto& tile:s.rsx.tiles)if(tile.bound && tile.location==location(context) &&
+        for(const auto& tile:gpu.tiles)if(tile.bound && tile.location==location(context) &&
             at<std::uint64_t(tile.offset)+tile.size && at+bpp>tile.offset){
             if(selected)throw std::runtime_error("overlapping RSX blit tiles");
             selected=&tile;
@@ -117,14 +129,24 @@ struct Image {
             // other tag layouts are unknown here.
             if(tile.compression!=0 && tile.compression!=7 && (tile.compression<9 || tile.compression>12))
                 throw std::runtime_error("unsupported RSX blit tile compression mode "+std::to_string(tile.compression));
-            const auto physical=std::uint64_t(rsx_tiled_offset(tile,(at-tile.offset)&~3u))+(at&3);
+            const std::uint64_t linear=(at-tile.offset)&~3u;
+            std::uint64_t word;   // rsx_tiled_offset of the 4-byte aligned logical address
+            if(memo && memo->tile==&tile && memo->group==(linear>>5)){
+                word=memo->base+(linear&31);
+                if(word<tile.offset || word+4>std::uint64_t(tile.offset)+tile.size)
+                    throw std::runtime_error("RSX tiled sample outside configured tile");
+            }else{
+                word=rsx_tiled_offset(tile,std::uint32_t(linear));
+                if(memo){memo->tile=&tile;memo->group=linear>>5;memo->base=word-(linear&31);}
+            }
+            const auto physical=word+(at&3);
             if(physical+bpp>std::uint64_t(tile.offset)+tile.size)
                 throw std::runtime_error("RSX blit tiled pixel outside tile");
             // Unaligned pixels must not span a permuted 32-byte block.
             if((at&31)+bpp>32)throw std::runtime_error("RSX blit pixel crosses tiled block");
             at=physical;
         }
-        return access(s,context,at,bpp,write);
+        return at;
     }
 };
 static unsigned dest_bpp(unsigned format){
@@ -277,6 +299,96 @@ static bool scaled_rows(PpuState& s,const Image& src,const Image& dst,unsigned s
     for(std::size_t i=0;i<targets.size();++i)targets[i].write(0,output[i].data(),dst_span);
     ++rows_executed;return true;
 }
+// Batch path for everything scaled_rows rejects: bound tiles, Morton-swizzled images and SRCCOPY_AND (zero-alpha discard).
+// Every physical address comes from Image::locate (the validation of the per-pixel reference). The source is snapshotted with
+// one Range read over its covering physical span (bytes between the touched pixels are covered but never used, like in
+// scaled_rows), all output colours are computed on the host, and only the touched destination bytes are written -- merged into
+// runs in ascending physical order, through one writable Range created (and so validated) before the first byte is written.
+// Anything unusual (sparse spans, tables over budget, two pixels on one byte, any exception) returns false before the first
+// write; the caller then runs the per-pixel reference, which raises the original error or produces the same bytes.
+static std::uint64_t batch_executed=0;   // transfers completed by the batch path (diagnostics / differential test)
+static bool force_no_batch=[]{const char* v=std::getenv("ANYPS3_RSX_BLIT_BATCH");return v && std::string(v)=="0";}();
+static bool scaled_batch(PpuState& s,const Image& src,const Image& dst,unsigned src_format,unsigned dst_format,bool raw_copy,unsigned operation,unsigned filter,
+    std::int64_t dx,std::int64_t dy,std::int64_t u,std::int64_t v,unsigned ox,unsigned oy,unsigned x0,unsigned y0,unsigned x1,unsigned y1){
+    struct Run {std::uint64_t at;std::size_t stage;unsigned size;};
+    std::vector<Run> runs;std::vector<std::uint8_t> stage;std::optional<GuestMemory::Range> target;std::uint64_t dlo=UINT64_MAX,dhi=0;
+    try{
+        if(x0>=x1 || y0>=y1 || dst.bpp!=dest_bpp(dst_format))return false;
+        auto clamp_to=[](std::int64_t value,std::int64_t last){return std::clamp<std::int64_t>(value,0,last);};
+        const std::int64_t xa=floor_fixed(u+std::int64_t(x0-ox)*dx),xb=floor_fixed(u+std::int64_t(x1-1-ox)*dx);
+        const std::int64_t ya=floor_fixed(v+std::int64_t(y0-oy)*dy),yb=floor_fixed(v+std::int64_t(y1-1-oy)*dy);
+        const std::int64_t extra=filter?1:0;
+        const std::int64_t cx0=clamp_to(std::min(xa,xb),src.width-1),cx1=clamp_to(std::max(xa,xb)+extra,src.width-1);
+        const std::int64_t cy0=clamp_to(std::min(ya,yb),src.height-1),cy1=clamp_to(std::max(ya,yb)+extra,src.height-1);
+        const std::uint64_t rw=std::uint64_t(cx1-cx0+1),rh=std::uint64_t(cy1-cy0+1),out_pixels=std::uint64_t(x1-x0)*(y1-y0);
+        if(rw*rh>(UINT64_C(4)<<20) || out_pixels>(UINT64_C(16)<<20))return false;
+        // A span much larger than the bytes it must contain would turn a cheap snapshot into a copy of unrelated memory.
+        auto dense=[](std::uint64_t span,std::uint64_t needed){return span<=(UINT64_C(64)<<20) && span<=std::max<std::uint64_t>(needed*64,UINT64_C(256)<<10);};
+        // 1. physical address of every source pixel of the touched rectangle, then one snapshot of the covering span.
+        std::vector<std::uint32_t> table(rw*rh);
+        std::uint64_t lo=UINT64_MAX,hi=0;
+        {Image::Memo memo;
+            for(std::uint64_t y=0;y<rh;++y)for(std::uint64_t x=0;x<rw;++x){
+                const auto at=src.locate(s.rsx,unsigned(cx0+x),unsigned(cy0+y),&memo);
+                if(at>UINT32_MAX-4)return false;
+                table[y*rw+x]=std::uint32_t(at);lo=std::min(lo,at);hi=std::max<std::uint64_t>(hi,at+src.bpp);}}
+        if(!dense(hi-lo,rw*rh*src.bpp))return false;
+        std::vector<std::uint8_t> snapshot(hi-lo);
+        access(s,src.context,std::int64_t(lo),unsigned(hi-lo),false).read(0,snapshot.data(),unsigned(hi-lo));
+        auto fetch=[&](std::int64_t x,std::int64_t y){
+            x=clamp_to(x,src.width-1);y=clamp_to(y,src.height-1);
+            if(x<cx0 || x>cx1 || y<cy0 || y>cy1)throw std::runtime_error("RSX blit batch tap outside its table");
+            return snapshot.data()+(table[std::uint64_t(y-cy0)*rw+std::uint64_t(x-cx0)]-lo);};
+        auto sample=[&](std::int64_t x,std::int64_t y){const auto* p=fetch(x,y);
+            if(raw_copy)return Color{p[0],p[1],p[2],p[3]};
+            return read(p,src_format);};
+        // 2. colours and destination addresses in raster order (the pixel reference's order).
+        std::vector<std::uint64_t> where;where.reserve(out_pixels);
+        std::vector<std::uint8_t> bytes;bytes.reserve(out_pixels*dst.bpp);
+        {Image::Memo memo;
+            for(unsigned y=y0;y<y1;++y)for(unsigned x=x0;x<x1;++x){
+                const auto fx=u+std::int64_t(x-ox)*dx,fy=v+std::int64_t(y-oy)*dy;
+                const auto ix=floor_fixed(fx),iy=floor_fixed(fy);
+                Color c=sample(ix,iy);
+                if(filter){
+                    const std::uint64_t a=fx-ix*1048576,b=fy-iy*1048576;
+                    const auto c10=sample(ix+1,iy),c01=sample(ix,iy+1),c11=sample(ix+1,iy+1);
+                    for(unsigned k=0;k<4;++k)c[k]=(std::uint64_t(c[k])*(1048576-a)*(1048576-b)+std::uint64_t(c10[k])*a*(1048576-b)+
+                        std::uint64_t(c01[k])*(1048576-a)*b+std::uint64_t(c11[k])*a*b+(UINT64_C(1)<<39))>>40;
+                }
+                if(operation==0 && !c[0])continue;
+                const auto at=dst.locate(s.rsx,x,y,&memo);
+                const auto packed_color=packed(dst_format,c);
+                where.push_back(at);bytes.insert(bytes.end(),packed_color.data(),packed_color.data()+dst.bpp);
+                dlo=std::min(dlo,at);dhi=std::max<std::uint64_t>(dhi,at+dst.bpp);
+            }}
+        if(where.empty()){++batch_executed;return true;}   // every pixel discarded: nothing to write
+        if(!dense(dhi-dlo,where.size()*dst.bpp))return false;
+        // 3. chunks of raster-consecutive pixels with consecutive physical bytes, sorted by physical address and merged into runs.
+        struct Chunk {std::uint64_t at,first;unsigned count;};
+        std::vector<Chunk> chunks;
+        for(std::uint64_t i=0;i<where.size();++i){
+            if(!chunks.empty() && chunks.back().at+std::uint64_t(chunks.back().count)*dst.bpp==where[i])++chunks.back().count;
+            else chunks.push_back({where[i],i,1});}
+        std::stable_sort(chunks.begin(),chunks.end(),[](const Chunk& a,const Chunk& b){return a.at<b.at;});
+        stage.reserve(bytes.size());
+        for(const auto& chunk:chunks){
+            const unsigned size=chunk.count*dst.bpp;
+            if(!runs.empty()){
+                const auto end=runs.back().at+runs.back().size;
+                if(chunk.at<end)return false;   // two output pixels on one byte: keep the reference's raster order
+                if(chunk.at==end){runs.back().size+=size;stage.insert(stage.end(),bytes.begin()+chunk.first*dst.bpp,bytes.begin()+(chunk.first+chunk.count)*dst.bpp);continue;}
+            }
+            runs.push_back({chunk.at,stage.size(),size});
+            stage.insert(stage.end(),bytes.begin()+chunk.first*dst.bpp,bytes.begin()+(chunk.first+chunk.count)*dst.bpp);
+        }
+        // 4. one writable Range over the covering destination span validates mapping and permission before the first write.
+        target.emplace(access(s,dst.context,std::int64_t(dlo),unsigned(dhi-dlo),true));
+    }catch(const std::exception&){return false;}
+    // Past this point nothing may fall back: a failure after the first byte was written must stop the run, not repeat the transfer.
+    for(const auto& run:runs)target->write(unsigned(run.at-dlo),stage.data()+run.stage,run.size);
+    ++batch_executed;return true;
+}
 static void scaled(PpuState& s,unsigned point){
     auto& gpu=s.rsx;
     const auto clip=state(gpu,0xc30c),out=state(gpu,0xc314);
@@ -316,7 +428,9 @@ static void scaled(PpuState& s,unsigned point){
         GuestMemory::ObserverPause acquire(s.memory);
         const auto from=access(s,src.context,src.offset,(oh-1)*std::uint64_t(src.pitch)+ow*src.bpp,false);
         const auto to=access(s,dst.context,dst.offset,(oh-1)*std::uint64_t(dst.pitch)+ow*dst.bpp,true);
-        if(static_cast<rsxgraphics::Session*>(gpu.graphics_session)->copy(from,to,ow*src.bpp,oh,src.pitch,dst.pitch,dst_format==4?3:8))return;
+        if(static_cast<rsxgraphics::Session*>(gpu.graphics_session)->copy(from,to,ow*src.bpp,oh,src.pitch,dst.pitch,dst_format==4?3:8)){
+            ::RsxPerfCounters::add(::RsxPerfCounters::blit_calls);::RsxPerfCounters::add(::RsxPerfCounters::blit_gpu);
+            ::RsxPerfCounters::add(::RsxPerfCounters::blit_pixels,std::uint64_t(ow)*oh);return;}
     }
 #endif
     {   // Diagnostic (ANYPS3_RSX_BLIT_TRACE=1): the first 300 scaled transfers, to size the per-pixel Range cost.
@@ -340,7 +454,16 @@ static void scaled(PpuState& s,unsigned point){
                 x0,y0,x1,y1,(long long)dx,(long long)dy,(long long)u,(long long)v);
         }
     }
-    if(operation==3 && !force_pixel_path && scaled_rows(s,src,dst,src_format,dst_format,raw_copy,filter,dx,dy,u,v,ox,oy,x0,y0,x1,y1))return;
+    // Path accounting (always on, a few relaxed stores per transfer): PERF RSX_COUNTERS blit_*; the _ns counters are host wall time.
+    const auto path_start=std::chrono::steady_clock::now();
+    auto account=[&](::RsxPerfCounters::Id calls,::RsxPerfCounters::Id ns){
+        ::RsxPerfCounters::add(::RsxPerfCounters::blit_calls);::RsxPerfCounters::add(calls);
+        ::RsxPerfCounters::add(::RsxPerfCounters::blit_pixels,std::uint64_t(x1-x0)*(y1-y0));
+        ::RsxPerfCounters::add(ns,std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-path_start).count());};
+    if(operation==3 && !force_pixel_path && scaled_rows(s,src,dst,src_format,dst_format,raw_copy,filter,dx,dy,u,v,ox,oy,x0,y0,x1,y1)){
+        account(::RsxPerfCounters::blit_rows,::RsxPerfCounters::blit_rows_ns);return;}
+    if(!force_pixel_path && !force_no_batch && scaled_batch(s,src,dst,src_format,dst_format,raw_copy,operation,filter,dx,dy,u,v,ox,oy,x0,y0,x1,y1)){
+        account(::RsxPerfCounters::blit_batch,::RsxPerfCounters::blit_batch_ns);return;}
     // Keep the ordinary pixel descriptor compact. Only a physical pixel that
     // straddles mappings needs a retained scatter range; mappings cannot change
     // during this synchronous command.
@@ -373,6 +496,7 @@ static void scaled(PpuState& s,unsigned point){
             s.memory.mark_write(p.direct,n);std::copy_n(bytes.data(),n,p.direct);
         }else write(s,*p.split,dst_format,p.color);
     }
+    account(::RsxPerfCounters::blit_pixel,::RsxPerfCounters::blit_pixel_ns);
 }
 static void cpu(PpuState& s,unsigned reg,unsigned value){
     auto& gpu=s.rsx;const auto size=state(gpu,0xa308),input=state(gpu,0xa30c);

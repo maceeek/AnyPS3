@@ -767,11 +767,11 @@ static bool rsx_run_impl(PpuState& s,unsigned budget,bool idle_poll=false){
                         // No cached visibility results or pending draws exist yet.
                         if(value)++gpu.zcull_generation;
                     }else if(reg==0x2328){
-                        rsx_diag(s,"copy",reg,[&]{rsxblit::copy(s,value);});
+                        rsx_diag(s,"copy",reg,[&]{rsxdraw::HostPhase blit_phase(rsxdraw::HostStage::blit);rsxblit::copy(s,value);});
                     }else if(reg>=0xa400 && reg<0xc000){
-                        rsx_diag(s,"ifc",reg,[&]{rsxblit::cpu(s,reg,value);});
+                        rsx_diag(s,"ifc",reg,[&]{rsxdraw::HostPhase blit_phase(rsxdraw::HostStage::blit);rsxblit::cpu(s,reg,value);});
                     }else if(reg==0xc40c){
-                        rsx_diag(s,"blit",reg,[&]{rsxblit::scaled(s,value);});
+                        rsx_diag(s,"blit",reg,[&]{rsxdraw::HostPhase blit_phase(rsxdraw::HostStage::blit);rsxblit::scaled(s,value);});
                     }else if(reg==0x68 || reg==0x6c){
                         const auto address=rsx_semaphore_address(gpu,rsx_reg(gpu,0x60),rsx_reg(gpu,0x64));
                         // Offline replay omits CPU scheduling/wait latency; the
