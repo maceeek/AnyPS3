@@ -228,7 +228,7 @@ class BlockValues(Values):
         later instructions of the block, and regions validated earlier in this call, may have changed.  The next
         entry validates again.  Stores to data (the overwhelming majority) pay one range compare."""
         nxt = f'(a+0x{pc + 4 - self.block_start:x}u)'
-        hit = f'({address}+15u-flo)<0x{self.flen + 15:x}u'
+        hit = f'((({address}+15u-flo)&0x3ffffu)<0x{self.flen + 15:x}u)'
         leave = f'{self.pending_stores()}block.executed=ex+{self.insn_index(pc) + 1};t.pc={nxt};return;'
         if provenance:
             return (f'if(__builtin_expect(prov|({hit}),0)){{if(prov)spu_ls_forget(t,{address},16);if({hit}){{{leave}}}}}')
@@ -308,11 +308,10 @@ def emit_function(name, code_name, lo, words, lift_parts, templates=True, insns=
     lines = [f'void {name}(PpuState& s,NativeSpu::Thread& t,std::uint8_t* ls) {{',
              'auto& g=t.gpr;(void)g;(void)s;SpuBlockScope block(t);const std::uint32_t delta=t.reloc_delta;'
              f'const std::uint8_t* const code={code_name};',
-             # fb = LS address of the function start in this call.  A relocation that wraps the function around the
-             # end of the 256 KB LS is served by the exact slow tiers.
-             f'const unsigned fb=(0x{lo:x}u+delta)&0x3ffffu;',
-             f'if(__builtin_expect(fb+0x{flen:x}u>0x40000u,0)){{t.dynamic_miss=true;return;}}',
-             f'std::uint8_t* const fnls=ls+fb;const unsigned flo=fb;const bool prov=spu_provenance_on;(void)fnls;(void)flo;(void)prov;'
+             # flo = LS address of the function start in this call.  With a relocation the function's window
+             # [flo, flo+flen) may wrap around the end of the 256 KB LS (code linked above the lowest loaded
+             # address): every LS address derived from it is therefore masked (region compares, self-store check).
+             f'const unsigned flo=(0x{lo:x}u+delta)&0x3ffffu;const bool prov=spu_provenance_on;(void)flo;(void)prov;'
              'unsigned ex=0,lim=spu_block_lim(t,block);std::uint64_t vm=0;(void)vm;']
     if used_dispatch:
         lines.append('spu_dispatch_local:')
@@ -338,12 +337,13 @@ def emit_function(name, code_name, lo, words, lift_parts, templates=True, insns=
         # touched in each region of a call); everything else (budget gone, regions differ, wide blocks) calls the
         # out-of-line helper, which runs the exact entry guard (decline, dynamic miss, interrupt delivery) and returns
         # the new bitmap and budget by value so that ex/lim/vm stay in registers.
-        slow_call = (f'block.executed=ex;const SpuSlow slow=spu_block_slow(s,t,block,ls,fnls,code,0x{flen:x}u,a,0x{offset:x}u,{length},{len(block)},lim,vm,0x{mask:x}ull);'
+        slow_call = (f'block.executed=ex;const SpuSlow slow=spu_block_slow(s,t,block,ls,flo,code,0x{flen:x}u,a,0x{offset:x}u,{length},{len(block)},lim,vm,0x{mask:x}ull);'
                      f'if(!slow.ok)return;lim=slow.lim;vm=slow.vm;')
         if region_hi - region_lo <= 1:
-            eq = '&'.join(f'spu_code_eq<{min(REGION, flen - r * REGION)}>(fnls+0x{r * REGION:x}u,code+0x{r * REGION:x}u)' for r in range(region_lo, region_hi + 1))
+            eq = '&&'.join(f'spu_region_eq<{min(REGION, flen - r * REGION)}>(ls,(flo+0x{r * REGION:x}u)&0x3ffffu,code+0x{r * REGION:x}u)'
+                           for r in range(region_lo, region_hi + 1))
             lines.append(f'if(__builtin_expect((ex>=lim)|((vm&0x{mask:x}ull)!=0x{mask:x}ull),0)){{'
-                         f'if(__builtin_expect((ex>=lim)|!({eq}),0)){{{slow_call}}}else vm|=0x{mask:x}ull;}}')
+                         f'if(__builtin_expect((ex>=lim)||!({eq}),0)){{{slow_call}}}else vm|=0x{mask:x}ull;}}')
         else:
             lines.append(f'if(__builtin_expect((ex>=lim)|((vm&0x{mask:x}ull)!=0x{mask:x}ull),0)){{{slow_call}}}')
         index = {x.pc: i for i, x in enumerate(block)}
@@ -518,7 +518,7 @@ template<unsigned N> [[gnu::always_inline]] static inline bool spu_code_eq(const
 bool spu_block_enter(PpuState&,NativeSpu::Thread&,SpuBlockScope&,const std::uint8_t*,unsigned,const std::uint8_t*,unsigned,unsigned);
 struct SpuSlow {std::uint64_t vm;std::uint32_t lim,ok;};
 // Slow tier of the per-block guard (see spu_block.py): block.executed is already synchronised by the caller.
-SpuSlow spu_block_slow(PpuState&,NativeSpu::Thread&,SpuBlockScope&,const std::uint8_t* ls,const std::uint8_t* fn_ls,const std::uint8_t* code,unsigned flen,
+SpuSlow spu_block_slow(PpuState&,NativeSpu::Thread&,SpuBlockScope&,const std::uint8_t* ls,unsigned flo,const std::uint8_t* code,unsigned flen,
                        unsigned a,unsigned offset,unsigned length,unsigned count,unsigned lim,std::uint64_t vm,std::uint64_t mask);
 // Number of instructions a call may retire before the exact block-entry guard must run again: the soft/hard
 // budget (scope.fast) and, with interrupts enabled, the distance to the next interrupt sampling point.  Equivalent
@@ -533,16 +533,21 @@ SpuSlow spu_block_slow(PpuState&,NativeSpu::Thread&,SpuBlockScope&,const std::ui
     return lim;
 }
 // Regions (SPU_REGION bytes each) of a native function whose current LS bytes equal the translated bytes.
-// `lsd` = LS address of the function start, `code` = its translated bytes, `flen` = their length; `want` = bitmap
-// of regions to test.  Returns the subset that matches completely (the last region may be partial).
+// `flo` = LS address of the function start (a relocated function's window [flo,flo+flen) may wrap around the end of
+// the 256 KB LS, so the LS address of byte `off` is (flo+off)&0x3ffff), `code` = its translated bytes, `flen` = their
+// length; `want` = bitmap of regions to test.  Returns the subset that matches completely (the last region may be
+// partial).  A region that straddles the LS end is never reported valid: the exact per-block guard serves its blocks.
 static constexpr unsigned SPU_REGION=''' + str(REGION) + r''';
-[[maybe_unused,gnu::noinline]] static std::uint64_t spu_regions_valid(const std::uint8_t* lsd,const std::uint8_t* code,unsigned flen,std::uint64_t want){
+template<unsigned N> [[gnu::always_inline]] static inline bool spu_region_eq(const std::uint8_t* ls,unsigned lsa,const std::uint8_t* code){
+    return lsa<=0x40000u-N && spu_code_eq<N>(ls+lsa,code);
+}
+[[maybe_unused,gnu::noinline]] static std::uint64_t spu_regions_valid(const std::uint8_t* ls,unsigned flo,const std::uint8_t* code,unsigned flen,std::uint64_t want){
     std::uint64_t ok=0;
     for(std::uint64_t rest=want;rest;rest&=rest-1){
         const unsigned r=static_cast<unsigned>(__builtin_ctzll(rest)),off=r*SPU_REGION;
         if(off>=flen)continue;
-        const unsigned n=std::min(SPU_REGION,flen-off);
-        if(!std::memcmp(lsd+off,code+off,n))ok|=std::uint64_t(1)<<r;
+        const unsigned n=std::min(SPU_REGION,flen-off),lsa=(flo+off)&0x3ffffu;
+        if(lsa<=0x40000u-n && !std::memcmp(ls+lsa,code+off,n))ok|=std::uint64_t(1)<<r;
     }
     return ok;
 }
@@ -563,14 +568,14 @@ bool spu_block_enter(PpuState& s,NativeSpu::Thread& t,SpuBlockScope& block,const
     }
     return true;
 }
-SpuSlow spu_block_slow(PpuState& s,NativeSpu::Thread& t,SpuBlockScope& block,const std::uint8_t* ls,const std::uint8_t* fn_ls,const std::uint8_t* code,unsigned flen,
+SpuSlow spu_block_slow(PpuState& s,NativeSpu::Thread& t,SpuBlockScope& block,const std::uint8_t* ls,unsigned flo,const std::uint8_t* code,unsigned flen,
                        unsigned a,unsigned offset,unsigned length,unsigned count,unsigned lim,std::uint64_t vm,std::uint64_t mask){
     // (1) Budget left: compare the block's regions that were not proven yet (first touch of a region in this call).
-    if(block.executed<lim)vm|=spu_regions_valid(fn_ls,code,flen,mask&~vm);
+    if(block.executed<lim)vm|=spu_regions_valid(ls,flo,code,flen,mask&~vm);
     // (2) Budget gone or bytes differ: the exact guard decides.
     if(block.executed>=lim || (vm&mask)!=mask){
         if(!spu_block_enter(s,t,block,ls,a,code+offset,length,count))return {vm,lim,0};
-        lim=spu_block_lim(t,block);vm|=spu_regions_valid(fn_ls,code,flen,mask&~vm);
+        lim=spu_block_lim(t,block);vm|=spu_regions_valid(ls,flo,code,flen,mask&~vm);
     }
     return {vm,lim,1};
 }
