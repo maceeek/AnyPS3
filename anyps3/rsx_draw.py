@@ -294,11 +294,14 @@ struct DrawReadBatch {
         if(!first.memory->concurrent()){
             for(unsigned i=0;i<count;++i){const auto& input=inputs[i];input.range->read(0,output+input.destination,input.range->size);}return;
         }
-        // Shared reader admission per input (the Range::read protocol used for indices, fragment programs and
-        // textures): GPU-authoritative bytes are retired by the observer inside the lease, map identity is checked
-        // by Range::check_epoch. No exclusive page claim and no membarrier per draw (one claim cost ~2 us/draw in
-        // the level, ~8% of the RSX thread); a guest that rewrites vertex bytes while the draw reads them is racy
-        // on hardware as well, and every 32/64-bit word is still read atomically.
+        // Shared reader admission per input (the Range::read protocol used for indices, fragment programs and textures):
+        // GPU-authoritative bytes are retired by the observer inside the lease, map identity is checked by
+        // Range::check_epoch, every 64-bit word is read atomically. No exclusive page claim and no membarrier per draw
+        // (the claim cost ~2 ms/frame in the level). A bulk guest write that overlaps this read UNORDERED is a race on
+        // hardware too. The ordered cases are protected by (A) acquire/release: a write completed before the label the
+        // FIFO acquired is seen completely, and (B) program order: this read finishes inside rsx_execute_draw, before any
+        // later FIFO method can publish a label/semaphore the writer waits for (the read is never deferred past the draw).
+        // tests/test_rsx2_draw.py ordered_bulk_writes_ pins both; a future batching/deferral of this read must keep B.
         for(unsigned i=0;i<count;++i){const auto& input=inputs[i];const auto& range=*input.range;
             if(range.memory!=first.memory)throw std::runtime_error("RSX mixed draw input memory");
             range.read(0,output+input.destination,range.size);}

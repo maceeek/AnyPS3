@@ -58,7 +58,7 @@ private:
     // (default 384, 0 = off) bounds the cached bytes; the oldest blocks are really freed first.
     struct MemoryCache {
         struct Free {VkDevice device;std::uint32_t type;VkDeviceSize size;VkDeviceMemory memory;std::uint64_t stamp;};
-        std::mutex mutex;std::vector<Free> free;std::map<std::uint64_t,std::pair<std::uint32_t,VkDeviceSize>> live;
+        std::mutex mutex;std::vector<Free> free;std::map<std::pair<std::uint64_t,std::uint64_t>,std::pair<std::uint32_t,VkDeviceSize>> live;   // key (VkDevice, VkDeviceMemory): handles are only unique per device
         std::map<VkDevice,std::uint32_t> types;VkDeviceSize bytes=0,limit=UINT64_C(384)<<20;std::uint64_t clock=0;
     };
     static MemoryCache& memory_cache(){static MemoryCache cache;return cache;}
@@ -67,6 +67,7 @@ private:
         for(std::uint32_t i=0;i<memory.memoryTypeCount;++i){const auto f=memory.memoryTypes[i].propertyFlags;
             if((f&VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) && !(f&VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT))mask|=1u<<i;}
         auto& c=memory_cache();std::lock_guard<std::mutex> lock(c.mutex);
+        c.limit=UINT64_C(384)<<20;   // default on every configuration: the singleton must not keep a previous device's setting
         if(const char* v=std::getenv("ANYPS3_RSX_MEMORY_CACHE_MB")){char* end=nullptr;const auto n=std::strtoull(v,&end,10);
             if(!*v || *end || n>65536){throw std::runtime_error("invalid ANYPS3_RSX_MEMORY_CACHE_MB");}
             c.limit=n<<20;}
@@ -76,6 +77,7 @@ private:
         auto& c=memory_cache();std::lock_guard<std::mutex> lock(c.mutex);
         for(auto it=c.free.begin();it!=c.free.end();){if(it->device==d){c.bytes-=it->size;::vkFreeMemory(d,it->memory,nullptr);it=c.free.erase(it);}else ++it;}
         c.types.erase(d);
+        for(auto it=c.live.begin();it!=c.live.end();)if(it->first.first==resource_id(d))it=c.live.erase(it);else ++it;
     }
     static VkResult vkAllocateMemory(VkDevice d,const VkMemoryAllocateInfo* ci,const VkAllocationCallbacks* a,VkDeviceMemory* out){
         auto& c=memory_cache();bool cacheable=false;
@@ -83,12 +85,14 @@ private:
             const auto t=c.types.find(d);cacheable=!ci->pNext && !a && t!=c.types.end() && ci->memoryTypeIndex<32 && (t->second&(1u<<ci->memoryTypeIndex));
             if(cacheable){
                 for(auto it=c.free.begin();it!=c.free.end();++it)if(it->device==d && it->type==ci->memoryTypeIndex && it->size==ci->allocationSize){
-                    *out=it->memory;c.bytes-=it->size;c.free.erase(it);c.live[resource_id(*out)]={ci->memoryTypeIndex,ci->allocationSize};
+                    *out=it->memory;c.bytes-=it->size;c.free.erase(it);c.live[{resource_id(d),resource_id(*out)}]={ci->memoryTypeIndex,ci->allocationSize};
                     ::RsxPerfCounters::add(::RsxPerfCounters::vk_memory_reuses);resource_stats().add("device_memory",resource_id(*out),ci->allocationSize);return VK_SUCCESS;}}}
         ::RsxPerfCounters::add(::RsxPerfCounters::vk_memory_allocs);auto r=::vkAllocateMemory(d,ci,a,out);
-        if(r==VK_ERROR_OUT_OF_DEVICE_MEMORY && cacheable){release_memory_cache_blocks(d);r=::vkAllocateMemory(d,ci,a,out);}
+        // Any allocation that fails for device memory (a host-visible staging block can share a heap with the cached
+        // device-local blocks) gets the cached blocks back before the failure is reported.
+        if(r==VK_ERROR_OUT_OF_DEVICE_MEMORY){release_memory_cache_blocks(d);r=::vkAllocateMemory(d,ci,a,out);}
         if(r==VK_SUCCESS){resource_stats().add("device_memory",resource_id(*out),ci->allocationSize);
-            if(cacheable){std::lock_guard<std::mutex> lock(c.mutex);c.live[resource_id(*out)]={ci->memoryTypeIndex,ci->allocationSize};}}
+            if(cacheable){std::lock_guard<std::mutex> lock(c.mutex);c.live[{resource_id(d),resource_id(*out)}]={ci->memoryTypeIndex,ci->allocationSize};}}
         return r;
     }
     static void release_memory_cache_blocks(VkDevice d){
@@ -99,7 +103,7 @@ private:
         resource_stats().remove("device_memory",resource_id(object));
         auto& c=memory_cache();
         {std::lock_guard<std::mutex> lock(c.mutex);
-            const auto live=c.live.find(resource_id(object));
+            const auto live=c.live.find({resource_id(d),resource_id(object)});
             if(live!=c.live.end() && !a){
                 const auto entry=live->second;c.live.erase(live);
                 if(entry.second<=c.limit){
