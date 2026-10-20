@@ -39,6 +39,7 @@ TYPES = TYPES.replace('    std::shared_ptr<VulkanHostService> host;', '''#ifdef 
 CPP = r'''
 static bool rsx_run_inline(PpuState&,unsigned);
 static bool rsx_tick_vblank(PpuState&,std::uint64_t);
+static_assert(unsigned(rsxdraw::HostStage::count)<=16,"NativeRsxWorker::stage_ns holds 16 host stages");
 // Idle service ticks of the RSX owner (GPU completion polling every 100 us while flights are outstanding): count and time (PERF RSX_SERVICE).
 static std::atomic<std::uint64_t>& rsx_service_calls(){static std::atomic<std::uint64_t> v{0};return v;}
 static std::atomic<std::uint64_t>& rsx_service_ns(){static std::atomic<std::uint64_t> v{0};return v;}
@@ -323,7 +324,7 @@ static void rsx_worker_perf(const PpuState& s){
         if(w.last_memory)std::fprintf(stderr,"PERF GUEST_MEMORY membarriers=%" PRIu64 " slow_leases=%" PRIu64 " gpu_claims=%" PRIu64 "\n",mem[0]-(*w.last_memory)[0],mem[1]-(*w.last_memory)[1],mem[2]-(*w.last_memory)[2]);
         w.last_memory=mem;}
     if(rsxdraw::host_stats().enabled){
-        static const char* names[]={"idle","indices","assembly","state","texture_metadata","targets","certification","shader_source","geometry","vertex_upload","texture_upload","record","flush","blocks","tail","draw","kick"};
+        static const char* names[]={"idle","indices","assembly","state","texture_metadata","targets","certification","shader_source","geometry","vertex_upload","texture_upload","record","flush","tail","draw","kick"};
         std::string line="PERF RSX_STAGES";char item[64];
         for(unsigned i=0;i<unsigned(rsxdraw::HostStage::count);++i){const auto v=w.stage_ns[i].load(std::memory_order_relaxed);std::snprintf(item,sizeof(item)," %s_ns=%" PRIu64,names[i],v-w.last_stage_ns[i]);line+=item;w.last_stage_ns[i]=v;}
         std::fprintf(stderr,"%s\n",line.c_str());

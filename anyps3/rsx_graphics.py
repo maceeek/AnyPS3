@@ -1937,7 +1937,7 @@ template<class Vertex> static bool prepared(Session& session,const std::vector<s
     phase.next(HostStage::record);
     static thread_local std::shared_ptr<const std::string> pass_vertex;static thread_local bool pass_layered=false;
     if(!pass_vertex || pass_layered!=rsx_layered_shaders().load(std::memory_order_relaxed)){pass_layered=rsx_layered_shaders().load(std::memory_order_relaxed);pass_vertex=std::make_shared<const std::string>(vertex_source());}const auto& vertex_owner=raw_vertex?hw_vertex:pass_vertex;const auto& vertex_shader=*vertex_owner;
-    phase.next(HostStage::blocks);session.bind_draw_blocks(data,direct);
+    session.bind_draw_blocks(data,direct);
     phase.next(HostStage::tail);
     if(tail_bytes && reuse==UINT64_MAX){
         const auto tail_at=vk.graphics_reserve_upload(*session.batch,tail_bytes);if(tail_at+tail_bytes>UINT_MAX)throw std::runtime_error("RSX graphics vertex slice offset overflow");
