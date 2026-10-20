@@ -45,7 +45,7 @@ struct PpuState : PpuContext {
  struct Audio {unsigned maximum=0,running=0;std::vector<unsigned> notifications;} audio;
  struct Wait {bool done=false;std::uint64_t deadline=0;};
  struct {std::map<unsigned,Wait> waits;} sync_ext;
- struct Queue {std::uint64_t id=0;std::vector<unsigned> data;};
+ struct Queue {std::uint64_t id=0;struct {std::vector<unsigned> v;bool empty()const{return v.empty();}bool has_events()const{return !v.empty();}} data;};
  struct Semaphore {std::uint64_t id=0,value=0;};
  struct Mutex {std::uint64_t id=0;unsigned owner=0;};
  struct {std::vector<Queue> queues;} events;
@@ -71,7 +71,7 @@ static bool rsx_run(PpuState&,unsigned){
  ++rsx_calls;if(rsx_calls==2)clock_us+=engine_advance_us;return false;
 }
 static void rsx_worker_pump(PpuState&){}
-static void sync_ext_poll(PpuState& s){
+static void sync_ext_poll(PpuState& s,std::uint64_t&){
  for(auto& pair:s.sync_ext.waits)if(!pair.second.done && pair.second.deadline && clock_us>=pair.second.deadline){
   pair.second.done=true;
   for(auto& t:s.ppu_threads)if(t.thread_id==pair.first)t.wait_kind=0;
