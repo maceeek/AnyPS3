@@ -212,6 +212,71 @@ static std::array<std::uint8_t,4> packed(unsigned format,const Color& c){
 static void write(PpuState&,const GuestMemory::Range& destination,unsigned format,const Color& c){
     const auto bytes=packed(format,c);destination.write(0,bytes.data(),dest_bpp(format));
 }
+static std::int64_t floor_fixed(std::int64_t value){return value>=0?value/1048576:-((-value+1048575)/1048576);}
+// The per-pixel path in scaled() is the reference implementation (one Range per pixel, bytes snapshotted before
+// any write). ANYPS3_RSX_BLIT_PIXEL_PATH=1 (or a test setting this flag) forces it; the differential test compares both.
+static std::uint64_t rows_executed=0;   // transfers completed by the row-wise path (diagnostics / differential test)
+static bool force_pixel_path=[]{const char* v=std::getenv("ANYPS3_RSX_BLIT_PIXEL_PATH");return v && std::string(v)=="1";}();
+// Row-wise SRCCOPY transfer: one Range per touched source row and per destination row instead of two per pixel
+// (every pixel Range is a slow guest lease on the renderer thread). It applies to linear images whose touched bytes
+// overlap no bound tile of the same location; the colour arithmetic is the reference's. Everything is read and every
+// Range is created before the first byte is written, so a failure leaves the guest untouched: it returns false and the
+// caller runs the per-pixel path, which raises the original error. Source bytes between the touched pixels of a row
+// (downscale, row padding) are covered by the row Range but never used; the observer is only told about reads of them.
+static bool scaled_rows(PpuState& s,const Image& src,const Image& dst,unsigned src_format,unsigned dst_format,bool raw_copy,unsigned filter,
+    std::int64_t dx,std::int64_t dy,std::int64_t u,std::int64_t v,unsigned ox,unsigned oy,unsigned x0,unsigned y0,unsigned x1,unsigned y1){
+    std::vector<std::vector<std::uint8_t>> output;std::vector<GuestMemory::Range> targets;unsigned dst_span=0;
+    try{
+        if(src.swizzled || dst.swizzled || x0>=x1 || y0>=y1)return false;
+        auto clamp_to=[](std::int64_t value,std::int64_t last){return std::clamp<std::int64_t>(value,0,last);};
+        const std::int64_t xa=floor_fixed(u+std::int64_t(x0-ox)*dx),xb=floor_fixed(u+std::int64_t(x1-1-ox)*dx);
+        const std::int64_t ya=floor_fixed(v+std::int64_t(y0-oy)*dy),yb=floor_fixed(v+std::int64_t(y1-1-oy)*dy);
+        const std::int64_t extra=filter?1:0;
+        const std::int64_t cx0=clamp_to(std::min(xa,xb),src.width-1),cx1=clamp_to(std::max(xa,xb)+extra,src.width-1);
+        const std::int64_t cy0=clamp_to(std::min(ya,yb),src.height-1),cy1=clamp_to(std::max(ya,yb)+extra,src.height-1);
+        const std::uint64_t rows=std::uint64_t(cy1-cy0+1),span=std::uint64_t(cx1-cx0+1)*src.bpp;
+        dst_span=(x1-x0)*dst.bpp;const unsigned out_rows=y1-y0;
+        if(rows*span>(UINT64_C(64)<<20) || std::uint64_t(out_rows)*dst_span>(UINT64_C(64)<<20) || dst.bpp!=dest_bpp(dst_format))return false;
+        auto src_at=[&](std::int64_t row){return std::uint64_t(src.offset)+std::uint64_t(row)*src.pitch+std::uint64_t(cx0)*src.bpp;};
+        auto dst_at=[&](unsigned y){return std::uint64_t(dst.offset)+std::uint64_t(y)*dst.pitch+std::uint64_t(x0)*dst.bpp;};
+        const auto src_lo=src_at(cy0),src_hi=src_at(cy1)+span,dst_lo=dst_at(y0),dst_hi=dst_at(y1-1)+dst_span;
+        if(src_hi>UINT32_MAX || dst_hi>UINT32_MAX)return false;
+        for(const auto& tile:s.rsx.tiles){
+            if(!tile.bound)continue;
+            const std::uint64_t first=tile.offset,last=first+tile.size;
+            if(tile.location==location(src.context) && src_lo<last && src_hi>first)return false;
+            if(tile.location==location(dst.context) && dst_lo<last && dst_hi>first)return false;
+        }
+        std::vector<std::vector<std::uint8_t>> source(rows);
+        auto row_bytes=[&](std::int64_t row){auto& bytes=source[row-cy0];
+            if(bytes.empty()){bytes.resize(span);access(s,src.context,std::int64_t(src_at(row)),unsigned(span),false).read(0,bytes.data(),unsigned(span));}
+            return bytes.data();};
+        auto sample=[&](std::int64_t x,std::int64_t y){x=clamp_to(x,src.width-1);y=clamp_to(y,src.height-1);
+            const auto* p=row_bytes(y)+(x-cx0)*src.bpp;
+            if(raw_copy)return Color{p[0],p[1],p[2],p[3]};
+            return read(p,src_format);};
+        output.resize(out_rows);
+        for(unsigned y=y0;y<y1;++y){
+            auto& row=output[y-y0];row.resize(dst_span);
+            const auto fy=v+std::int64_t(y-oy)*dy,iy=floor_fixed(fy);
+            for(unsigned x=x0;x<x1;++x){
+                const auto fx=u+std::int64_t(x-ox)*dx,ix=floor_fixed(fx);
+                Color c=sample(ix,iy);
+                if(filter){
+                    const std::uint64_t a=fx-ix*1048576,b=fy-iy*1048576;
+                    const auto c10=sample(ix+1,iy),c01=sample(ix,iy+1),c11=sample(ix+1,iy+1);
+                    for(unsigned k=0;k<4;++k)c[k]=(std::uint64_t(c[k])*(1048576-a)*(1048576-b)+std::uint64_t(c10[k])*a*(1048576-b)+
+                        std::uint64_t(c01[k])*(1048576-a)*b+std::uint64_t(c11[k])*a*b+(UINT64_C(1)<<39))>>40;
+                }
+                const auto bytes=packed(dst_format,c);std::copy_n(bytes.data(),dst.bpp,row.data()+std::size_t(x-x0)*dst.bpp);
+            }
+        }
+        targets.reserve(out_rows);
+        for(unsigned y=y0;y<y1;++y)targets.push_back(access(s,dst.context,std::int64_t(dst_at(y)),dst_span,true));
+    }catch(const std::exception&){return false;}
+    for(std::size_t i=0;i<targets.size();++i)targets[i].write(0,output[i].data(),dst_span);
+    ++rows_executed;return true;
+}
 static void scaled(PpuState& s,unsigned point){
     auto& gpu=s.rsx;
     const auto clip=state(gpu,0xc30c),out=state(gpu,0xc314);
@@ -265,13 +330,13 @@ static void scaled(PpuState& s,unsigned point){
                 x0,y0,x1,y1,(long long)dx,(long long)dy,(long long)u,(long long)v);
         }
     }
+    if(operation==3 && !force_pixel_path && scaled_rows(s,src,dst,src_format,dst_format,raw_copy,filter,dx,dy,u,v,ox,oy,x0,y0,x1,y1))return;
     // Keep the ordinary pixel descriptor compact. Only a physical pixel that
     // straddles mappings needs a retained scatter range; mappings cannot change
     // during this synchronous command.
     struct Pixel {std::uint8_t* direct;std::shared_ptr<GuestMemory::Range> split;Color color;};
     std::vector<Pixel> pixels;pixels.reserve(std::size_t(x1-x0)*(y1-y0));
     auto sample=[&](std::int64_t x,std::int64_t y){return read(src.pixel(s,std::clamp<std::int64_t>(x,0,src.width-1),std::clamp<std::int64_t>(y,0,src.height-1),false),src_format);};
-    auto floor_fixed=[](std::int64_t value){return value>=0?value/1048576:-((-value+1048575)/1048576);};
     for(unsigned y=y0;y<y1;++y)for(unsigned x=x0;x<x1;++x){
         const auto fx=u+std::int64_t(x-ox)*dx,fy=v+std::int64_t(y-oy)*dy;
         const auto ix=floor_fixed(fx),iy=floor_fixed(fy);
