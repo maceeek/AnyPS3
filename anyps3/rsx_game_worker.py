@@ -179,7 +179,9 @@ static void rsx_worker_start(PpuState& s){
         GuestMemory::RawYield yield(m);
         auto invoke=[&w,&m,p,n,write]{
             GuestMemory::ObserverPause pause(m);
-            if(m.host_access_observer && (m.host_access_observer.interested(p,n) || m.raw_cpu_dirty_interested(p,n,write)))m.host_access_observer.callback(p,n,write);
+            if(m.host_access_observer && (m.host_access_observer.interested(p,n) || m.raw_cpu_dirty_interested(p,n,write))){
+                if(anyps3_ft::on)anyps3_ft::exec_class|=(m.host_access_observer.interested(p,n)?1u:0u)|(m.raw_cpu_dirty_interested(p,n,write)?2u:0u);
+                m.host_access_observer.callback(p,n,write);}
         };
         if(w.on_owner())invoke();else{ExecutionScope wait(ExecutionPhase::RsxWait);++w.host_requests;
             anyps3_ft::Span ft_host(anyps3_ft::HostReq,reinterpret_cast<std::uintptr_t>(p),write?1:0,20000,n);

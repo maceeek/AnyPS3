@@ -1122,12 +1122,16 @@ struct Session {
         finish_reads();
     }
     void host_access(const void* p,std::uint64_t size,bool write){
-        if(busy)return;
+        if(busy){if(anyps3_ft::on)anyps3_ft::exec_class|=4;return;}
+        const auto ft_invalidations=raw_invalidations;
+        struct FtClass {const decltype(raw_invalidations)& now;decltype(raw_invalidations) before;~FtClass(){if(anyps3_ft::on && now!=before)anyps3_ft::exec_class|=32;}} ft_class{raw_invalidations,ft_invalidations};
         ::RsxPerfCounters::add(::RsxPerfCounters::host_access);
         GuestMemory::RawYield payload(state.memory);
         if(!state.rsx.graphics_session)enter_fifo();
         const bool protected_access=!HostByteAccess::active() && (write?guard.touches_any(p,size):guard.touches(p,size));
+        if(anyps3_ft::on && protected_access)anyps3_ft::exec_class|=16;
         if(has_labels() && (label_overlap(p,size) || protected_access)){
+            if(anyps3_ft::on)anyps3_ft::exec_class|=8;
             if(fallback_stats().enabled){std::ostringstream detail;detail<<"write="<<write<<" pc=0x"<<std::hex<<state.pc;
                 detail<<" ppu_owner="<<std::dec<<state.thread_id<<" host=0x"<<std::hex<<reinterpret_cast<std::uintptr_t>(p)<<" bytes=0x"<<size;
                 for(const auto& region:state.maps){const auto base=reinterpret_cast<std::uintptr_t>(region.bytes->data()),at=reinterpret_cast<std::uintptr_t>(p);if(at>=base && at-base<region.bytes->size())detail<<" guest=0x"<<(region.base+at-base);}
@@ -1150,9 +1154,10 @@ struct Session {
         if(write || protected_access)invalidate_raw(p,size,write?"host_write":"protected_read");
         bool overlap=false;for(const auto& s:surfaces)if(s.overlaps(p,size)){overlap=true;break;}
         if(!overlap){
-            if(!HostByteAccess::active() && guard.touches_any(p,size)){guard.release(p,size);++ownership_revision;if(!state.rsx.graphics_session)leave_fifo();}
+            if(!HostByteAccess::active() && guard.touches_any(p,size)){if(anyps3_ft::on)anyps3_ft::exec_class|=256;guard.release(p,size);++ownership_revision;if(!state.rsx.graphics_session)leave_fifo();}
             return;
         }
+        if(anyps3_ft::on){anyps3_ft::exec_class|=64;for(const auto& s:surfaces)if(s.dirty && s.overlaps(p,size)){anyps3_ft::exec_class|=128;break;}}
         if(fallback_stats().enabled){std::ostringstream detail;detail<<"write="<<write<<" pc=0x"<<std::hex<<state.pc<<" host=0x"<<reinterpret_cast<std::uintptr_t>(p)<<" bytes=0x"<<size;
             for(const auto& region:state.maps){const auto base=reinterpret_cast<std::uintptr_t>(region.bytes->data()),at=reinterpret_cast<std::uintptr_t>(p);if(at>=base && at-base<region.bytes->size())detail<<" guest=0x"<<(region.base+at-base);}
             fallback_stats().detail("surface_host_access",detail.str());}

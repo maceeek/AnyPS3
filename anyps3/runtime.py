@@ -9,6 +9,7 @@ from .host_access import CPP as HOST_ACCESS_CPP
 from .host_fault import CPP as HOST_FAULT_CPP
 from .guest_backing import CPP as GUEST_BACKING_CPP
 from .ppu_memory import CPP as PPU_MEMORY_CPP
+from .frametime import CPP as FRAMETIME_CPP
 from .elf import ElfImage
 from .errors import AnyPS3Error
 
@@ -50,7 +51,8 @@ def memory_loader(image: ElfImage) -> str:
     return "\n".join(lines)
 
 
-MEMORY_CPP = r'''
+# FRAMETIME (guarded) precedes the memory model: the SPUPUT LeaseWait spans in par_memory use anyps3_ft.
+MEMORY_CPP = FRAMETIME_CPP + r'''
 #include <cstdint>
 #include <vector>
 #include <list>

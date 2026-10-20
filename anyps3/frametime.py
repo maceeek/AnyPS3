@@ -46,6 +46,12 @@ kind  name        thread       fields
 20  EventPub     rsx worker   a=event queue id, b=event name, c=flags
 21  WorkerWait   rsx worker   span: a=completion id & c=1 (blocking GPU collect, >= 20 us) or a=packed reason & c=2/3 (flush with/without download, >= 100 us)
 22  Mark         any          user marker (tests)
+23  LeaseWait    any guest    span (a CPU/SPU guest access waits outside admission, SPUPUT): a=guest EA, c=reason|write<<8
+                              (1 owner coherence RPC because the page broker refused admission, 2 owner RPC because the span is
+                              synchronously watched, 3 page-broker wait_change after a refusal), d=size
+HostExec d (SPUPUT): what the owner callback did, bit mask: 1 observer interested at the owner, 2 raw CPU-dirty interested,
+                              4 session busy, 8 label sync, 16 protected access, 32 a cached texture was invalidated,
+                              64 surface overlap (flush + erase), 128 an overlapped surface was GPU-dirty, 256 guard released
 """
 
 CPP = r'''
@@ -65,7 +71,7 @@ CPP = r'''
 namespace anyps3_ft {
 enum Kind : std::uint32_t {PostFifo=1,FifoRun=2,Vblank=3,FlipReq=4,FlipVsync=5,FlipAsync=6,GpuSubmit=7,GpuRetire=8,LabelPub=9,
     HostReq=10,HostExec=11,Block=12,Idle=13,Service=14,Fault=15,DisplayReq=16,DisplayExec=17,BarrierReq=18,Switch=19,EventPub=20,
-    WorkerWait=21,Mark=22};
+    WorkerWait=21,Mark=22,LeaseWait=23};
 struct alignas(64) Event {std::atomic<std::uint64_t> seq;std::uint64_t ns;std::uint32_t kind,tid;std::uint64_t a,b,c,d,pad;};
 static_assert(sizeof(Event)==64 && std::atomic<std::uint64_t>::is_always_lock_free,"frametime event ABI");
 struct Header {char magic[8];std::uint64_t capacity,version;std::atomic<std::uint64_t> head,dropped;std::uint64_t pad[3];};
@@ -78,6 +84,8 @@ inline int peek_register=-1;
 inline std::uint32_t peek_pc=0;
 inline std::atomic<std::uint64_t> last_post_ns{0};
 inline thread_local std::uint64_t current_completion=0;
+// SPUPUT: classification bits of the HostAccess callback currently executed by wrap() (reported as HostExec d).
+inline thread_local std::uint64_t exec_class=0;
 inline std::uint64_t pack(const char* text){std::uint64_t v=0;for(unsigned i=0;i<8 && text && text[i];++i)v|=std::uint64_t(std::uint8_t(text[i]))<<(8*i);return v;}
 inline std::uint64_t now(){timespec t;clock_gettime(CLOCK_MONOTONIC,&t);return std::uint64_t(t.tv_sec)*1000000000ull+std::uint64_t(t.tv_nsec);}
 inline std::uint32_t this_tid(){static thread_local const std::uint32_t tid=std::uint32_t(syscall(SYS_gettid));return tid;}
@@ -136,8 +144,8 @@ inline std::function<void()> wrap(std::uint32_t kind,std::uint64_t a,std::functi
     const auto posted=now();
     return [kind,a,posted,f=std::move(f)]{
         const auto t0=now();
-        struct Done {std::uint32_t kind;std::uint64_t a,posted,t0;~Done(){put(t0,kind,a,now()-t0,t0-posted,0);}} done{kind,a,posted,t0};
-        f();
+        struct Done {std::uint32_t kind;std::uint64_t a,posted,t0;~Done(){put(t0,kind,a,now()-t0,t0-posted,exec_class);exec_class=0;}} done{kind,a,posted,t0};
+        exec_class=0;f();
     };
 }
 // Guest thread blocks (usleep, semaphore, event queue ...). `State` is PpuState: kept a template so tests can compile this alone.
