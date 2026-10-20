@@ -34,7 +34,8 @@ static unsigned src_bpp_of(unsigned f){return f==8?1:(f==1||f==2||f==7||f==9)?2:
 struct Case {
  unsigned src_format,dst_format,filter,origin,w,h,src_pitch,ow,oh,dst_pitch,ox,oy,cx,cy,cw,ch,point;
  std::int32_t dx,dy;bool src_io,dst_io,in_place,tile,src_tile,swz;unsigned src_offset,dst_offset;
- unsigned op,tile_pitch,tile_bank,src_tile_pitch,src_tile_bank;
+ unsigned op,tile_pitch,tile_bank,src_tile_pitch,src_tile_bank,tile_size,src_tile_size;
+ bool dst_ahead,src_ahead;   // the tile starts at the next 64 KiB boundary, inside the image (linear pixels first, tiled pixels after)
  unsigned io1;   // IO page 1: 0 contiguous with page 0, 1 discontiguous, 2 unmapped hole
 };
 static void program_case(PpuState& s,const Case& c){
@@ -47,9 +48,9 @@ static void program_case(PpuState& s,const Case& c){
  if(c.swz){R[0x8300]=(5u<<24)|(6u<<16)|c.dst_format;R[0x8184]=c.dst_io?0xfeed0001u:0xfeed0000u;R[0x8304]=c.dst_offset;}
  s.rsx.io[1]=c.io1==0?0x70100000u:c.io1==1?0x70200000u:UINT32_MAX;
  auto& t=s.rsx.tiles[0];t=NativeRsx::Tile{};
- if(c.tile){t.bound=true;t.location=c.dst_io?1:0;t.offset=c.dst_offset&~0xffffu;t.size=0x10000;t.pitch=c.tile_pitch;t.bank=c.tile_bank;}
+ if(c.tile){t.bound=true;t.location=c.dst_io?1:0;t.offset=c.dst_ahead?(c.dst_offset+0xffffu)&~0xffffu:c.dst_offset&~0xffffu;t.size=c.tile_size;t.pitch=c.tile_pitch;t.bank=c.tile_bank;}
  auto& q=s.rsx.tiles[1];q=NativeRsx::Tile{};
- if(c.src_tile){q.bound=true;q.location=c.src_io?1:0;q.offset=c.src_offset&~0xffffu;q.size=0x10000;q.pitch=c.src_tile_pitch;q.bank=c.src_tile_bank;}
+ if(c.src_tile){q.bound=true;q.location=c.src_io?1:0;q.offset=c.src_ahead?(c.src_offset+0xffffu)&~0xffffu:c.src_offset&~0xffffu;q.size=c.src_tile_size;q.pitch=c.src_tile_pitch;q.bank=c.src_tile_bank;}
 }
 // Run one transfer; returns the error text ("" on success).
 static std::string run(PpuState& s,const Case& c){
@@ -59,7 +60,7 @@ static std::string run(PpuState& s,const Case& c){
 }
 // Observed guest regions: linear IO, VRAM, both sides of the IO page 0/1 edge, the discontiguous page-1 alias, the read-only page.
 struct Window {std::uint64_t address;unsigned size;bool writable;};
-static const Window windows[]={{0x70000000,0x10000,true},{0xc0000000,0x20000,true},{0x700fe000,0x4000,true},{0x70200000,0x2000,true},{0x70300000,0x1000,false}};
+static const Window windows[]={{0x70000000,0x30000,true},{0xc0000000,0x40000,true},{0x700fe000,0x4000,true},{0x70200000,0x2000,true},{0x70300000,0x1000,false}};
 static std::vector<std::uint8_t> dump(PpuState& s){
  std::vector<std::uint8_t> out;
  for(const auto& w:windows){const auto at=out.size();out.resize(at+w.size);s.memory.transfer(w.address,out.data()+at,w.size,false);}
@@ -80,16 +81,21 @@ static Case random_case(std::uint32_t& r){
  c.dst_format=choice==0?4:choice==1?11:10;
  c.filter=lcg(r)%3==0;c.origin=1+lcg(r)%2;
  if(c.dst_format==11){c.src_format=lcg(r)&1?3:12;c.filter=0;}   // Y32 is an untyped 32-bit SRCCOPY
+ // A third of the cases are 1:1 unfiltered copies with identical byte layout (the run-wise identity path's domain).
+ const bool copy_bias=lcg(r)%3==0;
+ if(copy_bias){const unsigned pick=lcg(r)%3;c.src_format=pick==1?7:3;c.dst_format=pick==0?10:pick==1?4:11;c.filter=0;c.origin=2;}
  c.w=1+lcg(r)%40;c.h=1+lcg(r)%24;
  const unsigned bpp=src_bpp_of(c.src_format);
  c.src_pitch=c.w*bpp+(lcg(r)%3==0?4*(lcg(r)%5):0);
  c.ow=1+lcg(r)%40;c.oh=1+lcg(r)%24;c.ox=lcg(r)%4;c.oy=lcg(r)%3;
+ if(copy_bias){c.ow=c.w;c.oh=c.h;}
  const unsigned dbpp=c.dst_format==4?2:4;
  c.dst_pitch=(c.ox+c.ow)*dbpp+(lcg(r)%3==0?4*(lcg(r)%5):0);
  c.cx=lcg(r)%6;c.cy=lcg(r)%4;
  c.cw=1+lcg(r)%(c.ow+3);c.ch=1+lcg(r)%(c.oh+2);
  c.dx=scales[lcg(r)%8];c.dy=scales[lcg(r)%8];
  c.point=(lcg(r)%6)|((lcg(r)%4)<<16);
+ if(copy_bias){c.dx=c.dy=0x100000;c.point=0;}
  c.src_io=lcg(r)&1;c.dst_io=lcg(r)&1;
  c.src_offset=0x1000*(c.src_io?1:1)+4*(lcg(r)%16);
  c.dst_offset=c.dst_io?0x4000+4*(lcg(r)%16):0x1000+4*(lcg(r)%16);
@@ -99,6 +105,9 @@ static Case random_case(std::uint32_t& r){
  static const unsigned pitches[]={256,512,768,1024,256,512,1280,2048};   // 1280/2048 push physical blocks past the 64 KiB tile: identical errors
  c.tile_pitch=pitches[lcg(r)%8];c.tile_bank=lcg(r)%4;c.src_tile_pitch=pitches[lcg(r)%8];c.src_tile_bank=lcg(r)%4;
  c.op=lcg(r)%5==0?0u:3u;
+ // A quarter of the tiles end inside the image: tiled and linear pixels mix, and a 32-byte group can straddle the tile end.
+ c.tile_size=lcg(r)%4==0?(c.dst_offset&0xffffu)+4*(1+lcg(r)%96):0x10000u;
+ c.src_tile_size=lcg(r)%4==0?(c.src_offset&0xffffu)+4*(1+lcg(r)%96):0x10000u;
  c.swz=lcg(r)%9==0;
  if(lcg(r)%3==0)c.tile=true;
  // Mapping edges: rows that straddle the 1 MiB IO page boundary (contiguous / discontiguous / unmapped next page),
@@ -113,6 +122,11 @@ static Case random_case(std::uint32_t& r){
   else {c.dst_io=false;c.in_place=false;c.dst_offset=0x7ffc0-4*(lcg(r)%30);}
  }
  c.src_tile=lcg(r)%3==0;
+ c.dst_ahead=c.tile && lcg(r)%5==0;c.src_ahead=c.src_tile && lcg(r)%5==0;
+ if(c.dst_ahead && !c.in_place && c.dst_offset<0x10000)c.dst_offset=0x10000-4*(1+lcg(r)%30);
+ else c.dst_ahead=false;
+ if(c.src_ahead && !c.in_place && c.src_offset<0x10000)c.src_offset=0x10000-4*(1+lcg(r)%30);
+ else c.src_ahead=false;
  if(c.src_tile && c.tile && c.src_io==c.dst_io)c.src_tile=false;   // two tiles over one pixel is an (identical) error, not the interesting case
  // Invalid parameters are part of the sweep: zero pitch, pitch below the row, unsupported combinations.
  if(lcg(r)%40==0)c.src_pitch=c.w*bpp>1?c.w*bpp-1:0;
@@ -122,8 +136,8 @@ static void differential(bool concurrent){
  PpuState fast,slow;setup(fast);setup(slow);
  if(concurrent){fast.memory.enable_concurrency();slow.memory.enable_concurrency();}
  std::uint32_t r=concurrent?0x1234567u:0x7654321u;unsigned ok=0,failed=0,tiled=0;std::map<std::string,unsigned> errors;
- const auto start=rsxblit::rows_executed,start_batch=rsxblit::batch_executed;
- for(unsigned n=0;n<700;++n){
+ const auto start=rsxblit::rows_executed,start_batch=rsxblit::batch_executed,start_copy=rsxblit::batch_copy_executed;
+ for(unsigned n=0;n<1400;++n){
   const auto c=random_case(r);fill(fast,slow,r+n);
   rsxblit::force_pixel_path=false;const auto e_fast=run(fast,c);
   rsxblit::force_pixel_path=true;const auto e_slow=run(slow,c);
@@ -133,11 +147,11 @@ static void differential(bool concurrent){
   if(a!=b){unsigned at=0;while(a[at]==b[at])++at;throw std::runtime_error("case "+std::to_string(n)+": destination differs at byte "+std::to_string(at)+" (fmt "+std::to_string(c.src_format)+"->"+std::to_string(c.dst_format)+")");}
   e_fast.empty()?++ok:++failed;tiled+=c.tile||c.src_tile;if(!e_fast.empty())++errors[e_fast.substr(0,26)];
  }
- const auto taken=rsxblit::rows_executed-start,batched=rsxblit::batch_executed-start_batch;
- std::printf("INFO %s: %u transfers ok, %u rejected identically, %u with a bound tile, row-wise path taken %llu times, batch path %llu times\n",concurrent?"concurrent":"serial",ok,failed,tiled,(unsigned long long)taken,(unsigned long long)batched);
+ const auto taken=rsxblit::rows_executed-start,batched=rsxblit::batch_executed-start_batch,copies=rsxblit::batch_copy_executed-start_copy;
+ std::printf("INFO %s: %u transfers ok, %u rejected identically, %u with a bound tile, row-wise path taken %llu times, batch path %llu times (%llu run-wise copies)\n",concurrent?"concurrent":"serial",ok,failed,tiled,(unsigned long long)taken,(unsigned long long)batched,(unsigned long long)copies);
  for(const auto& [text,count]:errors)std::printf("INFO   %u x %s\n",count,text.c_str());
  std::fflush(stdout);
- assert(ok>450 && failed>5 && taken>100 && batched>150);
+ assert(ok>900 && failed>5 && taken>80 && batched>150 && copies>100);
  rsxblit::force_pixel_path=false;
 }
 static void analytic(){
@@ -182,7 +196,7 @@ static void analytic_layouts(){
   fill_background(0xc0000000,0x1000,0xa5);
   for(unsigned y=0;y<9;++y)for(unsigned x=0;x<8;++x)for(unsigned k=0;k<4;++k)m.store(0x70001000+y*32+x*4+k,1,pattern(x,y,k));
   Case c{};c.op=3;c.src_format=3;c.dst_format=10;c.origin=2;c.w=8;c.h=9;c.src_pitch=32;c.ow=8;c.oh=9;c.dst_pitch=256;c.cw=8;c.ch=9;
-  c.dx=c.dy=0x100000;c.src_io=true;c.dst_io=false;c.src_offset=0x1000;c.dst_offset=0;c.tile=true;c.tile_pitch=256;c.tile_bank=0;
+  c.dx=c.dy=0x100000;c.src_io=true;c.dst_io=false;c.src_offset=0x1000;c.dst_offset=0;c.tile=true;c.tile_pitch=256;c.tile_bank=0;c.tile_size=c.src_tile_size=0x10000;
   const auto before=rsxblit::batch_executed;
   assert(run(s,c).empty());
   assert(rsxblit::batch_executed==before+1);
@@ -194,7 +208,7 @@ static void analytic_layouts(){
   // (2) bound tile source in VRAM (the pattern stored at the hand-derived physical offsets) -> linear IO destination.
   fill_background(0x70002000,0x400,0x5a);
   Case d{};d.op=3;d.src_format=3;d.dst_format=10;d.origin=2;d.w=8;d.h=9;d.src_pitch=256;d.ow=8;d.oh=9;d.dst_pitch=32;d.cw=8;d.ch=9;
-  d.dx=d.dy=0x100000;d.src_io=false;d.dst_io=true;d.src_offset=0;d.dst_offset=0x2000;d.src_tile=true;d.src_tile_pitch=256;d.src_tile_bank=0;
+  d.dx=d.dy=0x100000;d.src_io=false;d.dst_io=true;d.src_offset=0;d.dst_offset=0x2000;d.src_tile=true;d.src_tile_pitch=256;d.src_tile_bank=0;d.tile_size=d.src_tile_size=0x10000;
   const auto before2=rsxblit::batch_executed;
   assert(run(s,d).empty());
   assert(rsxblit::batch_executed==before2+1);

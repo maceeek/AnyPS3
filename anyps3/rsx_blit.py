@@ -95,7 +95,8 @@ struct Image {
     GuestMemory::Range pixel(PpuState& s,unsigned x,unsigned y,bool write)const{return access(s,context,locate(s.rsx,x,y,nullptr),bpp,write);}
     // Physical byte offset inside the DMA context of pixel (x,y) after swizzle and tile permutation; the single place
     // that validates blit addressing (the per-pixel reference and the batch path both call it).
-    std::uint64_t locate(const NativeRsx& gpu,unsigned x,unsigned y,Memo* memo)const{
+    // Logical (pre-tile) byte address of pixel (x,y) inside the DMA context.
+    std::uint64_t logical(unsigned x,unsigned y)const{
         if(x>=width || y>=height)throw std::runtime_error("RSX blit coordinate outside image");
         std::uint64_t at=0;
         if(swizzled){
@@ -107,6 +108,33 @@ struct Image {
             at=offset+at*bpp;
         }else at=std::uint64_t(offset)+std::uint64_t(y)*pitch+std::uint64_t(x)*bpp;
         if(at>UINT32_MAX)throw std::runtime_error("RSX blit image offset overflow");
+        return at;
+    }
+    // How many pixels of row y starting at x (at most `max`, at least 1) are guaranteed to be physically consecutive bytes whose
+    // addressing locate() validates identically for each of them: the rest of the row of a linear image no bound tile of this
+    // location touches, the pixels of one aligned 32-byte logical group inside a single bound tile (RSX tiling keeps each 32-byte
+    // group), 1 for a swizzled image or whenever tiles overlap or start inside the run. The first and last pixel of a run are still
+    // locate()d by the caller (which raises every configuration/bounds error), so a run never hides a fault.
+    unsigned run(const NativeRsx& gpu,unsigned x,unsigned y,unsigned max)const{
+        if(swizzled || max<2)return 1;
+        const auto at=logical(x,y),end=at+std::uint64_t(max)*bpp;const auto place=location(context);
+        const NativeRsx::Tile* first=nullptr;unsigned hits=0;std::uint64_t next_start=UINT64_MAX;
+        for(const auto& tile:gpu.tiles){
+            if(!tile.bound || tile.location!=place)continue;
+            const std::uint64_t begin=tile.offset,limit=begin+tile.size;
+            if(at<limit && at+bpp>begin){++hits;first=&tile;}
+            else if(begin>=at+bpp && begin<end)next_start=std::min(next_start,begin);
+        }
+        if(hits>1)return 1;
+        std::uint64_t pixels=max;
+        if(hits==1){
+            pixels=std::min<std::uint64_t>(pixels,(32-(at&31))/bpp);
+            pixels=std::min<std::uint64_t>(pixels,(std::uint64_t(first->offset)+first->size-at)/bpp);
+        }else if(next_start!=UINT64_MAX)pixels=std::min<std::uint64_t>(pixels,(next_start-at)/bpp);
+        return unsigned(std::max<std::uint64_t>(pixels,1));
+    }
+    std::uint64_t locate(const NativeRsx& gpu,unsigned x,unsigned y,Memo* memo)const{
+        const auto at=logical(x,y);
         // Byte lanes inside a word are preserved by rsx_tiled_offset. Tile
         // pitch describes the memory permutation, not necessarily this subimage's
         // row stride. Apply it also to main-memory tiles before IO translation.
@@ -144,7 +172,7 @@ struct Image {
                 throw std::runtime_error("RSX blit tiled pixel outside tile");
             // Unaligned pixels must not span a permuted 32-byte block.
             if((at&31)+bpp>32)throw std::runtime_error("RSX blit pixel crosses tiled block");
-            at=physical;
+            return physical;
         }
         return at;
     }
@@ -299,19 +327,87 @@ static bool scaled_rows(PpuState& s,const Image& src,const Image& dst,unsigned s
     for(std::size_t i=0;i<targets.size();++i)targets[i].write(0,output[i].data(),dst_span);
     ++rows_executed;return true;
 }
-// Batch path for everything scaled_rows rejects: bound tiles, Morton-swizzled images and SRCCOPY_AND (zero-alpha discard).
+// Batch paths for everything scaled_rows rejects: bound tiles, Morton-swizzled images and SRCCOPY_AND (zero-alpha discard).
 // Every physical address comes from Image::locate (the validation of the per-pixel reference). The source is snapshotted with
 // one Range read over its covering physical span (bytes between the touched pixels are covered but never used, like in
-// scaled_rows), all output colours are computed on the host, and only the touched destination bytes are written -- merged into
+// scaled_rows), the output bytes are computed on the host, and only the touched destination bytes are written -- merged into
 // runs in ascending physical order, through one writable Range created (and so validated) before the first byte is written.
 // Anything unusual (sparse spans, tables over budget, two pixels on one byte, any exception) returns false before the first
 // write; the caller then runs the per-pixel reference, which raises the original error or produces the same bytes.
-static std::uint64_t batch_executed=0;   // transfers completed by the batch path (diagnostics / differential test)
+static std::uint64_t batch_executed=0;   // transfers completed by a batch path (diagnostics / differential test)
+static std::uint64_t batch_copy_executed=0;   // ... of which by the run-wise identity copy
 static bool force_no_batch=[]{const char* v=std::getenv("ANYPS3_RSX_BLIT_BATCH");return v && std::string(v)=="0";}();
+// A span much larger than the bytes it must contain would turn a cheap snapshot into a copy of unrelated memory.
+static bool dense_span(std::uint64_t span,std::uint64_t needed){return span<=(UINT64_C(64)<<20) && span<=std::max<std::uint64_t>(needed*64,UINT64_C(256)<<10);}
+struct Chunk {std::uint64_t at;const std::uint8_t* data;std::size_t size;};   // `size` bytes for destination byte offset `at`
+// Writes the chunks (in any order; two chunks on one byte or an unwritable/unmapped covering span return false before the first write).
+// Past the first write nothing may fall back: a failure there must stop the run, not repeat the transfer.
+static bool write_chunks(PpuState& s,const Image& dst,std::vector<Chunk>& chunks,std::uint64_t dlo,std::uint64_t dhi,std::uint64_t needed){
+    struct Run {std::uint64_t at;std::size_t stage,size;};
+    std::vector<Run> runs;std::vector<std::uint8_t> stage;std::optional<GuestMemory::Range> target;
+    try{
+        if(!dense_span(dhi-dlo,needed))return false;
+        std::stable_sort(chunks.begin(),chunks.end(),[](const Chunk& a,const Chunk& b){return a.at<b.at;});
+        stage.reserve(needed);
+        for(const auto& chunk:chunks){
+            if(!runs.empty()){
+                const auto end=runs.back().at+runs.back().size;
+                if(chunk.at<end)return false;   // two output pixels on one byte: keep the reference's raster order
+                if(chunk.at==end){runs.back().size+=chunk.size;stage.insert(stage.end(),chunk.data,chunk.data+chunk.size);continue;}
+            }
+            runs.push_back({chunk.at,stage.size(),chunk.size});
+            stage.insert(stage.end(),chunk.data,chunk.data+chunk.size);
+        }
+        target.emplace(access(s,dst.context,std::int64_t(dlo),unsigned(dhi-dlo),true));
+    }catch(const std::exception&){return false;}
+    for(const auto& run:runs)target->write(unsigned(run.at-dlo),stage.data()+run.stage,unsigned(run.size));
+    return true;
+}
+// Pure byte copy: SRCCOPY, 1:1 unfiltered, identical byte layout on both sides (A8R8G8B8 -> A8R8G8B8, R5G6B5 -> R5G6B5, raw Y32),
+// every source tap inside the image. Works on runs of consecutive pixels (Image::run) instead of single pixels.
+static bool scaled_copy(PpuState& s,const Image& src,const Image& dst,unsigned src_format,unsigned dst_format,bool raw_copy,unsigned operation,unsigned filter,
+    std::int64_t dx,std::int64_t dy,std::int64_t u,std::int64_t v,unsigned ox,unsigned oy,unsigned x0,unsigned y0,unsigned x1,unsigned y1){
+    if(operation!=3 || filter || dx!=1048576 || dy!=1048576 || (u&1048575) || (v&1048575) || src.bpp!=dst.bpp)return false;
+    if(!raw_copy && !((src_format==3 && dst_format==10) || (src_format==7 && dst_format==4)))return false;
+    std::vector<Chunk> chunks;std::vector<std::uint8_t> snapshot;std::uint64_t lo=UINT64_MAX,hi=0,dlo=UINT64_MAX,dhi=0,needed=0;
+    struct Seg {std::uint64_t from,to;unsigned bytes;};std::vector<Seg> segments;
+    try{
+        const std::int64_t sx=(u>>20)-ox,sy=(v>>20)-oy;   // source x = x + sx, source y = y + sy
+        if(std::int64_t(x0)+sx<0 || std::int64_t(x1-1)+sx>=std::int64_t(src.width) || std::int64_t(y0)+sy<0 || std::int64_t(y1-1)+sy>=std::int64_t(src.height))return false;
+        Image::Memo from_memo,to_memo;
+        for(unsigned y=y0;y<y1;++y){
+            for(unsigned x=x0;x<x1;){
+                const unsigned left=x1-x,source_x=unsigned(std::int64_t(x)+sx),source_y=unsigned(std::int64_t(y)+sy);
+                const unsigned n=std::min(src.run(s.rsx,source_x,source_y,left),dst.run(s.rsx,x,y,left));
+                const auto from=src.locate(s.rsx,source_x,source_y,&from_memo),to=dst.locate(s.rsx,x,y,&to_memo);
+                if(n>1){   // the last pixel of the run must validate too and sit exactly (n-1) pixels further on both sides
+                    if(src.locate(s.rsx,source_x+n-1,source_y,&from_memo)!=from+std::uint64_t(n-1)*src.bpp ||
+                       dst.locate(s.rsx,x+n-1,y,&to_memo)!=to+std::uint64_t(n-1)*dst.bpp)return false;
+                }
+                const unsigned bytes=n*src.bpp;
+                segments.push_back({from,to,bytes});needed+=bytes;
+                lo=std::min(lo,from);hi=std::max<std::uint64_t>(hi,from+bytes);dlo=std::min(dlo,to);dhi=std::max<std::uint64_t>(dhi,to+bytes);
+                x+=n;
+            }
+        }
+        if(segments.empty() || hi>UINT32_MAX || !dense_span(hi-lo,needed))return false;
+        snapshot.resize(hi-lo);
+        access(s,src.context,std::int64_t(lo),unsigned(hi-lo),false).read(0,snapshot.data(),unsigned(hi-lo));
+        chunks.reserve(segments.size());
+        for(const auto& segment:segments){
+            const auto* data=snapshot.data()+(segment.from-lo);
+            if(!chunks.empty() && chunks.back().at+chunks.back().size==segment.to && chunks.back().data+chunks.back().size==data)chunks.back().size+=segment.bytes;
+            else chunks.push_back({segment.to,data,segment.bytes});
+        }
+    }catch(const std::exception&){return false;}
+    if(!write_chunks(s,dst,chunks,dlo,dhi,needed))return false;
+    ++batch_executed;++batch_copy_executed;return true;
+}
 static bool scaled_batch(PpuState& s,const Image& src,const Image& dst,unsigned src_format,unsigned dst_format,bool raw_copy,unsigned operation,unsigned filter,
     std::int64_t dx,std::int64_t dy,std::int64_t u,std::int64_t v,unsigned ox,unsigned oy,unsigned x0,unsigned y0,unsigned x1,unsigned y1){
-    struct Run {std::uint64_t at;std::size_t stage;unsigned size;};
-    std::vector<Run> runs;std::vector<std::uint8_t> stage;std::optional<GuestMemory::Range> target;std::uint64_t dlo=UINT64_MAX,dhi=0;
+    if(scaled_copy(s,src,dst,src_format,dst_format,raw_copy,operation,filter,dx,dy,u,v,ox,oy,x0,y0,x1,y1))return true;
+    std::vector<Chunk> chunks;std::uint64_t dlo=UINT64_MAX,dhi=0,needed=0;
+    std::vector<std::uint8_t> bytes;   // output pixels in raster order (the chunks point into it)
     try{
         if(x0>=x1 || y0>=y1 || dst.bpp!=dest_bpp(dst_format))return false;
         auto clamp_to=[](std::int64_t value,std::int64_t last){return std::clamp<std::int64_t>(value,0,last);};
@@ -322,8 +418,6 @@ static bool scaled_batch(PpuState& s,const Image& src,const Image& dst,unsigned 
         const std::int64_t cy0=clamp_to(std::min(ya,yb),src.height-1),cy1=clamp_to(std::max(ya,yb)+extra,src.height-1);
         const std::uint64_t rw=std::uint64_t(cx1-cx0+1),rh=std::uint64_t(cy1-cy0+1),out_pixels=std::uint64_t(x1-x0)*(y1-y0);
         if(rw*rh>(UINT64_C(4)<<20) || out_pixels>(UINT64_C(16)<<20))return false;
-        // A span much larger than the bytes it must contain would turn a cheap snapshot into a copy of unrelated memory.
-        auto dense=[](std::uint64_t span,std::uint64_t needed){return span<=(UINT64_C(64)<<20) && span<=std::max<std::uint64_t>(needed*64,UINT64_C(256)<<10);};
         // 1. physical address of every source pixel of the touched rectangle, then one snapshot of the covering span.
         std::vector<std::uint32_t> table(rw*rh);
         std::uint64_t lo=UINT64_MAX,hi=0;
@@ -332,7 +426,7 @@ static bool scaled_batch(PpuState& s,const Image& src,const Image& dst,unsigned 
                 const auto at=src.locate(s.rsx,unsigned(cx0+x),unsigned(cy0+y),&memo);
                 if(at>UINT32_MAX-4)return false;
                 table[y*rw+x]=std::uint32_t(at);lo=std::min(lo,at);hi=std::max<std::uint64_t>(hi,at+src.bpp);}}
-        if(!dense(hi-lo,rw*rh*src.bpp))return false;
+        if(!dense_span(hi-lo,rw*rh*src.bpp))return false;
         std::vector<std::uint8_t> snapshot(hi-lo);
         access(s,src.context,std::int64_t(lo),unsigned(hi-lo),false).read(0,snapshot.data(),unsigned(hi-lo));
         auto fetch=[&](std::int64_t x,std::int64_t y){
@@ -343,8 +437,7 @@ static bool scaled_batch(PpuState& s,const Image& src,const Image& dst,unsigned 
             if(raw_copy)return Color{p[0],p[1],p[2],p[3]};
             return read(p,src_format);};
         // 2. colours and destination addresses in raster order (the pixel reference's order).
-        std::vector<std::uint64_t> where;where.reserve(out_pixels);
-        std::vector<std::uint8_t> bytes;bytes.reserve(out_pixels*dst.bpp);
+        bytes.reserve(out_pixels*dst.bpp);std::vector<std::uint64_t> where;where.reserve(out_pixels);
         {Image::Memo memo;
             for(unsigned y=y0;y<y1;++y)for(unsigned x=x0;x<x1;++x){
                 const auto fx=u+std::int64_t(x-ox)*dx,fy=v+std::int64_t(y-oy)*dy;
@@ -363,30 +456,13 @@ static bool scaled_batch(PpuState& s,const Image& src,const Image& dst,unsigned 
                 dlo=std::min(dlo,at);dhi=std::max<std::uint64_t>(dhi,at+dst.bpp);
             }}
         if(where.empty()){++batch_executed;return true;}   // every pixel discarded: nothing to write
-        if(!dense(dhi-dlo,where.size()*dst.bpp))return false;
-        // 3. chunks of raster-consecutive pixels with consecutive physical bytes, sorted by physical address and merged into runs.
-        struct Chunk {std::uint64_t at,first;unsigned count;};
-        std::vector<Chunk> chunks;
+        // 3. chunks of raster-consecutive pixels with consecutive physical bytes.
+        needed=where.size()*dst.bpp;chunks.reserve(where.size()/4+1);
         for(std::uint64_t i=0;i<where.size();++i){
-            if(!chunks.empty() && chunks.back().at+std::uint64_t(chunks.back().count)*dst.bpp==where[i])++chunks.back().count;
-            else chunks.push_back({where[i],i,1});}
-        std::stable_sort(chunks.begin(),chunks.end(),[](const Chunk& a,const Chunk& b){return a.at<b.at;});
-        stage.reserve(bytes.size());
-        for(const auto& chunk:chunks){
-            const unsigned size=chunk.count*dst.bpp;
-            if(!runs.empty()){
-                const auto end=runs.back().at+runs.back().size;
-                if(chunk.at<end)return false;   // two output pixels on one byte: keep the reference's raster order
-                if(chunk.at==end){runs.back().size+=size;stage.insert(stage.end(),bytes.begin()+chunk.first*dst.bpp,bytes.begin()+(chunk.first+chunk.count)*dst.bpp);continue;}
-            }
-            runs.push_back({chunk.at,stage.size(),size});
-            stage.insert(stage.end(),bytes.begin()+chunk.first*dst.bpp,bytes.begin()+(chunk.first+chunk.count)*dst.bpp);
-        }
-        // 4. one writable Range over the covering destination span validates mapping and permission before the first write.
-        target.emplace(access(s,dst.context,std::int64_t(dlo),unsigned(dhi-dlo),true));
+            if(!chunks.empty() && chunks.back().at+chunks.back().size==where[i])chunks.back().size+=dst.bpp;
+            else chunks.push_back({where[i],bytes.data()+i*dst.bpp,dst.bpp});}
     }catch(const std::exception&){return false;}
-    // Past this point nothing may fall back: a failure after the first byte was written must stop the run, not repeat the transfer.
-    for(const auto& run:runs)target->write(unsigned(run.at-dlo),stage.data()+run.stage,run.size);
+    if(!write_chunks(s,dst,chunks,dlo,dhi,needed))return false;
     ++batch_executed;return true;
 }
 static void scaled(PpuState& s,unsigned point){
