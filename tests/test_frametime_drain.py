@@ -8,6 +8,10 @@ Independent expectations (not derived from the implementation's algorithm):
   * vsync: the same request posted 5 ms into a 40 ms vsync wait executes long before the deadline (default) or only after it
     (ANYPS3_RSX_HOST_DRAIN=0); a label queued before the wait is published before the deadline by default and still pending when the
     request runs with ANYPS3_RSX_FLIP_EARLY=0.
+  * timer slack: ANYPS3_RSX_TIMER_SLACK_NS accepts exactly the digit strings that fit unsigned long (the grammar of
+    ANYPS3_TIMER_SLACK_NS); signed, blank-led, trailing-garbage, empty and overflowing values stop the process with status 2.
+  * diagnostic gating: the service-tick clocks, the per-draw recording time (record_back_ms) and the flight latency EWMA do not run
+    unless their switch is set (ANYPS3_PERF_REPORT=1, ANYPS3_RSX_POLL=adaptive) and do run when it is.
 """
 from pathlib import Path
 import os
@@ -80,18 +84,45 @@ static void vsync(const char* mode){
  if(m=="default"){assert(served_ns<deadline.load()-20'000'000);assert(!label_pending && label_value==0x55667788);}
  else if(m=="drain_off"){assert(served_ns>=deadline.load());}
  else if(m=="early_off"){assert(served_ns<deadline.load()-20'000'000);assert(label_pending && label_value==0);}
- else if(m=="slack_off"){assert(served_ns<deadline.load()-20'000'000);}
+ else if(m=="slack_off" || m=="slack_env"){assert(served_ns<deadline.load()-20'000'000);}
  else assert(false);
  const long main_slack=prctl(PR_GET_TIMERSLACK);
- if(m=="slack_off")assert(owner_slack.load()==main_slack);else assert(owner_slack.load()==1);   // the owner thread alone gets 1 ns
- assert(main_slack!=1 || m=="slack_off");                   // the process's other threads keep the kernel default
+ if(m=="slack_off")assert(owner_slack.load()==main_slack);
+ else if(m=="slack_env")assert(owner_slack.load()==long(std::strtoul(std::getenv("ANYPS3_RSX_TIMER_SLACK_NS"),nullptr,10)));
+ else assert(owner_slack.load()==1);   // the owner thread alone gets 1 ns
+ assert(main_slack!=1 || m=="slack_off" || m=="slack_env");                   // the process's other threads keep the kernel default
  life.finish();
  std::printf("PASS vsync %s: request served %.1f ms into a 40 ms wait, label_pending=%d\n",mode,served_after_ms,int(label_pending));
+}
+// Diagnostic timing is off unless its switch is set: counters stay exactly zero / at their initial value without it and move with it.
+static void gate(){
+ setenv("ANYPS3_RSX_BACKEND","gpu",1);setenv("ANYPS3_RSX_WORKER","0",1);setenv("ANYPS3_SPU_THREADS","0",1);
+ const unsigned groups=400;
+ PpuState s;const auto put=setup_fifo(s,groups);s.memory.regions.push_back({0x71000000,6,s.memory.regions[0].bytes});
+ setenv("ANYPS3_RSX_WORKER","1",1);
+ SpuWorkerSession life(s);auto& w=s.process.rsx_worker;assert(w.enabled);
+ assert(!rsx_worker_request(s,1<<20).completed);
+ const auto until=mono_ns()+20'000'000'000ull;
+ while(s.memory.load(0x70008044,4)!=put){assert(mono_ns()<until);std::this_thread::yield();}
+ w.queue->drain();
+ std::vector<std::uint8_t> pixels(32*16*4);s.memory.transfer(0xc0100000,pixels.data(),pixels.size(),false);   // guarded read: retires every flight
+ std::this_thread::sleep_for(std::chrono::milliseconds(30));w.queue->drain();
+ auto* f=static_cast<PpuState*>(w.facade.get());
+ auto& session=*static_cast<rsxgraphics::Session*>(f->rsx.graphics_owner.get());
+ const char* report_env=std::getenv("ANYPS3_PERF_REPORT");const char* poll_env=std::getenv("ANYPS3_RSX_POLL");
+ const bool report=report_env && std::string(report_env)=="1",adaptive=poll_env && std::string(poll_env)=="adaptive";
+ assert(session.async_submits>0 && session.async_retires==session.async_submits);
+ const double back=session.batch->record_back_ms;
+ if(report){assert(back>0.0);assert(rsx_service_calls().load()>0 && rsx_service_ns().load()>0);}
+ else{assert(back==0.0);assert(rsx_service_calls().load()==0 && rsx_service_ns().load()==0);}
+ if(adaptive)assert(session.flight_ns!=300000.0);else assert(session.flight_ns==300000.0);
+ life.finish();
+ std::printf("PASS gate report=%d adaptive=%d: record_back_ms=%.3f service_calls=%llu flight_ns=%.0f\n",int(report),int(adaptive),back,(unsigned long long)rsx_service_calls().load(),session.flight_ns);
 }
 int main(int argc,char** argv){try{
  const std::string mode=argc>1?argv[1]:"";
  if(mode=="midrun_on")midrun(true);else if(mode=="midrun_off")midrun(false);
- else if(mode=="vsync_default")vsync("default");else if(mode=="vsync_drain_off")vsync("drain_off");else if(mode=="vsync_early_off")vsync("early_off");else if(mode=="vsync_slack_off")vsync("slack_off");
+ else if(mode=="vsync_default")vsync("default");else if(mode=="vsync_drain_off")vsync("drain_off");else if(mode=="vsync_early_off")vsync("early_off");else if(mode=="vsync_slack_off")vsync("slack_off");else if(mode=="vsync_slack_env")vsync("slack_env");else if(mode=="gate")gate();
  else return 3;
 }catch(const std::exception& e){std::fprintf(stderr,"FAIL %s\n",e.what());return 1;}}
 '''
@@ -114,6 +145,9 @@ class OwnerResponsiveness(unittest.TestCase):
                    ANYPS3_SPU_WORKER='0')
         env.pop('ANYPS3_RSX_HOST_DRAIN', None)
         env.pop('ANYPS3_RSX_FLIP_EARLY', None)
+        env.pop('ANYPS3_PERF_REPORT', None)
+        env.pop('ANYPS3_RSX_POLL', None)
+        env.pop('ANYPS3_RSX_TIMER_SLACK_NS', None)
         env.update(extra)
         result = subprocess.run([str(self.exe), mode], capture_output=True, text=True, env=env, timeout=120)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr[-6000:])
@@ -134,6 +168,24 @@ class OwnerResponsiveness(unittest.TestCase):
 
     def test_vsync_wait_without_early_submit_keeps_label_pending(self):
         self.run_mode('vsync_early_off', ANYPS3_RSX_FLIP_EARLY='0')
+
+    def test_timer_slack_grammar(self):
+        # exact digit strings that fit unsigned long are applied to the owner thread alone; everything else stops the process (status 2)
+        out = self.run_mode('vsync_slack_env', ANYPS3_RSX_TIMER_SLACK_NS='7')
+        self.assertIn('PASS ', out)
+        for bad in ('-1', '+5', ' 5', '5 ', '5x', '', '0x10', '18446744073709551616', '99999999999999999999999999'):
+            with self.subTest(value=bad):
+                env = dict(os.environ, LP_NUM_THREADS='4', ANYPS3_VK_DEVICE='lavapipe', VK_DRIVER_FILES='/usr/share/vulkan/icd.d/lvp_icd.json',
+                           ANYPS3_SPU_WORKER='0', ANYPS3_RSX_TIMER_SLACK_NS=bad)
+                result = subprocess.run([str(self.exe), 'vsync_default'], capture_output=True, text=True, env=env, timeout=120)
+                self.assertEqual(result.returncode, 2, result.stdout + result.stderr[-2000:])
+                self.assertIn('invalid ANYPS3_RSX_TIMER_SLACK_NS', result.stderr)
+
+    def test_diagnostic_timing_is_off_without_its_switch(self):
+        self.run_mode('gate')
+        self.run_mode('gate', ANYPS3_PERF_REPORT='1')
+        self.run_mode('gate', ANYPS3_RSX_POLL='adaptive')
+        self.run_mode('gate', ANYPS3_PERF_REPORT='1', ANYPS3_RSX_POLL='adaptive')
 
     def test_owner_timer_slack_is_private_and_switchable(self):
         # default: owner thread 1 ns, other threads untouched (checked inside vsync_default); switch off: inherited value

@@ -530,7 +530,7 @@ struct Session {
         std::shared_ptr<std::vector<std::uint64_t>> results;
         std::chrono::steady_clock::time_point submitted{};
     };
-    double flight_ns=300000;   // EWMA of submit -> retire latency of a flight (adaptive completion polling, ANYPS3_RSX_POLL=adaptive)
+    double flight_ns=300000;   // EWMA of submit -> retire latency of a flight; only maintained for ANYPS3_RSX_POLL=adaptive (rsx_poll_adaptive)
     // Three persistent mappings/command+descriptor pools; an arena cannot be
     // reused until its exact timeline value completed and results retired.
     std::deque<Flight> flights;
@@ -576,7 +576,7 @@ struct Session {
             anyps3_ft::mark(anyps3_ft::GpuRetire,flight.batch->completion,flight.pending.size(),wait?1:0,flight.labels.size());
             anyps3_ft::current_completion=flight.batch->completion;
             retire_work(*flight.batch,flight.pending,flight.results,flight.labels);
-            flight_ns=0.8*flight_ns+0.2*double(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-flight.submitted).count());
+            if(rsx_poll_adaptive())flight_ns=0.8*flight_ns+0.2*double(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-flight.submitted).count());
             vk.graphics_reset(*flight.batch);vk.graphics_move_stats(*flight.batch,*batch);
             spare_batches.push_back(std::move(flight.batch));flights.pop_front();++async_retires;
         }}catch(...){failed=true;throw;}
@@ -607,7 +607,7 @@ struct Session {
             else if(flights.size()<2)next=vk.graphics_batch(batch->capacity);
             else{retire(true,flights.front().batch->completion);next=std::move(spare_batches.back());spare_batches.pop_back();}
             vk.graphics_move_stats(*batch,*next);
-            flights.push_back({std::move(batch),std::move(pending),std::move(labels),std::move(query_results),std::chrono::steady_clock::now()});
+            flights.push_back({std::move(batch),std::move(pending),std::move(labels),std::move(query_results),rsx_poll_adaptive()?std::chrono::steady_clock::now():std::chrono::steady_clock::time_point{}});
             batch=std::move(next);pending.clear();labels.clear();query_results=std::make_shared<std::vector<std::uint64_t>>();++async_submits;
         }catch(...){failed=true;throw;}
     }
