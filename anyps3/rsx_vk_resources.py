@@ -58,6 +58,15 @@ private:
     static VkResult vkResetDescriptorPool(VkDevice d,VkDescriptorPool pool,VkDescriptorPoolResetFlags flags){const auto r=::vkResetDescriptorPool(d,pool,flags);if(r==VK_SUCCESS)release_descriptor_sets(pool);return r;}
     static VkResult vkAllocateDescriptorSets(VkDevice d,const VkDescriptorSetAllocateInfo* ci,VkDescriptorSet* out){const auto r=::vkAllocateDescriptorSets(d,ci,out);if(r==VK_SUCCESS){auto& stats=resource_stats();std::lock_guard<std::recursive_mutex> lock(stats.mutex);for(unsigned i=0;i<ci->descriptorSetCount;++i){auto id=resource_id(out[i]);stats.add("descriptor_sets",id);stats.descriptor_sets[resource_id(ci->descriptorPool)].push_back(id);}}return r;}
     static VkResult vkCreateGraphicsPipelines(VkDevice d,VkPipelineCache cache,std::uint32_t n,const VkGraphicsPipelineCreateInfo* ci,const VkAllocationCallbacks* a,VkPipeline* out){const auto r=::vkCreateGraphicsPipelines(d,cache,n,ci,a,out);for(unsigned i=0;i<n;++i)if(out[i])resource_stats().add("pipelines",resource_id(out[i]));return r;}
+    // Diagnostic command-kind tags for ANYPS3_RSX_VK_MARKS (see GraphicsMark); the wrappers only record the kind.
+    static void vkCmdCopyBuffer(VkCommandBuffer c,VkBuffer a,VkBuffer b,std::uint32_t n,const VkBufferCopy* r){graphics_last_kind()=MarkCopyBuffer;::vkCmdCopyBuffer(c,a,b,n,r);}
+    static void vkCmdCopyBufferToImage(VkCommandBuffer c,VkBuffer a,VkImage b,VkImageLayout l,std::uint32_t n,const VkBufferImageCopy* r){graphics_last_kind()=MarkCopyImage;::vkCmdCopyBufferToImage(c,a,b,l,n,r);}
+    static void vkCmdCopyImageToBuffer(VkCommandBuffer c,VkImage a,VkImageLayout l,VkBuffer b,std::uint32_t n,const VkBufferImageCopy* r){graphics_last_kind()=MarkCopyImage;::vkCmdCopyImageToBuffer(c,a,l,b,n,r);}
+    static void vkCmdCopyImage(VkCommandBuffer c,VkImage a,VkImageLayout al,VkImage b,VkImageLayout bl,std::uint32_t n,const VkImageCopy* r){graphics_last_kind()=MarkCopyImage;::vkCmdCopyImage(c,a,al,b,bl,n,r);}
+    static void vkCmdFillBuffer(VkCommandBuffer c,VkBuffer b,VkDeviceSize o,VkDeviceSize n,std::uint32_t v){graphics_last_kind()=MarkFill;::vkCmdFillBuffer(c,b,o,n,v);}
+    static void vkCmdDispatch(VkCommandBuffer c,std::uint32_t x,std::uint32_t y,std::uint32_t z){graphics_last_kind()=MarkDispatch;::vkCmdDispatch(c,x,y,z);}
+    static void vkCmdClearColorImage(VkCommandBuffer c,VkImage i,VkImageLayout l,const VkClearColorValue* v,std::uint32_t n,const VkImageSubresourceRange* r){graphics_last_kind()=MarkClear;::vkCmdClearColorImage(c,i,l,v,n,r);}
+    static void vkCmdClearDepthStencilImage(VkCommandBuffer c,VkImage i,VkImageLayout l,const VkClearDepthStencilValue* v,std::uint32_t n,const VkImageSubresourceRange* r){graphics_last_kind()=MarkClear;::vkCmdClearDepthStencilImage(c,i,l,v,n,r);}
     static VkResult vkCreateComputePipelines(VkDevice d,VkPipelineCache cache,std::uint32_t n,const VkComputePipelineCreateInfo* ci,const VkAllocationCallbacks* a,VkPipeline* out){const auto r=::vkCreateComputePipelines(d,cache,n,ci,a,out);for(unsigned i=0;i<n;++i)if(out[i])resource_stats().add("pipelines",resource_id(out[i]));return r;}
 #endif
 '''

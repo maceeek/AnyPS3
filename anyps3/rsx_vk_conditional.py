@@ -21,6 +21,7 @@ public:
     }
     void graphics_predicate(GraphicsBatch& b,const std::shared_ptr<GraphicsBuffer>& output,unsigned offset,
             const std::vector<ConditionalQuery>& queries,unsigned base,unsigned type,bool active,bool stats){
+        GraphicsSite site(SitePredicate);
         if(!graphics_conditional_rendering() || !output || offset%4 || std::uint64_t(offset)+4>output->size || type<1 || type>5)
             throw std::runtime_error("invalid RSX GPU predicate");
         std::uint64_t count=0;for(const auto& q:queries){if(!q.pool || !q.count || q.first>1024 || q.count>1024-q.first)throw std::runtime_error("invalid RSX predicate query span");count+=q.count;}

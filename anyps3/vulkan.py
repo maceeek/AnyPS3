@@ -80,6 +80,14 @@ class NativeVulkan {
     VkCommandPool pool=VK_NULL_HANDLE;
     VkPhysicalDeviceMemoryProperties memory{};
     std::uint32_t family=0;
+#ifdef ANYPS3_RSX_VK
+    // Dedicated DMA (transfer-only) queue: batch preludes (staging->device buffer copies) run there, concurrently with the
+    // previous batch's graphics work (ANYPS3_RSX_ASYNC_UPLOAD=0 disables; absent on devices with a single queue family).
+    VkQueue transfer_queue=VK_NULL_HANDLE;VkCommandPool transfer_pool=VK_NULL_HANDLE;std::uint32_t transfer_family=UINT32_MAX;
+    VkSemaphore graphics_upload_timeline=VK_NULL_HANDLE;std::uint64_t graphics_upload_serial=0;
+    VkBuffer graphics_loop_scratch=VK_NULL_HANDLE;VkDeviceMemory graphics_loop_scratch_memory=VK_NULL_HANDLE;std::uint64_t graphics_loop_scratch_size=0; // diagnostic loop benchmark only
+    bool graphics_host_query_reset=false;
+#endif
     static void check(VkResult result,const char* operation){
         if(result!=VK_SUCCESS)throw std::runtime_error(std::string(operation)+" failed: VkResult="+std::to_string(result));
     }
@@ -105,6 +113,9 @@ class NativeVulkan {
             vkDeviceWaitIdle(device);
 #ifdef ANYPS3_RSX_VK
             if(graphics_timeline)vkDestroySemaphore(device,graphics_timeline,nullptr);
+            if(graphics_upload_timeline)vkDestroySemaphore(device,graphics_upload_timeline,nullptr);
+            if(graphics_loop_scratch)vkDestroyBuffer(device,graphics_loop_scratch,nullptr);
+            if(graphics_loop_scratch_memory)vkFreeMemory(device,graphics_loop_scratch_memory,nullptr);
             if(graphics_sampler)vkDestroySampler(device,graphics_sampler,nullptr);
             save_pipeline_cache(true);compile_stats_print(true);
             graphics_pipelines.clear();
@@ -115,6 +126,9 @@ class NativeVulkan {
             compute_pipelines.clear();
 #endif
             if(pool)vkDestroyCommandPool(device,pool,nullptr);
+#ifdef ANYPS3_RSX_VK
+            if(transfer_pool)vkDestroyCommandPool(device,transfer_pool,nullptr);
+#endif
             vkDestroyDevice(device,nullptr);
         }
         if(instance)vkDestroyInstance(instance,nullptr);
@@ -209,6 +223,15 @@ public:
 #endif
             VkDeviceCreateInfo di{};di.sType=VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;di.queueCreateInfoCount=1;di.pQueueCreateInfos=&q;
             #ifdef ANYPS3_RSX_VK
+            VkDeviceQueueCreateInfo queue_infos[2]{q,q};
+            {const char* v=std::getenv("ANYPS3_RSX_ASYNC_UPLOAD");if(v && std::strcmp(v,"0") && std::strcmp(v,"1"))throw std::runtime_error("invalid ANYPS3_RSX_ASYNC_UPLOAD");
+                if(!v || !std::strcmp(v,"1")){
+                    std::uint32_t n=0;vkGetPhysicalDeviceQueueFamilyProperties(physical,&n,nullptr);std::vector<VkQueueFamilyProperties> families(n);vkGetPhysicalDeviceQueueFamilyProperties(physical,&n,families.data());
+                    for(std::uint32_t i=0;i<n;++i)if(i!=family && families[i].queueCount && (families[i].queueFlags&VK_QUEUE_TRANSFER_BIT) &&
+                        !(families[i].queueFlags&~(VK_QUEUE_TRANSFER_BIT|VK_QUEUE_SPARSE_BINDING_BIT)) && families[i].timestampValidBits){transfer_family=i;break;}}}
+            if(transfer_family!=UINT32_MAX){queue_infos[1].queueFamilyIndex=transfer_family;di.queueCreateInfoCount=2;di.pQueueCreateInfos=queue_infos;}
+            #endif
+            #ifdef ANYPS3_RSX_VK
             VkPhysicalDeviceTimelineSemaphoreFeatures timeline{};timeline.sType=VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES;
             std::uint32_t extension_count=0;check(vkEnumerateDeviceExtensionProperties(physical,nullptr,&extension_count,nullptr),"device extension count");
             std::vector<VkExtensionProperties> extensions(extension_count);check(vkEnumerateDeviceExtensionProperties(physical,nullptr,&extension_count,extensions.data()),"device extensions");
@@ -225,7 +248,9 @@ public:
             VkPhysicalDeviceMultiviewFeatures multiview_features{};multiview_features.sType=VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MULTIVIEW_FEATURES;
             if(conditional_available)timeline.pNext=&conditional_features;
             multiview_features.pNext=timeline.pNext;timeline.pNext=&multiview_features;
+            VkPhysicalDeviceHostQueryResetFeatures host_reset{};host_reset.sType=VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_HOST_QUERY_RESET_FEATURES;host_reset.pNext=timeline.pNext;timeline.pNext=&host_reset;
             VkPhysicalDeviceFeatures2 features2{};features2.sType=VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;features2.pNext=&timeline;vkGetPhysicalDeviceFeatures2(physical,&features2);
+            graphics_host_query_reset=host_reset.hostQueryReset;
             bool multiview_available=graphics_properties.apiVersion>=VK_API_VERSION_1_2 && multiview_features.multiview && !layer_available;
             {const char* value=std::getenv("ANYPS3_RSX_MULTIVIEW");if(value && std::strcmp(value,"0") && std::strcmp(value,"1"))throw std::runtime_error("invalid ANYPS3_RSX_MULTIVIEW");if(!value || !std::strcmp(value,"0"))multiview_available=false;}
             multiview_features.multiviewGeometryShader=VK_FALSE;multiview_features.multiviewTessellationShader=VK_FALSE;multiview_features.multiview=multiview_available?VK_TRUE:VK_FALSE;
@@ -245,6 +270,11 @@ public:
             check(vkCreateDevice(physical,&di,nullptr,&device),"vkCreateDevice");
             vkGetDeviceQueue(device,family,0,&queue);
 #ifdef ANYPS3_RSX_VK
+            if(transfer_family!=UINT32_MAX){
+                vkGetDeviceQueue(device,transfer_family,0,&transfer_queue);
+                VkCommandPoolCreateInfo tpi{};tpi.sType=VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;tpi.queueFamilyIndex=transfer_family;tpi.flags=VK_COMMAND_POOL_CREATE_TRANSIENT_BIT|VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+                check(vkCreateCommandPool(device,&tpi,nullptr,&transfer_pool),"transfer command pool");
+            }
             if(conditional_available){
                 conditional_begin=reinterpret_cast<PFN_vkCmdBeginConditionalRenderingEXT>(vkGetDeviceProcAddr(device,"vkCmdBeginConditionalRenderingEXT"));
                 conditional_end=reinterpret_cast<PFN_vkCmdEndConditionalRenderingEXT>(vkGetDeviceProcAddr(device,"vkCmdEndConditionalRenderingEXT"));
@@ -254,6 +284,7 @@ public:
             VkSemaphoreTypeCreateInfo timeline_type{};timeline_type.sType=VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO;timeline_type.semaphoreType=VK_SEMAPHORE_TYPE_TIMELINE;
             VkSemaphoreCreateInfo timeline_info{};timeline_info.sType=VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;timeline_info.pNext=&timeline_type;
             check(vkCreateSemaphore(device,&timeline_info,nullptr,&graphics_timeline),"graphics timeline");
+            if(transfer_queue)check(vkCreateSemaphore(device,&timeline_info,nullptr,&graphics_upload_timeline),"graphics upload timeline");
 #endif
             VkCommandPoolCreateInfo pi{};pi.sType=VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
             pi.queueFamilyIndex=family;pi.flags=VK_COMMAND_POOL_CREATE_TRANSIENT_BIT|VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;

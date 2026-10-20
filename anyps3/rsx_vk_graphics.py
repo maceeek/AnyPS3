@@ -79,7 +79,9 @@ public:
     struct GraphicsBatch {
         NativeVulkan* owner;
         VkBuffer buffer=VK_NULL_HANDLE,data_buffer=VK_NULL_HANDLE;VkDeviceMemory memory=VK_NULL_HANDLE,data_memory=VK_NULL_HANDLE;void* map=nullptr;
-        VkCommandBuffer command=VK_NULL_HANDLE,upload_command=VK_NULL_HANDLE;VkFence fence=VK_NULL_HANDLE;VkDescriptorPool descriptors=VK_NULL_HANDLE;
+        VkCommandBuffer command=VK_NULL_HANDLE,upload_command=VK_NULL_HANDLE,transfer_command=VK_NULL_HANDLE;VkFence fence=VK_NULL_HANDLE;
+        // Async prelude (NativeVulkan::transfer_queue): staging->device copies on the DMA queue, timestamps in their own 2-slot pool.
+        VkQueryPool transfer_queries=VK_NULL_HANDLE;bool transfer_pending=false;std::uint64_t upload_wait=0;VkDescriptorPool descriptors=VK_NULL_HANDLE;
         // Further pools chained when one batch records more sets than `descriptors` holds.
         std::vector<VkDescriptorPool> overflow_descriptors;std::size_t overflow_used=0;
         struct DescriptorEntry{VkDescriptorSet set;std::uint64_t last_use;};
@@ -96,6 +98,9 @@ public:
         VkQueryPool occlusion=VK_NULL_HANDLE;unsigned visibility_count=0;std::vector<std::uint64_t> visibility;
         VkQueryPool queries=VK_NULL_HANDLE;unsigned query_count=0,timestamp_bits=0;float timestamp_period=0;
         std::vector<unsigned> phases;std::vector<const GraphicsPipeline*> phase_pipelines;
+        // Diagnostic (ANYPS3_RSX_VK_MARKS=1): BOTTOM_OF_PIPE timestamp chain; the time between two marks is attributed to the
+        // kind of the later mark (GraphicsMark). Serializes the pipeline at every mark: attribution, not a performance mode.
+        VkQueryPool marks=VK_NULL_HANDLE;unsigned mark_count=0;std::vector<unsigned> mark_kinds;
         bool coherent=false,recording=false,submitted=false,failed=false;
         std::uint64_t capacity=0,used=0;
         // Shader failures are consumed only after batch completion. Keep the
@@ -148,10 +153,13 @@ public:
             if(busy_queries)vkDestroyQueryPool(owner->device,busy_queries,nullptr);
             if(occlusion)vkDestroyQueryPool(owner->device,occlusion,nullptr);
             if(queries)vkDestroyQueryPool(owner->device,queries,nullptr);
+            if(marks)vkDestroyQueryPool(owner->device,marks,nullptr);
             if(descriptors)vkDestroyDescriptorPool(owner->device,descriptors,nullptr);
             for(auto pool:overflow_descriptors)vkDestroyDescriptorPool(owner->device,pool,nullptr);
             if(fence)vkDestroyFence(owner->device,fence,nullptr);
             if(upload_command)vkFreeCommandBuffers(owner->device,owner->pool,1,&upload_command);
+            if(transfer_command)vkFreeCommandBuffers(owner->device,owner->transfer_pool,1,&transfer_command);
+            if(transfer_queries)vkDestroyQueryPool(owner->device,transfer_queries,nullptr);
             if(command)vkFreeCommandBuffers(owner->device,owner->pool,1,&command);
             if(map)vkUnmapMemory(owner->device,memory);
             if(data_buffer)vkDestroyBuffer(owner->device,data_buffer,nullptr);
@@ -190,7 +198,10 @@ private:
     VkSemaphore graphics_timeline=VK_NULL_HANDLE;
     std::uint64_t graphics_serial=0;
 public:
-    std::uint64_t graphics_busy_ns=0,graphics_profile_frames=0,graphics_completed_batches=0;
+    std::uint64_t graphics_busy_ns=0,graphics_profile_frames=0,graphics_completed_batches=0,graphics_prelude_ns=0;
+    std::array<std::uint64_t,256> graphics_mark_ns{},graphics_mark_count{};
+    std::uint64_t graphics_loop_ns=0,graphics_loop_warm_ns=0,graphics_loop_batches=0;
+    static unsigned graphics_gpu_loop(){static const unsigned loop=[]{const char* v=std::getenv("ANYPS3_RSX_GPU_LOOP");return v?unsigned(std::strtoul(v,nullptr,10)):0u;}();return loop;}
 private:
     VkPhysicalDeviceFeatures graphics_features{};VkPhysicalDeviceSubgroupProperties graphics_subgroups{};
     VkPhysicalDeviceProperties graphics_properties{};
@@ -210,11 +221,21 @@ private:
         if(changed(16,2))vkCmdSetDepthBias(command,f[4],0,f[5]);
         if(changed(18,2))vkCmdSetDepthBounds(command,f[6],f[7]);
     }
+    enum GraphicsMark:unsigned {MarkStart,MarkDraw,MarkPassBegin,MarkPassEnd,MarkBarrier,MarkCopyBuffer,MarkCopyImage,MarkDispatch,MarkClear,MarkFill,MarkTail,MarkOther,MarkCount};
+    // Call sites that issue copies/dispatches/barriers tag themselves (GraphicsSite) so the marks attribute them per site.
+    enum GraphicsSiteId:unsigned {SiteNone,SiteTexUpload,SiteSurfaceCopy,SiteTransfer,SiteUnpack,SitePack,SiteAspect,SiteDecode,SiteRawBuffer,SiteDeviceUpload,SitePredicate,SitePresent,SiteClear,SiteDeviceCopies,SiteCount};
+    static unsigned& graphics_last_kind(){static thread_local unsigned kind=MarkOther;return kind;}
+    static unsigned& graphics_site_ref(){static thread_local unsigned site=SiteNone;return site;}
+    struct GraphicsSite{unsigned previous;explicit GraphicsSite(unsigned s):previous(graphics_site_ref()){graphics_site_ref()=s;}~GraphicsSite(){graphics_site_ref()=previous;}};
+    static void graphics_mark(GraphicsBatch& b,unsigned kind){
+        if(!b.marks || b.mark_count>=4096)return;
+        vkCmdWriteTimestamp(b.command,VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,b.marks,b.mark_count++);b.mark_kinds.push_back(graphics_site_ref()*16+kind);
+    }
     static void graphics_replay_planes(GraphicsBatch& b){
         for(unsigned plane=1;plane<b.plane_count;++plane){
             VkRenderPassBeginInfo pass{};pass.sType=VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;pass.renderPass=b.plane_pass;
             pass.framebuffer=b.plane_framebuffers[plane];pass.renderArea={{0,0},b.plane_extent};
-            vkCmdBeginRenderPass(b.command,&pass,VK_SUBPASS_CONTENTS_INLINE);++b.render_passes;::RsxPerfCounters::add(::RsxPerfCounters::render_passes);
+            vkCmdBeginRenderPass(b.command,&pass,VK_SUBPASS_CONTENTS_INLINE);graphics_mark(b,MarkPassBegin);++b.render_passes;::RsxPerfCounters::add(::RsxPerfCounters::render_passes);
             const std::array<unsigned,22>* previous=b.dynamic_valid?&b.dynamic_state:nullptr;
             for(const auto& d:b.plane_draws){
                 vkCmdBeginQuery(b.command,b.occlusion,d.query+plane,d.query_flags);
@@ -224,34 +245,36 @@ private:
                 graphics_emit_dynamic(b.command,d.dynamic,previous);previous=&d.dynamic;
                 if(d.indexed){vkCmdBindIndexBuffer(b.command,b.data_buffer,d.index_offset,VK_INDEX_TYPE_UINT32);vkCmdDrawIndexed(b.command,d.vertices,d.instances,d.first_vertex,0,0);}
                 else vkCmdDraw(b.command,d.vertices,d.instances,d.first_vertex,0);
-                vkCmdEndQuery(b.command,b.occlusion,d.query+plane);
+                vkCmdEndQuery(b.command,b.occlusion,d.query+plane);graphics_mark(b,MarkDraw);
             }
             b.dynamic_state=b.plane_draws.back().dynamic;b.dynamic_valid=true;
-            vkCmdEndRenderPass(b.command);::RsxPerfCounters::add(::RsxPerfCounters::pass_ends);
+            vkCmdEndRenderPass(b.command);graphics_mark(b,MarkPassEnd);::RsxPerfCounters::add(::RsxPerfCounters::pass_ends);
         }
         b.plane_draws.clear();b.plane_count=0;
     }
     static void graphics_end_pass(GraphicsBatch& b){
-        if(b.active_framebuffer){vkCmdEndRenderPass(b.command);b.active_framebuffer=VK_NULL_HANDLE;::RsxPerfCounters::add(::RsxPerfCounters::pass_ends);}
+        if(b.active_framebuffer){vkCmdEndRenderPass(b.command);graphics_mark(b,MarkPassEnd);b.active_framebuffer=VK_NULL_HANDLE;::RsxPerfCounters::add(::RsxPerfCounters::pass_ends);}
         if(!b.plane_draws.empty())graphics_replay_planes(b);
     }
     static void graphics_barrier(GraphicsBatch& b){
-        graphics_end_pass(b);
+        graphics_end_pass(b);graphics_mark(b,graphics_last_kind());graphics_last_kind()=MarkOther;
         VkMemoryBarrier m{};m.sType=VK_STRUCTURE_TYPE_MEMORY_BARRIER;
         m.srcAccessMask=VK_ACCESS_MEMORY_WRITE_BIT|VK_ACCESS_MEMORY_READ_BIT|VK_ACCESS_HOST_WRITE_BIT;
         m.dstAccessMask=VK_ACCESS_MEMORY_READ_BIT|VK_ACCESS_MEMORY_WRITE_BIT;
         vkCmdPipelineBarrier(b.command,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT|VK_PIPELINE_STAGE_HOST_BIT,
-            VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,0,1,&m,0,nullptr,0,nullptr);
+            VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,0,1,&m,0,nullptr,0,nullptr);graphics_mark(b,MarkBarrier);
     }
     void graphics_begin(GraphicsBatch& b){
         if(b.owner!=this || b.failed)throw std::runtime_error("RSX graphics batch owner/failure");
         if(b.recording)return;
         if(b.submitted || b.completion)throw std::runtime_error("RSX graphics begin before retirement/reset");
         if(!b.plane_draws.empty())throw std::runtime_error("RSX graphics deferred MSAA planes outlived their batch");
-        VkCommandBufferBeginInfo i{};i.sType=VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;i.flags=VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        VkCommandBufferBeginInfo i{};i.sType=VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;i.flags=graphics_gpu_loop()?0:VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
         check(vkBeginCommandBuffer(b.command,&i),"graphics begin");b.recording=true;++graphics_recordings;
         if(b.queries)vkCmdResetQueryPool(b.command,b.queries,0,4096);
         vkCmdResetQueryPool(b.command,b.occlusion,0,1024);
+        if(transfer_queue && b.busy_queries){vkCmdResetQueryPool(b.command,b.busy_queries,0,3);vkCmdWriteTimestamp(b.command,VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,b.busy_queries,0);}
+        if(b.marks){vkCmdResetQueryPool(b.command,b.marks,0,4096);b.mark_count=0;b.mark_kinds.clear();graphics_mark(b,MarkStart);}
     }
     void graphics_stamp(GraphicsBatch& b,unsigned phase,bool end=false){
         if(!b.queries)return;
@@ -383,6 +406,9 @@ private:
         graphics_pipeline_fast[fast_key]=p;return graphics_pipelines.emplace(std::move(key),std::move(p)).first->second;
     }
 public:
+    // True when batch preludes run on the dedicated DMA queue (graphics_upload_submissions counts those submissions).
+    bool graphics_async_upload()const{return transfer_queue!=VK_NULL_HANDLE;}
+    std::uint64_t graphics_upload_submissions()const{return graphics_upload_serial;}
     bool graphics_sample_interpolation()const{return graphics_features.sampleRateShading;}
     bool graphics_depth_bounds()const{return graphics_features.depthBounds;}
     bool graphics_precise_visibility()const{return graphics_features.occlusionQueryPrecise;}
@@ -434,6 +460,9 @@ public:
     std::unique_ptr<GraphicsBatch> graphics_batch(std::uint64_t bytes=64*1024*1024){
         auto b=std::make_unique<GraphicsBatch>(this);b->capacity=bytes;
         VkBufferCreateInfo bi{};bi.sType=VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;bi.size=bytes;bi.usage=VK_BUFFER_USAGE_STORAGE_BUFFER_BIT|VK_BUFFER_USAGE_INDEX_BUFFER_BIT|VK_BUFFER_USAGE_TRANSFER_SRC_BIT|VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+        // Both queue families touch these two buffers (prelude on the DMA queue, batch on the graphics queue); no ownership transfer needed.
+        const std::uint32_t sharing_families[2]={family,transfer_family};
+        if(transfer_queue){bi.sharingMode=VK_SHARING_MODE_CONCURRENT;bi.queueFamilyIndexCount=2;bi.pQueueFamilyIndices=sharing_families;}
         check(vkCreateBuffer(device,&bi,nullptr,&b->buffer),"graphics staging buffer");
         VkMemoryRequirements r{};vkGetBufferMemoryRequirements(device,b->buffer,&r);
         VkMemoryAllocateInfo ai{};ai.sType=VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;ai.allocationSize=r.size;ai.memoryTypeIndex=host_read_memory_type(r.memoryTypeBits);
@@ -446,6 +475,7 @@ public:
         VkCommandBufferAllocateInfo ci{};ci.sType=VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;ci.commandPool=pool;ci.level=VK_COMMAND_BUFFER_LEVEL_PRIMARY;ci.commandBufferCount=1;
         check(vkAllocateCommandBuffers(device,&ci,&b->command),"graphics command buffer");
         check(vkAllocateCommandBuffers(device,&ci,&b->upload_command),"graphics upload command buffer");
+        if(transfer_queue){ci.commandPool=transfer_pool;check(vkAllocateCommandBuffers(device,&ci,&b->transfer_command),"graphics transfer command buffer");ci.commandPool=pool;}
         VkFenceCreateInfo fi{};fi.sType=VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;check(vkCreateFence(device,&fi,nullptr,&b->fence),"graphics fence");
         b->descriptors=graphics_descriptor_pool();
         VkQueryPoolCreateInfo oi{};oi.sType=VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;oi.queryType=VK_QUERY_TYPE_OCCLUSION;oi.queryCount=1024;
@@ -454,8 +484,11 @@ public:
         b->timestamp_bits=queues[family].timestampValidBits;b->timestamp_period=graphics_properties.limits.timestampPeriod;
         if(b->timestamp_bits && std::getenv("ANYPS3_RSX_VK_PROFILE")){VkQueryPoolCreateInfo qi{};qi.sType=VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;qi.queryType=VK_QUERY_TYPE_TIMESTAMP;qi.queryCount=4096;
             check(vkCreateQueryPool(device,&qi,nullptr,&b->queries),"graphics timestamps");}
-        if(b->timestamp_bits && (std::getenv("ANYPS3_RSX_VK_PROFILE") || std::getenv("ANYPS3_PERF_REPORT"))){VkQueryPoolCreateInfo qi{};qi.sType=VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;qi.queryType=VK_QUERY_TYPE_TIMESTAMP;qi.queryCount=2;
-            check(vkCreateQueryPool(device,&qi,nullptr,&b->busy_queries),"graphics busy timestamps");}
+        if(b->timestamp_bits && (std::getenv("ANYPS3_RSX_VK_PROFILE") || std::getenv("ANYPS3_PERF_REPORT"))){VkQueryPoolCreateInfo qi{};qi.sType=VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;qi.queryType=VK_QUERY_TYPE_TIMESTAMP;qi.queryCount=3;
+            check(vkCreateQueryPool(device,&qi,nullptr,&b->busy_queries),"graphics busy timestamps");
+            if(transfer_queue && graphics_host_query_reset){qi.queryCount=2;check(vkCreateQueryPool(device,&qi,nullptr,&b->transfer_queries),"graphics transfer timestamps");vkResetQueryPool(device,b->transfer_queries,0,2);}}
+        if(b->timestamp_bits && std::getenv("ANYPS3_RSX_VK_MARKS")){VkQueryPoolCreateInfo qi{};qi.sType=VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;qi.queryType=VK_QUERY_TYPE_TIMESTAMP;qi.queryCount=4096;
+            check(vkCreateQueryPool(device,&qi,nullptr,&b->marks),"graphics mark timestamps");}
         return b;
     }
     std::uint64_t graphics_image_creations=0;
@@ -481,11 +514,13 @@ public:
     // position (not the batch prelude): later commands of this batch may
     // overwrite them on the device before the consumer runs.
     std::uint64_t graphics_device_upload(GraphicsBatch& b,const void* data,std::uint64_t bytes){
+        GraphicsSite site(SiteDeviceUpload);
         const auto at=graphics_upload(b,data,bytes);graphics_barrier(b);
         VkBufferCopy copy{at,at,bytes};vkCmdCopyBuffer(b.command,b.buffer,b.data_buffer,1,&copy);graphics_barrier(b);return at;
     }
     void graphics_device_copies(GraphicsBatch& b,const std::vector<VkBufferCopy>& regions){
         if(regions.empty())return;
+        GraphicsSite site(SiteDeviceCopies);
         graphics_begin(b);graphics_barrier(b);vkCmdCopyBuffer(b.command,b.data_buffer,b.data_buffer,unsigned(regions.size()),regions.data());graphics_barrier(b);
     }
     // Immutable slice filled in place by the caller (staging map + offset);
@@ -510,6 +545,7 @@ public:
         }
     }
     std::shared_ptr<GraphicsBuffer> graphics_buffer(GraphicsBatch& b,const void* data,std::uint64_t size){
+        GraphicsSite site(SiteRawBuffer);
         const auto bytes=(size+3)&~UINT64_C(3);
         if(!bytes || bytes>graphics_properties.limits.maxStorageBufferRange)throw std::runtime_error("RSX texture buffer storage limit");
         auto result=std::make_shared<GraphicsBuffer>(this,bytes);
@@ -523,6 +559,7 @@ public:
 ''' + READBACK_MEMBERS + UPLOAD_MEMBERS + DECODE_MEMBERS + r'''
     // Images stay GENERAL, allowing explicit cross-draw transfer barriers.
     std::uint64_t graphics_transfer(GraphicsBatch& b,const std::shared_ptr<GraphicsImage>& image,VkImageAspectFlags aspect,unsigned bpp,const void* data=nullptr){
+        GraphicsSite site(SiteTransfer);
         graphics_begin(b);const auto bytes=std::uint64_t(image->width)*image->height*image->layers*bpp;
         const auto at=data?graphics_upload(b,data,bytes):graphics_space(b,bytes);
         graphics_barrier(b);VkBufferImageCopy copy{};copy.bufferOffset=at;copy.imageSubresource={aspect,0,0,image->layers};copy.imageExtent={image->width,image->height,1};
@@ -532,6 +569,7 @@ public:
         graphics_stamp(b,0,true);b.pins.push_back(image);return at;
     }
     std::shared_ptr<GraphicsImage> graphics_aspect_image(GraphicsBatch& b,const std::shared_ptr<GraphicsImage>& source,VkImageAspectFlags aspect,const std::shared_ptr<GraphicsImage>& destination={},std::shared_ptr<GraphicsBuffer>* scratch=nullptr){
+        GraphicsSite site(SiteAspect);
         const bool depth=source->depth && source->format==VK_FORMAT_D24_UNORM_S8_UINT && (aspect==VK_IMAGE_ASPECT_DEPTH_BIT || aspect==VK_IMAGE_ASPECT_STENCIL_BIT);
         const bool color=!source->depth && aspect==VK_IMAGE_ASPECT_COLOR_BIT && (source->format==VK_FORMAT_R16G16B16A16_SFLOAT || source->format==VK_FORMAT_R32G32B32A32_SFLOAT || source->format==VK_FORMAT_R32_SFLOAT);
         if(!depth && !color)throw std::runtime_error("unsupported RSX typeless aspect copy");
@@ -561,6 +599,7 @@ public:
     }
     std::uint64_t graphics_full_clears=0;
     void graphics_clear_image(GraphicsBatch& b,const std::shared_ptr<GraphicsImage>& image,const VkClearColorValue& color,float depth,unsigned stencil,VkImageAspectFlags aspects){
+        GraphicsSite site(SiteClear);
         graphics_begin(b);graphics_barrier(b);
         const VkImageSubresourceRange range{aspects,0,1,0,image->layers};
         if(image->depth){const VkClearDepthStencilValue value{depth,stencil};vkCmdClearDepthStencilImage(b.command,image->image,VK_IMAGE_LAYOUT_GENERAL,&value,1,&range);}
@@ -569,6 +608,7 @@ public:
     }
     void graphics_copy(GraphicsBatch& b,const std::shared_ptr<GraphicsImage>& from,const std::shared_ptr<GraphicsImage>& to){
         if(from==to)return;
+        GraphicsSite site(SiteSurfaceCopy);
         const bool rgba_compatible=(from->format==VK_FORMAT_R8G8B8A8_SRGB && to->format==VK_FORMAT_R8G8B8A8_UNORM) ||
             (to->format==VK_FORMAT_R8G8B8A8_SRGB && from->format==VK_FORMAT_R8G8B8A8_UNORM);
         if((from->format!=to->format && !rgba_compatible) || from->width!=to->width || from->height!=to->height || from->layers!=to->layers || from->depth!=to->depth)
@@ -680,7 +720,7 @@ public:
             // are distinct images and may be recorded as runs (PlaneDraw).
             if(b.active_framebuffer!=framebuffer){
                 graphics_end_pass(b);
-                vkCmdBeginRenderPass(b.command,&pass,VK_SUBPASS_CONTENTS_INLINE);
+                vkCmdBeginRenderPass(b.command,&pass,VK_SUBPASS_CONTENTS_INLINE);graphics_mark(b,MarkPassBegin);
                 b.active_framebuffer=framebuffer;++b.render_passes;::RsxPerfCounters::add(::RsxPerfCounters::render_passes);
             }else ++b.render_pass_reuses;
             // One query per sample pass; sum at the ownership boundary.
@@ -714,7 +754,7 @@ public:
             const unsigned instances=layered&&!multiview?s.samples:1;
             if(data.size()>15 && data[15]==1){vkCmdBindIndexBuffer(b.command,b.data_buffer,at+std::uint64_t(data[13])*4,VK_INDEX_TYPE_UINT32);vkCmdDrawIndexed(b.command,vertices,instances,first_vertex,0,0);}
             else vkCmdDraw(b.command,vertices,instances,first_vertex,0);
-            vkCmdEndQuery(b.command,b.occlusion,query+layer);
+            vkCmdEndQuery(b.command,b.occlusion,query+layer);graphics_mark(b,MarkDraw);
             if(defer_planes){deferred.pipeline=p.pipeline;deferred.layout=p.layout;deferred.set=set;deferred.offset=dynamic_at;deferred.dynamic=dynamic;
                 deferred.vertices=vertices;deferred.instances=instances;deferred.first_vertex=first_vertex;deferred.query=query;
                 deferred.indexed=data.size()>15 && data[15]==1;deferred.index_offset=deferred.indexed?at+std::uint64_t(data[13])*4:0;
@@ -758,16 +798,38 @@ public:
                 vkCmdCopyBuffer(b.command,b.data_buffer,b.buffer,unsigned(copies.size()),copies.data());
             }
             if(!b.coherent){VkMappedMemoryRange r{};r.sType=VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;r.memory=b.memory;r.size=VK_WHOLE_SIZE;check(vkFlushMappedMemoryRanges(device,1,&r),"graphics flush");}
+            graphics_mark(b,graphics_last_kind());graphics_last_kind()=MarkOther;
             VkMemoryBarrier m{};m.sType=VK_STRUCTURE_TYPE_MEMORY_BARRIER;m.srcAccessMask=VK_ACCESS_MEMORY_WRITE_BIT;m.dstAccessMask=VK_ACCESS_HOST_READ_BIT;
-            vkCmdPipelineBarrier(b.command,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,VK_PIPELINE_STAGE_HOST_BIT,0,1,&m,0,nullptr,0,nullptr);
+            vkCmdPipelineBarrier(b.command,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,VK_PIPELINE_STAGE_HOST_BIT,0,1,&m,0,nullptr,0,nullptr);graphics_mark(b,MarkTail);
             if(b.busy_queries)vkCmdWriteTimestamp(b.command,VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,b.busy_queries,1);
             check(vkEndCommandBuffer(b.command),"graphics end");b.recording=false;
             // Recording is complete, so every immutable slice is known. Upload
             // them once before all consumers instead of breaking every draw's
             // pass. Distinct allocations never overlap, even across versions.
-            VkCommandBufferBeginInfo begin{};begin.sType=VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;begin.flags=VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+            VkCommandBufferBeginInfo begin{};begin.sType=VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;begin.flags=graphics_gpu_loop()?0:VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+            VkCommandBuffer commands[2]{};unsigned command_count=0;
+            if(transfer_queue){
+                // The prelude runs on the DMA queue while the graphics queue still executes the previous batch. The batch waits on
+                // an upload timeline value; the semaphore wait is the execution and memory dependency the barrier used to provide.
+                // Both buffers are concurrent-shared, every copy reads this batch's staging and writes this batch's device buffer
+                // (reused only after its previous use retired).
+                if(!b.uploads.empty()){
+                    check(vkBeginCommandBuffer(b.transfer_command,&begin),"graphics transfer begin");
+                    if(b.transfer_queries)vkCmdWriteTimestamp(b.transfer_command,VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,b.transfer_queries,0);
+                    vkCmdCopyBuffer(b.transfer_command,b.buffer,b.data_buffer,unsigned(b.uploads.size()),b.uploads.data());++b.upload_commands;
+                    if(b.transfer_queries)vkCmdWriteTimestamp(b.transfer_command,VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,b.transfer_queries,1);
+                    check(vkEndCommandBuffer(b.transfer_command),"graphics transfer end");
+                    if(graphics_upload_serial==UINT64_MAX)throw std::runtime_error("RSX graphics upload timeline exhausted");
+                    const std::uint64_t upload_value=graphics_upload_serial+1;
+                    VkTimelineSemaphoreSubmitInfo upload_timeline{};upload_timeline.sType=VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;upload_timeline.signalSemaphoreValueCount=1;upload_timeline.pSignalSemaphoreValues=&upload_value;
+                    VkSubmitInfo ui{};ui.sType=VK_STRUCTURE_TYPE_SUBMIT_INFO;ui.pNext=&upload_timeline;ui.commandBufferCount=1;ui.pCommandBuffers=&b.transfer_command;ui.signalSemaphoreCount=1;ui.pSignalSemaphores=&graphics_upload_timeline;
+                    check(vkQueueSubmit(transfer_queue,1,&ui,VK_NULL_HANDLE),"graphics upload submit");
+                    graphics_upload_serial=upload_value;b.upload_wait=upload_value;b.transfer_pending=b.transfer_queries!=VK_NULL_HANDLE;
+                }
+                commands[command_count++]=b.command;
+            }else{
             check(vkBeginCommandBuffer(b.upload_command,&begin),"graphics uploads begin");
-            if(b.busy_queries){vkCmdResetQueryPool(b.upload_command,b.busy_queries,0,2);vkCmdWriteTimestamp(b.upload_command,VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,b.busy_queries,0);}
+            if(b.busy_queries){vkCmdResetQueryPool(b.upload_command,b.busy_queries,0,3);vkCmdWriteTimestamp(b.upload_command,VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,b.busy_queries,0);}
             if(!b.uploads.empty()){
                 vkCmdCopyBuffer(b.upload_command,b.buffer,b.data_buffer,unsigned(b.uploads.size()),b.uploads.data());++b.upload_commands;
                 VkBufferMemoryBarrier ready{};ready.sType=VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
@@ -775,11 +837,57 @@ public:
                 ready.srcQueueFamilyIndex=ready.dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED;ready.buffer=b.data_buffer;ready.offset=0;ready.size=b.used;
                 vkCmdPipelineBarrier(b.upload_command,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,0,0,nullptr,1,&ready,0,nullptr);
             }
+            if(b.busy_queries)vkCmdWriteTimestamp(b.upload_command,VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,b.busy_queries,2);
             check(vkEndCommandBuffer(b.upload_command),"graphics uploads end");
+            commands[command_count++]=b.upload_command;commands[command_count++]=b.command;
+            }
             if(graphics_serial==UINT64_MAX)throw std::runtime_error("RSX graphics timeline exhausted");
             const std::uint64_t value=graphics_serial+1,values[]={value,0};const VkSemaphore signals[]={graphics_timeline,b.signal};
+            const std::uint64_t wait_values[]={b.upload_wait};const VkSemaphore waits[]={graphics_upload_timeline};const VkPipelineStageFlags wait_stages[]={VK_PIPELINE_STAGE_ALL_COMMANDS_BIT};
+            const bool wait_upload=transfer_queue && !b.uploads.empty();
             VkTimelineSemaphoreSubmitInfo timeline{};timeline.sType=VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;timeline.signalSemaphoreValueCount=b.signal?2:1;timeline.pSignalSemaphoreValues=values;
-            VkSubmitInfo si{};si.sType=VK_STRUCTURE_TYPE_SUBMIT_INFO;si.pNext=&timeline;const VkCommandBuffer commands[]={b.upload_command,b.command};si.commandBufferCount=2;si.pCommandBuffers=commands;si.signalSemaphoreCount=timeline.signalSemaphoreValueCount;si.pSignalSemaphores=signals;
+            if(wait_upload){timeline.waitSemaphoreValueCount=1;timeline.pWaitSemaphoreValues=wait_values;}
+            VkSubmitInfo si{};si.sType=VK_STRUCTURE_TYPE_SUBMIT_INFO;si.pNext=&timeline;si.commandBufferCount=command_count;si.pCommandBuffers=commands;si.signalSemaphoreCount=timeline.signalSemaphoreValueCount;si.pSignalSemaphores=signals;
+            if(wait_upload){si.waitSemaphoreCount=1;si.pWaitSemaphores=waits;si.pWaitDstStageMask=wait_stages;}
+            if(const unsigned loop=graphics_gpu_loop()){
+                // DIAGNOSTIC ONLY (ANYPS3_RSX_GPU_LOOP=N, replay benchmark): run this batch N extra times back to back so the GPU
+                // is saturated (driver boosts clocks); the second half is timed on the host. Guest-visible results of such a
+                // run are meaningless (blending and feedback accumulate), it never belongs in a game run.
+                VkSubmitInfo li{};li.sType=VK_STRUCTURE_TYPE_SUBMIT_INFO;li.commandBufferCount=command_count;li.pCommandBuffers=commands;
+                const unsigned warm=loop/2,timed=loop-warm;
+                // With an async prelude each iteration also issues a same-sized prelude copy into a scratch buffer on the DMA queue
+                // (the steady state of consecutive batches: batch k+1's upload overlaps batch k's graphics work).
+                const bool overlap=transfer_queue && !b.uploads.empty();VkCommandBuffer loop_copy=VK_NULL_HANDLE;
+                if(overlap){
+                    if(graphics_loop_scratch_size<b.capacity){
+                        if(graphics_loop_scratch){vkDeviceWaitIdle(device);vkDestroyBuffer(device,graphics_loop_scratch,nullptr);vkFreeMemory(device,graphics_loop_scratch_memory,nullptr);}
+                        VkBufferCreateInfo sbi{};sbi.sType=VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;sbi.size=b.capacity;sbi.usage=VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+                        const std::uint32_t fam[2]={family,transfer_family};sbi.sharingMode=VK_SHARING_MODE_CONCURRENT;sbi.queueFamilyIndexCount=2;sbi.pQueueFamilyIndices=fam;
+                        check(vkCreateBuffer(device,&sbi,nullptr,&graphics_loop_scratch),"loop scratch");
+                        VkMemoryRequirements r{};vkGetBufferMemoryRequirements(device,graphics_loop_scratch,&r);VkMemoryAllocateInfo mi{};mi.sType=VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;mi.allocationSize=r.size;mi.memoryTypeIndex=memory_type(r.memoryTypeBits,VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+                        check(vkAllocateMemory(device,&mi,nullptr,&graphics_loop_scratch_memory),"loop scratch memory");check(vkBindBufferMemory(device,graphics_loop_scratch,graphics_loop_scratch_memory,0),"loop scratch bind");graphics_loop_scratch_size=b.capacity;
+                    }
+                    VkCommandBufferAllocateInfo ai{};ai.sType=VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;ai.commandPool=transfer_pool;ai.level=VK_COMMAND_BUFFER_LEVEL_PRIMARY;ai.commandBufferCount=1;
+                    check(vkAllocateCommandBuffers(device,&ai,&loop_copy),"loop copy command");VkCommandBufferBeginInfo lb{};lb.sType=VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+                    check(vkBeginCommandBuffer(loop_copy,&lb),"loop copy begin");vkCmdCopyBuffer(loop_copy,b.buffer,graphics_loop_scratch,unsigned(b.uploads.size()),b.uploads.data());check(vkEndCommandBuffer(loop_copy),"loop copy end");
+                }
+                auto run=[&](unsigned n){for(unsigned k=0;k<n;++k){
+                    if(overlap){
+                        const std::uint64_t u=++graphics_upload_serial;
+                        VkTimelineSemaphoreSubmitInfo ut{};ut.sType=VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;ut.signalSemaphoreValueCount=1;ut.pSignalSemaphoreValues=&u;
+                        VkSubmitInfo ui{};ui.sType=VK_STRUCTURE_TYPE_SUBMIT_INFO;ui.pNext=&ut;ui.commandBufferCount=1;ui.pCommandBuffers=&loop_copy;ui.signalSemaphoreCount=1;ui.pSignalSemaphores=&graphics_upload_timeline;
+                        check(vkQueueSubmit(transfer_queue,1,&ui,VK_NULL_HANDLE),"graphics loop upload submit");
+                        VkTimelineSemaphoreSubmitInfo wt{};wt.sType=VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;wt.waitSemaphoreValueCount=1;wt.pWaitSemaphoreValues=&u;
+                        VkSubmitInfo gi=li;gi.pNext=&wt;gi.waitSemaphoreCount=1;gi.pWaitSemaphores=&graphics_upload_timeline;const VkPipelineStageFlags stage=VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;gi.pWaitDstStageMask=&stage;
+                        check(vkQueueSubmit(queue,1,&gi,VK_NULL_HANDLE),"graphics loop submit");
+                    }else check(vkQueueSubmit(queue,1,&li,VK_NULL_HANDLE),"graphics loop submit");}
+                    check(vkQueueWaitIdle(queue),"graphics loop idle");if(overlap)check(vkQueueWaitIdle(transfer_queue),"graphics loop transfer idle");};
+                const auto t0=std::chrono::steady_clock::now();run(warm);const auto t1=std::chrono::steady_clock::now();run(timed);const auto t2=std::chrono::steady_clock::now();
+                graphics_loop_warm_ns+=std::chrono::duration_cast<std::chrono::nanoseconds>(t1-t0).count()/std::max(1u,warm);
+                graphics_loop_ns+=std::chrono::duration_cast<std::chrono::nanoseconds>(t2-t1).count()/timed;++graphics_loop_batches;
+                if(loop_copy)vkFreeCommandBuffers(device,transfer_pool,1,&loop_copy);
+                std::fprintf(stderr,"PERF GPU_LOOP batches=%llu steady_ns=%llu warm_ns=%llu\n",(unsigned long long)graphics_loop_batches,(unsigned long long)graphics_loop_ns,(unsigned long long)graphics_loop_warm_ns);
+            }
             check(vkQueueSubmit(queue,1,&si,b.fence),"graphics submit");::RsxPerfCounters::add(::RsxPerfCounters::submits);graphics_serial=value;b.completion=value;b.submitted=true;++b.submissions;return value;
         }catch(...){b.failed=true;throw;}
     }
@@ -806,10 +914,39 @@ public:
                 for(unsigned i=0;i<b.phases.size();++i){const double ms=double((values[2*i+1]-values[2*i])&mask)*b.timestamp_period/1e6;
                     if(b.phases[i]==1 && b.phase_pipelines[i])draw_profile_add(*b.phase_pipelines[i],ms);
                     if(b.phases[i]==0)b.upload_ms+=ms;else if(b.phases[i]==1)b.draw_ms+=ms;else b.download_ms+=ms;}}
-            if(b.busy_queries){std::uint64_t ticks[2]{};check(vkGetQueryPoolResults(device,b.busy_queries,0,2,sizeof(ticks),ticks,8,VK_QUERY_RESULT_64_BIT),"graphics busy results");
-                const auto mask=b.timestamp_bits>=64?UINT64_MAX:((UINT64_C(1)<<b.timestamp_bits)-1);
-                graphics_busy_ns+=std::uint64_t(double((ticks[1]-ticks[0])&mask)*b.timestamp_period);graphics_profile_frames+=b.frames;++graphics_completed_batches;
-                if(b.frames)std::fprintf(stderr,"PERF GPU busy_ns=%llu frames=%llu batches=%llu timeline=%llu\n",(unsigned long long)graphics_busy_ns,(unsigned long long)graphics_profile_frames,(unsigned long long)graphics_completed_batches,(unsigned long long)b.completion);}
+            if(b.busy_queries){std::uint64_t ticks[3]{};check(vkGetQueryPoolResults(device,b.busy_queries,0,transfer_queue?2:3,sizeof(ticks),ticks,8,VK_QUERY_RESULT_64_BIT),"graphics busy results");
+                // Non-async: ticks[2]-ticks[0] is the in-queue prelude. Async: busy_ns is the graphics-queue time of the batch and
+                // the DMA queue's prelude is measured by its own two timestamps (prelude_ns).
+                const auto busy_mask=b.timestamp_bits>=64?UINT64_MAX:((UINT64_C(1)<<b.timestamp_bits)-1);
+                double prelude_batch_ns=transfer_queue?0.0:double((ticks[2]-ticks[0])&busy_mask)*b.timestamp_period;
+                if(transfer_queue){ticks[2]=ticks[0];
+                    if(b.transfer_pending){std::uint64_t t[2]{};check(vkGetQueryPoolResults(device,b.transfer_queries,0,2,sizeof(t),t,8,VK_QUERY_RESULT_64_BIT),"graphics transfer results");
+                        prelude_batch_ns=double((t[1]-t[0])&busy_mask)*b.timestamp_period;vkResetQueryPool(device,b.transfer_queries,0,2);b.transfer_pending=false;}}
+                graphics_busy_ns+=std::uint64_t(double((ticks[1]-ticks[0])&busy_mask)*b.timestamp_period);graphics_profile_frames+=b.frames;++graphics_completed_batches;
+                graphics_prelude_ns+=std::uint64_t(prelude_batch_ns);
+                if(b.marks && b.mark_count>1){std::vector<std::uint64_t> stamps(b.mark_count);
+                    check(vkGetQueryPoolResults(device,b.marks,0,b.mark_count,stamps.size()*8,stamps.data(),8,VK_QUERY_RESULT_64_BIT),"graphics mark results");
+                    if(std::getenv("ANYPS3_RSX_VK_MARKS_TRACE") && graphics_completed_batches>=300 && graphics_completed_batches<330){
+                        static const char* const names[]={"start","draw","pass_begin","pass_end","barrier","copy_buffer","copy_image","dispatch","clear","fill","tail","other"};
+                        static const char* const sites[]={"-","tex_upload","surface_copy","transfer","unpack","pack","aspect","decode","raw_buffer","device_upload","predicate","present","clear","device_copies"};
+                        std::fprintf(stderr,"TRACE batch=%llu marks=%u prelude_ns=%llu busy_ns=%llu\n",(unsigned long long)graphics_completed_batches,b.mark_count,(unsigned long long)prelude_batch_ns,(unsigned long long)(double((ticks[1]-ticks[0])&busy_mask)*b.timestamp_period));
+                        unsigned run=0;unsigned long long runns=0;unsigned last=UINT_MAX;
+                        for(unsigned i=1;i<=b.mark_count;++i){
+                            const bool end=i==b.mark_count;const auto kind=end?UINT_MAX:b.mark_kinds[i];const unsigned long long ns=end?0:(unsigned long long)(double((stamps[i]-stamps[i-1])&busy_mask)*b.timestamp_period);
+                            if(!end && kind==last){++run;runns+=ns;continue;}
+                            if(last!=UINT_MAX)std::fprintf(stderr,"TRACE   %s:%s x%u %.1f us\n",sites[std::min<unsigned>(last/16,SiteCount-1)],names[std::min<unsigned>(last%16,MarkOther)],run,runns/1000.0);
+                            last=kind;run=1;runns=ns;
+                        }
+                    }
+                    for(unsigned i=1;i<b.mark_count;++i){const auto kind=b.mark_kinds[i];graphics_mark_ns[kind]+=std::uint64_t(double((stamps[i]-stamps[i-1])&busy_mask)*b.timestamp_period);++graphics_mark_count[kind];}
+                    graphics_mark_ns[MarkStart]+=std::uint64_t(double((stamps[0]-ticks[2])&busy_mask)*b.timestamp_period);++graphics_mark_count[MarkStart];}
+                if(b.frames){std::fprintf(stderr,"PERF GPU busy_ns=%llu frames=%llu batches=%llu timeline=%llu prelude_ns=%llu\n",(unsigned long long)graphics_busy_ns,(unsigned long long)graphics_profile_frames,(unsigned long long)graphics_completed_batches,(unsigned long long)b.completion,(unsigned long long)graphics_prelude_ns);
+                    if(b.marks){static const char* const names[]={"start","draw","pass_begin","pass_end","barrier","copy_buffer","copy_image","dispatch","clear","fill","tail","other"};
+                        static const char* const sites[]={"-","tex_upload","surface_copy","transfer","unpack","pack","aspect","decode","raw_buffer","device_upload","predicate","present","clear","device_copies"};
+                        std::fprintf(stderr,"PERF GPU_MARKS frames=%llu",(unsigned long long)graphics_profile_frames);
+                        for(unsigned k=0;k<graphics_mark_ns.size();++k){if(!graphics_mark_count[k])continue;
+                            std::fprintf(stderr," %s:%s=%llu/%llu",sites[std::min<unsigned>(k/16,SiteCount-1)],names[std::min<unsigned>(k%16,MarkOther)],(unsigned long long)graphics_mark_ns[k],(unsigned long long)graphics_mark_count[k]);}
+                        std::fputc('\n',stderr);}}}
             b.visibility.resize(b.visibility_count);
             if(b.visibility_count)check(vkGetQueryPoolResults(device,b.occlusion,0,b.visibility_count,b.visibility.size()*8,b.visibility.data(),8,VK_QUERY_RESULT_64_BIT),"graphics visibility results");
             return true;
@@ -848,7 +985,7 @@ public:
         if(b.recording || b.submitted || b.failed)throw std::runtime_error("RSX graphics reset pending/failed batch");
         b.framebuffer_pins.clear();b.pipeline_pins.clear();b.pins.clear();b.buffer_pins.clear();b.compute_pins.clear();
         check(vkResetFences(device,1,&b.fence),"graphics reset fence");check(vkResetCommandBuffer(b.command,0),"graphics reset commands");
-        check(vkResetCommandBuffer(b.upload_command,0),"graphics reset uploads");
+        check(vkResetCommandBuffer(b.upload_command,0),"graphics reset uploads");if(b.transfer_command)check(vkResetCommandBuffer(b.transfer_command,0),"graphics reset transfer");b.upload_wait=0;
         check(vkResetDescriptorPool(device,b.descriptors,0),"graphics reset descriptors");
         for(std::size_t i=0;i<b.overflow_used;++i){check(vkResetDescriptorPool(device,b.overflow_descriptors[i],0),"graphics reset descriptors");}
         b.overflow_used=0;b.used=0;b.status_offsets.clear();b.uploads.clear();b.active_framebuffer=VK_NULL_HANDLE;b.completion=0;b.frames=0;b.descriptor_cache.clear();b.signal=VK_NULL_HANDLE;b.visibility_count=0;b.visibility.clear();b.query_count=0;b.phases.clear();b.phase_pipelines.clear();
