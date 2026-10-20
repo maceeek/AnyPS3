@@ -1,7 +1,7 @@
 """Timer slack: Linux gives a thread 50 us of timer slack, so a timed host wait ends 30-50 us late.
 
-The generated program lowers the slack of its first thread (and so of every thread it creates later) to 1 ns;
-ANYPS3_TIMER_SLACK_NS selects another value and 0 keeps the kernel default. Expected values are the kernel's
+The generated program lowers the slack of its first thread (and so of every thread it creates later) only on request:
+ANYPS3_TIMER_SLACK_NS=N selects N ns; unset or 0 keeps the kernel default (opt-in because the level measured worse with 1 ns). Expected values are the kernel's
 literal numbers (default 50000 ns, PR_GET_TIMERSLACK), not derived from the implementation.
 """
 from pathlib import Path
@@ -56,12 +56,15 @@ class TimerSlack(unittest.TestCase):
             env['ANYPS3_TIMER_SLACK_NS'] = value
         return subprocess.run([self.probe], capture_output=True, text=True, timeout=60, env=env)
 
-    def test_default_is_one_nanosecond_and_inherited(self):
+    def test_default_keeps_the_kernel_slack(self):
         run = self.run_probe()
         self.assertEqual(run.returncode, 0, run.stderr)
-        before, after, worker = map(int, run.stdout.split())
-        self.assertEqual(before, 50000)  # kernel default of a fresh process
-        self.assertEqual((after, worker), (1, 1))
+        self.assertEqual(list(map(int, run.stdout.split())), [50000, 50000, 50000])  # kernel default of a fresh process
+
+    def test_one_nanosecond_is_inherited_by_later_threads(self):
+        run = self.run_probe('1')
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual(list(map(int, run.stdout.split())), [50000, 1, 1])
 
     def test_explicit_value(self):
         run = self.run_probe('777')

@@ -34,13 +34,15 @@ from .par_worker import TYPES as WORKER_TYPES, CPP as WORKER_CPP, RSX_GAME_CPP, 
 from .execution import TYPES as EXECUTION_TYPES, STATE_CPP as EXECUTION_STATE_CPP, CPP as EXECUTION_CPP, adapt_engines, instrument_gpu_waits
 
 ATEXIT_RETURN = 0xfffe0010  # must match threads.py ATEXIT_RETURN
-# Linux gives every thread a 50 us timer slack, so a timed host wait (guest usleep(30), SPU lane park timeouts,
-# scheduler idle sleeps) ends 30-50 us late (measured: sleep_for(30 us) = 80 us). Threads inherit the creator's slack, so
-# set it once, before any worker thread exists. ANYPS3_TIMER_SLACK_NS=N chooses another value; 0 keeps the kernel default.
+# Linux gives every thread a 50 us timer slack, so a timed host wait (guest usleep(30), SPU lane park timeouts, scheduler idle
+# sleeps) ends 30-50 us late (scratch test: sleep_for(30 us) = 80 us). Threads inherit the creator's slack, so an opt-in value is
+# set once, before any worker thread exists. ANYPS3_TIMER_SLACK_NS=N chooses N; unset or 0 keeps the kernel default. NOT the
+# default: in the level (builds 520b/520c vs 470a/520a) slack 1 ns raised the main thread busy time by 1.3 ms/frame (shorter
+# sleeps = more wake-ups and cold restarts) and did not shorten the frame.
 TIMER_SLACK_CPP = r'''
 [[maybe_unused]] static void anyps3_timer_slack() {
 #if defined(__linux__) && defined(PR_SET_TIMERSLACK)
-    unsigned long ns = 1;
+    unsigned long ns = 0;
     if (const char* v = std::getenv("ANYPS3_TIMER_SLACK_NS")) {
         char* end = nullptr; ns = std::strtoul(v, &end, 10);
         if (*v < '0' || *v > '9' || *end) { std::fprintf(stderr, "invalid ANYPS3_TIMER_SLACK_NS: expected a decimal nanosecond count\n"); std::exit(2); }
