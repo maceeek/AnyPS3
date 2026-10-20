@@ -1728,6 +1728,20 @@ template<class Vertex> static bool prepared(Session& session,const std::vector<s
     const float vx=bits_float(r(0xa20)),vy=bits_float(r(0xa24)),vz=bits_float(r(0xa28));
     const bool fetch_candidate=!alias && !point && !lines && r.get(0x368,0x1d01)!=0x1d00 && vk.graphics_vertex_fetch();
     auto hw_vertex=session.vertex_program.source_current(state.rsx,fetch_candidate?(state.rsx.draw.immediate_vertices.empty()?1:2):0);
+    {   // ANYPS3_RSX_VP_TRACE=1: vertex programs that cannot run on the GPU (distinct start/length, first 40): scalar/vector opcodes per instruction.
+        static const bool trace=std::getenv("ANYPS3_RSX_VP_TRACE")!=nullptr;static std::set<std::string> seen;
+        if(trace && !hw_vertex && seen.size()<40){
+            const auto& gpu=std::as_const(state.rsx);const unsigned first=r.get(0x1ea0,0);std::ostringstream text;text<<"start="<<first<<" vertices="<<(device?device->vertices:unsigned(indices.size()*3))<<" ops:";
+            for(unsigned pc=first;pc<544;++pc){
+                bool written=true;for(unsigned c=0;c<4;++c)written&=gpu.transform_program_written[pc*4+c];if(!written){text<<" [unwritten@"<<pc<<"]";break;}
+                const auto* d=gpu.transform_program.data()+pc*4;const unsigned vec=(d[1]>>22)&31,sca=(d[1]>>27)&31;
+                text<<" "<<pc<<":v"<<vec<<"/s"<<sca;
+                if(sca==8||sca==9||sca==10||sca==12||sca==17||sca==18)text<<"->"<<(((d[0]>>23)&1)<<9|((d[2]&63)<<3)|(d[3]>>29))<<(sca==17||sca==18?" bool":"");
+                if(d[3]&1){text<<" END";break;}
+            }
+            if(seen.insert(text.str()).second)std::fprintf(stderr,"VP_TRACE %s\n",text.str().c_str());
+        }
+    }
     if(attempt.stats.enabled){
         if(alias)attempt.path("geometry_attachment_alias");
         else if(point)attempt.path("geometry_points");
