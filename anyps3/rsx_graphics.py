@@ -1217,11 +1217,24 @@ struct Session {
     }
     static std::shared_ptr<Surface::ReadbackPlan> clipped_plan(const Surface& surface,const std::vector<GuestMemory::HostGuard::Span>& spans){
         auto plan=std::make_shared<Surface::ReadbackPlan>();
-        for(const auto& run:surface.readback->runs)for(const auto& span:spans){
+        const auto& source=*surface.readback;
+        // Exact output size first (a partial plan of a large tiled surface used to grow word by word), then the same
+        // run-major / span-minor order as before; an aligned start copies whole words, otherwise each word keeps the
+        // constant sub-word remainder of its logical byte offset.
+        std::size_t total_words=0,total_runs=0;
+        for(const auto& run:source.runs)for(const auto& span:spans){
+            const auto base=reinterpret_cast<std::uintptr_t>(run.data),first=std::max(base,span.begin),last=std::min(base+run.size,span.end);
+            if(first>=last)continue;
+            total_words+=(last-first+3)/4;++total_runs;
+        }
+        plan->words.reserve(total_words);plan->runs.reserve(total_runs);
+        for(const auto& run:source.runs)for(const auto& span:spans){
             const auto base=reinterpret_cast<std::uintptr_t>(run.data),first=std::max(base,span.begin),last=std::min(base+run.size,span.end);
             if(first>=last)continue;
             const unsigned delta=first-base,offset=plan->words.size()*4,count=last-first;
-            for(unsigned byte=0;byte<count;byte+=4){const auto at=run.offset+delta+byte;plan->words.push_back(surface.readback->words[at/4]+at%4);}
+            const auto at=std::uint64_t(run.offset)+delta;const auto* words=source.words.data()+at/4;const unsigned n=(count+3)/4,sub=at%4;
+            if(!sub)plan->words.insert(plan->words.end(),words,words+n);
+            else for(unsigned i=0;i<n;++i)plan->words.push_back(words[i]+sub);
             plan->runs.push_back({reinterpret_cast<std::uint8_t*>(first),count,offset,unsigned(run.guest_offset+delta)});
         }
         return plan;

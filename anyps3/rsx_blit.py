@@ -321,6 +321,16 @@ static void scaled(PpuState& s,unsigned point){
 #endif
     {   // Diagnostic (ANYPS3_RSX_BLIT_TRACE=1): the first 300 scaled transfers, to size the per-pixel Range cost.
         static const bool trace=[]{const char* v=std::getenv("ANYPS3_RSX_BLIT_TRACE");return v && std::string(v)=="1";}();
+        // ANYPS3_RSX_BLIT_TRACE=2: running totals every 120 transfers (steady-state mix: calls, pixels, row-wise share, tiled share).
+        static const bool stats=[]{const char* v=std::getenv("ANYPS3_RSX_BLIT_TRACE");return v && std::string(v)=="2";}();
+        static std::uint64_t calls=0,pixels=0,tiled_calls=0,tiled_pixels=0,filtered=0;
+        if(stats){
+            bool tiled=false;
+            for(const auto& tile:gpu.tiles)if(tile.bound && (tile.location==location(src.context) || tile.location==location(dst.context)))tiled=true;
+            ++calls;pixels+=std::uint64_t(x1-x0)*(y1-y0);filtered+=filter!=0;if(tiled){++tiled_calls;tiled_pixels+=std::uint64_t(x1-x0)*(y1-y0);}
+            if(calls%120==0)std::fprintf(stderr,"BLIT_STATS calls=%llu pixels=%llu tile_location_calls=%llu tile_location_pixels=%llu filtered=%llu rows_path=%llu\n",
+                (unsigned long long)calls,(unsigned long long)pixels,(unsigned long long)tiled_calls,(unsigned long long)tiled_pixels,(unsigned long long)filtered,(unsigned long long)rows_executed);
+        }
         static unsigned traced=0;
         if(trace && traced++<300){
             bool src_tile=false,dst_tile=false;
