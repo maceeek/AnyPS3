@@ -39,17 +39,17 @@ def program(prefix, channel, base):
     return a.finish()
 
 
-BODY = r'''
+COMMON = r'''
  struct State {std::array<SpuRegister,128> gpr;std::uint32_t pc,srr0;bool srr0_valid,interrupts_enabled;std::uint64_t steps;std::array<std::uint32_t,5> dma;std::uint32_t tag_mask;};
  auto snapshot=[&](){return State{t.gpr,t.pc,t.srr0,t.srr0_valid,t.interrupts_enabled,t.steps,t.dma,t.tag_mask};};
  auto reset=[&](unsigned entry,bool interrupts,bool pending){
-  std::fill(ls,ls+0x40000,0);std::copy(image,image+image_size,ls+0x100);
+  std::fill(ls,ls+0x40000,0);std::copy(image,image+image_size,ls+image_base);
   t.gpr={};t.pc=entry;t.steps=0;t.reloc_delta=0;t.relocated_entries=0;t.interpreted_instructions=0;t.stopped=false;t.dma={};t.tag_mask=0;
   t.srr0=0;t.srr0_valid=false;t.srr0_pending=false;t.irq_next=0;t.event_status=t.event_mask=0;t.event_ready=false;t.interrupts_enabled=interrupts;
   if(pending){t.event_mask=t.event_status=0x10;t.event_ready=true;}
  };
  // oracle: the exact interpreter executes `count` instructions with interrupts disabled, then one sample with the event pending
- auto oracle=[&](unsigned entry,unsigned count){
+ [[maybe_unused]] auto oracle=[&](unsigned entry,unsigned count){
   reset(entry,false,false);
   spu_step(s,t,ls,count,UINT64_MAX,true);assert(t.steps==count);
   t.event_mask=t.event_status=0x10;t.event_ready=true;t.interrupts_enabled=true;spu_take_interrupt(s,t);
@@ -62,6 +62,9 @@ BODY = r'''
  };
  auto same=[&](const State& a,const State& b){return a.gpr==b.gpr && a.pc==b.pc && a.srr0==b.srr0 && a.srr0_valid==b.srr0_valid && a.interrupts_enabled==b.interrupts_enabled
   && a.steps==b.steps && a.dma==b.dma && a.tag_mask==b.tag_mask;};
+'''
+
+BODY = COMMON + r'''
  const bool profile_default=spu_profile_on;
  for(const auto& v:variants){
   // 1. the pending event is taken right after the first WRCH (instruction number v.first, 1-based): pc, SRR0, steps, all GPRs, MFC parameters
@@ -97,6 +100,59 @@ BODY = r'''
 '''
 
 
+LS_END = r'''
+ // 3 instructions at the end of local storage: IL r3,0x1234; AI r10,r10,1; WRCH 16,r3 at 0x3fffc.  The exact interpreter wraps the pc to 0
+ // after the WRCH, so the handler entered right behind it saves SRR0 = 0 (a pc of 0x40000 is not a local storage address).
+ const auto expected=oracle(0x3fff4,3);
+ assert(expected.pc==0 && expected.srr0==0 && expected.srr0_valid && !expected.interrupts_enabled && expected.steps==3);
+ assert(spu_word(expected.gpr[10],0)==1 && expected.dma[0]==0x1234);
+ const bool profile_default=spu_profile_on;
+ for(const bool profile:{false,true}){
+  reset(0x3fff4,true,true);start(profile);
+  try{assert(spu_native_enter(s,t,ls));}catch(...){spu_profile_on=profile_default;throw;}
+  spu_profile_on=profile_default;
+  const auto actual=snapshot();
+  if(!same(expected,actual)){
+   std::fprintf(stderr,"MISMATCH profile=%d: pc %x/%x srr0 %x/%x steps %llu/%llu\n",int(profile),actual.pc,expected.pc,actual.srr0,expected.srr0,
+     (unsigned long long)actual.steps,(unsigned long long)expected.steps);
+   throw std::runtime_error("handler entered behind a WRCH at the end of local storage must save the wrapped pc");
+  }
+  assert(t.srr0==0 && t.pc==0);
+ }
+ std::puts("PASS local storage end");
+'''
+
+THROWS = r'''
+ // IL r3,0x1234; AI r10,r10,1; WRCH 16,r3; AI r11,r11,5; BRA.  Interrupts are enabled and the SPU holds a reservation whose compare reaches
+ // a memory observer that fails: the sample after the WRCH throws.  The exception leaves exactly the interpreter's state: the three
+ // retired instructions, pc behind the WRCH, every register written so far (r10 was only cached in the native function when it threw).
+ auto arm=[&](bool interrupts){
+  std::uint8_t bytes[128]{};s.memory.getllar(0x10000,bytes,t.reservation);t.reservation_address=0x10000;t.interrupts_enabled=interrupts;
+  s.memory.host_access_observer=[&](const void*,std::uint64_t,bool){throw std::runtime_error("observer failure");};
+ };
+ auto sample_throws=[&](auto&& f){std::string error;try{f();}catch(const std::runtime_error& e){error=e.what();}s.memory.host_access_observer=nullptr;return error;};
+ reset(0x100,false,false);
+ spu_step(s,t,ls,3,UINT64_MAX,true);assert(t.steps==3);
+ arm(true);
+ assert(sample_throws([&]{spu_take_interrupt(s,t);})=="observer failure");
+ const auto expected=snapshot();                      // oracle: interpreter, then the failing sample
+ assert(expected.pc==0x10c && expected.steps==3 && spu_word(expected.gpr[10],0)==1 && spu_word(expected.gpr[11],0)==0 && expected.dma[0]==0x1234);
+ const bool profile_default=spu_profile_on;
+ for(const bool profile:{false,true}){
+  reset(0x100,false,false);start(profile);arm(true);
+  const auto error=sample_throws([&]{try{(void)spu_native_enter(s,t,ls);}catch(...){spu_profile_on=profile_default;throw;}});
+  spu_profile_on=profile_default;
+  const auto actual=snapshot();
+  if(error!="observer failure" || !same(expected,actual)){
+   std::fprintf(stderr,"MISMATCH profile=%d error '%s': pc %x/%x steps %llu/%llu r10 %u/%u r11 %u/%u\n",int(profile),error.c_str(),actual.pc,expected.pc,
+     (unsigned long long)actual.steps,(unsigned long long)expected.steps,spu_word(actual.gpr[10],0),spu_word(expected.gpr[10],0),spu_word(actual.gpr[11],0),spu_word(expected.gpr[11],0));
+   throw std::runtime_error("a failing interrupt sample behind an inline WRCH must leave the retired prefix and the cached registers");
+  }
+ }
+ std::puts("PASS failing sample");
+'''
+
+
 @unittest.skipUnless(shutil.which('c++'), 'Requires native C++ compiler')
 class SpuWrchInterruptTests(unittest.TestCase):
     def test_pending_event_is_sampled_after_each_inline_mfc_parameter_wrch(self):
@@ -113,9 +169,35 @@ class SpuWrchInterruptTests(unittest.TestCase):
             image.setdefault(pc, 0x40200000)     # NOP filler between the variants
         data = b''.join(image[pc].to_bytes(4, 'big') for pc in range(BASE, high, 4))
         table = ','.join(f'{{{e}u,{f}u,{t}u,{l}u,{c}u}}' for e, f, t, l, c in variants)
-        body = (f'const std::uint8_t image[]={{{",".join(str(b) for b in data)}}};const unsigned image_size={len(data)};'
+        body = (f'const std::uint8_t image[]={{{",".join(str(b) for b in data)}}};const unsigned image_size={len(data)};const unsigned image_base=0x100;'
                 f'struct Variant {{unsigned entry,first,total,last,channel_index;}};const Variant variants[]={{{table}}};' + BODY)
         test_spu_block.SpuBlockTests().native(image, body)
+
+
+    def run_program(self, entry, build, tail):
+        a = Asm(entry)
+        build(a)
+        words = a.finish()
+        data = b''.join(w.to_bytes(4, 'big') for w in words)
+        body = (f'const std::uint8_t image[]={{{",".join(str(b) for b in data)}}};const unsigned image_size={len(data)};const unsigned image_base={entry};'
+                + COMMON + tail)
+        test_spu_block.SpuBlockTests().native({entry + 4 * i: w for i, w in enumerate(words)}, body)
+
+    def test_handler_entry_behind_wrch_at_local_storage_end_saves_the_wrapped_pc(self):
+        def build(a):
+            a.il(3, 0x1234)
+            a.ai(10, 10, 1)
+            a.wrch(16, 3)
+        self.run_program(0x3fff4, build, LS_END)
+
+    def test_failing_interrupt_sample_after_wrch_keeps_registers_and_retired_prefix(self):
+        def build(a):
+            a.il(3, 0x1234)
+            a.ai(10, 10, 1)
+            a.wrch(16, 3)
+            a.ai(11, 11, 5)
+            a.emit(ri16(0x060, EXIT >> 2, 0))        # BRA
+        self.run_program(0x100, build, THROWS)
 
 
 if __name__ == '__main__':
