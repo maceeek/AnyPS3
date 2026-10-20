@@ -564,7 +564,10 @@ TYPES = RESERVATION_WAIT_TYPES + r'''
     }
     struct Lease {
         GuestMemory& memory;HostAccessContext::Address origin_address;bool active=false,scalar_hazard=false;std::optional<CpuPages> pages;PageBroker::Cell* scalar_cell=nullptr;
-        [[gnu::always_inline]] Lease(GuestMemory& m,std::uint64_t address,unsigned size,bool write,bool split=false):memory(m),origin_address(address,m.concurrent() || bool(m.host_access_observer)){
+        // false: translation-only admission (GuestMemory::range of a read-only Range): reader gate, map snapshot and observer
+        // coherence as usual, but no page-broker cell increments, because no payload byte is read or written under it.
+        bool brokered_=true;
+        [[gnu::always_inline]] Lease(GuestMemory& m,std::uint64_t address,unsigned size,bool write,bool split=false,bool brokered=true):memory(m),origin_address(address,m.concurrent() || bool(m.host_access_observer)),brokered_(brokered){
             if(!m.concurrent())return;
             m.suspend_scalar_batch(m.local_state());
             if(!split && size && size<=8){auto& local=m.local_state();
@@ -591,7 +594,7 @@ TYPES = RESERVATION_WAIT_TYPES + r'''
                 return;
             }
             if(local.leases){
-                if(m.page_broker.enabled.load(std::memory_order_acquire)){
+                if(brokered_ && m.page_broker.enabled.load(std::memory_order_acquire)){
                     const auto required=PageBroker::cpu_keys(m.cpu_spans(address,size,write,split));
                     if(local.leased_pages?!std::includes(local.leased_pages->begin(),local.leased_pages->end(),required.begin(),required.end()):(!required.empty() && (required.size()!=1 || required[0]!=local.leased_scalar_page)))
                         throw std::runtime_error("nested CPU lease expands page set; predeclare complete batch");
@@ -604,7 +607,7 @@ TYPES = RESERVATION_WAIT_TYPES + r'''
                 try{
                     // Watch bitmaps are published atomically without reader exclusion.
                     // Admission still protects callback and map lifetime.
-                    if(m.page_broker.enabled.load(std::memory_order_acquire)){
+                    if(brokered_ && m.page_broker.enabled.load(std::memory_order_acquire)){
                         auto requested=m.cpu_spans(address,size,write,split);
                         pages.emplace(m.page_broker,requested);
                         if(!pages->admitted){pages.reset();m.leave_reader(local);
@@ -627,7 +630,7 @@ TYPES = RESERVATION_WAIT_TYPES + r'''
                     const auto generation=m.notify_spans(spans,write);
                     m.enter_reader(local);
                     if(epoch==local.snapshot->epoch && generation==m.parallel->raw_generation.load(std::memory_order_acquire)){
-                        if(m.page_broker.enabled.load(std::memory_order_acquire)){
+                        if(brokered_ && m.page_broker.enabled.load(std::memory_order_acquire)){
                             pages.emplace(m.page_broker,m.cpu_spans(address,size,write,split));
                             if(!pages->admitted){pages.reset();m.leave_reader(local);if(m.page_broker.coherence)m.notify_spans(spans,write);m.page_broker.wait_change(m.memory_owner());continue;}
                         }

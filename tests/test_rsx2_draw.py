@@ -79,7 +79,55 @@ static void memory_reuse_(){
  std::printf("INFO memory cacheable=%d reuses=%llu\n",int(on_cacheable),(unsigned long long)on_reuses);
  std::puts("PASS recycled device memory carries only the new owner's bytes");
 }
-int main(){try{vertex_groups_();memory_reuse_();}catch(const std::exception& e){std::fprintf(stderr,"FAIL %s\n",e.what());return 1;}
+// Vertex bytes read under the lease protocol (no exclusive page claim): the same quad must render identical pixels
+// from plain guest memory, serially and with parallel guest memory (Range::read leases), and also when the vertex
+// page is owned by the GPU (a dirty surface whose guest bytes are stale): the read must retire the surface first.
+// Oracle: the pixels of the plain-memory baseline; the GPU-owned image is built from the baseline's own vertex
+// bytes through the A8R8G8B8 byte mapping (guest bytes [A,R,G,B] <- image texel bytes [R,G,B,A], as test_rsx_pipeline packed_leases_).
+static std::vector<std::uint32_t> lease_vertex_(bool concurrent,bool gpu_owned,std::uint64_t& first_claims,std::uint64_t& repeat_claims){
+ PpuState s;setup_draw(s,16,8,64,false);auto& m=s.memory;
+ std::array<std::uint8_t,4096> page{};for(unsigned i=0;i<4096;++i)page[i]=std::uint8_t(m.load(0x70002000+i,1));
+ if(concurrent)m.enable_concurrency();
+ s.rsx.renderer=std::make_unique<NativeVulkan>();rsxgraphics::Session session(*s.rsx.renderer,s);session.observe();s.rsx.graphics_session=&session;
+ if(gpu_owned){
+  {GuestMemory::RawPermit raw(m);
+   for(unsigned i=0;i<4096;i+=4)m.store(0x70002000+i,4,0);   // stale guest bytes: the real data lives only in the GPU image
+   auto target=rsxdraw::bind_target(s,0xfeed0001,0x2000,64,16,64,4);
+   auto& surface=session.bind(target,16,64,1,8,false);
+   std::vector<std::uint8_t> texels(4096);   // A8R8G8B8: guest bytes [A,R,G,B] <- texel bytes [R,G,B,A]
+   for(unsigned i=0;i<4096;i+=4){texels[i]=page[i+1];texels[i+1]=page[i+2];texels[i+2]=page[i+3];texels[i+3]=page[i];}
+   s.rsx.renderer->graphics_transfer(*session.batch,surface.image,VK_IMAGE_ASPECT_COLOR_BIT,4,texels.data());session.dirty_surface(surface);
+   assert(surface.dirty);}
+ }
+ // The first draw binds/uploads its targets (claims allowed). Its own pixels are the oracle comparison: a vertex read that
+ // flushes the batch at the wrong moment (after the staging slice was reserved) corrupts exactly this first draw.
+ auto before=GuestMemory::stat_gpu_claims.load();
+ rsx_execute_draw(s);
+ first_claims=GuestMemory::stat_gpu_claims.load()-before;
+ session.flush();
+ std::vector<std::uint32_t> out(16*8);
+ {GuestMemory::ObserverPause pause(m);for(unsigned i=0;i<out.size();++i)out[i]=std::uint32_t(m.load(0xc0100000u+4*i,4));}
+ // Identical draws after it only read vertices: no exclusive GPU page claim may be taken for them.
+ before=GuestMemory::stat_gpu_claims.load();
+ for(unsigned k=0;k<7;++k){s.rsx.draw.primitive=8;s.rsx.draw.ranges={{0,4}};rsx_execute_draw(s);}
+ repeat_claims=GuestMemory::stat_gpu_claims.load()-before;
+ session.flush();
+ s.rsx.graphics_session=nullptr;return out;
+}
+static void lease_vertex_reads_(){
+ std::uint64_t f0=0,r0=0,f1=0,r1=0,f2=0,r2=0,f3=0,r3=0;
+ const auto base=lease_vertex_(false,false,f0,r0),parallel=lease_vertex_(true,false,f1,r1),owned=lease_vertex_(false,true,f2,r2),owned_parallel=lease_vertex_(true,true,f3,r3);
+ unsigned lit=0;for(auto p:base)lit+=p!=0;assert(lit>=100);   // the quad covers the target: not an empty comparison
+ auto diff=[&](const char* name,const std::vector<std::uint32_t>& v){unsigned d=0,lit=0;for(unsigned i=0;i<v.size();++i){d+=v[i]!=base[i];lit+=v[i]!=0;}std::printf("INFO %s lit=%u differing=%u\n",name,lit,d);};
+ diff("serial",base);diff("parallel",parallel);diff("owned",owned);diff("owned_parallel",owned_parallel);
+ assert(parallel==base);
+ assert(owned==base);
+ assert(owned_parallel==base);
+ assert(r1==0 && r3==0);   // repeated draws read vertices under shared leases: no exclusive GPU page claim per draw
+ std::printf("INFO claims first=%llu/%llu repeat=%llu/%llu\n",(unsigned long long)f1,(unsigned long long)f3,(unsigned long long)r1,(unsigned long long)r3);
+ std::puts("PASS vertex reads under shared leases: serial, parallel and GPU-owned vertex page render identical pixels without a GPU claim per draw");
+}
+int main(){try{vertex_groups_();memory_reuse_();lease_vertex_reads_();}catch(const std::exception& e){std::fprintf(stderr,"FAIL %s\n",e.what());return 1;}
 }
 '''
 
@@ -109,7 +157,7 @@ class Rsx2DrawTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 self.assertNotIn('Validation Error', result.stdout + result.stderr)
                 self.assertNotIn('Validation Warning', result.stdout + result.stderr)
-                self.assertEqual(result.stdout.count('PASS '), 2, result.stdout)
+                self.assertEqual(result.stdout.count('PASS '), 3, result.stdout)
 
 
 if __name__ == '__main__':

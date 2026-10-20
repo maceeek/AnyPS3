@@ -1543,11 +1543,11 @@ template<class Vertex> static bool prepared(Session& session,const std::vector<s
         unsigned width,unsigned height,unsigned x0,unsigned y0,unsigned x1,unsigned y1,bool point=false,const std::map<unsigned,LineGeometry>* lines=nullptr,const DeviceGeometry* device=nullptr,GeometryFallback materialize={}){
     GuestMemory::RawYield payload(session.state.memory);
     HostPhase phase(HostStage::geometry);
-    DrawAttempt attempt;auto textures=supplied_textures;auto colors=supplied_colors;
+    DrawAttempt attempt;auto colors=supplied_colors;
     auto& vk=session.vk;auto& state=session.state;const Reg r{state.rsx};
     if(lines && !vk.graphics_float64())return attempt.reject("device_line_fp64");
     if(r(0x220) && color_format(r(0x208)&31)==VK_FORMAT_UNDEFINED)return attempt.reject("color_format");
-    if(!supported(state.rsx,fp,textures))return attempt.reject("texture_layout");
+    if(!supported(state.rsx,fp,supplied_textures))return attempt.reject("texture_layout");
     const auto target=r(0x220);unsigned count=target==0?0:(target==1 || target==2)?1:target==0x13?2:target==0x17?3:target==0x1f?4:5;
     if(count>4)return attempt.reject("target_count");
     // The masks suppress every color store, including blend and logic ops.
@@ -1575,6 +1575,12 @@ template<class Vertex> static bool prepared(Session& session,const std::vector<s
     // model; a GPU snapshot must not silently change inter-primitive reads.
     // The compute alias rasterizer has no 0x1d7c coverage/alpha-to-one or null texture model.
     if(alias && r.get(0x1d7c,0xffff0000)!=0xffff0000)return attempt.reject("alias_multisample_control");
+    // The 16-texture array is copied only where this draw can edit it: the attachment-alias path (materialize /
+    // re-decode) and the gathered-RTT feedback snapshot. Every other draw reads the caller's array.
+    bool edit_textures=alias;
+    if(!edit_textures)for(const auto& texture:supplied_textures)if(texture.resident_image && texture.plan && texture.plan->gathered){edit_textures=true;break;}
+    std::optional<std::array<Texture,16>> owned_textures;if(edit_textures)owned_textures.emplace(supplied_textures);
+    const auto& textures=edit_textures?*owned_textures:supplied_textures;
     if(alias)for(const auto& texture:textures)if(texture.null_texture)return attempt.reject("alias_null_texture");
     for(const auto& texture:textures)if(texture.valid && !texture.untiled && !(texture.plan && texture.plan->gathered)){
         if(target_overlaps(depth,texture.storage,texture.storage_size,width*nx,height*ny))return attempt.reject("sequential_depth_texture_feedback");
@@ -1583,7 +1589,7 @@ template<class Vertex> static bool prepared(Session& session,const std::vector<s
     // Gathered CPU textures have a pre-draw snapshot contract. A tiled RTT
     // view of the active attachment needs the same snapshot on the GPU; an
     // image must never be sampled while this draw writes that very image.
-    for(auto& texture:textures)if(texture.resident_image && texture.plan && texture.plan->gathered){
+    if(edit_textures)for(auto& texture:*owned_textures)if(texture.resident_image && texture.plan && texture.plan->gathered){
         bool feedback=false;
         for(const auto& surface:session.surfaces)if(surface.image==texture.resident_image){
             for(unsigned i=0;i<count;++i)if(colors[i].base && surface.same(colors[i],width,height,samples,r(0x208)&31,false))feedback=true;
@@ -1609,7 +1615,7 @@ template<class Vertex> static bool prepared(Session& session,const std::vector<s
             if(vertex_group_count){auto& g=vertex_groups[vertex_group_count-1];const auto end=std::max(g.address+g.span,e.address+e.span);
                 if(e.address<=g.address+g.span && end-g.address<=UINT_MAX){g.span=end-g.address;e.group=vertex_group_count-1;continue;}}
             vertex_groups[vertex_group_count]={e.address,e.span};e.group=vertex_group_count++;}
-        for(unsigned g=0;g<vertex_group_count;++g)vertex_inputs[g].emplace(state.memory.range(vertex_groups[g].address,vertex_groups[g].span,false));
+        for(unsigned g=0;g<vertex_group_count;++g)vertex_inputs[g].emplace(state.memory.range_translated(vertex_groups[g].address,vertex_groups[g].span));
         vertex_grouped=true;
     };
     session.vertex_program.refresh(state.rsx);
@@ -1649,8 +1655,8 @@ template<class Vertex> static bool prepared(Session& session,const std::vector<s
         state.memory.last_region=saved;if(!safe)return attempt.reject("sequential_vertex_feedback_or_unmapped_input");
     }
     if(alias && session.conditional && session.resolve_conditional())return true;
-    if(alias){for(auto& t:textures)materialize_texture(state,t);colors=supplied_colors;session.flush(true,nullptr,0,"attachment_alias");session.clear_surfaces();session.allow_resident_textures=false;
-        try{for(unsigned unit=0;unit<16;++unit)if(textures[unit].resident_image)textures[unit]=decode_texture(state,r,unit);}
+    if(alias){for(auto& t:*owned_textures)materialize_texture(state,t);colors=supplied_colors;session.flush(true,nullptr,0,"attachment_alias");session.clear_surfaces();session.allow_resident_textures=false;
+        try{for(unsigned unit=0;unit<16;++unit)if((*owned_textures)[unit].resident_image)(*owned_textures)[unit]=decode_texture(state,r,unit);}
         catch(...){session.allow_resident_textures=true;throw;}session.allow_resident_textures=true;}
     const bool packed=packed_color(r),srgb=!packed && r(0x1fec);
     NativeVulkan::GraphicsState fixed;fixed.width=width;fixed.height=height;fixed.samples=samples;fixed.colors=count;fixed.color=packed?VK_FORMAT_R32_UINT:color_format(r(0x208)&31,srgb);

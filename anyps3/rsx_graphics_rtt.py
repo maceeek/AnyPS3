@@ -26,6 +26,19 @@ MEMBERS = r'''
     // their real storage; counting it again per proof caused repeated eviction
     // and revalidation of the same large tiled layout every frame.
     std::unordered_map<RttProofKey,RttProof,RttProofHash> rtt_proofs;
+    // rtt_image's row-coverage check is a pure function of seven integers (layout of the texture rows inside the
+    // surface); the per-row loop ran for every draw sampling a render target. Memoized by value, exactly.
+    using RttCoverKey=std::array<std::uint64_t,7>;
+    struct RttCoverHash {std::size_t operator()(const RttCoverKey& key)const{std::size_t h=0;for(auto v:key)h=(h*1099511628211ull)^v;return h;}};
+    std::unordered_map<RttCoverKey,bool,RttCoverHash> rtt_cover_memo;
+    bool rtt_rows_covered(std::uint64_t origin,std::uint64_t pitch,std::uint64_t row_bytes,unsigned rows,std::uint64_t target_pitch,unsigned source_height,unsigned source_width){
+        const RttCoverKey key{origin,pitch,row_bytes,rows,target_pitch,source_height,source_width};
+        const auto found=rtt_cover_memo.find(key);if(found!=rtt_cover_memo.end())return found->second;
+        bool covered=true;
+        for(unsigned y=0;y<rows && covered;++y){const auto at=origin+std::uint64_t(y)*pitch;covered=at/target_pitch<source_height && at%target_pitch+row_bytes<=source_width;}
+        if(rtt_cover_memo.size()>=8192)rtt_cover_memo.clear();
+        rtt_cover_memo.emplace(key,covered);return covered;
+    }
     bool rtt_proved(const std::shared_ptr<TexturePlan>& texture,const std::shared_ptr<Surface::ReadbackPlan>& surface,unsigned origin){
         const RttProofKey key{reinterpret_cast<std::uintptr_t>(texture.get()),reinterpret_cast<std::uintptr_t>(surface.get()),origin};
         auto found=rtt_proofs.find(key);if(found==rtt_proofs.end())return false;
@@ -93,7 +106,7 @@ MEMBERS = r'''
             if(contiguous){
                 if(target.swizzle_width)covered=std::uint64_t(origin)+texture.plan->bytes<=std::uint64_t(target.swizzle_width)*target.swizzle_height*target.bpp;
                 else{const auto last=std::uint64_t(origin)+texture.plan->bytes;covered=last<=std::uint64_t(target.pitch)*source_height && (source_width==target.pitch || std::uint64_t(origin)/target.pitch==(last-1)/target.pitch) && (source_width==target.pitch || last%target.pitch<=source_width);}
-            }else for(unsigned y=0;y<rows && covered;++y){const auto at=std::uint64_t(origin)+std::uint64_t(y)*level.pitch;covered=at/target.pitch<source_height && at%target.pitch+row_bytes<=source_width;}
+            }else covered=rtt_rows_covered(std::uint64_t(origin),level.pitch,row_bytes,rows,target.pitch,source_height,source_width);
             if(!covered){reject("pitch_or_extent",surface,origin);continue;}
             std::size_t reuse=rtt_views.size();
             for(std::size_t i=0;i<rtt_views.size();++i){auto& view=rtt_views[i];
