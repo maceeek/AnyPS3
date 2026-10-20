@@ -177,12 +177,49 @@ Eliding queries while 0x17cc is 0 would need a separate diagnostic mode; worth i
 
 ## Measurements (synthetic, this cloud CPU)
 
-*Filled in after the final comparison run.*
+Base = worktree of `43c6b27` (snapshot 460), final = this branch after the reservation fast path. Same kernels and
+benchmark sources for both; the cloud host is shared and memory-bound kernels vary by more than ±10% between runs.
+
+**PPU kernels** (`python3 bench/ppu_bench.py ROOT OUT`, ns per guest instruction, best of 5 per run, runs 2–3 of 3
+alternating base/final; run 1 was noisier):
+
+| kernel | base | final | note |
+| --- | --- | --- | --- |
+| k_atomic (lwarx/stwcx. loop) | 68.9–71.1 | 39.6–41.8 | reservation fast path, −42% |
+| k_vmx (vmaddfp/vperm/vaddfp) | 18.3–18.9 | 1.29–1.33 | VMX SIMD, ~14× |
+| k_float, FPSCR XX set (`BENCH_FPSCR=0x02000000`) | 3.33 | 2.45 | lazy FR/FI/FPRF, −26% |
+| k_float, XX clear (FPSCR 0, results stay exact) | 3.30–3.36 | 3.75–3.79 | +13%: extra mode test, lazy path never applies |
+| k_copy (lwzu/stwu) | 1.17–1.18 | 1.07–1.10 | within noise |
+| k_struct (lwz/lhz/lbz, conditional stw) | 0.95 | 1.02–1.04 | within noise (repeat runs gave 1.03–2.35) |
+| k_branchy / k_calls | 0.79–0.81 / 1.10 | 0.78–0.79 / 1.12–1.14 | unchanged |
+| k_spin (`or 31,31,31` loop) | 0.26 | 2.03 | intended: one host `pause` per block |
+
+**Verified:** same-page indirect dispatch has no measurable effect on k_calls (1.13 with and without it, separate
+build with the `goto ppu_dispatch_local` line removed); kept because it is correct (test) and removes one dispatcher
+lookup per same-page return. The earlier suspicion of a ~5% k_copy/k_struct slowdown is **refuted** as noise.
+
+**RSX draws** (synthetic `bench/rsx_draw_bench.py` scenarios on 8×8 surfaces, Lavapipe, `LP_NUM_THREADS=1`; both
+binaries built with `-O2 -march=native -ffp-contract=off -fno-omit-frame-pointer`, `perf record -F 4000 -g`,
+6000 draws × 3 repetitions; host cost = samples in AnyPS3 code plus libc/kernel called from it inside
+`rsx_execute_draw`/flush stacks, scratch tool `host_cost.py`):
+
+| scenario | host µs/draw base → final | wall µs/draw base → final |
+| --- | --- | --- |
+| identical draws | 10.9 → 5.6 | 51.2 → 54.1 |
+| fragment constant changes every draw | 11.0 → 6.3 | 58.6 → 48.3 |
+| same with 2× MSAA | 7.3 → 6.5 | **276.3 → 97.9** |
+| alternating two textures | 8.6 → 5.9 | 56.1 → 53.1 |
+
+Wall time is dominated by Lavapipe rasterizing on the CPU (not representative of a GPU). The 2× MSAA wall time
+drop is the plane-run change: render-pass begin/end per plane is expensive in Lavapipe too. An earlier session
+measurement of the indexed-mesh scenario (1200 BE16 indices) gave host 11.5 → 8.9 µs/draw (SIMD index decode).
+**Limitation:** none of these is a game frame; the level's RSX worker spends ~28 µs/draw on the PC (460a), with
+work these synthetic draws do not have (vertex arrays, texture uploads, surface cache, readbacks).
 
 ## Not done / open
 
 - **No game build or FPS measurement** — the user must build and measure on the PC (commands below).
-- PPU `k_copy`/`k_struct` showed a possible ~5% slowdown in single runs; a bisect under load was inconclusive.
+- PPU `k_copy`/`k_struct` single-run differences are host noise (see Measurements).
 - RSX2 estimate from the FAST round stays valid: ≤10 ms/frame needs the RSX work split across threads.
 
 ## How to verify on the PC
