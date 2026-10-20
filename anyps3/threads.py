@@ -206,8 +206,9 @@ struct PpuDeferredScope {
     static const bool trace_switch=[]{const char* v=std::getenv("ANYPS3_TRACE_PPU_SWITCH");return v && std::string(v)=="1";}();
     if(trace_switch && next->thread_id!=s.thread_id)std::fprintf(stderr,"PPU switch %u -> %u pc=%08x\n",s.thread_id,next->thread_id,next->pc);
     // Keeping the same context at a preemption point: the slot was just saved from `s` and the readiness pass only touches
-    // blocked contexts, so copying it back is the identity. A mandatory pass may have woken the active context.
-    if(!mandatory && next==&*active){s.reschedule=false;return;}
+    // blocked contexts, so copying it back is the identity — unless the active context itself was blocked (any pass may
+    // have woken it: its slot, not `s`, then carries the cleared wait).
+    if(!mandatory && next==&*active && !s.wait_kind){s.reschedule=false;return;}
     static_cast<PpuContext&>(s)=*next;s.reschedule=false;
     return;
     }
