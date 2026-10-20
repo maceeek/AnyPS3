@@ -442,7 +442,8 @@ def generate_blocks(images, overlays, lift_parts):
     chunks = {}
     decoded = {}
     sources = []
-    targets = set()
+    own_targets = []
+    foreign = set()
     for base, payload in collect_sources(images, overlays):
         insns = []
         for i in range(0, len(payload), 4):
@@ -451,11 +452,16 @@ def generate_blocks(images, overlays, lift_parts):
                 decoded[key] = decode(base + i, int.from_bytes(key[1], 'big'), lift_parts)
             insns.append(decoded[key])
         sources.append((base, payload, insns))
-        # Direct targets are LS addresses: any source loaded there can be the
-        # code entered by such a branch (cross-chunk and cross-overlay calls).
-        targets |= direct_targets(insns)
-    for base, payload, insns in sources:
-        leaders = source_leaders(insns) | targets
+        targets = direct_targets(insns)
+        own_targets.append(targets)
+        # A direct branch that leaves the range of the source it sits in can only land in another source (cross-overlay
+        # call, kernel <-> job module): that source needs a leader there.  A target inside the own range is a leader of
+        # the own source only.  (The union of ALL sources' targets made every address that is a branch target in any of
+        # ~200 kernel/module variants a leader of every other variant: 2.1 instructions per block instead of 6.9, i.e.
+        # a register flush/reload and a validation guard every other instruction; bench/spufast3_leaders.py.)
+        foreign |= {x for x in targets if not base <= x < base + len(payload)}
+    for (base, payload, insns), targets in zip(sources, own_targets):
+        leaders = source_leaders(insns) | targets | {x for x in foreign if base <= x < base + len(payload)}
         for at in range(0, len(payload), 4 * MAX_FUNCTION):
             data = payload[at:at + 4 * MAX_FUNCTION]
             key = (base + at, data)
