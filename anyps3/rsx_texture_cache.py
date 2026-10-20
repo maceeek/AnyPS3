@@ -196,6 +196,18 @@ MEMBERS = r'''
         next.resize(count);
         bool equal=surface_watches.size()==next.size();
         if(equal)for(std::size_t i=0;i<next.size();++i)if(less(next[i],surface_watches[i]) || less(surface_watches[i],next[i])){equal=false;break;}
+        // ANYPS3_RSX_WATCH_TRACE=1: how often the surface watch set really changes and how many bytes are (un)watched (diagnostic).
+        static const bool trace=std::getenv("ANYPS3_RSX_WATCH_TRACE")!=nullptr;
+        static std::uint64_t t_calls=0,t_same=0,t_added=0,t_removed=0,t_span_ops=0;
+        if(trace){
+            ++t_calls;if(equal)++t_same;
+            else{std::size_t a=0,b=0;
+                while(a<surface_watches.size() || b<next.size()){
+                    if(b==next.size() || (a<surface_watches.size() && less(surface_watches[a],next[b]))){t_removed+=surface_watches[a++].second;++t_span_ops;}
+                    else if(a==surface_watches.size() || less(next[b],surface_watches[a])){t_added+=next[b++].second;++t_span_ops;}
+                    else{++a;++b;}}}
+            if(t_calls%200==0)std::fprintf(stderr,"WATCH_STATS refreshes=%llu unchanged=%llu span_ops=%llu added_kb=%llu removed_kb=%llu\n",(unsigned long long)t_calls,(unsigned long long)t_same,(unsigned long long)t_span_ops,(unsigned long long)(t_added>>10),(unsigned long long)(t_removed>>10));
+        }
         if(equal){surface_watch_mappings=std::move(mappings);return;}
         GuestMemory::MetadataPermit metadata(state.memory);
         std::size_t a=0,b=0;

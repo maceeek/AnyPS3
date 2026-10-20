@@ -1494,6 +1494,14 @@ struct Session {
             surface.last_use=++resource_clock;return surface;
         }
         ::RsxPerfCounters::add(::RsxPerfCounters::surface_binds_new);
+        {   // ANYPS3_RSX_BIND_TRACE=1: why a bind creates a new surface (first 120 binds after the 3000th): new target vs the surfaces at the same offset.
+            static const bool trace=std::getenv("ANYPS3_RSX_BIND_TRACE")!=nullptr;static unsigned seen=0,shown=0;
+            if(trace && ++seen>3000 && shown<120){++shown;
+                std::fprintf(stderr,"BIND_TRACE new offset=%u base=%u pitch=%u %ux%u samples=%u fmt=%u depth=%d tile=%d discard=%d |",target.offset,target.base_offset,target.pitch,width,height,samples,format,int(depth),int(bool(target.tile)),int(discard));
+                for(const auto& old:surfaces)if(old.target.offset==target.offset || old.target.base_offset==target.base_offset)
+                    std::fprintf(stderr," [off=%u pitch=%u %ux%u s=%u f=%u d=%d partial=%d dirty=%d imgfmt=%d]",old.target.offset,old.target.pitch,old.width,old.height,old.samples,old.format,int(old.depth),int(old.partial),int(old.dirty),int(old.image?old.image->format:0));
+                std::fprintf(stderr,"\n");}
+        }
         Surface surface{target,width,height,samples,format,depth,false,{},{}};
         if(target.tile){surface.tile_snapshot=std::make_shared<NativeRsx::Tile>(*target.tile);surface.target.tile=surface.tile_snapshot.get();}
         prepare_protection(surface);
