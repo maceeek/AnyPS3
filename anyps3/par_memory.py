@@ -800,6 +800,36 @@ TYPES = RESERVATION_WAIT_TYPES + r'''
         std::uint64_t version=0;for(auto i=first;i<=last;++i){version+=map.state->versions[i];if(version>UINT32_MAX)throw std::runtime_error("guest reservation version overflow");}
         return {pointer-(address-line),(local_state().snapshot->epoch<<32)|version};
     }
+    // Reservation fast path: the access and its whole 128-byte granule lie in ONE mapping (the common case).
+    // The published Mapping holds the same BackingState that parallel->backings names (publish_maps), so the
+    // tracked flags and versions are reached without a backing hash lookup, a span vector or a weak_ptr lock.
+    // A granule clipped by its mapping keeps the general path. Same stripes, tracking and token as
+    // reservation_span + track_reservation + parallel_token; the caller holds reader admission (Lease).
+    struct ReservedLine {const ParallelMemory::Mapping* map=nullptr;std::uint8_t* pointer=nullptr;std::size_t first=0,last=0;};
+    [[gnu::always_inline]] ReservedLine reserved_line(std::uint64_t address,unsigned size,bool write){
+        const auto& map=translate_parallel(address,size,write);const auto& r=map.region;
+        const auto line=address&~UINT64_C(127);
+        if(line<r.base || line+128>r.base+r.bytes->size())return {};
+        auto* pointer=r.bytes->data()+(line-r.base);const auto offset=static_cast<std::size_t>(pointer-r.bytes->data());
+        return {&map,pointer,offset/128,(offset+127)/128};
+    }
+    // Tracking is sticky: only the first reservation of a granule takes track_reservation (fences, drain).
+    [[gnu::always_inline]] void reserved_track(const ReservedLine& l){
+        const auto& tracked=l.map->state->tracked;
+        for(auto i=l.first;i<=l.last;++i)if(!tracked[i].load(std::memory_order_acquire)){track_reservation({l.pointer,128,l.map->region.bytes});return;}
+    }
+    [[gnu::always_inline]] std::pair<std::uintptr_t,std::uint64_t> reserved_token(const ReservedLine& l){
+        reserved_track(l);
+        const auto& versions=l.map->state->versions;
+        std::uint64_t version=0;for(auto i=l.first;i<=l.last;++i){version+=versions[i];if(version>UINT32_MAX)throw std::runtime_error("guest reservation version overflow");}
+        return {reinterpret_cast<std::uintptr_t>(l.pointer),(local_state().snapshot->epoch<<32)|version};
+    }
+    // bump_parallel for the single span [pointer,pointer+size) of this mapping. Caller holds its stripes.
+    [[gnu::always_inline]] void reserved_bump(const ReservedLine& l,std::uint8_t* pointer,unsigned size){
+        auto& versions=l.map->state->versions;const auto offset=static_cast<std::size_t>(pointer-l.map->region.bytes->data());
+        for(auto i=offset/128;size && i<=(offset+size-1)/128;++i){if(versions[i]==UINT32_MAX)throw std::runtime_error("guest write version overflow");++versions[i];}
+        parallel->notifications->notify(pointer,size);
+    }
     std::uint64_t enqueue_coherence(const std::shared_ptr<ParallelMemory::Request>& request){
         std::unique_lock<std::mutex> lock(parallel->queue_mutex);
         parallel->queue_space.wait(lock,[&]{return parallel->stopping || parallel->requests.size()<ParallelMemory::queue_capacity;});

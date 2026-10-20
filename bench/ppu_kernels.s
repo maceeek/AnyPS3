@@ -146,3 +146,14 @@ k_spin:                       # guest busy-wait shape: or 31,31,31 blocks
 	or 31,31,31
 	bdnz 1b
 	blr
+
+	.globl k_atomic
+k_atomic:                     # lwarx/stwcx. increment (uncontended atomic add, mutex shape)
+	lis 30,0x20
+	mtctr 3
+1:	lwarx 5,0,30
+	addi 5,5,1
+	stwcx. 5,0,30
+	bne- 1b
+	bdnz 1b
+	blr

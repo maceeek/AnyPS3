@@ -27,7 +27,7 @@ code = code + bytes((-len(code)) & 0xfff)
 image = make_image([(BASE, 5, code), (0x40000, 6, struct.pack('>II', BASE, 0))], entry=0x40000)
 translated = compile_program(image, process_entry=True, extra_entries=tuple(BASE + a for a in syms.values()))
 src = translated.cpp(max_steps=10**12).replace('int main(int argc, char** argv)', 'int original_main(int argc, char** argv)')
-iters = dict(k_copy=200, k_calls=200000, k_branchy=300000, k_float=1000, k_vmx=1000, k_struct=400, k_spin=300000)
+iters = dict(k_copy=200, k_calls=200000, k_branchy=300000, k_float=1000, k_vmx=1000, k_struct=400, k_spin=300000, k_atomic=300000)
 calls = []
 for name, addr in sorted(syms.items()):
     calls.append(f'run(code,"{name}",0x{BASE+addr:x},{iters.get(name,1000)});')

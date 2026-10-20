@@ -111,11 +111,20 @@ out by hand, the architecture definition, or the exact implementation as oracle 
 5. `tests/test_spufast_blocks.py`: the sweeps bind their threads to image 0 (the unbound-image stop of item 1 made
    all 4 fail on `1f2e4b2`).
 
-**Open (agent finding, not done):** `getllar` ~180 ns, `putllc` ~130 ns, `reservation_token` ~65 ns single-threaded;
-each `getllar`/`putllc` allocates a `std::vector<HostSpan>` with shared_ptr copies (`parallel_spans`), `LineLocks`
-two more vectors, and `track_reservation` runs twice per `getllar` with a hash lookup and `weak_ptr::lock` each.
-A single-line allocation-free fast path in `runtime.py`/`par_memory.py` would speed the PUTLLUC completion writes
-that sit on the main thread's critical path.
+6. **Reservation fast path** (`par_memory.py` `reserved_line/reserved_track/reserved_token/reserved_bump`;
+   `runtime.py` `load_reserved`, `store_conditional`, `getllar`, `putllc`, both `reservation_token` forms), following
+   the agent's finding that every `getllar`/`putllc` allocated span and lock vectors and ran `track_reservation` twice
+   (backing hash lookup + `weak_ptr::lock` each). When the access and its whole 128-byte granule lie in one mapping,
+   the published `Mapping::state` (the same `BackingState` object that `parallel->backings` names, `publish_maps`)
+   gives the tracked flags and versions directly; tracking still goes through `track_reservation` the first time;
+   same stripe set (`ScalarLock`), same token, same permission checks in the same order. A granule clipped by its
+   mapping keeps the general path. **Verified:** `tests/test_reservation_fast_path.py` (fast and general paths:
+   lost/kept reservations, consumed token, big-endian bytes, word vs line tokens, a mapping base inside a granule,
+   read-only faults; 5 concurrent agents mixing lwarx/stwcx. and getllar/putllc lose no increment), which **fails**
+   on a mutant whose fast path skips the version bump. **Measured** (`bench/ppu_bench.py`, new kernel `k_atomic`:
+   uncontended lwarx/addi/stwcx./bne/bdnz with concurrent memory): **70.7 → 40.5 ns per guest instruction**,
+   i.e. ~350 → ~200 ns per lwarx+stwcx. pair. The remainder is the ordinary `load()` path (ScalarAccess with
+   watch/observer handling), the stripe mutex and `inline_suspend/resume`; not changed.
 
 ### RSX
 
