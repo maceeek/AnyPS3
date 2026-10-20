@@ -20,8 +20,9 @@ The first and only target so far is **Ratchet & Clank: A Crack in Time** (BCES00
 
 - The original game boots, plays its videos, reaches the original main menu and loads a saved game into the
   first level (`great_clock_a`). The menu and the level are rendered by the Vulkan RSX backend.
-- The menu runs at full speed. The best level build so far runs at about 22 FPS on a Ryzen 9 9900X with an
-  RTX 4070 SUPER. Reaching a stable 60 FPS with headroom is the current work item.
+- The menu runs at full speed. In the level, the runtime on `main` runs at about 47 FPS on a Ryzen 9 9900X with
+  an RTX 4070 SUPER; unmerged development builds reach about 56 FPS (median 58.5). Reaching a stable 60 FPS with
+  headroom is the current work item.
 - Input works through SDL game controllers; navigation with a virtual and a uinput controller is verified.
   A physical controller has not been verified yet.
 - Audio is produced through SDL. Linux is the only supported host for the game runtime.
@@ -51,6 +52,20 @@ The demo ELF is a synthetic PPU program written by this project
 ([examples/answer42.ppu.s](examples/answer42.ppu.s)), not a game dump. `python3 -m anyps3 --help` lists the other
 commands (`analyze`, `recompile-program`, `sfo`, `unself`, `disc-inventory`, `disc-extract`, `recover-zip`).
 Commands never overwrite existing output files.
+
+## Game library manager (CLI and Qt GUI)
+
+`anyps3-manager` imports a disc image into a library, builds and rebuilds the native executable (each build in a
+new directory) and launches it, while save data and installed game data stay in a separate per-title storage that
+rebuilds never touch. `anyps3-gui` is a PySide6 front end that only drives the CLI. Both are early: they are
+tested with synthetic data, not yet end to end with a real game. See [docs/manager/README.md](docs/manager/README.md)
+and the [specification](docs/manager/SPEC.md).
+
+```bash
+python3 -m venv .venv && .venv/bin/python -m pip install -e '.[gui,self]'
+.venv/bin/anyps3-manager --library ~/.local/share/anyps3 init --json
+.venv/bin/anyps3-gui
+```
 
 ## Tests
 

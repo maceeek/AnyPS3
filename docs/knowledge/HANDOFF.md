@@ -1,5 +1,12 @@
 # Handoff to the next instance
 
+## FAST2 wave 4 handoff — 2026-10-20 ~22:25
+
+Read the top of [CURRENT.md](CURRENT.md) first. Best measured: 660a 55.96 FPS (integration + blit batch, without SPU work);
+build 473 (everything combined) was compiling at handoff and is unmeasured; the blit batch has an unfixed High review
+finding (fixes uncommitted in the warmup tree, patch backup). main runtime unchanged (472 + ZeroTable).
+Agent handoffs: `local/ratchet/work/{integ473,warmup,spuwake}/{STATUS,RESULT}.md`.
+
 ## Manager worktree — 2026-10-20
 
 Continue from [manager implementation](experiments/2026-10-20-manager-gui.md)

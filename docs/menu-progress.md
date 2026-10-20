@@ -563,3 +563,8 @@ Documented integration fixes, the unbuilt AVX DMA concurrency concern, and actua
 Proposed next candidate: corrected integration + SPU through `87dce76`, recorder OFF, without the late AVX DMA patch.
 No new game/test/build or runtime/profile changes. Host processes inaccessible in this sandbox.
 See [analysis](knowledge/experiments/2026-10-20-sandbox-analysis.md) and the updated [CURRENT](knowledge/CURRENT.md).
+
+**2026-10-20 FAST2 wave 4 (to ~22:25, ended on user instruction).** 660a **55.96 FPS** (integration of RSXCPU3 +
+FRAMETIME + rsxblit batch path; first 30 s 32.7 FPS, sustained 30 FPS after 12 s). The post-load slow phase was CPU-side
+scaled blits, not GPU waits. Main-thread SPU wait is 94 % lane compute (wake trace). Build 473 (all combined + review fixes)
+unmeasured; blit batch review findings (1 High) not yet committed. See [CURRENT](knowledge/CURRENT.md).
