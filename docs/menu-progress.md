@@ -537,3 +537,11 @@ longer spins on `wait_until(steady_clock::time_point::max())` with the cloud too
 276.3 → 97.9 µs under Lavapipe). Open hypothesis: MSAA plane runs cut part of the ~30 ms/frame GPU busy time. First next
 action on the user's PC: new build N, `measure_level.sh N Na`, A/B runs with `ANYPS3_RSX_PLANE_RUNS=0/1` and `ANYPS3_SPU_POLL_PARK=0/1`.
 See [cloud optimization record](knowledge/experiments/2026-10-19-cloud-optimization.md) and [CURRENT](knowledge/CURRENT.md).
+
+**2026-10-20 FAST2 wave (Claude Opus 5.5 + Sonnet 5.5 agents, Codex gpt-6.1-sol reviews; PC with the game).** Original level
+`great_clock_a` 22.59 → **46.68 FPS** (build 472 = main b3281ed, `native-virtual-472a`, correct image, no STOP; median 45.97, max 58.0).
+Steps: cloud round measured (470a 29.70: MSAA plane runs etc., GPU 31 → 13 ms); GPU uploads on the DMA queue; RSX vertex reads without a
+per-draw membarrier claim (rsx_worker 22.9 → 18.1); GPU alias merge for 1/2-byte surfaces removing 5 readbacks + finish waits per frame;
+FP loader/blit/plan caches (rsx_worker → 13.4); scheduler fast pass. Refuted: FIFO prefetch window, timer slack 1 ns, register residency
+across SPU blocks; lane 0x100 is not on the critical path (the main thread waits ~6.6 ms/frame for ig SPU jobs). 60 FPS with headroom
+not reached; whole suite over 472 not run. See [FAST2 record](knowledge/experiments/2026-10-20-fast2-wave.md) and [HANDOFF](knowledge/HANDOFF.md).

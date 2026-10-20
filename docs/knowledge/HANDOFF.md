@@ -2,6 +2,36 @@
 
 The handing-over party fills in CURRENT and the links to verification. The receiving party checks the working tree, opens the latest log and verifies the paths and the profile. A handoff is not a request for a new plan: continue from the nearest concrete question.
 
+## Handoff 2026-10-20 — FAST2 wave (Claude Opus 5.5 coordinator; Sonnet 5.5 xhigh agents; Codex gpt-6.1-sol reviews)
+
+Ended on the user's instruction ("finish the milestones and running tests, write it up, end"). Goal (60 FPS with headroom) **not
+reached**. **Best verified build: 472 = live `main` b3281ed, `native-virtual-472a`: 46.68 FPS mean (median 45.97, max 58.0), correct
+image, no STOP.** Path of the day: 460a 22.59 → 470a 29.70 → 471a 31.18 → 472a 46.68. Full record with all numbers, reviews and
+refuted ideas: [FAST2 record](experiments/2026-10-20-fast2-wave.md).
+
+- **State of the tree:** `main` = b3281ed (fast-forwarded from integ/472); live `anyps3/`, `tests/`, profile = `source-snapshot-472`.
+  Not pushed to `origin`. Agent branches kept: `fast2/{gpufast,rsxcpu,critpath}` (merged via integ/471), `fast2/{gpufast2,rsxcpu2}`
+  (merged up to a4295b7 / c1f221e + f0923ea), `fast2/spufast2` (**do not merge**, see below); worktrees under `local/ratchet/work/`.
+- **Processes:** none (no agent, build, test, game or codex process; checked at the end).
+- **Tests:** suite over 471 = 806 tests, 804 pass; both failures fixed on main (71b5289 scheduler fast-return regression, 6c2d651 GCC 16
+  `-Wmaybe-uninitialized` pragma). 472: 30 targeted tests pass on the RTX; **the whole suite over 472 was not run** — first thing to do.
+- **Open review items (Sol, `local/ratchet/work/_reviews/`):** c36746e (in 472) over-reads up to 256 bytes past a fragment program's END
+  on a cache miss (observer/coherence side effects; fix = exact 16-byte extent discovery + observer-span test); e6c99b8 (not merged) memory
+  budget and test coverage; a42b9f0 `HostObserver::watch` (not merged) unreviewed and unmeasured.
+- **SPU branch:** `fast2/spufast2` build 580 regressed to 3.70 FPS (interpreter calls ×50 on an ig lane); hypothesis: the 16-byte
+  dispatcher candidate window; fix 021aa25 unit-tested only. Next: build it, compare `PERF SPU_STATS` with 471w, then measure.
+- **Where the frame goes now (472a):** rsx_worker 13.4 ms, main busy 14.0 ms (~6.6 ms waits for ig SPU jobs: engine-counter wait 0x696c10,
+  job-flag wait 0x5564d4), GPU 6.3 ms at mostly low clocks. Lane 0x100 is NOT critical (causal test 470t2).
+- **Tools/infrastructure added:** `local/ratchet/tools/make_gitworktree.sh` (agent worktree on a `fast2/*` branch + base for
+  `agent_build.sh`), `sol_review.sh` (read-only Codex review in a scope), `sol_agent.sh` (Codex without sandbox in a scope — never used;
+  the sandbox hides `/dev/nvidia*` and the user bus), rules `local/ratchet/work/COMMON-FAST2.md`. Lessons: the Bash tool is zsh (pass
+  file lists through bash arrays); at most 3 Sonnet agents at once (6 hit the API limit twice); the compile queue (15–25 min per full
+  build) is the shared bottleneck.
+- **First next actions:** (1) whole suite over 472 in quiet conditions; (2) fix the c36746e over-read; (3) SPU: build `fast2/spufast2`
+  021aa25, verify counters, measure; (4) RSX tail: CPU vertex programs on the GPU (VP branches), 12 surface re-binds/frame at one
+  address (samples 2↔1), mprotect churn; (5) recorder-thread split per `_reviews/design-rsxsplit.md`. Audio stays silent
+  (`SDL_AUDIODRIVER=dummy`, `ANYPS3_AUDIO_SINK=null`); physical gamepad not verified in this round.
+
 ## Handoff 2026-10-19/20 — cloud optimization round (Claude Opus 5.5, cloud container without game data or GPU)
 
 Goal unchanged (60 FPS with headroom, then the original menu and gamepad requirement of the project). **This round has no

@@ -9,7 +9,7 @@ ended for handoff on user instruction; 60 FPS not reached, physical gamepad not 
 [web research of real PS3 recomp projects](experiments/2026-10-19-web-ps3-recomp.md).
 **2026-10-19 afternoon: FAST wave (target 60 FPS in the level, game mode 0 verified, default 14.25 FPS):**
 [FAST record](experiments/2026-10-19-fast-wave.md).
-**2026-10-20 FAST2 wave (build 470 = main: 29.70 FPS in the level, three Sonnet subagents):** [FAST2 record](experiments/2026-10-20-fast2-wave.md).
+**2026-10-20 FAST2 wave (best build 472 = main: 46.68 FPS in the level; ended on user instruction):** [FAST2 record](experiments/2026-10-20-fast2-wave.md).
 **2026-10-19/20 cloud optimization round (PPU, SPU, RSX host cost; no game build and no FPS figure, best verified build
 still 460 at 22.59 FPS):** [cloud optimization record](experiments/2026-10-19-cloud-optimization.md).
 
