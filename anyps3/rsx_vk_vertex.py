@@ -43,12 +43,15 @@ static std::optional<std::string> vertex_shader(const NativeRsx& gpu,unsigned st
     if(flow.control){
         body+="uint pc_="+u(start)+",steps_=0u;bool done_=false;";
         if(flow.calls)body+="uint stack_[16],sp_=0u;";
-        body+="for(;;){if(++steps_>65536u){atomicOr(w[7],16u);return;}switch(pc_){\n";
+        body+="for(;;){switch(pc_){\n";
     }
     bool ended=false;
     for(unsigned pc=0;pc<544;++pc){
         if(!flow.reach[pc])continue;
         if(flow.control && flow.leader[pc])body+="case "+u(pc)+":\n";
+        // run_vertex_program stops before the 65,537th instruction: every executed instruction (fall-through, taken or untaken branch,
+        // call, RET) is charged before its side effects, not once per switch dispatch.
+        if(flow.control)body+="if(++steps_>65536u){atomicOr(w[7],16u);return;}\n";
         std::array<unsigned,4> d{};for(unsigned c=0;c<4;++c){if(!gpu.transform_program_written[pc*4+c])return {};d[c]=gpu.transform_program[pc*4+c];}
         const bool indexed_input=d[0]&(1u<<27),indexed_constant=d[3]&2;
         if((indexed_input || indexed_constant) && !checked)return {};
