@@ -410,8 +410,11 @@ static void analytic_observer(){
 // is admitted. A destination guard faults only in the write phase; a remainder on other pages is admitted and written after the
 // reference's prefix pixels (as in the reference), a remainder on the guarded page is not: the reference finishes.
 static void analytic_guard(){
- for(int variant=0;variant<3;++variant){   // 0: source row 0 page guarded, 1: destination row 0 page, 2: one page holding both destination rows
+ for(int variant=0;variant<4;++variant){   // 0: source row 0 page guarded, 1: destination row 0 page, 2: one page holding both destination rows,
+  // 3: as 0 in concurrent memory with exact-byte observation (Range accesses use the coherent alias: no fault on either side)
   PpuState a,b;setup(a);setup(b);
+  if(variant==3)for(auto* t:{&a,&b}){t->memory.host_access_observer.supports_exact_bytes=true;t->memory.enable_concurrency();}
+  const auto batches=rsxblit::batch_executed;
   std::string error[2];std::vector<std::uint8_t> memory[2];unsigned syncs[2]={0,0};
   const auto escapes=rsxblit::prefix_escapes;
   for(int side=0;side<2;++side){
@@ -420,7 +423,7 @@ static void analytic_guard(){
     for(unsigned k=0;k<0x4000;k+=0x400)s.memory.store(0xc0001000+k+i,1,0x5a);}
    Case c{};c.op=0;c.src_format=3;c.dst_format=10;c.origin=2;c.w=1;c.h=2;c.src_pitch=8192;c.ow=1;c.oh=2;c.cw=1;c.ch=2;c.dst_pitch=8192;
    c.dx=c.dy=0x100000;c.src_io=true;c.src_offset=0x1000;c.dst_io=false;c.dst_offset=0x1000;if(variant==2)c.dst_pitch=8;
-   const std::uint64_t guarded=variant?0xc0001000:0x70001000;
+   const std::uint64_t guarded=variant==1 || variant==2?0xc0001000:0x70001000;
    std::shared_ptr<GuestBacking> owner;for(const auto& r:s.memory.regions)if(guarded>=r.base && guarded-r.base<r.bytes->size())owner=r.bytes;
    {GuestMemory::HostGuard guard;
     guard.synchronize=[&,side]{++syncs[side];*host_of(s,0x70003001)=0x99;*host_of(s,0xc0001010)=0x77;*host_of(s,0xc0003001)=0x66;};
@@ -431,10 +434,11 @@ static void analytic_guard(){
    memory[side]=dump(s);
   }
   if(error[0]!=error[1])throw std::runtime_error("guard variant "+std::to_string(variant)+": error '"+error[0]+"' reference '"+error[1]+"'");
-  if(syncs[0]!=1 || syncs[1]!=1)throw std::runtime_error("guard variant "+std::to_string(variant)+": synchronizations "+std::to_string(syncs[0])+" reference "+std::to_string(syncs[1]));
+  if(syncs[0]!=(variant==3?0u:1u) || syncs[1]!=syncs[0])throw std::runtime_error("guard variant "+std::to_string(variant)+": synchronizations "+std::to_string(syncs[0])+" reference "+std::to_string(syncs[1]));
   if(memory[0]!=memory[1])throw std::runtime_error("guard variant "+std::to_string(variant)+": memory differs from the reference");
-  if(!variant && unsigned(a.memory.load(0xc0003001,1))!=0x99)throw std::runtime_error("guard variant "+std::to_string(variant)+": second pixel did not read the synchronized source");
-  if(rsxblit::prefix_escapes!=escapes+(variant==2?0:1))throw std::runtime_error("guard variant "+std::to_string(variant)+": unexpected remainder escape count");
+  if(variant==0 && unsigned(a.memory.load(0xc0003001,1))!=0x99)throw std::runtime_error("guard variant "+std::to_string(variant)+": second pixel did not read the synchronized source");
+  if(rsxblit::prefix_escapes!=escapes+(variant>=2?0:1))throw std::runtime_error("guard variant "+std::to_string(variant)+": unexpected remainder escape count");
+  if(variant==3 && rsxblit::batch_executed!=batches+1)throw std::runtime_error("guard variant 3: the batch path did not run although no access can fault");
  }
  std::puts("PASS guarded source/destination pages: remainder batch or reference, equal to the frozen reference");
 }

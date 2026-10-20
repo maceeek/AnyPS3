@@ -337,6 +337,7 @@ static bool admit(PpuState& s,unsigned context,const std::vector<Span>& interval
     if(m.concurrent() && !m.renderer_enabled && !m.memory_owner())return blit_decline("foreign observer owner");
     try{
         GuestMemory::ObserverPause pause(m);
+        const bool alias_access=m.concurrent() && m.host_access_observer.supports_exact_bytes.load(std::memory_order_acquire);
         std::vector<std::pair<std::uintptr_t,std::uintptr_t>> hosts;
         for(const auto& interval:intervals){
             if(interval.end-interval.at>(UINT64_C(64)<<20))return blit_decline("interval size");
@@ -344,7 +345,10 @@ static bool admit(PpuState& s,unsigned context,const std::vector<Span>& interval
             for(const auto& part:range.parts){
                 if(m.host_access_observer && (m.host_access_observer.interested(part.data,part.size) || m.raw_cpu_dirty_interested(part.data,part.size,write)))
                     {admission_dynamic=true;return blit_decline("observed");}
-                for(const auto* guard=GuestMemory::HostGuard::head;guard;guard=guard->next)if(guard->touches_any(part.data,part.size)){admission_dynamic=true;return blit_decline("guarded");}
+                // A HostGuard protects the primary mapping. Concurrent Range reads/writes with exact-byte observation go through
+                // the coherent alias (GuestMemory::byte_pointer) on both paths and never fault; otherwise (including the
+                // reference's serial direct-pointer writes) a guarded byte may fault and synchronize.
+                if(!alias_access)for(const auto* guard=GuestMemory::HostGuard::head;guard;guard=guard->next)if(guard->touches_any(part.data,part.size)){admission_dynamic=true;return blit_decline("guarded");}
                 if(distinct){const auto begin=reinterpret_cast<std::uintptr_t>(part.data);hosts.push_back({begin,begin+part.size});}
             }
         }
