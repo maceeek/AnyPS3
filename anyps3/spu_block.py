@@ -223,13 +223,16 @@ class BlockValues(Values):
         super().__init__(lines)
         self.block_end, self.insn_index, self.current, self.flen = block_end, insn_index, None, flen
 
-    def self_store_exit(self, address, pc):
+    def self_store_exit(self, address, pc, provenance=False):
         """A store overlapping this function's own (relocated) code range ends the call after the storing instruction:
         later instructions of the block, and regions validated earlier in this call, may have changed.  The next
         entry validates again.  Stores to data (the overwhelming majority) pay one range compare."""
         nxt = f'(a+0x{pc + 4 - self.block_start:x}u)'
-        return (f'if(__builtin_expect(({address}+15u-flo)<0x{self.flen + 15:x}u,0)){{'
-                f'{self.pending_stores()}block.executed=ex+{self.insn_index(pc) + 1};t.pc={nxt};return;}}')
+        hit = f'({address}+15u-flo)<0x{self.flen + 15:x}u'
+        leave = f'{self.pending_stores()}block.executed=ex+{self.insn_index(pc) + 1};t.pc={nxt};return;'
+        if provenance:
+            return (f'if(__builtin_expect(prov|({hit}),0)){{if(prov)spu_ls_forget(t,{address},16);if({hit}){{{leave}}}}}')
+        return f'if(__builtin_expect({hit},0)){{{leave}}}'
 
     def load(self, t, address):
         name = self.fresh()
@@ -241,8 +244,8 @@ class BlockValues(Values):
         name = self.fresh()
         pc = self.current
         self.emit(f'const unsigned a{name}={address};spu_vstp(ls+a{name},{value});')
-        self.emit(f'if(__builtin_expect(spu_provenance_on,0))spu_ls_forget(t,a{name},16);')
-        self.emit(self.self_store_exit(f'a{name}', pc))
+        # One unlikely branch for both rare conditions: provenance logging (diagnostic) and a store into the function's own range.
+        self.emit(self.self_store_exit(f'a{name}', pc, provenance=True))
 
 
 def _relocated(target):
@@ -309,7 +312,7 @@ def emit_function(name, code_name, lo, words, lift_parts, templates=True, insns=
              # end of the 256 KB LS is served by the exact slow tiers.
              f'const unsigned fb=(0x{lo:x}u+delta)&0x3ffffu;',
              f'if(__builtin_expect(fb+0x{flen:x}u>0x40000u,0)){{t.dynamic_miss=true;return;}}',
-             f'std::uint8_t* const fnls=ls+fb;const unsigned flo=fb;(void)fnls;(void)flo;'
+             f'std::uint8_t* const fnls=ls+fb;const unsigned flo=fb;const bool prov=spu_provenance_on;(void)fnls;(void)flo;(void)prov;'
              'unsigned ex=0,lim=spu_block_lim(t,block);std::uint64_t vm=0;(void)vm;']
     if used_dispatch:
         lines.append('spu_dispatch_local:')
