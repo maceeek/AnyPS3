@@ -156,7 +156,7 @@ TYPES = r'''
             auto& local=m.local_state();if(local.leases || local.raw)throw std::runtime_error("page ownership inside CPU/raw admission");
             // Only map owner may translate and pin new claims in this phase.
             if(!m.memory_owner() && !(m.renderer_owner() && (local.fault_claim || local.renderer_claim)))throw std::runtime_error("foreign page ownership requires map owner pin transaction");
-            memory=&m;broker=&m.page_broker;pages=PageBroker::keys(spans);token=broker->acquire(pages,m.renderer_owner() && (local.fault_claim || local.renderer_claim));
+            memory=&m;broker=&m.page_broker;GuestMemory::stat_gpu_claims.fetch_add(1,std::memory_order_relaxed);pages=PageBroker::keys(spans);token=broker->acquire(pages,m.renderer_owner() && (local.fault_claim || local.renderer_claim));
         }
         GpuPages(GpuPages&& o)noexcept:broker(o.broker),memory(o.memory),spans(std::move(o.spans)),pages(std::move(o.pages)),token(o.token),payload_owner(o.payload_owner){o.broker=nullptr;}
         GpuPages& operator=(GpuPages&& o)noexcept{if(this!=&o){reset();broker=o.broker;memory=o.memory;spans=std::move(o.spans);pages=std::move(o.pages);token=o.token;payload_owner=o.payload_owner;o.broker=nullptr;}return *this;}

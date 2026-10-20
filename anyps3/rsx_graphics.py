@@ -1271,9 +1271,12 @@ struct Session {
         const bool aliased=std::any_of(surfaces.begin(),surfaces.end(),[&](const Surface& old){for(const auto& span:surface.physical)if(old.overlaps(reinterpret_cast<const void*>(span.begin),span.end-span.begin))return true;return false;});
         if(!aliased)return false;
         auto reject=[](::RsxPerfCounters::Id id){::RsxPerfCounters::add(id);return false;};
-        if(!surface.protectable || !surface.exposed.empty() || !t.mapping)return reject(::RsxPerfCounters::merge_rej_new);
-        if(!discard){if(!plan || plan->words.empty() || t.bpp<4 || (t.offset&3) || (t.pitch&3) || plan->words.size()*4!=bytes)return reject(::RsxPerfCounters::merge_rej_new);
-            for(const auto& run:plan->runs)if((run.offset|run.size)&3)return reject(::RsxPerfCounters::merge_rej_new);}
+        // ANYPS3_RSX_MERGE_TRACE=1: why a new surface over live aliases cannot use the GPU merge (diagnostic).
+        auto trace_new=[&](const char* why){static const bool on=std::getenv("ANYPS3_RSX_MERGE_TRACE")!=nullptr;static unsigned lines=0;
+            if(on && lines++<60)std::fprintf(stderr,"RSX MERGE REJECT %s discard=%d protectable=%d exposed=%zu mapping=%d plan=%d plan_words=%zu bpp=%u offset=%u pitch=%u width=%u height=%u samples=%u format=%u depth=%d bytes=%llu\n",why,int(discard),int(surface.protectable),surface.exposed.size(),int(bool(t.mapping)),int(bool(plan)),plan?plan->words.size():size_t(0),unsigned(t.bpp),unsigned(t.offset),unsigned(t.pitch),surface.width,surface.height,surface.samples,surface.format,int(surface.depth),(unsigned long long)bytes);};
+        if(!surface.protectable || !surface.exposed.empty() || !t.mapping){trace_new("protection");return reject(::RsxPerfCounters::merge_rej_new);}
+        if(!discard){if(!plan || plan->words.empty() || t.bpp<4 || (t.offset&3) || (t.pitch&3) || plan->words.size()*4!=bytes){trace_new("plan_or_bpp_or_align");return reject(::RsxPerfCounters::merge_rej_new);}
+            for(const auto& run:plan->runs)if((run.offset|run.size)&3){trace_new("run_align");return reject(::RsxPerfCounters::merge_rej_new);}}
         std::vector<std::size_t> olds;std::uint64_t required=discard?0:bytes*4+65536;
         for(std::size_t i=0;i<surfaces.size();++i){const auto& old=surfaces[i];bool overlap=false;
             for(const auto& span:surface.physical)if(old.overlaps(reinterpret_cast<const void*>(span.begin),span.end-span.begin)){overlap=true;break;}
@@ -1540,11 +1543,11 @@ template<class Vertex> static bool prepared(Session& session,const std::vector<s
         unsigned width,unsigned height,unsigned x0,unsigned y0,unsigned x1,unsigned y1,bool point=false,const std::map<unsigned,LineGeometry>* lines=nullptr,const DeviceGeometry* device=nullptr,GeometryFallback materialize={}){
     GuestMemory::RawYield payload(session.state.memory);
     HostPhase phase(HostStage::geometry);
-    DrawAttempt attempt;auto textures=supplied_textures;auto colors=supplied_colors;
+    DrawAttempt attempt;auto colors=supplied_colors;
     auto& vk=session.vk;auto& state=session.state;const Reg r{state.rsx};
     if(lines && !vk.graphics_float64())return attempt.reject("device_line_fp64");
     if(r(0x220) && color_format(r(0x208)&31)==VK_FORMAT_UNDEFINED)return attempt.reject("color_format");
-    if(!supported(state.rsx,fp,textures))return attempt.reject("texture_layout");
+    if(!supported(state.rsx,fp,supplied_textures))return attempt.reject("texture_layout");
     const auto target=r(0x220);unsigned count=target==0?0:(target==1 || target==2)?1:target==0x13?2:target==0x17?3:target==0x1f?4:5;
     if(count>4)return attempt.reject("target_count");
     // The masks suppress every color store, including blend and logic ops.
@@ -1572,6 +1575,12 @@ template<class Vertex> static bool prepared(Session& session,const std::vector<s
     // model; a GPU snapshot must not silently change inter-primitive reads.
     // The compute alias rasterizer has no 0x1d7c coverage/alpha-to-one or null texture model.
     if(alias && r.get(0x1d7c,0xffff0000)!=0xffff0000)return attempt.reject("alias_multisample_control");
+    // The 16-texture array is copied only where this draw can edit it: the attachment-alias path (materialize /
+    // re-decode) and the gathered-RTT feedback snapshot. Every other draw reads the caller's array.
+    bool edit_textures=alias;
+    if(!edit_textures)for(const auto& texture:supplied_textures)if(texture.resident_image && texture.plan && texture.plan->gathered){edit_textures=true;break;}
+    std::optional<std::array<Texture,16>> owned_textures;if(edit_textures)owned_textures.emplace(supplied_textures);
+    const auto& textures=edit_textures?*owned_textures:supplied_textures;
     if(alias)for(const auto& texture:textures)if(texture.null_texture)return attempt.reject("alias_null_texture");
     for(const auto& texture:textures)if(texture.valid && !texture.untiled && !(texture.plan && texture.plan->gathered)){
         if(target_overlaps(depth,texture.storage,texture.storage_size,width*nx,height*ny))return attempt.reject("sequential_depth_texture_feedback");
@@ -1580,7 +1589,7 @@ template<class Vertex> static bool prepared(Session& session,const std::vector<s
     // Gathered CPU textures have a pre-draw snapshot contract. A tiled RTT
     // view of the active attachment needs the same snapshot on the GPU; an
     // image must never be sampled while this draw writes that very image.
-    for(auto& texture:textures)if(texture.resident_image && texture.plan && texture.plan->gathered){
+    if(edit_textures)for(auto& texture:*owned_textures)if(texture.resident_image && texture.plan && texture.plan->gathered){
         bool feedback=false;
         for(const auto& surface:session.surfaces)if(surface.image==texture.resident_image){
             for(unsigned i=0;i<count;++i)if(colors[i].base && surface.same(colors[i],width,height,samples,r(0x208)&31,false))feedback=true;
@@ -1591,7 +1600,24 @@ template<class Vertex> static bool prepared(Session& session,const std::vector<s
     }
     if(device && alias){materialize();device=nullptr;}
     IndexBounds bounds(indices,device);
-    std::array<std::optional<GuestMemory::Range>,16> vertex_inputs;
+    // Vertex attributes frequently interleave one buffer: attributes whose spans overlap or touch
+    // share one guest Range (one lease/claim, one copy) and index into it by byte offset.
+    struct VertexExtent {bool used=false;unsigned group=0;std::uint64_t address=0,span=0;};
+    struct VertexGroup {std::uint64_t address=0,span=0;};
+    std::array<VertexExtent,16> vertex_extent{};std::array<VertexGroup,16> vertex_groups{};unsigned vertex_group_count=0;bool vertex_grouped=false;
+    std::array<std::optional<GuestMemory::Range>,16> vertex_inputs;  // per group
+    auto build_vertex_groups=[&]{
+        std::array<unsigned,16> order{};unsigned n=0;
+        for(unsigned a=0;a<16;++a)if(vertex_extent[a].used)order[n++]=a;
+        std::sort(order.begin(),order.begin()+n,[&](unsigned x,unsigned y){return vertex_extent[x].address<vertex_extent[y].address || (vertex_extent[x].address==vertex_extent[y].address && x<y);});
+        vertex_group_count=0;
+        for(unsigned i=0;i<n;++i){auto& e=vertex_extent[order[i]];
+            if(vertex_group_count){auto& g=vertex_groups[vertex_group_count-1];const auto end=std::max(g.address+g.span,e.address+e.span);
+                if(e.address<=g.address+g.span && end-g.address<=UINT_MAX){g.span=end-g.address;e.group=vertex_group_count-1;continue;}}
+            vertex_groups[vertex_group_count]={e.address,e.span};e.group=vertex_group_count++;}
+        for(unsigned g=0;g<vertex_group_count;++g)vertex_inputs[g].emplace(state.memory.range_translated(vertex_groups[g].address,vertex_groups[g].span));
+        vertex_grouped=true;
+    };
     session.vertex_program.refresh(state.rsx);
     // Vertex fetches may depend on earlier primitives in this same draw.
     // Preparing all vertices up front is safe only for immutable input spans;
@@ -1609,7 +1635,8 @@ template<class Vertex> static bool prepared(Session& session,const std::vector<s
         };
         const auto saved=state.memory.last_region;
         bool safe=true;
-        try{for(unsigned a=0;a<16 && safe;++a)if(r(0x1ff0)&(1u<<a)){
+        try{
+        for(unsigned a=0;a<16 && safe;++a)if(r(0x1ff0)&(1u<<a)){
             const auto format=r(0x1740+4*a);const unsigned type=format&15,size=(format>>4)&15,stride=(format>>8)&255;
             if(!size)continue;
             if(size>4){safe=false;break;}
@@ -1620,15 +1647,16 @@ template<class Vertex> static bool prepared(Session& session,const std::vector<s
             const auto at=std::uint64_t(offset&0x7fffffff)+r(0x1738)+std::uint64_t(stride)*first;
             const auto span=std::uint64_t(stride)*(last-first)+bytes;
             if(at+span>UINT64_C(0x100000000) || span>UINT_MAX){safe=false;break;}
-            const auto address=location_address(state.rsx,offset>>31,at,span);
-            auto& input=vertex_inputs[a].emplace(state.memory.range(address,span,false));
-            for(const auto& part:input.parts)if(aliases(part.data,part.size)){safe=false;break;}
-        }}catch(const std::exception&){safe=false;}
+            vertex_extent[a]={true,0,location_address(state.rsx,offset>>31,at,span),span};
+        }
+        if(safe){build_vertex_groups();
+            for(unsigned g=0;g<vertex_group_count && safe;++g)for(const auto& part:vertex_inputs[g]->parts)if(aliases(part.data,part.size)){safe=false;break;}}
+        }catch(const std::exception&){safe=false;}
         state.memory.last_region=saved;if(!safe)return attempt.reject("sequential_vertex_feedback_or_unmapped_input");
     }
     if(alias && session.conditional && session.resolve_conditional())return true;
-    if(alias){for(auto& t:textures)materialize_texture(state,t);colors=supplied_colors;session.flush(true,nullptr,0,"attachment_alias");session.clear_surfaces();session.allow_resident_textures=false;
-        try{for(unsigned unit=0;unit<16;++unit)if(textures[unit].resident_image)textures[unit]=decode_texture(state,r,unit);}
+    if(alias){for(auto& t:*owned_textures)materialize_texture(state,t);colors=supplied_colors;session.flush(true,nullptr,0,"attachment_alias");session.clear_surfaces();session.allow_resident_textures=false;
+        try{for(unsigned unit=0;unit<16;++unit)if((*owned_textures)[unit].resident_image)(*owned_textures)[unit]=decode_texture(state,r,unit);}
         catch(...){session.allow_resident_textures=true;throw;}session.allow_resident_textures=true;}
     const bool packed=packed_color(r),srgb=!packed && r(0x1fec);
     NativeVulkan::GraphicsState fixed;fixed.width=width;fixed.height=height;fixed.samples=samples;fixed.colors=count;fixed.color=packed?VK_FORMAT_R32_UINT:color_format(r(0x208)&31,srgb);
@@ -1707,7 +1735,7 @@ template<class Vertex> static bool prepared(Session& session,const std::vector<s
     if(device && !direct){materialize();device=nullptr;bounds.device=nullptr;}
     bool raw_vertex=!alias && !point && !lines && bool(hw_vertex) && r.get(0x368,0x1d01)!=0x1d00;
     std::vector<unsigned> line_data;
-    std::uint64_t tail_bytes=0;unsigned tail_attributes=0;std::array<unsigned,16> tail_rel{};
+    std::uint64_t tail_bytes=0;unsigned tail_attributes=0;std::array<unsigned,16> tail_rel{},group_rel{};std::array<bool,16> group_added{};
     struct TailPad {std::uint64_t at,n;};std::array<TailPad,16> tail_pads{};unsigned tail_pad_count=0;DrawReadBatch input_reads;
     std::vector<std::array<unsigned,3>> accepted;
     unsigned vertices=0;
@@ -1761,6 +1789,20 @@ template<class Vertex> static bool prepared(Session& session,const std::vector<s
             vertices=indices.size()*3;data[15]=1;}
         data[12]=data.size();const unsigned desc=data.size();data.resize(desc+16*8);
         std::uint64_t tail_used=0;
+        if(!vertex_grouped && vertices){
+            for(unsigned a=0;a<16;++a){const unsigned f=(r(0x1ff0)&(1u<<a))?r(0x1740+4*a):0;
+                const unsigned type=f&15,n=(f>>4)&15,stride=(f>>8)&255,frequency=f>>16;
+                if(!n)continue;
+                if(n>4 || type==0 || type>7)throw std::runtime_error("unsupported RSX vertex attribute type/size");
+                const auto interval=bounds.get(frequency,(r(0x1fc0)&(1u<<a))!=0);
+                const unsigned width=type==2?4:(type==1 || type==3 || type==5)?2:1,bytes=type==6?4:width*n,offset=r(0x1680+4*a);
+                const auto at=std::uint64_t(offset&0x7fffffff)+r(0x1738)+std::uint64_t(stride)*interval.first;
+                const auto span=std::uint64_t(stride)*(interval.second-interval.first)+bytes;
+                if(at>UINT_MAX || span>UINT_MAX || at+span>UINT64_C(0x100000000))throw std::runtime_error("RSX vertex address overflow");
+                vertex_extent[a]={true,0,location_address(state.rsx,offset>>31,at,span),span};
+            }
+            build_vertex_groups();
+        }
         for(unsigned a=0;a<16;++a){const unsigned d=desc+a*8,f=(r(0x1ff0)&(1u<<a))?r(0x1740+4*a):0;
             const unsigned type=f&15,n=(f>>4)&15,stride=(f>>8)&255,frequency=f>>16;
             data[d]=f;
@@ -1775,17 +1817,20 @@ template<class Vertex> static bool prepared(Session& session,const std::vector<s
             const auto at=std::uint64_t(offset&0x7fffffff)+r(0x1738)+std::uint64_t(stride)*first;
             const auto span=std::uint64_t(stride)*(last-first)+bytes;
             if(at>UINT_MAX || span>UINT_MAX || at+span>UINT64_C(0x100000000))throw std::runtime_error("RSX vertex address overflow");
-            if(!vertex_inputs[a])vertex_inputs[a].emplace(state.memory.range(location_address(state.rsx,offset>>31,at,span),span,false));
-            const auto& input=*vertex_inputs[a];
+            const auto& extent=vertex_extent[a];
+            if(!extent.used || extent.span!=span || extent.address!=location_address(state.rsx,offset>>31,at,span))throw std::runtime_error("RSX vertex input extent changed during draw preparation");
+            const auto& group=vertex_groups[extent.group];
             // Bytes go to the persistent tail scratch, word padded with zeros;
             // data[d+1] is rebased onto the final word count before upload.
             // Vertex bytes become one immutable staging slice addressed with
             // absolute device-buffer byte offsets (data[d+1]), word padded
             // with zeros, read directly into staging right before recording.
-            data[d+1]=0;data[d+2]=first;data[d+3]=stride;tail_attributes|=1u<<a;tail_rel[a]=unsigned(tail_used);
-            const auto padded=(span+3)&~std::uint64_t(3);
-            if(padded>span)tail_pads[tail_pad_count++]={tail_used+span,padded-span};
-            input_reads.add(input,tail_used);tail_used+=padded;::RsxPerfCounters::add(::RsxPerfCounters::vertex_bytes,span);
+            data[d+1]=0;data[d+2]=first;data[d+3]=stride;tail_attributes|=1u<<a;
+            if(!group_added[extent.group]){group_added[extent.group]=true;group_rel[extent.group]=unsigned(tail_used);
+                const auto padded=(group.span+3)&~std::uint64_t(3);
+                if(padded>group.span)tail_pads[tail_pad_count++]={tail_used+group.span,padded-group.span};
+                input_reads.add(*vertex_inputs[extent.group],tail_used);tail_used+=padded;::RsxPerfCounters::add(::RsxPerfCounters::vertex_bytes,group.span);}
+            tail_rel[a]=group_rel[extent.group]+unsigned(extent.address-group.address);
         }
         if(r(0x183c)&1){const auto face=r.get(0x1830,0x405);fixed.raster.cullMode=face==0x408?VK_CULL_MODE_FRONT_AND_BACK:face==0x404?VK_CULL_MODE_FRONT_BIT:VK_CULL_MODE_BACK_BIT;}
 
