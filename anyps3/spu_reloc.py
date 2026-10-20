@@ -58,14 +58,14 @@ public:
             std::vector<std::uint64_t> rows;for(const auto& x:*table)if(const auto v=x.load(std::memory_order_relaxed))rows.push_back(v);
             std::sort(rows.begin(),rows.end(),[](auto a,auto b){return (a&0xffffffffu)>(b&0xffffffffu);});
             std::fprintf(stderr,"PERF SPU_NATIVE_ENTRIES id=%x",t.id);
-            for(std::size_t i=0;i<rows.size() && i<16;++i)std::fprintf(stderr," %05x:%u",unsigned((rows[i]>>32)-1),unsigned(rows[i]&0xffffffffu));
+            for(std::size_t i=0;i<rows.size() && i<24;++i)std::fprintf(stderr," %05x:%u",unsigned((rows[i]>>32)-1),unsigned(rows[i]&0xffffffffu));
             std::fputc('\n',stderr);
         }
         if(const auto table=t.interp_entries){
             std::vector<std::uint64_t> rows;for(const auto& x:*table)if(const auto v=x.load(std::memory_order_relaxed))rows.push_back(v);
             std::sort(rows.begin(),rows.end(),[](auto a,auto b){return (a&0xffffffffu)>(b&0xffffffffu);});
             std::fprintf(stderr,"PERF SPU_INTERP_ENTRIES id=%x",t.id);
-            for(std::size_t i=0;i<rows.size() && i<12;++i)std::fprintf(stderr," %05x:%u",unsigned((rows[i]>>32)-1),unsigned(rows[i]&0xffffffffu));
+            for(std::size_t i=0;i<rows.size() && i<40;++i)std::fprintf(stderr," %05x:%u",unsigned((rows[i]>>32)-1),unsigned(rows[i]&0xffffffffu));
             std::fputc('\n',stderr);
         }
     }

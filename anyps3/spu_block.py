@@ -263,7 +263,8 @@ def source_leaders(insns):
             leaders.add(x.pc + 4)
         if x.kind == 'effect':
             leaders.add(x.pc)
-        if x.kind in ('br', 'bra', 'ind') and i + 1 < len(insns) and insns[i + 1].op in (1, 0x201):
+        if (x.kind in ('br', 'bra', 'ind') or (x.kind == 'effect' and x.op in (0, 0x140))) and i + 1 < len(insns) \
+                and insns[i + 1].op in (1, 0x201):
             j = i + 1
             while j < len(insns) and insns[j].op in (1, 0x201):
                 j += 1
@@ -274,6 +275,12 @@ def source_leaders(insns):
 
 def direct_targets(insns):
     return {x.target for x in insns if x.kind in ('br', 'brc', 'bra')}
+
+
+def address_taken(insns):
+    """Code addresses loaded as 18-bit constants (ILA): function pointers, jump-table bases, callback entries.  Reached by
+    computed branches, they would otherwise be entered in the interpreter until the next leader."""
+    return {v for v in ((x.word >> 7) & 0x3ffff for x in insns if x.word >> 25 == 0x21) if not v & 3}
 
 
 def emit_function(name, code_name, lo, words, lift_parts, templates=True, insns=None, extra_leaders=()):
@@ -460,8 +467,12 @@ def generate_blocks(images, overlays, lift_parts):
         # ~200 kernel/module variants a leader of every other variant: 2.1 instructions per block instead of 6.9, i.e.
         # a register flush/reload and a validation guard every other instruction; bench/spufast3_leaders.py.)
         foreign |= {x for x in targets if not base <= x < base + len(payload)}
+    # Entry points of the images themselves (SPURS kernel restart address, ELF entry).
+    entries = {image.entry & 0x3fffc for image in images}
     for (base, payload, insns), targets in zip(sources, own_targets):
-        leaders = source_leaders(insns) | targets | {x for x in foreign if base <= x < base + len(payload)}
+        inside = lambda x: base <= x < base + len(payload)
+        leaders = (source_leaders(insns) | targets | {x for x in foreign if inside(x)}
+                   | {x for x in address_taken(insns) if inside(x)} | {x for x in entries if inside(x)})
         for at in range(0, len(payload), 4 * MAX_FUNCTION):
             data = payload[at:at + 4 * MAX_FUNCTION]
             key = (base + at, data)

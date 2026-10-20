@@ -55,6 +55,26 @@ class SpuLeaderTests(unittest.TestCase):
         functions, _ = generate_blocks([image(a_words), image(wd)], ((), ()), lift_parts)
         self.assertIn(0x2008, starts(functions, 0x2000), 'a branch from another source into this range is an entry point')
 
+    def test_address_taken_entries_stop_padding_and_image_entry_are_leaders(self):
+        def code(a):
+            a.ila(7, 0x140)                      # 0x100: function pointer to 0x140 (no direct branch targets it)
+            for _ in range(3):
+                a.ai(3, 3, 1)                    # 0x104..0x10c
+            a.stop(0x2104)                       # 0x110: STOP
+            a.emit(0x40200000)                   # 0x114: nop (alignment padding)
+            for k in range(26):                  # 0x118: first instruction after STOP + padding ... 0x17c
+                a.ai(4, 4, k + 1)
+        w = words(0x100, code)
+        img = image(w)
+        img = img.__class__(*[getattr(img, f) if f != 'entry' else 0x130 for f in img.__dataclass_fields__])
+        self.assertEqual(img.entry, 0x130)
+        functions, _ = generate_blocks([img], ((),), lift_parts)
+        got = starts(functions, 0x100)
+        self.assertIn(0x118, got)                # first instruction after STOP and alignment padding
+        self.assertIn(0x130, got)                # image entry
+        self.assertIn(0x140, got)                # ILA address
+        self.assertNotIn(0x150, got)             # an ordinary instruction inside straight-line code
+
 
 if __name__ == '__main__':
     unittest.main()

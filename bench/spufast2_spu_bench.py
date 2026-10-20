@@ -88,7 +88,7 @@ def kernels():
 
 def main():
     ap = argparse.ArgumentParser(); ap.add_argument('--march', default='native'); ap.add_argument('--instr', type=int, default=4000000)
-    ap.add_argument('--keep', default=''); a = ap.parse_args()
+    ap.add_argument('--keep', default=''); ap.add_argument('--extra', default='', help='extra compiler flags, e.g. "-fno-tree-loop-im"'); a = ap.parse_args()
     import os; env = dict(os.environ, ANYPS3_SPU_MAX_STEPS='100000000000')
     words = kernels()
     img = image(words)
@@ -123,7 +123,7 @@ int main(){
     with tempfile.TemporaryDirectory() as d:
         p = Path(a.keep or d); p.mkdir(exist_ok=True)
         (p / 'b.cpp').write_text(source)
-        flags = ['-O2', '-march=native'] if a.march == 'native' else ['-O2']
+        flags = (['-O2', '-march=native'] if a.march == 'native' else ['-O2']) + a.extra.split()
         build = subprocess.run(['c++', '-std=c++17', *flags, '-ffp-contract=off', '-pthread', str(p / 'b.cpp'), '-o', str(p / 'b')], capture_output=True, text=True)
         if build.returncode: print(build.stderr[-3000:]); sys.exit(1)
         run = subprocess.run([str(p / 'b')], capture_output=True, text=True, timeout=600, env=env)

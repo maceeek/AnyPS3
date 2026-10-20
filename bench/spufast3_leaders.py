@@ -68,3 +68,23 @@ for base, payload, insns, sl, dt in S:
     if cur: term['tail'] += 1; size['tail'] += cur
 tot = sum(term.values())
 print('block terminators (new policy):', ', '.join(f'{k} {v} ({100*v/tot:.0f}%, avg {size[k]/v:.1f})' for k, v in term.most_common()))
+
+# Address-taken code: ILA immediates (function pointers / computed-branch targets) that fall inside the source's own range.
+extra = 0; newb = 0; hit = collections.Counter()
+for base, payload, insns, sl, dt in S:
+    hi = base + len(payload)
+    leaders = {p for p in sl | dt if base <= p < hi} | {base} | {p for b2, pl2, _, _, dt2 in S for p in dt2 if base <= p < hi and not (b2 <= p < b2 + len(pl2))}
+    ila = set()
+    for x in insns:
+        if x.word >> 25 == 0x21 >> 1 and (x.word >> 24) == 0x21 or (x.word >> 25) == 0x10 and False:
+            pass
+    for x in insns:
+        if (x.word >> 25) == 0x21:        # ILA: 0x21 << 7 (7-bit opcode 0100001)
+            v = (x.word >> 7) & 0x3ffff
+            if base <= v < hi and v % 4 == 0: ila.add(v)
+    fresh = ila - leaders
+    extra += len(fresh)
+    for v in fresh: hit[v] += 1
+print(f'ILA code-address immediates inside their own source that are not leaders: {extra}')
+for want in (0x4980, 0x54a0, 0x5690, 0x120, 0x28ecc):
+    print(hex(want), 'is such an ILA target in', hit.get(want, 0), 'sources')
