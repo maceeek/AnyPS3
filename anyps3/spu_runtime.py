@@ -111,6 +111,8 @@ struct NativeSpu {
         struct DynamicSeen {bool valid=false;std::string mode;std::array<std::uint8_t,64> bytes{};std::vector<DmaWrite> origins;};
         std::unordered_map<unsigned,DynamicSeen> dynamic_seen;
         std::uint64_t control_generation=0;
+        // SPUPUT: the pool lane (NativeSpuWorker*) executing this context; published with release before that lane launches.
+        void* pool_lane=nullptr;
         std::array<std::uint32_t,5> dma{};std::uint32_t tag_mask=0,tag_status=0;
         // MFC list stall-and-notify (CBEA v1.02 9.1.4; RPCS3 ffba2bf0 SPUThread.cpp do_list_transfer): the rest of a
         // stalled list per tag, stall mask/status (channel 25) and a pending ANY/ALL tag update (mode 1/2).

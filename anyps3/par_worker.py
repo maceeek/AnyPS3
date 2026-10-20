@@ -52,6 +52,9 @@ struct NativeSpuWorker {
     std::uint64_t observed_completed=0;
     std::atomic<std::uint64_t> pool_completed{0};
     bool enabled=false,active=false,last_progress=false;
+    unsigned owner_rpc_depth=0; // guarded by mutex: owner_call frames in flight (see owner_call)
+    // SPUPUT: peer-LS GETs served without an owner RPC / fallen back to it (PERF SPU_PEER_LS).
+    inline static std::atomic<std::uint64_t> peer_direct_reads{0},peer_direct_fallbacks{0};
     bool pool_mode=false,refreshing=false;NativeSpuWorker* parent=nullptr;
     std::uint32_t group_id=0,lane_thread_id=0;
     std::atomic<bool> scheduled{true};
@@ -73,6 +76,7 @@ struct NativeSpuWorker {
                 (unsigned long long)(m.pause_ns-old.pause_ns),(unsigned long long)(m.service_ns-old.service_ns));old=m;}
         rpc_report_at=now;coordinator_clock.report("spu_coordinator");
         std::fprintf(stderr,"PERF SPU_REFRESH total=%llu\n",(unsigned long long)refresh_count);
+        std::fprintf(stderr,"PERF SPU_PEER_LS direct=%llu fallback=%llu\n",(unsigned long long)peer_direct_reads.load(std::memory_order_relaxed),(unsigned long long)peer_direct_fallbacks.load(std::memory_order_relaxed));
     }
     struct OwnerRequest {bool refresh_needed=true,typed=false;std::function<void()> invoke;std::function<void(std::exception_ptr)> failed;bool done=false;std::exception_ptr error;std::condition_variable ready;};
     std::deque<std::shared_ptr<OwnerRequest>> owner_requests;
@@ -97,15 +101,18 @@ struct NativeSpuWorker {
         // Publish the request before acknowledging a safe point. Otherwise
         // group destruction could observe !active, miss the not-yet-enqueued
         // command, and join a worker waiting for an owner that already left.
+        // SPUPUT: while this lane waits here it is inactive but NOT at an instruction boundary (the owner may still write its LS for
+        // this very request), so peer lanes must not read its LS directly (spu_peer_ls_read_direct checks owner_rpc_depth).
+        struct RpcDepth {NativeSpuWorker& lane;bool armed=false;~RpcDepth(){if(armed){std::lock_guard<std::mutex> lock(lane.mutex);--lane.owner_rpc_depth;}}} rpc_depth{*this};
         std::unique_lock<std::mutex> execution_lock(mutex);
         if(stop)throw SpuControlEnd{};
         const auto context_generation=context?context->control_generation:0;
         std::unique_lock<std::mutex> queue_lock(parent->mutex);
         parent->owner_requests.push_back(request);parent->owner_pending.fetch_add(1,std::memory_order_release);parent->attention.store(true,std::memory_order_release);++parent->generation;parent->changed.notify_all();
-        active=false;++generation;changed.notify_all();signal_coordinator();execution_lock.unlock();
+        ++owner_rpc_depth;rpc_depth.armed=true;active=false;++generation;changed.notify_all();signal_coordinator();execution_lock.unlock();
         request->ready.wait(queue_lock,[&]{return request->done || parent->stop;});
         const auto e=request->error;const bool done=request->done;queue_lock.unlock();
-        {std::unique_lock<std::mutex> lock(mutex);changed.wait(lock,[&]{return stop || !pauses;});if(!stop)active=true;}
+        {std::unique_lock<std::mutex> lock(mutex);changed.wait(lock,[&]{return stop || !pauses;});if(!stop)active=true;--owner_rpc_depth;rpc_depth.armed=false;}
         // A parked RPC frame is a state handoff, not an instruction boundary.
         // A restarted/destroyed context must unwind before its old AOT suffix
         // can overwrite the new PC/registers or retire the old block prefix.
@@ -439,6 +446,7 @@ static void spu_pool_refresh(PpuState& s){
         for(unsigned i=0;i<g.threads.size();++i){auto& t=g.threads[i];
             if(std::any_of(w.lanes.begin(),w.lanes.end(),[&](const auto& lane){return lane->lane_thread_id==t.id;}))continue;
             auto lane=std::make_unique<NativeSpuWorker>();lane->parent=&w;lane->group_id=g.id;lane->guest_thread=t.id;lane->lane_thread_id=t.id;lane->scheduled=g.scheduled;lane->pauses=w.pauses;lane->budget=NativeSpuWorker::lane_budget(w.pool_budget);lane->context=&t;lane->group=&g;
+            __atomic_store_n(&t.pool_lane,static_cast<void*>(lane.get()),__ATOMIC_RELEASE);
             auto facade=std::make_shared<PpuState>(s.process);auto* group=&g;
             lane->step=[facade,group,i](unsigned budget){try{const auto progress=spu_run_thread(*facade,*group,i,budget);if(group->state!=6 || !NativeSpuWorker::current->scheduled.load())facade->memory.release_reader_slot();return progress;}catch(const SpuControlEnd&){return false;}catch(...){auto& t=group->threads[i];NativeSpuWorker::current->failed_context(t.pc,t.id);throw;}};
             auto* wake_lane=lane.get();t.in_mailbox.set_wakeup([wake_lane]{wake_lane->wake();});for(auto& snr:t.snr)snr.set_wakeup([wake_lane]{wake_lane->wake();});
