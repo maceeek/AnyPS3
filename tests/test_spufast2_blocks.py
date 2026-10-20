@@ -53,6 +53,19 @@ class SpuFast2BlockTests(unittest.TestCase):
  assert(spu_word(t.gpr[6],0)==9);
 ''')
 
+    def test_short_block_is_entered_natively_when_the_bytes_after_it_differ(self):
+        # AI, AI, BR -8 form a 12-byte block; the translated source has a 4th word that the LS does not (overlay boundary).
+        # The dispatcher must still enter the native function: it validates exactly the bytes of the block it executes.
+        words = {0x100: 0x1c004183, 0x104: 0x1c004183, 0x108: 0x327fff00, 0x10c: 0x1c004185}
+        self.native(words, r'''
+ const std::uint32_t other=0x1c004186;
+ for(unsigned i=0;i<4;++i)ls[0x10c+i]=other>>(24-8*i);
+ t.pc=0x100;t.steps=0;t.interpreted_instructions=0;
+ assert(spu_run(s,300) && t.steps>=300);
+ assert(t.interpreted_instructions.value.load()==0);
+ assert(spu_word(t.gpr[3],0)>=190 && spu_word(t.gpr[3],0)<=2*(t.steps/3+1));
+''')
+
 
 if __name__ == '__main__':
     unittest.main()

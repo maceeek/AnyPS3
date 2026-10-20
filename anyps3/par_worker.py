@@ -145,10 +145,9 @@ struct NativeSpuWorker {
     // ANYPS3_SPU_STATS: wake latency = time from a wake() that finds the lane asleep to the moment its wait returns
     // (stats[25] = summed microseconds, stats[27] = count, per lane thread; see spu_dynamic_perf_report).
     std::atomic<bool> sleeping{false};std::atomic<std::uint64_t> wake_stamp_ns{0};
-    static bool stats_enabled(){static const bool v=[]{const char* e=std::getenv("ANYPS3_SPU_STATS");return e && e[0]=='1' && !e[1];}();return v;}
     static std::uint64_t mono_ns(){return std::uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());}
     void note_wake_latency(){
-        if(!stats_enabled() || !context)return;
+        if(!spu_stats_on || !context)return;
         const auto stamp=wake_stamp_ns.exchange(0,std::memory_order_acq_rel);
         if(!stamp)return;
         const auto now=mono_ns();if(now<=stamp)return;
@@ -211,7 +210,7 @@ struct NativeSpuWorker {
                     lock.lock();worker_ns+=ns;last_progress=progress;++completed;if(parent && progress)parent->pool_completed.fetch_add(1,std::memory_order_relaxed);++generation;active=false;if(pauses)changed.notify_all();signal_coordinator();
                     if(!progress && !tickets && !pauses){
                         const auto ready=[&]{return stop || pauses || tickets || wake_generation!=observed_wake;};
-                        if(stats_enabled()){wake_stamp_ns.store(0,std::memory_order_relaxed);sleeping.store(true,std::memory_order_release);}
+                        if(spu_stats_on){wake_stamp_ns.store(0,std::memory_order_relaxed);sleeping.store(true,std::memory_order_release);}
                         if(event_driven){
                             if(const auto spin=park_spin_ns()){
                                 const auto seen=generation.load(std::memory_order_relaxed);
@@ -228,13 +227,13 @@ struct NativeSpuWorker {
                             if(wait_deadline==std::chrono::steady_clock::time_point::max())changed.wait(lock,ready);
                             else changed.wait_until(lock,wait_deadline,ready);
                         }else changed.wait_for(lock,std::chrono::milliseconds(1),ready);
-                        if(stats_enabled()){sleeping.store(false,std::memory_order_release);note_wake_latency();}
+                        if(spu_stats_on){sleeping.store(false,std::memory_order_release);note_wake_latency();}
                     }
                 }
             }catch(...){if(!lock.owns_lock())lock.lock();if(!error)error=std::current_exception();failed.store(true,std::memory_order_release);if(parent){parent->failed.store(true,std::memory_order_release);parent->attention.store(true,std::memory_order_release);}if(failure)failure(error,guest_pc,guest_thread);stop=true;active=false;tickets=0;++generation;changed.notify_all();signal_coordinator();}
         });
     }
-    void wake(){if(stats_enabled() && sleeping.load(std::memory_order_acquire)){std::uint64_t zero=0;wake_stamp_ns.compare_exchange_strong(zero,mono_ns());}
+    void wake(){if(spu_stats_on && sleeping.load(std::memory_order_acquire)){std::uint64_t zero=0;wake_stamp_ns.compare_exchange_strong(zero,mono_ns());}
         std::lock_guard<std::mutex> lock(mutex);++wake_generation;++generation;changed.notify_all();signal_coordinator();}
     void wake_coordinator(){attention.store(true,std::memory_order_release);wake();if(auto* lane=current;lane && lane!=this)lane->wake();}
     void pause(){

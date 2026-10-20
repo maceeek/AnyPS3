@@ -352,7 +352,6 @@ inline thread_local SpuProfile spu_profile;
 // Process-wide copies of the diagnostic switches: hot paths test a plain global,
 // never the dynamically initialized TLS profile (TLS wrapper call per access).
 inline bool spu_profile_on=[](){const char* v=std::getenv("ANYPS3_SPU_PROFILE");return v && v[0]=='1' && !v[1];}();
-inline const bool spu_stats_on=[](){const char* v=std::getenv("ANYPS3_SPU_STATS");return v && v[0]=='1' && !v[1];}();
 template<class T> [[gnu::always_inline]] static inline void spu_stat(T& t,unsigned i){
     if(__builtin_expect(spu_stats_on,0)){auto& c=t.stats[i].value;c.store(c.load(std::memory_order_relaxed)+1,std::memory_order_relaxed);}
 }

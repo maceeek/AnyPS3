@@ -596,10 +596,11 @@ static SpuNativeResult spu_native_call(PpuState& s,NativeSpu::Thread& t,std::uin
     return SpuNativeResult::Progress;
 }
 static bool spu_native_candidates(PpuState& s,NativeSpu::Thread& t,std::uint8_t* ls,NativeSpu::Thread::DispatchEntry& slot,std::uint32_t pc,std::uint32_t original){
-    const auto delta=(pc-original)&0x3fffc;
+    const auto word=spu_load_word(ls+pc);const auto delta=(pc-original)&0x3fffc;
     for(const auto* r:spu_native_pages()[original>>12]){
-        // Up to four instructions must match before a function is entered: the first word alone is shared by many images.
-        if(original<r->lo || original>=r->hi || std::memcmp(ls+pc,r->code+(original-r->lo),std::min({16u,r->hi-original,0x40000u-pc})))continue;
+        // Only the first word is a pre-filter: the block at pc may be shorter than any wider window, and the bytes after it
+        // can legitimately differ from the translated source (the function validates exactly the bytes it executes).
+        if(original<r->lo || original>=r->hi || spu_load_word(r->code+(original-r->lo))!=word)continue;
         slot={pc,delta,r->fn};spu_stat(t,21);
         const auto result=spu_native_call(s,t,ls,r->fn,delta);
         if(result==SpuNativeResult::Miss){spu_stat(t,22);slot.pc=UINT32_MAX;continue;}
