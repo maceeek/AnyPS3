@@ -8,6 +8,8 @@ from .par_pages import TYPES as PAGE_BROKER_TYPES
 from .par_wait import TYPES as RESERVATION_WAIT_TYPES
 
 TYPES = RESERVATION_WAIT_TYPES + r'''
+    // Diagnostic event counters (PERF GUEST_MEMORY); relaxed, any thread.
+    inline static std::atomic<std::uint64_t> stat_membarriers{0},stat_slow_leases{0},stat_gpu_claims{0};
     struct ParallelMemory {
         struct Request {
             HostAccessOrigin origin=HostAccessContext::sample();bool byte_access=HostByteAccess::active();
@@ -162,8 +164,8 @@ TYPES = RESERVATION_WAIT_TYPES + r'''
     }
     void asymmetric_barrier(){
 #if defined(__linux__) && defined(SYS_membarrier) && defined(__x86_64__)
-        if(parallel->asymmetric && syscall(SYS_membarrier,MEMBARRIER_CMD_PRIVATE_EXPEDITED,0,0))
-            throw std::runtime_error("guest memory membarrier failed");
+        if(parallel->asymmetric){stat_membarriers.fetch_add(1,std::memory_order_relaxed);if(syscall(SYS_membarrier,MEMBARRIER_CMD_PRIVATE_EXPEDITED,0,0))
+            throw std::runtime_error("guest memory membarrier failed");}
 #endif
     }
     // Raw owners exclude guest-memory readers; private SPU execution may
@@ -572,7 +574,7 @@ TYPES = RESERVATION_WAIT_TYPES + r'''
         // Keep the serial guard independent of the growing page/coherence
         // protocol. Otherwise whole-TU inlining can tax every serial load.
         [[gnu::noinline]] void enter(std::uint64_t address,unsigned size,bool write,bool split){
-            auto& m=memory;auto& local=m.local_state();
+            auto& m=memory;auto& local=m.local_state();stat_slow_leases.fetch_add(1,std::memory_order_relaxed);
             if(local.raw){
                 // Legacy HLE still uses load/store/Range/DMA byte APIs inside
                 // its raw scope. The old global barrier made these coherent
