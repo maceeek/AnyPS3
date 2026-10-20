@@ -233,8 +233,9 @@ class BlockValues(Values):
     def self_store_exit(self, address, pc, provenance=False):
         """A store overlapping this function's own (relocated) code range ends the call after the storing instruction:
         later instructions of the block, and regions validated earlier in this call, may have changed.  The next
-        entry validates again.  Stores to data (the overwhelming majority) pay one range compare."""
-        nxt = f'(a+0x{pc + 4 - self.block_start:x}u)'
+        entry validates again.  Stores to data (the overwhelming majority) pay one range compare.  The next pc wraps at
+        the end of local storage like the interpreter (a store at 0x3fffc continues at 0)."""
+        nxt = f'((a+0x{pc + 4 - self.block_start:x}u)&0x3fffcu)'
         hit = f'((({address}+15u-flo)&0x3ffffu)<0x{self.flen + 15:x}u)'
         leave = f'{self.pending_stores()}block.executed=ex+{self.insn_index(pc) + 1};t.pc={nxt};return;'
         if provenance:
