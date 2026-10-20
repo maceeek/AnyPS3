@@ -83,7 +83,7 @@ static std::function<void()>& rsx_owner_hook(){static thread_local std::function
 [[maybe_unused]] static inline void rsx_owner_poll(){
     if(__builtin_expect(rsx_host_waiters.load(std::memory_order_relaxed)!=0,0)){auto& hook=rsx_owner_hook();if(hook)hook();}
 }
-static bool rsx_flip_early_enabled(){static const bool on=[]{const char* v=std::getenv("ANYPS3_RSX_FLIP_EARLY");return !v || std::string(v)!="0";}();return on;}
+[[maybe_unused]] static bool rsx_flip_early_enabled(){static const bool on=[]{const char* v=std::getenv("ANYPS3_RSX_FLIP_EARLY");return !v || std::string(v)!="0";}();return on;}
 ''' + CAPTURE_CPP + SURFACE_CPP + DISPLAY_CPP + r'''
 [[maybe_unused]] static void rsx_set_flip_mode(PpuState& s,unsigned head){
     std::unique_ptr<GuestMemory::ConfigurationPermit> configuration;
