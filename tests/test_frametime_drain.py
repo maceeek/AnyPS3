@@ -5,7 +5,8 @@ Independent expectations (not derived from the implementation's algorithm):
   * midrun: a drainable request posted while the owner is in the middle of a long FIFO run observes GET < PUT when it executes
     (served between packets); with ANYPS3_RSX_HOST_DRAIN=0 it observes GET == PUT (served after the run). Pixels and the final
     GET/report of the run equal the serial reference in both cases.
-  * vsync: the same request posted 5 ms into a 40 ms vsync wait executes long before the deadline (default) or only after it
+  * vsync: the same request posted 50 ms into a 200 ms vsync wait (the wait is long so that a loaded machine, where the software GPU needs
+    several ms to finish the early-submitted batch, cannot turn the margin into a flake) executes long before the deadline (default) or only after it
     (ANYPS3_RSX_HOST_DRAIN=0); a label queued before the wait is published before the deadline by default and still pending when the
     request runs with ANYPS3_RSX_FLIP_EARLY=0.
   * timer slack: ANYPS3_RSX_TIMER_SLACK_NS accepts exactly the digit strings that fit unsigned long (the grammar of
@@ -68,12 +69,12 @@ static void vsync(const char* mode){
   owner_slack=prctl(PR_GET_TIMERSLACK);
   session.enter_fifo();f->rsx.graphics_session=&session;     // as inside a FIFO run
   assert(session.defer_label(0x70008400,0x55667788));
-  const auto until_ns=mono_ns()+40'000'000;deadline=until_ns;wait_start=mono_ns();
+  const auto until_ns=mono_ns()+200'000'000;deadline=until_ns;wait_start=mono_ns();
   rsx_wait_vblank(*f,std::chrono::steady_clock::time_point(std::chrono::nanoseconds(until_ns)));
   wait_end=mono_ns();f->rsx.graphics_session=nullptr;session.leave_fifo();
  });
  while(!wait_start.load())std::this_thread::yield();
- std::this_thread::sleep_for(std::chrono::milliseconds(5));
+ std::this_thread::sleep_for(std::chrono::milliseconds(50));
  std::uint64_t served_ns=0;bool label_pending=false;std::uint64_t label_value=0;
  rsx_host_request(w,[&]{auto& session=*static_cast<rsxgraphics::Session*>(f->rsx.graphics_owner.get());
   served_ns=mono_ns();label_pending=session.has_labels();label_value=f->memory.load(0x71008400,4);});
@@ -81,10 +82,10 @@ static void vsync(const char* mode){
  assert(wait_end.load()>=deadline.load());               // the wait itself still ends at the deadline
  const double served_after_ms=(served_ns-wait_start.load())/1e6;
  const std::string m=mode;
- if(m=="default"){assert(served_ns<deadline.load()-20'000'000);assert(!label_pending && label_value==0x55667788);}
+ if(m=="default"){assert(served_ns<deadline.load()-100'000'000);assert(!label_pending && label_value==0x55667788);}
  else if(m=="drain_off"){assert(served_ns>=deadline.load());}
- else if(m=="early_off"){assert(served_ns<deadline.load()-20'000'000);assert(label_pending && label_value==0);}
- else if(m=="slack_off" || m=="slack_env"){assert(served_ns<deadline.load()-20'000'000);}
+ else if(m=="early_off"){assert(served_ns<deadline.load()-100'000'000);assert(label_pending && label_value==0);}
+ else if(m=="slack_off" || m=="slack_env"){assert(served_ns<deadline.load()-100'000'000);}
  else assert(false);
  const long main_slack=prctl(PR_GET_TIMERSLACK);
  if(m=="slack_off")assert(owner_slack.load()==main_slack);
@@ -92,7 +93,7 @@ static void vsync(const char* mode){
  else assert(owner_slack.load()==1);   // the owner thread alone gets 1 ns
  assert(main_slack!=1 || m=="slack_off" || m=="slack_env");                   // the process's other threads keep the kernel default
  life.finish();
- std::printf("PASS vsync %s: request served %.1f ms into a 40 ms wait, label_pending=%d\n",mode,served_after_ms,int(label_pending));
+ std::printf("PASS vsync %s: request served %.1f ms into a 200 ms wait, label_pending=%d\n",mode,served_after_ms,int(label_pending));
 }
 // Diagnostic timing is off unless its switch is set: counters stay exactly zero / at their initial value without it and move with it.
 static void gate(){
@@ -115,9 +116,10 @@ static void gate(){
  const double back=session.batch->record_back_ms;
  if(report){assert(back>0.0);assert(rsx_service_calls().load()>0 && rsx_service_ns().load()>0);}
  else{assert(back==0.0);assert(rsx_service_calls().load()==0 && rsx_service_ns().load()==0);}
- if(adaptive)assert(session.flight_ns!=300000.0);else assert(session.flight_ns==300000.0);
+ const double flight=session.flight_ns;    // copied: the session dies with the worker session
+ if(adaptive)assert(flight!=300000.0);else assert(flight==300000.0);
  life.finish();
- std::printf("PASS gate report=%d adaptive=%d: record_back_ms=%.3f service_calls=%llu flight_ns=%.0f\n",int(report),int(adaptive),back,(unsigned long long)rsx_service_calls().load(),session.flight_ns);
+ std::printf("PASS gate report=%d adaptive=%d: record_back_ms=%.3f service_calls=%llu flight_ns=%.0f\n",int(report),int(adaptive),back,(unsigned long long)rsx_service_calls().load(),flight);
 }
 int main(int argc,char** argv){try{
  const std::string mode=argc>1?argv[1]:"";

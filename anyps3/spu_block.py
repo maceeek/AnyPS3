@@ -247,12 +247,15 @@ class BlockValues(Values):
         block entry does.  The inline form stores the parameter without a call, so with interrupts enabled the same
         boundary is reproduced here: sample now, leave the call if the handler was entered (registers flushed, retired
         count and pc exact), otherwise restart the sampling interval.  Interrupts disabled (the common case): one
-        not-taken branch; irq_next is not consulted while they are disabled and spu_branch_interrupts zeroes it on enable."""
-        nxt = f'(a+0x{pc + 4 - self.block_start:x}u)'
+        not-taken branch; irq_next is not consulted while they are disabled and spu_branch_interrupts zeroes it on enable.
+        The next pc wraps at the end of local storage like the interpreter (SRR0 of the handler entry is masked); when the
+        sample itself throws (a reservation compare reaching a failing observer) the registers cached so far are stored
+        before the exception leaves, so the retired prefix (pc, block.executed) and the register file stay consistent."""
+        nxt = f'((a+0x{pc + 4 - self.block_start:x}u)&0x3fffcu)'
         leave = f'{self.pending_stores()}return;'
         return ('if(__builtin_expect(t.interrupts_enabled,0)){'
                 f'const std::uint32_t irq_pc=t.pc;const auto irq_ex=block.executed;t.pc={nxt};block.executed=ex+{self.insn_index(pc) + 1};'
-                't.irq_next=0;spu_take_interrupt(s,t);'
+                f't.irq_next=0;try{{spu_take_interrupt(s,t);}}catch(...){{{self.pending_stores()}throw;}}'
                 f'if(!t.interrupts_enabled){{{leave}}}'
                 't.irq_next=t.steps+block.executed+SPU_IRQ_INTERVAL;t.pc=irq_pc;block.executed=irq_ex;}')
 

@@ -948,7 +948,10 @@ struct GuestMemory {
     // Side-effect-free admission test: true when [address,address+size) is wholly mapped and readable (the span may cross adjacent
     // regions). It calls no observer, takes no page-broker cell and reads no guest byte, so a caller that reads one logical block
     // through an admitted transfer can tell an admission fault (nothing was notified) from any other failure (not to be replayed).
-    bool readable_span(std::uint64_t address,unsigned size){
+    // transfer_admission: also require what transfer() asks of a span inside ONE guest page when the memory is concurrent: it is admitted
+    // like a scalar access, which resolves one mapping, so a span of that kind that continues into an adjacent mapping fails admission
+    // (before any observer call) although every byte is readable. Longer spans take the general path and may cross mappings.
+    bool readable_span(std::uint64_t address,unsigned size,bool transfer_admission=false){
         if(address>UINT32_MAX || size>UINT64_C(0x100000000)-address)return false;
         if(!concurrent()){
             auto next=address;auto remaining=size;
@@ -962,8 +965,11 @@ struct GuestMemory {
         }
         Lease lease(*this,address,0,false,true,false);   // zero-byte translation-only admission: reader gate and map snapshot, no span reaches an observer
         try{auto next=address;unsigned left=size;
+            const bool one_page=size && (address>>12)==((address+size-1)>>12);
             while(left){const auto& map=translate_parallel(next,1,false);const auto& r=map.region;
-                const unsigned n=std::min<std::uint64_t>(left,r.bytes->size()-(next-r.base));next+=n;left-=n;}
+                const unsigned n=std::min<std::uint64_t>(left,r.bytes->size()-(next-r.base));
+                if(transfer_admission && one_page && n<left)return false;
+                next+=n;left-=n;}
         }catch(const std::runtime_error&){return false;}
         return true;
     }

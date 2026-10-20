@@ -8,6 +8,7 @@ from pathlib import Path
 import os
 import shutil
 import signal
+import struct
 import subprocess
 import sys
 import tempfile
@@ -20,6 +21,7 @@ import ftring  # noqa: E402
 
 PROGRAM = r'''
 #include <chrono>
+#include <atomic>
 #include <csignal>
 #include <string>
 #include <thread>
@@ -45,6 +47,41 @@ int main(int argc,char** argv){
     }
     if(mode=="wrap"){
         for(std::uint64_t i=0;i<3000;++i)anyps3_ft::mark(anyps3_ft::Mark,i);
+        std::raise(SIGKILL);
+    }
+    if(mode=="torn"){
+        // A writer claims its slot, stores part of the fields and is killed before it commits (SIGKILL mid-write).
+        anyps3_ft::mark(anyps3_ft::Mark,1);
+        const auto index=anyps3_ft::reserve();
+        anyps3_ft::Event* e=anyps3_ft::claim(index);
+        e->ns=123456789;e->kind=anyps3_ft::Mark;e->tid=77;e->a=0xBAD;       // b, c, d never written, no commit
+        anyps3_ft::mark(anyps3_ft::Mark,2);
+        std::raise(SIGKILL);
+    }
+    if(mode=="stale" || mode=="stall"){
+        // Writer A holds index 0 while 2500 events (ring capacity 1024: two and a half laps) are written by the main thread.
+        // "stale": A only reserved the index and claims after the wraps; "stall": A claimed the slot and fills it after the wraps.
+        std::atomic<int> phase{0};
+        std::thread a([&]{
+            const auto index=anyps3_ft::reserve();
+            anyps3_ft::Event* e=mode=="stall" ? anyps3_ft::claim(index) : nullptr;
+            phase=1;while(phase!=2)std::this_thread::yield();
+            if(mode=="stale")e=anyps3_ft::claim(index);
+            std::printf("a_claimed=%d\n",e?1:0);std::fflush(stdout);
+            if(e){e->ns=77;e->kind=anyps3_ft::Mark;e->tid=1;e->a=0xBEEF;e->b=e->c=e->d=0xBEEF;anyps3_ft::commit(e,index);}
+        });
+        while(phase!=1)std::this_thread::yield();
+        for(std::uint64_t n=0;n<2500;++n)anyps3_ft::mark(anyps3_ft::Mark,1000+n,0,1000+n);
+        phase=2;a.join();
+        std::printf("dropped=%llu\n",(unsigned long long)anyps3_ft::header->dropped.load());std::fflush(stdout);
+        std::raise(SIGKILL);
+    }
+    if(mode=="stress"){
+        // Contended wraps: 4 threads x 100000 events through 1024 slots; every event is self-consistent in a, b, c.
+        std::vector<std::thread> threads;
+        for(std::uint64_t t=0;t<4;++t)threads.emplace_back([t]{for(std::uint64_t i=0;i<100000;++i)anyps3_ft::mark(anyps3_ft::Mark,t,i,t*1000003+i);});
+        for(auto& t:threads)t.join();
+        std::printf("dropped=%llu\n",(unsigned long long)anyps3_ft::header->dropped.load());std::fflush(stdout);
         std::raise(SIGKILL);
     }
     if(mode=="fields"){
@@ -104,6 +141,7 @@ class FrameTimeRingTests(unittest.TestCase):
         self.assertEqual(result.returncode, -signal.SIGKILL, result.stderr)
         header, events = ftring.read_ring(path)
         self.assertEqual(header['head'], 8000)
+        self.assertEqual((header['version'], header['dropped'], header['missing']), (2, 0, 0))
         self.assertEqual(header['capacity'], 1 << 23)
         marks = [e for e in events if e.kind == ftring.MARK]
         self.assertEqual(len(marks), 8000)
@@ -124,6 +162,92 @@ class FrameTimeRingTests(unittest.TestCase):
         header, events = ftring.read_ring(path)
         self.assertEqual((header['head'], header['capacity'], header['count']), (3000, 1024, 1024))
         self.assertEqual([e.a for e in events], list(range(3000 - 1024, 3000)))
+
+    def test_killed_mid_write_is_never_returned(self):
+        path, result = self.run_mode('torn', 'torn.bin', ANYPS3_FRAMETIME_EVENTS='1024')
+        self.assertEqual(result.returncode, -signal.SIGKILL, result.stderr)
+        header, events = ftring.read_ring(path)
+        self.assertEqual((header['head'], header['dropped'], header['missing']), (3, 0, 1))
+        self.assertEqual(sorted(e.a for e in events), [1, 2])       # the half-written third event (a == 0xBAD) is not accepted
+        # raw bytes: the claimed slot carries the odd claim word 2*1+1, the committed ones 2*0+2 and 2*2+2
+        raw = path.read_bytes()
+        self.assertEqual([struct.unpack_from('<Q', raw, 64 + 64 * slot)[0] for slot in range(3)], [2, 3, 6])
+
+    def test_delayed_writer_after_wraps_is_dropped(self):
+        # writer A reserved index 0 and claims only after 2500 later events wrapped the 1024-slot ring twice
+        path, result = self.run_mode('stale', 'stale.bin', ANYPS3_FRAMETIME_EVENTS='1024')
+        self.assertEqual(result.returncode, -signal.SIGKILL, result.stderr)
+        self.assertEqual(result.stdout.split(), ['a_claimed=0', 'dropped=1'])
+        header, events = ftring.read_ring(path)
+        self.assertEqual((header['head'], header['dropped'], header['missing'], header['count']), (2501, 1, 0, 1024))
+        # main's events have indices 1..2500 (value 1000 + index - 1); the window is indices 1477..2500, every one intact
+        self.assertEqual(sorted(e.a for e in events), list(range(1000 + 1476, 1000 + 2500)))
+        self.assertTrue(all(e.c == e.a for e in events))
+
+    def test_writer_stalled_inside_a_slot_across_wraps_blocks_only_that_slot(self):
+        # writer A owns slot 0 (odd claim word) while the ring wraps twice and only then fills and commits it
+        path, result = self.run_mode('stall', 'stall.bin', ANYPS3_FRAMETIME_EVENTS='1024')
+        self.assertEqual(result.returncode, -signal.SIGKILL, result.stderr)
+        self.assertEqual(result.stdout.split(), ['a_claimed=1', 'dropped=2'])     # indices 1024 and 2048 found the slot busy
+        header, events = ftring.read_ring(path)
+        self.assertEqual((header['head'], header['dropped'], header['missing'], header['count']), (2501, 2, 1, 1024))
+        self.assertNotIn(0xBEEF, [e.a for e in events])             # A's stale event is not mixed into the newest laps
+        expected = [1000 + index - 1 for index in range(1477, 2501) if index != 2048]
+        self.assertEqual(sorted(e.a for e in events), expected)
+        self.assertTrue(all(e.c == e.a and e.tid != 1 for e in events))
+
+    def test_contended_wraps_never_mix_events(self):
+        path, result = self.run_mode('stress', 'stress.bin', ANYPS3_FRAMETIME_EVENTS='1024')
+        self.assertEqual(result.returncode, -signal.SIGKILL, result.stderr)
+        dropped = int(result.stdout.split('=')[1])
+        header, events = ftring.read_ring(path)
+        self.assertEqual((header['head'], header['count'], header['dropped']), (400000, 1024, dropped))
+        self.assertEqual(len(events) + header['missing'], 1024)
+        self.assertTrue(all(e.kind == ftring.MARK and e.c == e.a * 1000003 + e.b and e.a < 4 and e.b < 100000 for e in events))
+
+    def test_reader_rejects_uncommitted_and_foreign_lap_slots_and_reads_version_1(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / 'hand.bin'
+            capacity = 1024
+            slots = bytearray(capacity * 64)
+
+            def put(index, seq, a):
+                struct.pack_into('<QQIIQQQQ', slots, (index & (capacity - 1)) * 64, seq, 1000 + index, ftring.MARK, 5, a, 0, 0, 0)
+
+            head = 1030                                             # window = indices 6..1029
+            for index in range(6, head):
+                put(index, 2 * index + 2, index)
+            put(10, 2 * 10 + 1, 10)                                 # odd: a writer is inside the slot
+            put(20, 2 * (20 + capacity) + 2, 20)                    # committed by a LATER lap
+            put(1025, 2 * (1025 - capacity) + 2, 1025)                    # committed by an EARLIER lap (the writer never arrived)
+            put(40, 0, 40)                                          # never committed
+            path.write_bytes(struct.pack('<8sQQQQ24x', b'ANYPSFT1', capacity, 2, head, 9) + bytes(slots))
+            header, events = ftring.read_ring(path)
+            self.assertEqual((header['version'], header['dropped'], header['missing']), (2, 9, 4))
+            self.assertEqual(sorted(e.a for e in events), [i for i in range(6, head) if i not in (10, 20, 1025, 40)])
+            v1 = Path(d) / 'v1.bin'                                 # a ring of an older build: 48-byte events, no commit word
+            body = bytearray(8 * 48)
+            for index in range(3):
+                struct.pack_into('<QIIQQQQ', body, index * 48, 500 + index, ftring.MARK, 9, index, 0, 0, 0)
+            v1.write_bytes(struct.pack('<8sQQQ32x', b'ANYPSFT1', 8, 1, 3) + bytes(body))
+            header, events = ftring.read_ring(v1)
+            self.assertEqual((header['version'], header['count'], header['missing']), (1, 3, 0))
+            self.assertEqual([(e.ns, e.a) for e in events], [(500, 0), (501, 1), (502, 2)])
+
+    def test_slot_claimed_while_the_reader_copies_it_is_rejected(self):
+        # a live reader: a writer claims slot 5 (index 5 -> odd claim word of its next lap) between the field copy and the re-check
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / 'live.bin'
+            ftring.write_ring(path, [ftring.Event(1000 + i, ftring.MARK, 3, i, 0, 0, 0) for i in range(10)], capacity=1024)
+
+            def writer_claims(index):
+                if index == 5:
+                    with open(path, 'r+b') as f:
+                        f.seek(64 + 5 * 64)
+                        f.write(struct.pack('<Q', 2 * (5 + 1024) + 1))
+
+            header, events = ftring.read_ring(path, _after_copy=writer_claims)
+            self.assertEqual((header['missing'], sorted(e.a for e in events)), (1, [0, 1, 2, 3, 4, 6, 7, 8, 9]))
 
     def test_invalid_capacity_is_an_error(self):
         path, result = self.run_mode('wrap', 'bad.bin', ANYPS3_FRAMETIME_EVENTS='1000')
