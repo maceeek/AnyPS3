@@ -22,7 +22,9 @@ Subagents: Sonnet only (user instruction); one SPU agent in an isolated git work
   request (gdb: main thread in `RsxOwnerQueue::await` from `rsx_worker_start`, owner thread in
   `steady_clock::now`/`system_clock::now`). test_par6 hung in 6 of 8 cases. The owner loop now waits without a
   timeout when there is no deadline, like `par_worker.py` already did for SPU lanes. Same semantics; it matters
-  for any toolchain whose condition variable lacks a steady-clock wait.
+  for any toolchain whose condition variable lacks a steady-clock wait. **Verified:** test_par6 8/8 after the fix
+  (6/8 hang on a worktree of `43c6b27`); test_par4, test_par9_coordinator, test_par10_deadlock and test_par14_deadlock,
+  which the SPU agent had reported as pre-existing timeouts, pass serially as well.
 - Lavapipe executes command buffers synchronously on the submitting thread, so RSX wall time per draw includes
   driver rasterization; host code is separated with perf symbol attribution (`anyps3`/libc vs `libvulkan_lvp`).
 
@@ -42,9 +44,11 @@ out by hand, the architecture definition, or the exact implementation as oracle 
 2. **rlwinm/rlwnm/rlwimi with MB>ME** (`anyps3/flow.py`, `1f2e4b2`): **semantic fix.** PowerPC Book I ROTL32 duplicates
    the rotated word into both halves and MASK(MB+32, ME+32) wraps, so the upper word is not zero. The previous lifter
    produced zero in the upper half. cntlzw/cntlzd use `__builtin_clz*`. **Verified:** `tests/test_ppu_rotate_count.py`
-   (red on the previous lifter).
+   (red on the previous lifter). **Limitation:** the Book I PDF (`local/reference/cell-docs/`) is not in this
+   container, so no PDF page is cited here; look up the rlwinm/ROTL32/MASK pages before quoting this as a manual fact.
 3. **Lazy FR/FI/FPRF** (`anyps3/floating.py` `fp_lazy*`, `fp_materialize`; `PpuContext::fp_lazy_*` in `threads.py`).
-   With XX already set, RN rounding and all exception enables clear, an add/mul/div/sqrt/fused operation on in-range
+   With XX already set, round-to-nearest (FPSCR RN=0b00), NI clear or set (not in the mask) and the five exception enables
+   VE/OE/UE/ZE/XE clear (`(fpscr&0x020000fb)==0x02000000`), an add/mul/div/sqrt/fused operation on in-range
    operands (zero or normal, exponent in [-400,400], no zero divisor, no negative sqrt; binary32 range and midpoint
    guards) cannot change any sticky bit, so only FR/FI/FPRF change. The host result is returned at once and the last
    operation is recorded; its exact FPSCR update is replayed (`fp_materialize_pending`, cold) before any observer:
@@ -69,7 +73,8 @@ out by hand, the architecture definition, or the exact implementation as oracle 
    loop; missing block → pc 0x10048, steps 3).
 6. **lvx/16-byte loads** (`par_memory.py` `atomic_read16`, `ppu_memory.py`): two 8-byte atomic loads into one 16-byte
    store instead of byte-wise copies, used only for 8-aligned 16-byte reads. Removes a store-forwarding stall
-   (two 8-byte stores followed by a 16-byte load). Covered by test_vector/test_ppu_block/test_par*.
+   (two 8-byte stores followed by a 16-byte load). **Derived** equivalence (same bytes, each 8-byte half single-copy
+   atomic as before); no dedicated test, covered by test_vector, test_ppu_block and test_par*.
 
 ### SPU
 
@@ -111,7 +116,9 @@ out by hand, the architecture definition, or the exact implementation as oracle 
 5. `tests/test_spufast_blocks.py`: the sweeps bind their threads to image 0 (the unbound-image stop of item 1 made
    all 4 fail on `1f2e4b2`).
 
-6. **Reservation fast path** (`par_memory.py` `reserved_line/reserved_track/reserved_token/reserved_bump`;
+### Memory (PPU and SPU reservations)
+
+1. **Reservation fast path** (`par_memory.py` `reserved_line/reserved_track/reserved_token/reserved_bump`;
    `runtime.py` `load_reserved`, `store_conditional`, `getllar`, `putllc`, both `reservation_token` forms), following
    the agent's finding that every `getllar`/`putllc` allocated span and lock vectors and ran `track_reservation` twice
    (backing hash lookup + `weak_ptr::lock` each). When the access and its whole 128-byte granule lie in one mapping,
@@ -154,9 +161,13 @@ out by hand, the architecture definition, or the exact implementation as oracle 
    `render_passes==samples` after the transfer, unchanged pixels/depth/stencil, Khronos validation with sync
    validation clean), test_rsx_graphics, test_rsx_parity, test_rsxvk20–22 (incl. conditional), test_rsx_rtt,
    test_rsx_alias_flow, test_rsx_readback and the other RSX modules of the batch.
-   **Hypothesis:** a large share of the ~30 ms GPU busy time per frame in the level is render-pass switching
-   (load/store of the attachments per pass); plane runs keep the fast per-plane layout and should cut passes to
-   roughly the multiview count. **Distinguishing test on the PC:** the same level window with
+   **Hypothesis (weak):** part of the ~30 ms GPU busy time per frame in the level is render-pass switching
+   (load/store of the attachments per pass); plane runs keep the per-plane layout and should cut passes to roughly the
+   multiview count. **Counter-evidence (verified only as the historical code comment `anyps3/vulkan.py:222-224`, RTX
+   4070 SUPER replay, not repeated):** the opt-in multiview variant cut passes 1712 → 76/frame but raised GPU wait
+   5.6 → 30 ms/frame with no CPU gain, so fewer passes alone has not been shown to lower GPU time; multiview also
+   changes the attachment layout (one layered image), which plane runs do not. Lavapipe here shows the CPU side only
+   (2× MSAA wall time per draw 276 → 98 µs, Measurements). **Distinguishing test on the PC:** the same level window with
    `ANYPS3_RSX_PLANE_RUNS=0` and `=1`, comparing `PERF GPU busy_ns`, render passes per frame (RSX perf counters)
    and FPS.
 6. **Stale test fixed:** `tests/test_rsx_gpu_upload.py` (vertex-format oracle) pasted `raw_vertex_glsl` into its own
@@ -173,7 +184,10 @@ Eliding queries while 0x17cc is 0 would need a separate diagnostic mode; worth i
 ### Scheduler
 
 - `par_worker.py` `compose_execution`: with SPU/RSX workers enabled, an Audio engine slot whose next tick is in the
-  future returns immediately (no work, no lock round trip).
+  future returns immediately (no work, no lock round trip). **Derived:** `audio_advance` mixes only when its tick is
+  due, and the skipped wrapper's `rsx_worker_pump` still runs on every RSX request (`rsx_worker_request`,
+  `rsx_game_worker.py`) and through the SPU worker's pump callback (`par_worker.py`). No dedicated test; test_native_audio,
+  test_native_audio_full, test_par1–4/6/7/9 pass with it.
 
 ## Measurements (synthetic, this cloud CPU)
 
@@ -240,7 +254,9 @@ ANYPS3_REQUIRE_VULKAN=1 python -m unittest discover -s tests -q
 ```
 
 Compare `native-virtual-Na/level-summary.json` with 460a (22.59 FPS; RSX worker 28.3 ms, main_idle 23.2 ms,
-GPU busy 30.0 ms per frame) and check that `level-frame.ppm` matches. Run-time switch for an A/B run without rebuilding:
-`ANYPS3_RSX_PLANE_RUNS=0` (one pass switch per MSAA plane, if integrated). Compile-time diagnostics only:
+GPU busy 30.0 ms per frame) and check that `level-frame.ppm` matches. Run-time switches for A/B runs of the same
+level window without rebuilding: `ANYPS3_RSX_PLANE_RUNS=0` (one pass switch per MSAA plane, the previous recording)
+and `ANYPS3_SPU_POLL_PARK=0` (no busy-poll parking). Set them in the environment of `measure_level.sh`; that script is
+not in this container, so check that it passes the environment to the game process. Compile-time diagnostics only:
 `-DANYPS3_VMX_FORCE_SCALAR` (exact VMX lanes) and `-DANYPS3_FP_FORCE_SOFT` (no lazy FPSCR and no host FP fast path).
 Audio stays silent: `SDL_AUDIODRIVER=dummy`, `ANYPS3_AUDIO_SINK=null`, never `ANYPS3_AUDIO_AUDIBLE=1`.

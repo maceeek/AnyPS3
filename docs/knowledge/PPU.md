@@ -36,3 +36,24 @@ big-endian STFS. The change is in the runtime; the original game instructions ar
 This is a test of the ISA sequence, not evidence of the menu; the actual 245 is
 still loading at the time of writing. Detailed sources, scope and limitations of the download of the original Book I,
 the regression and the runtime: [FP experiment 245](experiments/2026-10-14-fp-zero-divide-245.md).
+
+## Host cost of the translation: cloud optimization round (2026-10-19/20)
+
+Scope: AnyPS3 runtime and its native tests; nothing here is verified in the game. Evidence, benchmarks and limitations:
+[cloud optimization record, PPU](experiments/2026-10-19-cloud-optimization.md#ppu).
+
+- **Lazy FR/FI/FPRF (verified by `tests/test_ppu_fp_lazy.py`, exactness conditions):** only with XX already set, round-to-nearest
+  (RN=0b00) and the five exception enables VE/OE/UE/ZE/XE clear (`(fpscr&0x020000fb)==0x02000000`), and in-range operands (zero or normal, exponent in [-400,400], no zero divisor, no negative sqrt;
+  binary32 range and midpoint guards) can an add/mul/div/sqrt/fused operation not change any sticky bit, so only FR/FI/FPRF change. The exact
+  FPSCR update is replayed before any observer (mffs, mcrfs/mtfs*, compares, conversions, estimates, frsp, VMX float scopes, any
+  exact arithmetic, `anyps3_entry` exit including STOP); Rc=1 forms read only FX/FEX/VX/OX. While XX is clear the lazy path never
+  applies and a lifted FP operation is ~13% slower (synthetic benchmark); that a game sets XX early and rarely clears it is **derived**.
+- **Spin hints (derived benefit, verified step count):** `or n,n,n` with n in {1,6,28,29,30,31} issues one host `pause` per
+  block that contains it; guest steps and registers are unchanged (`tests/test_ppu_spin_hint.py`).
+- **rlwinm/rlwnm/rlwimi with MB>ME (semantic fix, verified by `tests/test_ppu_rotate_count.py`, red on the previous lifter):** the
+  rotated word is duplicated into both halves (ROTL32) and MASK(MB+32, ME+32) wraps, so the upper word is not zero. The Book I PDF is not in
+  the cloud container, so no PDF page is cited yet; look the page up before quoting it as a manual fact.
+- **Reservation fast path (verified by `tests/test_reservation_fast_path.py`, fails on a mutant that skips the version bump):**
+  taken only when the access and its whole 128-byte granule lie in one mapping; same stripe set, token and permission checks as the
+  general path; a granule clipped by its mapping keeps the general path. Synthetic lwarx/stwcx. kernel 70.7 → 40.5 ns per guest
+  instruction ([record, Memory](experiments/2026-10-19-cloud-optimization.md#memory-ppu-and-spu-reservations)).

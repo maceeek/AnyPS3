@@ -2,6 +2,44 @@
 
 The handing-over party fills in CURRENT and the links to verification. The receiving party checks the working tree, opens the latest log and verifies the paths and the profile. A handoff is not a request for a new plan: continue from the nearest concrete question.
 
+## Handoff 2026-10-19/20 — cloud optimization round (Claude Opus 5.5, cloud container without game data or GPU)
+
+Goal unchanged (60 FPS with headroom, then the original menu and gamepad requirement of the project). **This round has no
+game build and no FPS figure; the best verified game build is still `native-virtual-460` (22.59 FPS).** Current summary and
+first next action: [CURRENT.md](CURRENT.md).
+
+- **Branch and commits:** `claude/happy-franklin-2eocfp`, `git log --oneline 43c6b27..HEAD` (HEAD `4b3723a` when written;
+  `43c6b27` = snapshot 460). Code commits: `1f2e4b2` (VMX SIMD, rlw* wrap masks, cntlz, SPU unbound-image stop),
+  `91ae3e0` (lazy FPSCR, spin hints, same-page dispatch, register epochs, SIMD index decode), `f20b30f` (MSAA plane runs,
+  stale vertex-format oracle), `65325d8` (RSX owner queue waits without timeout when there is no deadline), `3c6fcd4`
+  (SPUFAST sweeps bound to image 0), `a0ccc3a` (pool-lane slice 4096), `3159a56` (reservation-lost change-counter filter),
+  `de6f69d` (busy-poll parking), `8ed5b00` (single-mapping reservation fast path). The other commits are documentation or
+  `.gitignore`. Subagents were Sonnet only (user instruction); the SPU agent worked in an isolated git worktree.
+- **Record:** [cloud optimization record](experiments/2026-10-19-cloud-optimization.md) (changes with status, synthetic
+  measurements, open items, PC commands).
+- **Not verified:** the game (no game data in the container), any FPS figure, frame correctness of a level image, the
+  physical gamepad. Every number in the record is a synthetic micro-benchmark on a shared 4 vCPU CPU (Lavapipe, no GPU), relative only.
+  Whole-suite result of this round: see CURRENT (line is filled in by the main agent).
+- **Kill switches** (for A/B runs and bisection): `ANYPS3_RSX_PLANE_RUNS=0` (old MSAA recording, one pass switch per plane);
+  `ANYPS3_SPU_POLL_PARK=0` (no busy-poll parking). Compile-time diagnostics only: `-DANYPS3_VMX_FORCE_SCALAR` (exact VMX
+  lanes) and `-DANYPS3_FP_FORCE_SOFT` (no lazy FPSCR and no host FP fast path). Per the record, the parked poll is retried
+  for real, so its results never change, only timing (**verified** by `tests/test_spu_pool_poll.py`), and plane runs keep
+  pixels/depth/stencil unchanged in the RSX tests.
+- **Cloud toolchain note:** the system GCC 13 has no `[[gnu::musttail]]` (required by the PPUFAST emitter), so the container
+  uses conda-forge GCC 15.3 in `/opt/gcc15` behind the wrapper `/usr/local/bin/g++-15` (`c++` points to it). Its libstdc++
+  lacks `pthread_cond_clockwait`: `std::condition_variable` waits on `system_clock`, and `wait_until(steady_clock::time_point::max())`
+  overflows into the past, so the RSX owner thread (`rsx_worker.py` `RsxOwnerQueue::launch`) spun at 100% CPU without serving
+  its queue and `test_par6` hung in 6 of 8 cases. Fixed by waiting without a timeout when there is no deadline (**verified**:
+  diagnosis by gdb; test_par6 8/8 after the fix, 6/8 hang on `43c6b27`). It matters for any toolchain whose condition variable has no steady-clock wait.
+- **Open items from the record:** (1) game build and FPS on the PC; (2) hypothesis: MSAA plane runs cut part of
+  the ~30 ms/frame GPU busy time (A/B `ANYPS3_RSX_PLANE_RUNS=0/1`; read the multiview caveat in CURRENT first); (3) hypothesis: the level's CellSpursKernel0 (SPU 0x100)
+  matches a parked poll pattern (A/B `ANYPS3_SPU_POLL_PARK=0/1`); risk: a poll loop whose only changing state is a counter in
+  local store would be slowed by the park timeout; (4) occlusion-query elision is a candidate only, worth it only if a PC
+  profile shows query cost; (5) the RSX2 estimate from the FAST round stays valid: reaching <=10 ms/frame needs the RSX work split across threads;
+  (6) the reservation filter breaks silently if a future version bump bypasses `notify()` (`test_par4` pins that every
+  current bump notifies); (7) lazy FR/FI/FPRF is ~13% slower while XX is clear, the steady-state benefit assumes (derived)
+  that a game sets XX early and rarely clears it. Refuted: the suspected ~5% `k_copy`/`k_struct` slowdown was host noise.
+
 ## Handoff 2026-10-19 evening — FAST wave (Claude Opus 5.5, goal: 60 FPS with headroom)
 
 State and evidence: [FAST record](experiments/2026-10-19-fast-wave.md) — the section "State at the end of the session" contains the

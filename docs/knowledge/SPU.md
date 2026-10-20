@@ -24,3 +24,23 @@ The RPCS3 checkpoint is in [SOURCES.md](SOURCES.md): `local/reference/rpcs3/rpcs
 The input instruction word, the decoded mnemonic/fields, the PC, the source registers, the required output and the channel/DMA state. With source/destination aliasing, verify that the original operands are read before the write. For shuffle/shift/rotate, record the byte order and the boundary shift counts. For FP, separate SPU from PPU and PowerXCell; generic host IEEE behavior may not match the target instruction.
 
 Active runtime questions belong in [CURRENT.md](CURRENT.md). The creation of this overview does not change the SPU runtime or the tests.
+
+## Pool lanes: cloud optimization round (2026-10-19/20)
+
+Scope: AnyPS3 runtime and its native tests; nothing here is verified in the game. Evidence, benchmarks and limitations:
+[cloud optimization record, SPU](experiments/2026-10-19-cloud-optimization.md#spu).
+
+- **Reservation-lost change-counter filter (exactness derived by main-agent review, behaviour verified by
+  `tests/test_spu_reservation_filter.py`):** every version bump already calls `notify()`, which now also increments a per-line-hash
+  (4096 buckets) or global counter. An SPU samples the counters before a successful `reservation_token` compare and skips the full
+  compare while they are unchanged for the same granule and memory. Exact because the writer bumps the version under the stripe lock and
+  publishes afterwards while the reader samples before its locked compare, so either the compare sees the new version or the next
+  sample differs; collisions only force a full compare, and a line with a synchronous host-access observer always takes the full compare.
+  Limitation: a future version bump that bypasses `notify()` would break the filter silently (`test_par4` pins that every current bump notifies).
+- **Busy-poll parking (verified by `tests/test_spu_pool_poll.py`, pool lanes only):** a repeated GETLLAR of an intact reservation or
+  `rchcnt` of channel 0 returning 0, at the same site with identical register file/fpscr and only idempotent channel traffic in
+  between, spins 50 µs and then throws `SpuBlocked` before any side effect; the retry executes the poll for real, so results never
+  change, only timing. `ANYPS3_SPU_POLL_PARK=0` disables it. **Hypothesis:** the level's CellSpursKernel0 (SPU 0x100) matches one of
+  the two patterns. Risk: a poll loop whose only changing state is a counter in local store would be slowed by the park timeout.
+- **Slice 4096 (verified by `tests/test_spu_pool_quantum.py`):** a pool lane free-runs 4096-instruction slices for requests of at
+  least the PPU tick budget (1024); smaller requests stay exact for stepping tests. The lane loop reads the host clock only with `ANYPS3_PERF_REPORT=1`.
