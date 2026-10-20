@@ -1217,11 +1217,24 @@ struct Session {
     }
     static std::shared_ptr<Surface::ReadbackPlan> clipped_plan(const Surface& surface,const std::vector<GuestMemory::HostGuard::Span>& spans){
         auto plan=std::make_shared<Surface::ReadbackPlan>();
-        for(const auto& run:surface.readback->runs)for(const auto& span:spans){
+        const auto& source=*surface.readback;
+        // Exact output size first (a partial plan of a large tiled surface used to grow word by word), then the same
+        // run-major / span-minor order as before; an aligned start copies whole words, otherwise each word keeps the
+        // constant sub-word remainder of its logical byte offset.
+        std::size_t total_words=0,total_runs=0;
+        for(const auto& run:source.runs)for(const auto& span:spans){
+            const auto base=reinterpret_cast<std::uintptr_t>(run.data),first=std::max(base,span.begin),last=std::min(base+run.size,span.end);
+            if(first>=last)continue;
+            total_words+=(last-first+3)/4;++total_runs;
+        }
+        plan->words.reserve(total_words);plan->runs.reserve(total_runs);
+        for(const auto& run:source.runs)for(const auto& span:spans){
             const auto base=reinterpret_cast<std::uintptr_t>(run.data),first=std::max(base,span.begin),last=std::min(base+run.size,span.end);
             if(first>=last)continue;
             const unsigned delta=first-base,offset=plan->words.size()*4,count=last-first;
-            for(unsigned byte=0;byte<count;byte+=4){const auto at=run.offset+delta+byte;plan->words.push_back(surface.readback->words[at/4]+at%4);}
+            const auto at=std::uint64_t(run.offset)+delta;const auto* words=source.words.data()+at/4;const unsigned n=(count+3)/4,sub=at%4;
+            if(!sub)plan->words.insert(plan->words.end(),words,words+n);
+            else for(unsigned i=0;i<n;++i)plan->words.push_back(words[i]+sub);
             plan->runs.push_back({reinterpret_cast<std::uint8_t*>(first),count,offset,unsigned(run.guest_offset+delta)});
         }
         return plan;
@@ -1493,6 +1506,14 @@ struct Session {
             surface.last_use=++resource_clock;return surface;
         }
         ::RsxPerfCounters::add(::RsxPerfCounters::surface_binds_new);
+        {   // ANYPS3_RSX_BIND_TRACE=1: why a bind creates a new surface (first 120 binds after the 3000th): new target vs the surfaces at the same offset.
+            static const bool trace=std::getenv("ANYPS3_RSX_BIND_TRACE")!=nullptr;static unsigned seen=0,shown=0;
+            if(trace && ++seen>3000 && shown<120){++shown;
+                std::fprintf(stderr,"BIND_TRACE new offset=%u base=%u pitch=%u %ux%u samples=%u fmt=%u depth=%d tile=%d discard=%d |",target.offset,target.base_offset,target.pitch,width,height,samples,format,int(depth),int(bool(target.tile)),int(discard));
+                for(const auto& old:surfaces)if(old.target.offset==target.offset || old.target.base_offset==target.base_offset)
+                    std::fprintf(stderr," [off=%u pitch=%u %ux%u s=%u f=%u d=%d partial=%d dirty=%d imgfmt=%d]",old.target.offset,old.target.pitch,old.width,old.height,old.samples,old.format,int(old.depth),int(old.partial),int(old.dirty),int(old.image?old.image->format:0));
+                std::fprintf(stderr,"\n");}
+        }
         Surface surface{target,width,height,samples,format,depth,false,{},{}};
         if(target.tile){surface.tile_snapshot=std::make_shared<NativeRsx::Tile>(*target.tile);surface.target.tile=surface.tile_snapshot.get();}
         prepare_protection(surface);
@@ -1719,6 +1740,20 @@ template<class Vertex> static bool prepared(Session& session,const std::vector<s
     const float vx=bits_float(r(0xa20)),vy=bits_float(r(0xa24)),vz=bits_float(r(0xa28));
     const bool fetch_candidate=!alias && !point && !lines && r.get(0x368,0x1d01)!=0x1d00 && vk.graphics_vertex_fetch();
     auto hw_vertex=session.vertex_program.source_current(state.rsx,fetch_candidate?(state.rsx.draw.immediate_vertices.empty()?1:2):0);
+    {   // ANYPS3_RSX_VP_TRACE=1: vertex programs that cannot run on the GPU (distinct start/length, first 40): scalar/vector opcodes per instruction.
+        static const bool trace=std::getenv("ANYPS3_RSX_VP_TRACE")!=nullptr;static std::set<std::string> seen;
+        if(trace && !hw_vertex && seen.size()<40){
+            const auto& gpu=std::as_const(state.rsx);const unsigned first=r.get(0x1ea0,0);std::ostringstream text;text<<"start="<<first<<" vertices="<<(device?device->vertices:unsigned(indices.size()*3))<<" ops:";
+            for(unsigned pc=first;pc<544;++pc){
+                bool written=true;for(unsigned c=0;c<4;++c)written&=gpu.transform_program_written[pc*4+c];if(!written){text<<" [unwritten@"<<pc<<"]";break;}
+                const auto* d=gpu.transform_program.data()+pc*4;const unsigned vec=(d[1]>>22)&31,sca=(d[1]>>27)&31;
+                text<<" "<<pc<<":v"<<vec<<"/s"<<sca;
+                if(sca==8||sca==9||sca==10||sca==12||sca==17||sca==18)text<<"->"<<(((d[0]>>23)&1)<<9|((d[2]&63)<<3)|(d[3]>>29))<<(sca==17||sca==18?" bool":"");
+                if(d[3]&1){text<<" END";break;}
+            }
+            if(seen.insert(text.str()).second)std::fprintf(stderr,"VP_TRACE %s\n",text.str().c_str());
+        }
+    }
     if(attempt.stats.enabled){
         if(alias)attempt.path("geometry_attachment_alias");
         else if(point)attempt.path("geometry_points");

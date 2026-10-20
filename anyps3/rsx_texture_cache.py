@@ -6,9 +6,13 @@ MEMBERS = r'''
     static constexpr unsigned texture_cache_entries=512;
     static constexpr std::uint64_t raw_cache_limit=UINT64_C(512)*1024*1024;
     struct MetadataEntry {Texture texture;std::uint64_t used;};
-    std::map<std::array<unsigned,4>,MetadataEntry> texture_plans;
+    // Looked up once per sampled texture unit and draw: a hash lookup instead of a 9-level ordered-tree walk. Eviction scans
+    // for the least recently used entry (unique clock values), so iteration order is irrelevant.
+    struct PlanKeyHash {std::size_t operator()(const std::array<unsigned,4>& k)const{
+        std::uint64_t h=UINT64_C(0xcbf29ce484222325);for(const auto w:k){h^=w;h*=UINT64_C(0x100000001b3);h^=h>>29;}return std::size_t(h);}};
+    std::unordered_map<std::array<unsigned,4>,MetadataEntry,PlanKeyHash> texture_plans;
     struct PlanEntry {std::shared_ptr<TexturePlan> plan;std::uint64_t used;};
-    std::map<std::array<unsigned,4>,PlanEntry> layout_plans;
+    std::unordered_map<std::array<unsigned,4>,PlanEntry,PlanKeyHash> layout_plans;
     std::uint64_t layout_plan_bytes=0,layout_clock=0;
     std::uint64_t texture_plan_bytes=0;
     std::vector<std::uint64_t> texture_context,context_scratch;
@@ -196,6 +200,18 @@ MEMBERS = r'''
         next.resize(count);
         bool equal=surface_watches.size()==next.size();
         if(equal)for(std::size_t i=0;i<next.size();++i)if(less(next[i],surface_watches[i]) || less(surface_watches[i],next[i])){equal=false;break;}
+        // ANYPS3_RSX_WATCH_TRACE=1: how often the surface watch set really changes and how many bytes are (un)watched (diagnostic).
+        static const bool trace=std::getenv("ANYPS3_RSX_WATCH_TRACE")!=nullptr;
+        static std::uint64_t t_calls=0,t_same=0,t_added=0,t_removed=0,t_span_ops=0;
+        if(trace){
+            ++t_calls;if(equal)++t_same;
+            else{std::size_t a=0,b=0;
+                while(a<surface_watches.size() || b<next.size()){
+                    if(b==next.size() || (a<surface_watches.size() && less(surface_watches[a],next[b]))){t_removed+=surface_watches[a++].second;++t_span_ops;}
+                    else if(a==surface_watches.size() || less(next[b],surface_watches[a])){t_added+=next[b++].second;++t_span_ops;}
+                    else{++a;++b;}}}
+            if(t_calls%200==0)std::fprintf(stderr,"WATCH_STATS refreshes=%llu unchanged=%llu span_ops=%llu added_kb=%llu removed_kb=%llu\n",(unsigned long long)t_calls,(unsigned long long)t_same,(unsigned long long)t_span_ops,(unsigned long long)(t_added>>10),(unsigned long long)(t_removed>>10));
+        }
         if(equal){surface_watch_mappings=std::move(mappings);return;}
         GuestMemory::MetadataPermit metadata(state.memory);
         std::size_t a=0,b=0;
