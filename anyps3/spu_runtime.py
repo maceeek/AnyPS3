@@ -100,9 +100,10 @@ struct NativeSpu {
         std::uint32_t reloc_image_index=UINT32_MAX;
         SpuPublished<std::uint64_t> relocated_entries{0},interpreted_instructions{0};
         // ANYPS3_SPU_STATS=1 diagnostic counters (single writer: the lane; see spu_stat).
-        std::array<SpuPublished<std::uint64_t>,20> stats{};
+        std::array<SpuPublished<std::uint64_t>,28> stats{};
         // ANYPS3_SPU_STATS: interpreter entry PCs (pc<<32|count), open addressing, lane-written.
         std::shared_ptr<std::array<std::atomic<std::uint64_t>,1024>> interp_entries;
+        std::shared_ptr<std::array<std::atomic<std::uint64_t>,1024>> native_entries; // ANYPS3_SPU_STATS: dispatcher entry PCs (pc+1)<<32|count
         struct DmaWrite {unsigned base,end;std::uint64_t ea;};
         std::vector<DmaWrite> dma_writes;
         std::set<std::string> dynamic_blocks;
@@ -167,6 +168,8 @@ struct NativeSpu {
 };
 using SpuNativeFunction=void(*)(PpuState&,NativeSpu::Thread&,std::uint8_t*);
 struct SpuNativeRange {std::uint32_t lo,hi;const std::uint8_t* code;SpuNativeFunction fn;const std::uint8_t* leaders;};
+// ANYPS3_SPU_STATS=1: diagnostic counters (spu_stat), read by the lane worker and the PERF report.
+inline const bool spu_stats_on=[](){const char* v=std::getenv("ANYPS3_SPU_STATS");return v && v[0]=='1' && !v[1];}();
 '''
 
 CPP = r'''

@@ -133,6 +133,7 @@ class SpuBlockTests(unittest.TestCase):
         _,functions,_=generate_parts((image({0x100:0x1c004183,0x104:0x327fff80}),))
         text=functions[0][1]
         self.assertIn('goto spu_b_100;',text)
-        self.assertIn('spu_code_eq<8>(ls+a,code+0x0)',text)
+        self.assertIn('spu_code_eq<8>(fnls+0x0u,code+0x0u)',text)
+        self.assertIn('spu_block_slow(s,t,block,ls,fnls,code,0x8u,a,0x0u,8,2,lim,vm,',text)
         self.assertNotIn('spu_load_word',text)
         self.assertNotIn('switch(',text.split('spu_b_100:')[1])

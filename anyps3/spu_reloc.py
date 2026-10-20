@@ -48,11 +48,19 @@ public:
     std::fprintf(stderr,"PERF SPU_DYNAMIC relocated_entries=%" PRIu64 " interpreted_instructions=%" PRIu64 "\n",relocated,interpreted);
     if(!spu_stats_on)return;
     static constexpr const char* names[]={"rchcnt0","rchcnt0_zero","rdch0","getllar","putllc","putlluc","slices","sleeps",
-        "native_calls","cache_hits","interpreter_calls","blocked","collect","wrch","rdch","rchcnt","dma","native_miss","declines","steps"};
+        "native_calls","cache_hits","interpreter_calls","blocked","collect","wrch","rdch","rchcnt","dma","native_miss","declines","steps",
+        "slot_stale","cand_try","cand_fail","reloc_find","reloc_hit","wake_lat_us","block_enter","wake_count"};
     for(const auto& group:s.spu.groups)for(const auto& t:group.threads){
         std::fprintf(stderr,"PERF SPU_STATS id=%x",t.id);
-        for(unsigned i=0;i<20;++i)std::fprintf(stderr," %s=%" PRIu64,names[i],i==19?t.published_steps.value.load(std::memory_order_relaxed):t.stats[i].value.load(std::memory_order_relaxed));
+        for(unsigned i=0;i<28;++i)std::fprintf(stderr," %s=%" PRIu64,names[i],i==19?t.published_steps.value.load(std::memory_order_relaxed):t.stats[i].value.load(std::memory_order_relaxed));
         std::fputc('\n',stderr);
+        if(const auto table=t.native_entries){
+            std::vector<std::uint64_t> rows;for(const auto& x:*table)if(const auto v=x.load(std::memory_order_relaxed))rows.push_back(v);
+            std::sort(rows.begin(),rows.end(),[](auto a,auto b){return (a&0xffffffffu)>(b&0xffffffffu);});
+            std::fprintf(stderr,"PERF SPU_NATIVE_ENTRIES id=%x",t.id);
+            for(std::size_t i=0;i<rows.size() && i<16;++i)std::fprintf(stderr," %05x:%u",unsigned((rows[i]>>32)-1),unsigned(rows[i]&0xffffffffu));
+            std::fputc('\n',stderr);
+        }
         if(const auto table=t.interp_entries){
             std::vector<std::uint64_t> rows;for(const auto& x:*table)if(const auto v=x.load(std::memory_order_relaxed))rows.push_back(v);
             std::sort(rows.begin(),rows.end(),[](auto a,auto b){return (a&0xffffffffu)>(b&0xffffffffu);});
