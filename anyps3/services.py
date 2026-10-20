@@ -136,6 +136,12 @@ inline thread_local unsigned hle_light_ticks=0;
     if(w.enabled){w.service();w.check();}
     else {rsx_worker_pump(s);s.memory.service_coherence();}
 }
+// GCC 16 -O2 reports -Wmaybe-uninitialized for the destroy path of the disengaged optional inside emplace()
+// (the static-local timing guard makes `legacy` escape); the path is unreachable. Scoped to this type only.
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
+#endif
 struct HleImportScope {
     using Clock=std::chrono::steady_clock;
     HleMetric* metric=nullptr;bool sampled=false;
@@ -155,6 +161,9 @@ struct HleImportScope {
     }
     HleImportScope(const HleImportScope&)=delete;
 };
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
 // Hook once in the existing two-second PERF report; see outside-ownership.patch.
 [[maybe_unused]] static void hle_perf_report(const PpuState& s){
     if(!s.execution.enabled)return;
