@@ -254,6 +254,17 @@ static void scaled(PpuState& s,unsigned point){
         if(static_cast<rsxgraphics::Session*>(gpu.graphics_session)->copy(from,to,ow*src.bpp,oh,src.pitch,dst.pitch,dst_format==4?3:8))return;
     }
 #endif
+    {   // Diagnostic (ANYPS3_RSX_BLIT_TRACE=1): the first 300 scaled transfers, to size the per-pixel Range cost.
+        static const bool trace=[]{const char* v=std::getenv("ANYPS3_RSX_BLIT_TRACE");return v && std::string(v)=="1";}();
+        static unsigned traced=0;
+        if(trace && traced++<300){
+            bool src_tile=false,dst_tile=false;
+            for(const auto& tile:gpu.tiles){if(!tile.bound)continue;if(tile.location==location(src.context))src_tile=true;if(tile.location==location(dst.context))dst_tile=true;}
+            std::fprintf(stderr,"BLIT_TRACE scaled op=%u filter=%u src{ctx=%08x off=%u pitch=%u %ux%u fmt=%u tilesloc=%d} dst{ctx=%08x off=%u pitch=%u %ux%u fmt=%u swz=%d tilesloc=%d} rect=%u,%u..%u,%u dx=%lld dy=%lld u=%lld v=%lld\n",
+                operation,filter,src.context,src.offset,src.pitch,src.width,src.height,src_format,int(src_tile),dst.context,dst.offset,dst.pitch,dst.width,dst.height,dst_format,int(dst.swizzled),int(dst_tile),
+                x0,y0,x1,y1,(long long)dx,(long long)dy,(long long)u,(long long)v);
+        }
+    }
     // Keep the ordinary pixel descriptor compact. Only a physical pixel that
     // straddles mappings needs a retained scatter range; mappings cannot change
     // during this synchronous command.
