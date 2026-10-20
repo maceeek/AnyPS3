@@ -507,6 +507,36 @@ static unsigned rsx_method_class(std::uint32_t reg){
 }
 // One admitted read per 1 MiB IO page for longer packets; any failure
 // repeats the original per-word loads, which raise the original error.
+// FIFO prefetch window: one admitted read of the already published command bytes replaces the two scalar
+// guest loads (header and first value) that every packet used to take. Only bytes the consumer may read
+// anyway are prefetched (see rsx_fifo_fill): below PUT, or - when GET is ahead of PUT, i.e. the producer
+// wrapped and GET still runs to the wrap jump - from GET onwards, where the ring protocol keeps the bytes
+// immutable until GET is published past them. Any non-sequential GET change drops the window.
+struct RsxFifoWindow {
+    static constexpr std::uint32_t capacity=8192;
+    std::uint32_t base=0,length=0;
+    alignas(8) std::uint8_t bytes[capacity];
+    bool has(std::uint32_t at,std::uint32_t n)const{return at>=base && n<=length && at-base<=length-n;}
+    std::uint32_t word(std::uint32_t at)const{const auto* b=bytes+(at-base);return (std::uint32_t(b[0])<<24)|(std::uint32_t(b[1])<<16)|(std::uint32_t(b[2])<<8)|b[3];}
+    void drop(){length=0;}
+};
+// Refill the window at `at`. `put` is the cached PUT; when `at` is not below it (wrapped ring or stale cache) PUT is
+// read afresh and bounds the window if `at` lies below it. Never reads past the 1 MiB IO page of `at`. Returns
+// false (window empty) on any failure: the caller repeats the original per-word loads, which raise the original error.
+static bool rsx_fifo_fill(NativeRsx& gpu,GuestMemory& m,RsxFifoWindow& window,std::uint32_t at,std::uint32_t put){
+    window.drop();
+    if(at&3)return false;
+    try{
+        std::uint32_t limit=UINT32_MAX;
+        if(at<put)limit=put;
+        else{const auto fresh=static_cast<std::uint32_t>(m.load(gpu.dma+0x40,4));if(!(fresh&3) && at<fresh)limit=fresh;}
+        std::uint32_t n=std::min<std::uint32_t>(RsxFifoWindow::capacity,0x100000-(at&0xfffff));
+        n=std::min<std::uint32_t>(n,limit-at)&~3u;
+        if(n<4)return false;
+        m.transfer(rsx_address(gpu,at),window.bytes,n,false);
+        window.base=at;window.length=n;return true;
+    }catch(const std::exception&){window.drop();return false;}
+}
 static void rsx_fifo_values(NativeRsx& gpu,GuestMemory& m,std::uint32_t at,unsigned count,std::uint32_t* out){
     if(count>=4){
         try{std::uint8_t bytes[0x2000];unsigned done=0;
@@ -538,24 +568,26 @@ static bool rsx_run_impl(PpuState& s,unsigned budget,bool idle_poll=false){
     // action method, before every return and on every exception.
     std::uint32_t put=0,get=0;bool cursor=false,pending=false;
     auto publish=[&]{if(pending){m.store(gpu.dma+0x44,4,get);pending=false;}};
+    RsxFifoWindow window;
     try{
     for(unsigned step=0;step<budget;++step){
         if(!cursor){put=static_cast<std::uint32_t>(m.load(gpu.dma+0x40,4));get=static_cast<std::uint32_t>(m.load(gpu.dma+0x44,4));cursor=true;}
         else if(get==put)put=static_cast<std::uint32_t>(m.load(gpu.dma+0x40,4));
         if((get|put)&3)throw std::runtime_error("unaligned RSX FIFO position");
         if(get==put){publish();return progress;}
-        const auto header=static_cast<std::uint32_t>(m.load(rsx_address(gpu,get),4));
+        if(!window.has(get,4))rsx_fifo_fill(gpu,m,window,get,put);
+        const auto header=window.has(get,4)?window.word(get):static_cast<std::uint32_t>(m.load(rsx_address(gpu,get),4));
         std::uint32_t next=get+4;
         if((header&0xe0000003)==0x20000000 || (header&0xe0000003)==1){
             next=header&((header&1)?0xfffffffc:0x1ffffffc);
             if(next==get){publish();return progress;}
-            rsx_address(gpu,next);
+            rsx_address(gpu,next);window.drop();
         }else if((header&3)==2){
             if(gpu.return_offset!=UINT32_MAX)throw std::runtime_error("nested RSX FIFO call");
-            next=header&0x1ffffffc;rsx_address(gpu,next);gpu.return_offset=get+4;
+            next=header&0x1ffffffc;rsx_address(gpu,next);gpu.return_offset=get+4;window.drop();
         }else if((header&0xffff0003)==0x20000){
             if(gpu.return_offset==UINT32_MAX)throw std::runtime_error("RSX FIFO return without call");
-            next=gpu.return_offset;gpu.return_offset=UINT32_MAX;
+            next=gpu.return_offset;gpu.return_offset=UINT32_MAX;window.drop();
         }else{
             if(header&0xa0030003)throw std::runtime_error("invalid RSX FIFO header "+std::to_string(header));
             const auto count=(header>>18)&0x7ff,method=header&0xfffc,increment=(header&0x40000000)?0u:4u;
@@ -586,7 +618,9 @@ static bool rsx_run_impl(PpuState& s,unsigned budget,bool idle_poll=false){
                         ++gpu.diag_skipped;std::fprintf(stderr,"RSX DIAG SKIP method=%04x stored as raw state\n",unsigned(reg));
                     }
                 }
-                rsx_fifo_values(gpu,m,get+4,count,values);
+                if(!window.has(get+4,count*4) && count*4+4<=RsxFifoWindow::capacity)rsx_fifo_fill(gpu,m,window,get,put);
+                if(window.has(get+4,count*4)){for(unsigned i=0;i<count;++i)values[i]=window.word(get+4+i*4);}
+                else rsx_fifo_values(gpu,m,get+4,count,values);
                 for(unsigned i=gpu.packet_index;i<count;++i){
                     const auto reg=method+i*increment,value=values[i];
                     if(rsx_method_class(reg)==2)publish();
