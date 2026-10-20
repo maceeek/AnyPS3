@@ -77,10 +77,6 @@ static void rsx_worker_start(PpuState& s){
     auto& w=s.process.rsx_worker;
     if(w.enabled){w.check();return;}
     if(!anyps3_trace_enabled("ANYPS3_RSX_WORKER"))return;
-    // The game's RSX owner runs with the asynchronous draw recorder unless ANYPS3_RSX_RECORDER is set explicitly (0 disables). Set before the first
-    // NativeVulkan is constructed (it reads the variable in its constructor). The GPU completion notifier (ANYPS3_RSX_COMPLETION=1) stays opt-in:
-    // measured runs 624a/624b show the same number of owner service ticks with and without it (the ticks are driven by FIFO requests, not by the 100 us timer).
-    ::setenv("ANYPS3_RSX_RECORDER","1",0);
     auto& m=s.memory;if(!m.concurrent())m.enable_concurrency();m.restart_coherence();m.enable_page_broker();
     auto facade=std::make_shared<PpuState>(s.process);w.facade=facade;
     auto* f=facade.get();w.queue=std::make_unique<RsxOwnerQueue>();auto& q=*w.queue;
