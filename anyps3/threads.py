@@ -7,19 +7,22 @@ struct PpuContext {
     std::shared_ptr<std::array<std::uint32_t,8>> thread_atexit=std::make_shared<std::array<std::uint32_t,8>>();
     std::uint64_t r[32]{},fpr[32]{};
     std::array<std::array<std::uint8_t,16>,32> vr{};
+    // Fields the scheduler reads for every blocked thread at each preemption point sit together, so that a pass over
+    // dozens of ~1.3 KB contexts touches one cache line per thread (ppu_schedule).
+    std::uint64_t wait_id=0,wait_deadline=0;
+    unsigned wait_kind=0;std::uint32_t thread_id=1,priority=1000;
+    bool returned=false,atexit_running=false,wait_timed_out=false,lwcond_timed_out=false;
     std::uint64_t lr=RETURN_SENTINEL,ctr=0,xer=0;
-    std::uint32_t cr=0,pc=0,fpscr=0,vrsave=0,vscr=0,thread_id=1,priority=1000;
-    bool returned=false;
+    std::uint32_t cr=0,pc=0,fpscr=0,vrsave=0,vscr=0;
     bool joinable=false;std::uint32_t joiner=0;
     std::uint64_t exit_status=0,stack_base=0,tls_base=0;
     // sysPrxForUser sys_ppu_thread_exit: pending exit value and next atexit slot while callbacks run.
-    std::uint64_t atexit_value=0;unsigned atexit_next=0;bool atexit_running=false;
+    std::uint64_t atexit_value=0;unsigned atexit_next=0;
     std::pair<std::uintptr_t,std::uint64_t> reservation{};
     std::uint64_t reservation_address=UINT64_MAX;unsigned reservation_size=0;
-    unsigned wait_kind=0;std::uint64_t wait_id=0,resume_cond=0;std::uint32_t wait_depth=0;
+    std::uint64_t resume_cond=0;std::uint32_t wait_depth=0;
     std::uint64_t lwmutex_waiting=0,resume_lwcond=0,wait_sequence=0;
-    // Timed kernel mutex wait (sys_mutex_lock timeout, steady-clock microseconds).
-    std::uint64_t wait_deadline=0;bool wait_timed_out=false,lwcond_timed_out=false;
+    // Timed kernel mutex wait (sys_mutex_lock timeout, steady-clock microseconds): wait_deadline/wait_timed_out above.
     std::uint32_t cancelled_event=0;
     // Lazy FR/FI/FPRF (floating.py fp_lazy): the last arithmetic operation whose
     // exact FPSCR update is still pending; fp_lazy_op==0 means none.
@@ -45,11 +48,20 @@ static void sync_ext_finish(PpuState& s,std::uint32_t tid,Lv2SyncExt::Wait& w,st
     for(auto& t:s.ppu_threads)if(t.thread_id==tid)t.wait_kind=0;
     s.reschedule=true;
 }
-static void sync_ext_poll(PpuState& s) {
-    auto& x=s.sync_ext;const auto now=sync_ext_now();
+// The scheduler reads the host clock at most once per pass (lazily; `cached` is 0 until read): a pass over dozens of timed
+// waiters used to read it for each.
+static void sync_ext_poll(PpuState& s,std::uint64_t& cached) {
+    auto& x=s.sync_ext;
+    // Nothing to poll: the deadline loop, the event-flag queues and the rwlock queues are all driven by x.waits entries.
+    if(x.waits.empty())return;
+    if(!cached)cached=sync_ext_now();
+    const auto now=cached;
+    bool flag_waits=false,rwlock_waits=false;
     for(auto& pair:x.waits){
         auto& w=pair.second;
-        for(const auto& t:s.ppu_threads)if(t.thread_id==pair.first)w.priority=t.priority;
+        // w.priority is consumed only by the flag (kind 9) and rwlock-writer (kind 11) queue orders below.
+        if(w.kind==9 || w.kind==11)for(const auto& t:s.ppu_threads)if(t.thread_id==pair.first)w.priority=t.priority;
+        flag_waits|=w.kind==9;rwlock_waits|=w.kind==10 || w.kind==11;
         if(!w.done && w.deadline && now>=w.deadline){
             if(w.kind==9)for(const auto& f:x.flags)if(f.id==w.id)w.pattern=f.pattern;
             sync_ext_finish(s,pair.first,w,w.kind==12?0:0x8001000b);
@@ -58,7 +70,7 @@ static void sync_ext_poll(PpuState& s) {
     auto before=[](const auto& a,const auto& b,unsigned protocol){
         return protocol==2 && a.priority!=b.priority?a.priority<b.priority:a.sequence<b.sequence;
     };
-    for(auto& f:x.flags){
+    if(flag_waits)for(auto& f:x.flags){
         // Consume patterns in queue order at wake time; runnable threads cannot
         // steal a bit from a selected waiter while it reacquires the CPU.
         std::vector<std::uint32_t> queue;
@@ -68,7 +80,7 @@ static void sync_ext_poll(PpuState& s) {
             if(sync_ext_match(f.pattern,w.bits,w.mode)){w.pattern=pattern;sync_ext_finish(s,tid,w,0);}
         }
     }
-    for(auto& l:x.rwlocks){
+    if(rwlock_waits)for(auto& l:x.rwlocks){
         if(l.writer)continue;
         std::uint32_t writer=0;
         for(const auto& pair:x.waits)if(!pair.second.done && pair.second.kind==11 && pair.second.id==l.id)
@@ -82,6 +94,7 @@ static void sync_ext_poll(PpuState& s) {
         }
     }
 }
+static void sync_ext_poll(PpuState& s){std::uint64_t cached=0;sync_ext_poll(s,cached);}
 [[noreturn]] static void ppu_block(PpuState& s,unsigned kind,std::uint64_t id) {
     s.wait_kind=kind;s.wait_id=id;throw PpuBlocked{};
 }
@@ -116,44 +129,48 @@ struct PpuDeferredScope {
     else *active=static_cast<PpuContext&>(s);
     for(;;){
     audio_run(s);
-    sync_ext_poll(s);
+    std::uint64_t cached_now=0; // host clock, read at most once per pass
+    const auto clock_now=[&]{if(!cached_now)cached_now=sync_ext_now();return cached_now;};
+    sync_ext_poll(s,cached_now);
     for(auto& thread:s.ppu_threads){
+        const unsigned kind=thread.wait_kind;
+        if(!kind)continue; // a runnable context has no readiness condition
         bool ready=false;
-        if(thread.wait_kind==1)for(const auto& q:s.events.queues)if(q.id==thread.wait_id && !q.data.empty())ready=true;
-        if(thread.wait_kind==2)for(const auto& sem:s.kernel.semaphores)if(sem.id==thread.wait_id && sem.value)ready=true;
-        if(thread.wait_kind==3)for(const auto& mutex:s.kernel.mutexes)if(mutex.id==thread.wait_id && !mutex.owner)ready=true;
+        // Kernel object ids are never reused (monotonic counters), so the first match is the object. An event queue is
+        // tested through its lock-free event count.
+        if(kind==1){for(const auto& q:s.events.queues)if(q.id==thread.wait_id){ready=q.data.has_events();break;}}
+        else if(kind==2){for(const auto& sem:s.kernel.semaphores)if(sem.id==thread.wait_id){ready=sem.value!=0;break;}}
+        else if(kind==3){for(const auto& mutex:s.kernel.mutexes)if(mutex.id==thread.wait_id){ready=!mutex.owner;break;}}
         // An expired timed mutex wait resumes; the retried lock reports ETIMEDOUT
         // unless the mutex became free (RPCS3 sys_mutex.cpp:247-290).
-        if(!ready && (thread.wait_kind==1 || thread.wait_kind==3 || thread.wait_kind==7 || thread.wait_kind==8) &&
-           thread.wait_deadline && sync_ext_now()>=thread.wait_deadline){thread.wait_timed_out=true;ready=true;}
-        if(thread.wait_kind==5)for(const auto& group:s.spu.groups)if(group.id==thread.wait_id && group.join_cause)ready=true;
-        if(thread.wait_kind==6)for(const auto& target:s.ppu_threads)if(target.thread_id==thread.wait_id && target.returned)ready=true;
-        if(thread.wait_kind==7 && s.mutexes.count(thread.wait_id) && s.memory.load(thread.wait_id,4)==UINT32_MAX)ready=true;
-        if(thread.wait_kind==13 && std::none_of(s.ppu_threads.begin(),s.ppu_threads.end(),[&](const auto& other){
+        if(!ready && (kind==1 || kind==3 || kind==7 || kind==8) &&
+           thread.wait_deadline && clock_now()>=thread.wait_deadline){thread.wait_timed_out=true;ready=true;}
+        if(kind==5)for(const auto& group:s.spu.groups)if(group.id==thread.wait_id && group.join_cause)ready=true;
+        if(kind==6)for(const auto& target:s.ppu_threads)if(target.thread_id==thread.wait_id && target.returned)ready=true;
+        if(kind==7 && s.mutexes.count(thread.wait_id) && s.memory.load(thread.wait_id,4)==UINT32_MAX)ready=true;
+        if(kind==13 && std::none_of(s.ppu_threads.begin(),s.ppu_threads.end(),[&](const auto& other){
             return other.thread_id!=thread.thread_id && other.atexit_running;}))ready=true;
         if(ready)thread.wait_kind=0;
     }
-    PpuContext* next=nullptr;
-    // Rotate equal priorities; a smaller number is a higher LV2 priority.
-    const auto current=static_cast<std::size_t>(active-s.ppu_threads.begin());
-    for(unsigned offset=1;offset<=s.ppu_threads.size();++offset){
-        auto& candidate=s.ppu_threads[(current+offset)%s.ppu_threads.size()];
-        if(candidate.wait_kind || candidate.returned)continue;
-        if(!next || candidate.priority<next->priority)next=&candidate;
-    }
+    // Rotate equal priorities; a smaller number is a higher LV2 priority. One pass in rotation order finds the best
+    // ready context (`next`, the first of the best priority) and the best of the others (`second`, same tie rule).
     // The Cell PPU has two hardware threads: LV2 runs the two highest-priority
     // ready threads at once, so a busy higher-priority thread cannot starve the
     // next one. On a preemption point (not a block) alternate between the best
     // two ready contexts, which serially approximates both hardware threads.
+    PpuContext* next=nullptr;
+    PpuContext* second=nullptr;
+    const auto current=static_cast<std::size_t>(active-s.ppu_threads.begin());
+    const auto count=s.ppu_threads.size();
+    for(std::size_t offset=1,index=current;offset<=count;++offset){
+        if(++index==count)index=0;
+        auto& candidate=s.ppu_threads[index];
+        if(candidate.wait_kind || candidate.returned)continue;
+        if(!next || candidate.priority<next->priority){second=next;next=&candidate;}
+        else if(!second || candidate.priority<second->priority)second=&candidate;
+    }
     if(!mandatory && next && !active->wait_kind && !active->returned){
-        PpuContext* second=nullptr;
-        for(unsigned offset=1;offset<=s.ppu_threads.size();++offset){
-            auto& candidate=s.ppu_threads[(current+offset)%s.ppu_threads.size()];
-            if(&candidate==next || candidate.wait_kind || candidate.returned)continue;
-            if(!second || candidate.priority<second->priority)second=&candidate;
-        }
         if(second && &*active==next)next=second;
-        else if(second && &*active==second)next=next;
     }
     if(!next){
         if(mandatory){
@@ -188,6 +205,9 @@ struct PpuDeferredScope {
     // Per-switch trace only on request: ~2000 switches/s in a level made it a stderr hot path.
     static const bool trace_switch=[]{const char* v=std::getenv("ANYPS3_TRACE_PPU_SWITCH");return v && std::string(v)=="1";}();
     if(trace_switch && next->thread_id!=s.thread_id)std::fprintf(stderr,"PPU switch %u -> %u pc=%08x\n",s.thread_id,next->thread_id,next->pc);
+    // Keeping the same context at a preemption point: the slot was just saved from `s` and the readiness pass only touches
+    // blocked contexts, so copying it back is the identity. A mandatory pass may have woken the active context.
+    if(!mandatory && next==&*active){s.reschedule=false;return;}
     static_cast<PpuContext&>(s)=*next;s.reschedule=false;
     return;
     }

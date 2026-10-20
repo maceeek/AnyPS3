@@ -89,7 +89,10 @@ def compile_units(sources: list[Path], output: Path, *, flags=FLAGS, defines=(),
     def build(source):
         start = time.monotonic()
         target = objects/(source.stem+'.o')
-        unit_flags = [*compile_flags, *(spu_extra_flags if source.name.startswith('spu-') else ())]
+        # ANYPS3_NATIVE_PROGRAM_CXXFLAGS (diagnostics only, e.g. "-fno-omit-frame-pointer" for sampler call stacks of the
+        # RSX thread) applies to program.cpp alone; unset in normal builds, so object-cache keys stay unchanged.
+        program_flags = os.environ.get('ANYPS3_NATIVE_PROGRAM_CXXFLAGS', '').split() if source.name == 'program.cpp' else []
+        unit_flags = [*compile_flags, *program_flags, *(spu_extra_flags if source.name.startswith('spu-') else ())]
         key = object_key(source, unit_flags, compiler) if cache else None
         if key and (cache/(key+'.o')).is_file():
             shutil.copyfile(cache/(key+'.o'), target)

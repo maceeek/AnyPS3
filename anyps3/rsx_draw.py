@@ -294,16 +294,17 @@ struct DrawReadBatch {
         if(!first.memory->concurrent()){
             for(unsigned i=0;i<count;++i){const auto& input=inputs[i];input.range->read(0,output+input.destination,input.range->size);}return;
         }
-        std::vector<GuestMemory::HostSpan> declared;
-        HostByteAccess exact_bytes{first.memory->host_access_observer.supports_exact_bytes.load(std::memory_order_acquire)};
-        for(unsigned i=0;i<count;++i){const auto& range=*inputs[i].range;
-            if(range.memory!=first.memory)throw std::runtime_error("RSX mixed draw input memory");
-            // Retire GPU-authoritative input bytes before claiming them, just
-            // as Range::read/transfer does; the claim itself is not coherence.
-            for(const auto& part:range.parts){range.memory->notify_host(part.data,part.size,false);declared.push_back({part.data,part.size,part.owner});}}
-        ClaimTransfer transfer(first,std::move(declared));
+        // Shared reader admission per input (the Range::read protocol used for indices, fragment programs and textures):
+        // GPU-authoritative bytes are retired by the observer inside the lease, map identity is checked by
+        // Range::check_epoch, every 64-bit word is read atomically. No exclusive page claim and no membarrier per draw
+        // (the claim cost ~2 ms/frame in the level). A bulk guest write that overlaps this read UNORDERED is a race on
+        // hardware too. The ordered cases are protected by (A) acquire/release: a write completed before the label the
+        // FIFO acquired is seen completely, and (B) program order: this read finishes inside rsx_execute_draw, before any
+        // later FIFO method can publish a label/semaphore the writer waits for (the read is never deferred past the draw).
+        // tests/test_rsx2_draw.py ordered_bulk_writes_ pins both; a future batching/deferral of this read must keep B.
         for(unsigned i=0;i<count;++i){const auto& input=inputs[i];const auto& range=*input.range;
-            transfer.claim->snapshot_into(range,0,range.size,output+input.destination);}
+            if(range.memory!=first.memory)throw std::runtime_error("RSX mixed draw input memory");
+            range.read(0,output+input.destination,range.size);}
     }
 };
 // Reverse translation is used only with a pinned original backing. Retain
@@ -1304,7 +1305,7 @@ static void rsx_execute_draw(PpuState& s){
             const auto address=location_address(gpu,dma&15,begin,count*width);
             if(!count)continue;
             auto& bytes=draw.scratch_index_bytes;bytes.resize(count*width);
-            m.range(address,count*width,false).read(0,bytes.data(),count*width);
+            m.transfer(address,bytes.data(),count*width,false);   // one admitted read; the Range would only be read once
             // Same values/errors as the per-element loop: decode into place,
             // checking overflow on the unrestarted maximum only.
             const auto at=indices.size();indices.resize(at+count);

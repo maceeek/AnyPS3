@@ -4,6 +4,7 @@ MEMBERS = r'''
     void graphics_unpack_upload(GraphicsBatch& b,const std::shared_ptr<GraphicsImage>& image,
             unsigned format,bool depth,unsigned bpp,unsigned pitch,unsigned samples,
             const std::vector<unsigned>& words,std::shared_ptr<GraphicsBuffer>& word_buffer,const void* bytes,std::uint64_t device_input=UINT64_MAX){
+        GraphicsSite site(SiteUnpack);
         const auto size=words.size()*4,pixels=std::uint64_t(image->width)*image->height*samples;
         const bool stencil=depth && format==2;
         if(device_input!=UINT64_MAX && (device_input%4 || device_input>b.used || size>b.used-device_input))throw std::runtime_error("RSX device surface upload input bounds");
@@ -11,12 +12,12 @@ MEMBERS = r'''
         const auto stencil_at=stencil?graphics_space(b,(pixels+3)&~UINT64_C(3)):0;
         if(!word_buffer)word_buffer=graphics_buffer(b,words.data(),size);
         graphics_barrier(b);VkBufferCopy copies[]={{input,input,size},{0,table,size}};
-        if(device_input==UINT64_MAX)vkCmdCopyBuffer(b.command,b.buffer,b.data_buffer,1,copies);
+        if(device_input==UINT64_MAX)b.uploads.push_back(copies[0]); // immutable CPU slice: copied by the batch prelude
         vkCmdCopyBuffer(b.command,word_buffer->buffer,b.data_buffer,1,copies+1);
         if(stencil)vkCmdFillBuffer(b.command,b.data_buffer,stencil_at,(pixels+3)&~UINT64_C(3),0);
         const unsigned parameters[]={unsigned(input/4),unsigned(table/4),unsigned(output/4),unsigned(stencil_at/4),unsigned(words.size()),image->width,image->height,samples,bpp,pitch,format,unsigned(depth),unsigned(image->format==VK_FORMAT_R32_UINT)};
         const auto params=graphics_upload(b,parameters,sizeof(parameters));
-        VkBufferCopy params_copy{params,params,sizeof(parameters)};vkCmdCopyBuffer(b.command,b.buffer,b.data_buffer,1,&params_copy);
+        b.uploads.push_back({params,params,sizeof(parameters)});
         static const std::string source=R"UPLOAD(#version 450
 layout(local_size_x=64) in;
 layout(std430,binding=0) buffer Data{uint w[];};

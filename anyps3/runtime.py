@@ -581,7 +581,7 @@ struct GuestMemory {
             Lease lease(*memory,address+offset,count,false,true);check_epoch();
             if(memory->concurrent()){
                 if(offset>size || count>size-offset)throw std::runtime_error("guest range bounds fault");
-                memory->transfer(address+offset,out,count,false);return;
+                memory->read_admitted(address+offset,out,count);return;
             }
             if(offset>size || count>size-offset)throw std::runtime_error("guest range bounds fault");
             for(const auto& part:parts){
@@ -746,8 +746,12 @@ struct GuestMemory {
         }
         return message+"]";
     }
-    Range range(std::uint64_t address,unsigned size,bool write){
-        Lease lease(*this,address,size,write,true);
+    // Translation-only read Range (vertex inputs of a draw): identical Range, map-epoch/permission checks and observer
+    // coherence point as range(address,size,false) -- creation retires GPU-authoritative bytes at this safe point, which the
+    // draw relies on before it reserves staging space -- but without page-broker cell admission: nothing is read here.
+    Range range_translated(std::uint64_t address,unsigned size){return range(address,size,false,false);}
+    Range range(std::uint64_t address,unsigned size,bool write,bool brokered=true){
+        Lease lease(*this,address,size,write,true,brokered);
         if(address>UINT32_MAX || size>UINT64_C(0x100000000)-address)
             throw std::runtime_error("guest address outside 32-bit space");
         Range result;result.memory=this;result.size=size;result.writable=write;result.address=address;result.epoch=parallel->epoch;
@@ -957,6 +961,16 @@ struct GuestMemory {
             return snapshot.data();
         }
         throw std::runtime_error(range_diagnostic(address,size,write));
+    }
+    // Concurrent read body of transfer() for a caller that already holds the Lease of exactly these bytes
+    // (Range::read): same translation, permission checks and atomic word reads, without the nested lease
+    // revalidation, the span vector and the shared_ptr copies of parallel_spans.
+    void read_admitted(std::uint64_t address,std::uint8_t* buffer,unsigned size){
+        if(address>UINT32_MAX || size>UINT64_C(0x100000000)-address)throw std::runtime_error("guest transfer outside 32-bit space");
+        auto next=address;unsigned left=size;
+        while(left){const auto& map=translate_parallel(next,1,false);const auto& r=map.region;
+            const unsigned n=std::min<std::uint64_t>(left,r.bytes->size()-(next-r.base));
+            atomic_read(byte_pointer(r.bytes,r.bytes->data()+next-r.base),buffer,n);buffer+=n;next+=n;left-=n;}
     }
     void transfer(std::uint64_t address,std::uint8_t* buffer,unsigned size,bool write) {
         HostByteAccess exact_bytes{host_access_observer.supports_exact_bytes.load(std::memory_order_acquire)};

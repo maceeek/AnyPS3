@@ -8,6 +8,7 @@ MEMBERS = r'''
     std::uint64_t graphics_pack_readback(GraphicsBatch& b,const std::shared_ptr<GraphicsImage>& image,
             unsigned format,bool depth,unsigned bpp,unsigned pitch,unsigned samples,
             const std::vector<unsigned>& words,std::shared_ptr<GraphicsBuffer>& word_buffer,bool download=true){
+        GraphicsSite site(SitePack);
         if(words.empty() || !pitch || (samples!=1 && samples!=2 && samples!=4))throw std::runtime_error("invalid RSX readback layout");
         unsigned image_bpp=4;
         switch(image->format){case VK_FORMAT_D16_UNORM:case VK_FORMAT_R5G6B5_UNORM_PACK16:image_bpp=2;break;
@@ -24,7 +25,7 @@ MEMBERS = r'''
         if(stencil){copy.bufferOffset=stencil_at;copy.imageSubresource.aspectMask=VK_IMAGE_ASPECT_STENCIL_BIT;vkCmdCopyImageToBuffer(b.command,image->image,VK_IMAGE_LAYOUT_GENERAL,b.data_buffer,1,&copy);}
         const unsigned parameters[]={unsigned(input/4),unsigned(stencil_at),unsigned(output/4),unsigned(table/4),unsigned(words.size()),image->width,image->height,samples,bpp,pitch,format,unsigned(depth),image_bpp,unsigned(image->format==VK_FORMAT_R32_UINT)};
         const auto params=graphics_upload(b,parameters,sizeof(parameters));
-        graphics_barrier(b);VkBufferCopy parameter_copy{params,params,sizeof(parameters)};vkCmdCopyBuffer(b.command,b.buffer,b.data_buffer,1,&parameter_copy);
+        b.uploads.push_back({params,params,sizeof(parameters)}); // immutable CPU slice: copied by the batch prelude
         static const std::string source=R"PACK(#version 450
 layout(local_size_x=64) in;
 layout(std430,binding=0) buffer Data {uint w[];};

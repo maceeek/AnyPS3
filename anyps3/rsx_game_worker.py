@@ -19,6 +19,7 @@ struct NativeRsxWorker {
 
     std::atomic<std::uint64_t> map_barriers{0},host_requests{0};
     std::optional<std::array<std::uint64_t,6>> last_metrics;
+    std::optional<std::array<std::uint64_t,3>> last_memory;
 #ifdef ANYPS3_RSX_PERF_COUNTERS
     std::optional<std::array<std::uint64_t,RsxPerfCounters::count>> last_counters;
 #endif
@@ -304,6 +305,9 @@ static void rsx_worker_perf(const PpuState& s){
         std::fprintf(stderr,"%s\n",line.c_str());}
     w.last_counters=counters;
 #endif
+    {const std::array<std::uint64_t,3> mem{{GuestMemory::stat_membarriers.load(std::memory_order_relaxed),GuestMemory::stat_slow_leases.load(std::memory_order_relaxed),GuestMemory::stat_gpu_claims.load(std::memory_order_relaxed)}};
+        if(w.last_memory)std::fprintf(stderr,"PERF GUEST_MEMORY membarriers=%" PRIu64 " slow_leases=%" PRIu64 " gpu_claims=%" PRIu64 "\n",mem[0]-(*w.last_memory)[0],mem[1]-(*w.last_memory)[1],mem[2]-(*w.last_memory)[2]);
+        w.last_memory=mem;}
     if(rsxdraw::host_stats().enabled){
         static const char* names[]={"idle","indices","assembly","state","texture_metadata","targets","certification","shader_source","geometry","vertex_upload","texture_upload","record","flush"};
         std::string line="PERF RSX_STAGES";char item[64];

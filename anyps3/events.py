@@ -4,11 +4,14 @@ struct EventQueueState {
     using Event=std::array<std::uint64_t,4>;
     mutable std::mutex mutex;std::vector<Event> values;
     std::atomic<unsigned> capacity{0};bool exists=true;
-    EventQueueState(unsigned n,std::initializer_list<Event> initial):values(initial),capacity(n){}
+    // values.size(), mirrored for lock-free emptiness polls (the scheduler tests every queue a blocked PPU thread waits on at
+    // each preemption point). Every mutation of `values` happens under `mutex` and refreshes it before unlocking.
+    std::atomic<std::size_t> count{0};
+    EventQueueState(unsigned n,std::initializer_list<Event> initial):values(initial),capacity(n),count(values.size()){}
     std::uint32_t send(const Event& event){std::lock_guard<std::mutex> lock(mutex);
         if(!exists)return 0x80010016;
         if(values.size()>=capacity.load(std::memory_order_relaxed))return 0x8001000a;
-        values.push_back(event);return 0;
+        values.push_back(event);count.store(values.size(),std::memory_order_release);return 0;
     }
 };
 struct Events {
@@ -20,10 +23,12 @@ struct Events {
         explicit Data(unsigned capacity=UINT32_MAX,std::initializer_list<Event> initial={}):state(std::make_shared<EventQueueState>(capacity,initial)){}
         std::size_t size()const{std::lock_guard<std::mutex> lock(state->mutex);return state->values.size();}
         bool empty()const{return !size();}
+        // Lock-free: true if an event was queued at some instant during the call (a concurrent send may or may not be seen).
+        bool has_events()const{return state->count.load(std::memory_order_acquire)!=0;}
         Event operator[](std::size_t i)const{std::lock_guard<std::mutex> lock(state->mutex);return state->values.at(i);}
         Event front()const{return (*this)[0];}
         void reserve(std::size_t n){std::lock_guard<std::mutex> lock(state->mutex);state->values.reserve(n);}
-        void clear(){std::lock_guard<std::mutex> lock(state->mutex);state->values.clear();}
+        void clear(){std::lock_guard<std::mutex> lock(state->mutex);state->values.clear();state->count.store(0,std::memory_order_release);}
         std::uint32_t send(const Event& event){return state->send(event);}
         void push_back(const Event& event){if(send(event))throw std::runtime_error("event queue append raced capacity or destruction");}
         void close()const{if(state){std::lock_guard<std::mutex> lock(state->mutex);state->exists=false;}}
@@ -42,6 +47,7 @@ struct Events {
         void erase(const Iterator& first,const Iterator& last){std::lock_guard<std::mutex> lock(state->mutex);
             if(first.index>last.index || last.index>state->values.size())throw std::runtime_error("event FIFO erase bounds");
             state->values.erase(state->values.begin()+first.index,state->values.begin()+last.index);
+            state->count.store(state->values.size(),std::memory_order_release);
         }
         void erase(const Iterator& at){erase(at,at+1);}
     };

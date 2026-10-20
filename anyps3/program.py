@@ -34,6 +34,25 @@ from .par_worker import TYPES as WORKER_TYPES, CPP as WORKER_CPP, RSX_GAME_CPP, 
 from .execution import TYPES as EXECUTION_TYPES, STATE_CPP as EXECUTION_STATE_CPP, CPP as EXECUTION_CPP, adapt_engines, instrument_gpu_waits
 
 ATEXIT_RETURN = 0xfffe0010  # must match threads.py ATEXIT_RETURN
+# Linux gives every thread a 50 us timer slack, so a timed host wait (guest usleep(30), SPU lane park timeouts, scheduler idle
+# sleeps) ends 30-50 us late (scratch test: sleep_for(30 us) = 80 us). Threads inherit the creator's slack, so an opt-in value is
+# set once, before any worker thread exists. ANYPS3_TIMER_SLACK_NS=N chooses N; unset or 0 keeps the kernel default. NOT the
+# default: in the level (builds 520b/520c vs 470a/520a) slack 1 ns raised the main thread busy time by 1.3 ms/frame (shorter
+# sleeps = more wake-ups and cold restarts) and did not shorten the frame.
+TIMER_SLACK_CPP = r'''
+[[maybe_unused]] static void anyps3_timer_slack() {
+#if defined(__linux__) && defined(PR_SET_TIMERSLACK)
+    unsigned long ns = 0;
+    if (const char* v = std::getenv("ANYPS3_TIMER_SLACK_NS")) {
+        char* end = nullptr; errno = 0; ns = std::strtoul(v, &end, 10);
+        if (*v < '0' || *v > '9' || *end || errno == ERANGE) {
+            std::fprintf(stderr, "invalid ANYPS3_TIMER_SLACK_NS: expected a decimal nanosecond count that fits unsigned long\n"); std::exit(2); }
+    }
+    if (ns && prctl(PR_SET_TIMERSLACK, ns, 0, 0, 0) != 0) {
+        std::fprintf(stderr, "ANYPS3_TIMER_SLACK_NS=%lu: prctl(PR_SET_TIMERSLACK) failed: %s\n", ns, std::strerror(errno)); std::exit(2); }
+#endif
+}
+'''
 # PPUFAST M3: GPR/FPR/CR fields/LR/CTR/XER in page-function locals.
 PPU_REGISTER_LOCALS = True
 from .spu import generate_parts as generate_spu
@@ -145,7 +164,7 @@ class Program:
         else:
             spu_core, spu_functions, spu_dispatch = "", [], ""
         lines = ["// AnyPS3 AOT diagnostic program. No PPU/SPU instruction decoding occurs at runtime.",
-                 "#include <cstdint>", "#include <cstdio>", "#include <cinttypes>", "#include <set>", "#include <chrono>", "#include <optional>", "#include <atomic>", "#include <array>", "#include <thread>", SAMPLE_PROFILE_TYPES, MEMORY_CPP,
+                 "#include <cstdint>", "#include <sys/prctl.h>", "#include <cerrno>", "#include <cstring>", "#include <cstdio>", "#include <cinttypes>", "#include <set>", "#include <chrono>", "#include <optional>", "#include <atomic>", "#include <array>", "#include <thread>", SAMPLE_PROFILE_TYPES, MEMORY_CPP,
                  memory_loader(self.image), "constexpr std::uint32_t RETURN_SENTINEL = 0xfffffffc;",
                  MMAPPER_TYPES, SYNC_TYPES, EVENT_TYPES, SYSUTIL_TYPES, FS_TYPES, PAD_TYPES, HID_TYPES, AUDIO_TYPES, PRESENT_TYPES, EXECUTION_TYPES, instrument_gpu_waits(VULKAN_CPP), RSX_TYPES, SPU_TYPES, THREAD_TYPES, FS_EXT_TYPES, SYNC_EXT_TYPES, SPU_EXT_TYPES, RSX_NET_EXT_TYPES,
                  WORKER_TYPES, EXECUTION_STATE_CPP, "bool spu_owner_call(PpuState&,NativeSpu::Thread&,const std::function<void()>&);", FLOW_CPP, FLOAT_CPP, VECTOR_CPP, FS_CPP]
@@ -296,11 +315,12 @@ class Program:
                       f'    if (state.steps >= UINT64_C({max_steps})) throw std::runtime_error("execution step limit reached");',
                       "    const auto before=state.steps; state.memory.inline_enter_dispatch(); try { ExecutionPpuPage ppu_perf_page(state.execution,state.thread_id,state.steps); { anyps3_dispatch_page(state);" if self.process_entry else "    state.memory.inline_enter_dispatch(); { anyps3_dispatch_page(state);"])
         ending = "    } } catch (const PpuBlocked&) { state.memory.inline_suspend(); ppu_schedule(state,true); continue; } if(state.steps/256!=before/256 || state.ppu_block_pending || state.reschedule || state.returned)state.memory.inline_suspend(); if(state.ppu_block_pending){state.ppu_block_pending=false;ppu_schedule(state,true);continue;} if(state.steps/256!=before/256){spu_run(state,1024);if(anyps3_rsx_poll_due(state,before))rsx_run(state,1024);if(state.steps/4096!=before/4096)audio_run(state);if(state.steps/65536!=before/65536)anyps3_perf_report(state);if(anyps3_dump_requested.load(std::memory_order_relaxed) && anyps3_dump_requested.exchange(false))anyps3_dump_threads(state);} if(state.reschedule || (!state.module_loading && state.ppu_threads.size()>1 && state.steps/4096!=before/4096)) ppu_schedule(state); if(state.returned) { if(state.thread_id!=1) throw std::runtime_error(\"PPU thread returned without thread-exit service\"); worker_session.finish();return; } } }" if self.process_entry else "    } if (state.returned) return; } }"
-        lines.extend([ending, "int main(int argc, char** argv) {",
+        lines.extend([ending, TIMER_SLACK_CPP, "int main(int argc, char** argv) {",
+                      "    anyps3_timer_slack();",
                       '    if (argc < 2 || argc > 3) { std::fprintf(stderr, "Usage: program SOURCE.elf [--trace]\\n"); return 2; }',
                       '    const bool trace = argc == 3 && std::string(argv[2]) == "--trace";',
                       '    if (argc == 3 && !trace) { std::fprintf(stderr, "Unknown option\\n"); return 2; }',
-                      "    PpuState state; state.rsx.trace=trace; try { anyps3_sample::Thread sample_profile(anyps3_sample::Role::Ppu,&state.pc,&state.thread_id,&state.steps); load_image(state.memory, argv[1]);",
+                      "    PpuState state; state.rsx.trace=trace; try { anyps3_sample::Thread sample_profile(anyps3_sample::Role::Ppu,&state.pc,&state.thread_id,&state.steps,&state.lr,&state.r[1],&state.memory.inline_flat.base); load_image(state.memory, argv[1]);",
                       '    state.fs.mount(std::getenv("ANYPS3_DISC_ROOT"));' if self.process_entry else "",
                       '    state.fs.configure_cache(std::getenv("ANYPS3_CACHE_ROOT"));' if self.process_entry else "",
                       '    state.fs.configure_hdd(std::getenv("ANYPS3_HDD_ROOT"));' if self.process_entry else "",

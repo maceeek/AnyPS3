@@ -51,13 +51,82 @@ private:
         resource_stats().remove("descriptor_pools",resource_id(object));release_descriptor_sets(object);::vkDestroyDescriptorPool(d,object,a);
     }
 
-    static VkResult vkAllocateMemory(VkDevice d,const VkMemoryAllocateInfo* ci,const VkAllocationCallbacks* a,VkDeviceMemory* out){::RsxPerfCounters::add(::RsxPerfCounters::vk_memory_allocs);const auto r=::vkAllocateMemory(d,ci,a,out);if(r==VK_SUCCESS)resource_stats().add("device_memory",resource_id(*out),ci->allocationSize);return r;}
-    static void vkFreeMemory(VkDevice d,VkDeviceMemory object,const VkAllocationCallbacks* a){::RsxPerfCounters::add(::RsxPerfCounters::vk_memory_frees);resource_stats().remove("device_memory",resource_id(object));::vkFreeMemory(d,object,a);}
+    // Device-local (never host-visible, hence never mapped) allocations are recycled by exact
+    // (memory type, size): vkFreeMemory/vkAllocateMemory cost dozens of RM ioctls each on NVIDIA.
+    // The Vulkan lifetime rules are unchanged: a block enters the cache only where the old code
+    // freed it, i.e. after the GPU finished with every resource bound to it. ANYPS3_RSX_MEMORY_CACHE_MB
+    // (default 384, 0 = off) bounds the cached bytes; the oldest blocks are really freed first.
+    struct MemoryCache {
+        struct Free {VkDevice device;std::uint32_t type;VkDeviceSize size;VkDeviceMemory memory;std::uint64_t stamp;};
+        std::mutex mutex;std::vector<Free> free;std::map<std::pair<std::uint64_t,std::uint64_t>,std::pair<std::uint32_t,VkDeviceSize>> live;   // key (VkDevice, VkDeviceMemory): handles are only unique per device
+        std::map<VkDevice,std::uint32_t> types;VkDeviceSize bytes=0,limit=UINT64_C(384)<<20;std::uint64_t clock=0;
+    };
+    static MemoryCache& memory_cache(){static MemoryCache cache;return cache;}
+    void configure_memory_cache(VkDevice d){
+        std::uint32_t mask=0;
+        for(std::uint32_t i=0;i<memory.memoryTypeCount;++i){const auto f=memory.memoryTypes[i].propertyFlags;
+            if((f&VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) && !(f&VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT))mask|=1u<<i;}
+        auto& c=memory_cache();std::lock_guard<std::mutex> lock(c.mutex);
+        c.limit=UINT64_C(384)<<20;   // default on every configuration: the singleton must not keep a previous device's setting
+        if(const char* v=std::getenv("ANYPS3_RSX_MEMORY_CACHE_MB")){char* end=nullptr;const auto n=std::strtoull(v,&end,10);
+            if(!*v || *end || n>65536){throw std::runtime_error("invalid ANYPS3_RSX_MEMORY_CACHE_MB");}
+            c.limit=n<<20;}
+        c.types[d]=c.limit?mask:0;
+    }
+    static void release_memory_cache(VkDevice d)noexcept{
+        auto& c=memory_cache();std::lock_guard<std::mutex> lock(c.mutex);
+        for(auto it=c.free.begin();it!=c.free.end();){if(it->device==d){c.bytes-=it->size;::vkFreeMemory(d,it->memory,nullptr);it=c.free.erase(it);}else ++it;}
+        c.types.erase(d);
+        for(auto it=c.live.begin();it!=c.live.end();)if(it->first.first==resource_id(d))it=c.live.erase(it);else ++it;
+    }
+    static VkResult vkAllocateMemory(VkDevice d,const VkMemoryAllocateInfo* ci,const VkAllocationCallbacks* a,VkDeviceMemory* out){
+        auto& c=memory_cache();bool cacheable=false;
+        {std::lock_guard<std::mutex> lock(c.mutex);
+            const auto t=c.types.find(d);cacheable=!ci->pNext && !a && t!=c.types.end() && ci->memoryTypeIndex<32 && (t->second&(1u<<ci->memoryTypeIndex));
+            if(cacheable){
+                for(auto it=c.free.begin();it!=c.free.end();++it)if(it->device==d && it->type==ci->memoryTypeIndex && it->size==ci->allocationSize){
+                    *out=it->memory;c.bytes-=it->size;c.free.erase(it);c.live[{resource_id(d),resource_id(*out)}]={ci->memoryTypeIndex,ci->allocationSize};
+                    ::RsxPerfCounters::add(::RsxPerfCounters::vk_memory_reuses);resource_stats().add("device_memory",resource_id(*out),ci->allocationSize);return VK_SUCCESS;}}}
+        ::RsxPerfCounters::add(::RsxPerfCounters::vk_memory_allocs);auto r=::vkAllocateMemory(d,ci,a,out);
+        // Any allocation that fails for device memory (a host-visible staging block can share a heap with the cached
+        // device-local blocks) gets the cached blocks back before the failure is reported.
+        if(r==VK_ERROR_OUT_OF_DEVICE_MEMORY){release_memory_cache_blocks(d);r=::vkAllocateMemory(d,ci,a,out);}
+        if(r==VK_SUCCESS){resource_stats().add("device_memory",resource_id(*out),ci->allocationSize);
+            if(cacheable){std::lock_guard<std::mutex> lock(c.mutex);c.live[{resource_id(d),resource_id(*out)}]={ci->memoryTypeIndex,ci->allocationSize};}}
+        return r;
+    }
+    static void release_memory_cache_blocks(VkDevice d){
+        auto& c=memory_cache();std::lock_guard<std::mutex> lock(c.mutex);
+        for(auto it=c.free.begin();it!=c.free.end();){if(it->device==d){c.bytes-=it->size;::RsxPerfCounters::add(::RsxPerfCounters::vk_memory_frees);::vkFreeMemory(d,it->memory,nullptr);it=c.free.erase(it);}else ++it;}
+    }
+    static void vkFreeMemory(VkDevice d,VkDeviceMemory object,const VkAllocationCallbacks* a){
+        resource_stats().remove("device_memory",resource_id(object));
+        auto& c=memory_cache();
+        {std::lock_guard<std::mutex> lock(c.mutex);
+            const auto live=c.live.find({resource_id(d),resource_id(object)});
+            if(live!=c.live.end() && !a){
+                const auto entry=live->second;c.live.erase(live);
+                if(entry.second<=c.limit){
+                    c.free.push_back({d,entry.first,entry.second,object,++c.clock});c.bytes+=entry.second;
+                    while(c.bytes>c.limit){auto oldest=std::min_element(c.free.begin(),c.free.end(),[](const auto& x,const auto& y){return x.stamp<y.stamp;});
+                        c.bytes-=oldest->size;::RsxPerfCounters::add(::RsxPerfCounters::vk_memory_frees);::vkFreeMemory(oldest->device,oldest->memory,nullptr);c.free.erase(oldest);}
+                    return;}}}
+        ::RsxPerfCounters::add(::RsxPerfCounters::vk_memory_frees);::vkFreeMemory(d,object,a);
+    }
     static void vkDestroyPipeline(VkDevice d,VkPipeline object,const VkAllocationCallbacks* a){resource_stats().remove("pipelines",resource_id(object));::vkDestroyPipeline(d,object,a);}
     static void release_descriptor_sets(VkDescriptorPool pool){auto& stats=resource_stats();std::lock_guard<std::recursive_mutex> lock(stats.mutex);auto it=stats.descriptor_sets.find(resource_id(pool));if(it!=stats.descriptor_sets.end()){for(auto id:it->second)stats.remove("descriptor_sets",id);stats.descriptor_sets.erase(it);}}
     static VkResult vkResetDescriptorPool(VkDevice d,VkDescriptorPool pool,VkDescriptorPoolResetFlags flags){const auto r=::vkResetDescriptorPool(d,pool,flags);if(r==VK_SUCCESS)release_descriptor_sets(pool);return r;}
     static VkResult vkAllocateDescriptorSets(VkDevice d,const VkDescriptorSetAllocateInfo* ci,VkDescriptorSet* out){const auto r=::vkAllocateDescriptorSets(d,ci,out);if(r==VK_SUCCESS){auto& stats=resource_stats();std::lock_guard<std::recursive_mutex> lock(stats.mutex);for(unsigned i=0;i<ci->descriptorSetCount;++i){auto id=resource_id(out[i]);stats.add("descriptor_sets",id);stats.descriptor_sets[resource_id(ci->descriptorPool)].push_back(id);}}return r;}
     static VkResult vkCreateGraphicsPipelines(VkDevice d,VkPipelineCache cache,std::uint32_t n,const VkGraphicsPipelineCreateInfo* ci,const VkAllocationCallbacks* a,VkPipeline* out){const auto r=::vkCreateGraphicsPipelines(d,cache,n,ci,a,out);for(unsigned i=0;i<n;++i)if(out[i])resource_stats().add("pipelines",resource_id(out[i]));return r;}
+    // Diagnostic command-kind tags for ANYPS3_RSX_VK_MARKS (see GraphicsMark); the wrappers only record the kind.
+    static void vkCmdCopyBuffer(VkCommandBuffer c,VkBuffer a,VkBuffer b,std::uint32_t n,const VkBufferCopy* r){graphics_last_kind()=MarkCopyBuffer;::vkCmdCopyBuffer(c,a,b,n,r);}
+    static void vkCmdCopyBufferToImage(VkCommandBuffer c,VkBuffer a,VkImage b,VkImageLayout l,std::uint32_t n,const VkBufferImageCopy* r){graphics_last_kind()=MarkCopyImage;::vkCmdCopyBufferToImage(c,a,b,l,n,r);}
+    static void vkCmdCopyImageToBuffer(VkCommandBuffer c,VkImage a,VkImageLayout l,VkBuffer b,std::uint32_t n,const VkBufferImageCopy* r){graphics_last_kind()=MarkCopyImage;::vkCmdCopyImageToBuffer(c,a,l,b,n,r);}
+    static void vkCmdCopyImage(VkCommandBuffer c,VkImage a,VkImageLayout al,VkImage b,VkImageLayout bl,std::uint32_t n,const VkImageCopy* r){graphics_last_kind()=MarkCopyImage;::vkCmdCopyImage(c,a,al,b,bl,n,r);}
+    static void vkCmdFillBuffer(VkCommandBuffer c,VkBuffer b,VkDeviceSize o,VkDeviceSize n,std::uint32_t v){graphics_last_kind()=MarkFill;::vkCmdFillBuffer(c,b,o,n,v);}
+    static void vkCmdDispatch(VkCommandBuffer c,std::uint32_t x,std::uint32_t y,std::uint32_t z){graphics_last_kind()=MarkDispatch;::vkCmdDispatch(c,x,y,z);}
+    static void vkCmdClearColorImage(VkCommandBuffer c,VkImage i,VkImageLayout l,const VkClearColorValue* v,std::uint32_t n,const VkImageSubresourceRange* r){graphics_last_kind()=MarkClear;::vkCmdClearColorImage(c,i,l,v,n,r);}
+    static void vkCmdClearDepthStencilImage(VkCommandBuffer c,VkImage i,VkImageLayout l,const VkClearDepthStencilValue* v,std::uint32_t n,const VkImageSubresourceRange* r){graphics_last_kind()=MarkClear;::vkCmdClearDepthStencilImage(c,i,l,v,n,r);}
     static VkResult vkCreateComputePipelines(VkDevice d,VkPipelineCache cache,std::uint32_t n,const VkComputePipelineCreateInfo* ci,const VkAllocationCallbacks* a,VkPipeline* out){const auto r=::vkCreateComputePipelines(d,cache,n,ci,a,out);for(unsigned i=0;i<n;++i)if(out[i])resource_stats().add("pipelines",resource_id(out[i]));return r;}
 #endif
 '''
