@@ -15,7 +15,8 @@ class SpuPerf2BlockTests(unittest.TestCase):
         words = {0x100+i*4: 0x1c004183 for i in range(16)}
         words[0x140] = 1
         _, functions, _ = generate_parts((image(words),))
-        self.assertIn('spu_code_eq<64>(ls+a,code+0x0)', functions[0][1])
+        self.assertIn('spu_code_eq<64>(fnls+0x0u,code+0x0u)', functions[0][1])
+        self.assertIn('spu_block_slow(s,t,block,ls,fnls,code,0x44u,a,0x0u,64,16,lim,vm,', functions[0][1])
         self.native(words, r'''
  for(unsigned offset=0;offset<16;++offset)for(unsigned budget=1;budget<=17-offset;++budget){
   t.pc=0x100+offset*4;t.steps=0;t.gpr={};

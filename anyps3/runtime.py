@@ -974,8 +974,11 @@ struct GuestMemory {
     }
     void transfer(std::uint64_t address,std::uint8_t* buffer,unsigned size,bool write) {
         HostByteAccess exact_bytes{host_access_observer.supports_exact_bytes.load(std::memory_order_acquire)};
-        Lease lease(*this,address,size,write,true);
+        // A transfer inside one guest page is one span: admit it like a scalar access and skip the per-page broker set.
+        const bool one_page=size && address<=UINT32_MAX && (address>>12)==((address+size-1)>>12);
+        Lease lease(*this,address,size,write,true,true,one_page);
         if(concurrent()){
+            if(one_page && !write){read_admitted(address,buffer,size);return;}
             const auto spans=parallel_spans(address,size,write,true);
             if(write){LineLocks locks(*this,spans);bump_parallel(spans);for(const auto& part:spans){atomic_write(byte_pointer(part.pin,part.pointer),buffer,part.size);buffer+=part.size;publish_cpu_write(part.pointer,part.size);}}
             else for(const auto& part:spans){atomic_read(byte_pointer(part.pin,part.pointer),buffer,part.size);buffer+=part.size;}

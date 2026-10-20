@@ -28,6 +28,7 @@ class SpuPerf2SimdTests(unittest.TestCase):
 #include <stdexcept>
 #include <cassert>
 using SpuRegister=std::array<std::uint8_t,16>;
+inline const bool spu_stats_on=false; // defined by the runtime types (spu_runtime.py) in a real program
 ''' + CORE_CPP.split('static void spu_collect_events(', 1)[0] + '''
 int main(){struct {std::array<SpuRegister,128> gpr{};SpuRegister fpscr{};unsigned pc=0x100;}t;
 auto& g=t.gpr;[[maybe_unused]] SpuRegister out{};

@@ -33,6 +33,7 @@ from . import spu_simd
 
 MAX_BLOCK = 64
 MAX_FUNCTION = 1024
+REGION = 64  # validation granule (bytes) of the per-call validated-region bitmap
 _EFFECT_TOKENS = ('spu_stop(', 'channel', 'throw', 'spu_dynamic_fault', 'spu_external_event', 'spu_interrupt_return')
 _INDIRECT = (0x1a8, 0x1a9, 0x128, 0x129, 0x12a, 0x12b, 0x1ab, 0x1aa)
 _STORES = lambda op: op >> 2 in (0x41, 0x47) or op >> 3 == 0x24 or op == 0x144
@@ -66,6 +67,11 @@ def decode(pc, word, lift_parts):
         return Insn(pc, word, 'brc', body, nxt, (pc + si16 * 4) & 0x3fffc)
     if op in _INDIRECT:
         return Insn(pc, word, 'ind', body, nxt)
+    if op == 0x10d and (16 <= ((word >> 7) & 127) <= 20 or ((word >> 7) & 127) == 22):
+        # WRCH of an MFC parameter channel (LSA, EAH, EAL, size, tag id) or of the tag mask only stores into t.dma[] /
+        # t.tag_mask: no LS access, no blocking, no event or interrupt state, cannot throw (spu_write_channel does exactly
+        # this for channels 16-20 and 22), so it neither ends a block nor invalidates validated code.
+        return Insn(pc, word, 'plain', body, nxt)
     if any(token in body for token in _EFFECT_TOKENS):
         return Insn(pc, word, 'effect', body, nxt)
     return Insn(pc, word, 'store' if _STORES(op) else 'plain', body, nxt)
@@ -213,9 +219,20 @@ class Values:
 class BlockValues(Values):
     """Values plus the block context needed by LS loads/stores."""
 
-    def __init__(self, lines, block_end, insn_index):
+    def __init__(self, lines, block_end, insn_index, flen):
         super().__init__(lines)
-        self.block_end, self.insn_index, self.current = block_end, insn_index, None
+        self.block_end, self.insn_index, self.current, self.flen = block_end, insn_index, None, flen
+
+    def self_store_exit(self, address, pc, provenance=False):
+        """A store overlapping this function's own (relocated) code range ends the call after the storing instruction:
+        later instructions of the block, and regions validated earlier in this call, may have changed.  The next
+        entry validates again.  Stores to data (the overwhelming majority) pay one range compare."""
+        nxt = f'(a+0x{pc + 4 - self.block_start:x}u)'
+        hit = f'({address}+15u-flo)<0x{self.flen + 15:x}u'
+        leave = f'{self.pending_stores()}block.executed=ex+{self.insn_index(pc) + 1};t.pc={nxt};return;'
+        if provenance:
+            return (f'if(__builtin_expect(prov|({hit}),0)){{if(prov)spu_ls_forget(t,{address},16);if({hit}){{{leave}}}}}')
+        return f'if(__builtin_expect({hit},0)){{{leave}}}'
 
     def load(self, t, address):
         name = self.fresh()
@@ -227,13 +244,8 @@ class BlockValues(Values):
         name = self.fresh()
         pc = self.current
         self.emit(f'const unsigned a{name}={address};spu_vstp(ls+a{name},{value});')
-        self.emit(f'if(__builtin_expect(spu_provenance_on,0))spu_ls_forget(t,a{name},16);')
-        remaining = self.block_end - (pc + 4)
-        if remaining > 0:
-            # A store into not yet executed words of this block ends it before them.
-            nxt = f'(a+0x{pc + 4 - self.block_start:x}u)'
-            self.emit(f'if(__builtin_expect(a{name}<{nxt}+0x{remaining:x}u && a{name}+16u>{nxt},0)){{'
-                      f'{self.pending_stores()}block.executed+={self.insn_index(pc) + 1};t.pc={nxt};return;}}')
+        # One unlikely branch for both rare conditions: provenance logging (diagnostic) and a store into the function's own range.
+        self.emit(self.self_store_exit(f'a{name}', pc, provenance=True))
 
 
 def _relocated(target):
@@ -285,19 +297,33 @@ def emit_function(name, code_name, lo, words, lift_parts, templates=True, insns=
         blocks.append(current)
     starts = {b[0].pc for b in blocks}
     used_dispatch = any(b[-1].kind == 'ind' for b in blocks)
+    flen = 4 * len(words)
+    if flen > 64 * REGION:
+        raise AnyPS3Error('SPU native function exceeds the validation bitmap')
+    # ex/lim: instructions retired by this call and the budget below which a block may start without the
+    # exact entry guard (soft slice, hard limit, interrupt sampling interval merged); vm: bitmap of REGION-byte
+    # regions of this function whose LS bytes were proven equal to the translated bytes since the last event that
+    # can change LS (a store of this function into its own range, a channel/effect instruction).  Both live in
+    # registers; block.executed is only synchronised where the scope or a callee can observe it.
     lines = [f'void {name}(PpuState& s,NativeSpu::Thread& t,std::uint8_t* ls) {{',
              'auto& g=t.gpr;(void)g;(void)s;SpuBlockScope block(t);const std::uint32_t delta=t.reloc_delta;'
-             f'const std::uint8_t* const code={code_name};']
+             f'const std::uint8_t* const code={code_name};',
+             # fb = LS address of the function start in this call.  A relocation that wraps the function around the
+             # end of the 256 KB LS is served by the exact slow tiers.
+             f'const unsigned fb=(0x{lo:x}u+delta)&0x3ffffu;',
+             f'if(__builtin_expect(fb+0x{flen:x}u>0x40000u,0)){{t.dynamic_miss=true;return;}}',
+             f'std::uint8_t* const fnls=ls+fb;const unsigned flo=fb;const bool prov=spu_provenance_on;(void)fnls;(void)flo;(void)prov;'
+             'unsigned ex=0,lim=spu_block_lim(t,block);std::uint64_t vm=0;(void)vm;']
     if used_dispatch:
         lines.append('spu_dispatch_local:')
     lines.append('switch((t.pc-delta)&0x3fffc){')
     lines.extend(f'case 0x{pc:x}:goto spu_b_{pc:x};' for pc in sorted(starts))
-    lines.append('default:t.dynamic_miss=true;return;}')
+    lines.append('default:block.executed=ex;t.dynamic_miss=true;return;}')
 
     def edge(target):
         if target in starts:
             return f'goto spu_b_{target:x};'
-        return f'{{t.pc={_relocated(target)};return;}}'
+        return f'{{block.executed=ex;t.pc={_relocated(target)};return;}}'
 
     for block in blocks:
         start = block[0].pc
@@ -305,18 +331,30 @@ def emit_function(name, code_name, lo, words, lift_parts, templates=True, insns=
         length = end - start
         offset = start - lo
         lines.append(f'spu_b_{start:x}:{{')
-        lines.append(f'const unsigned a={_relocated(start)};')
-        lines.append(f'if(__builtin_expect(!(block.executed<block.fast && a<=0x{0x40000 - length:x}u && '
-                     f'spu_code_eq<{length}>(ls+a,code+0x{offset:x}) && (!t.interrupts_enabled || t.steps+block.executed<t.irq_next)),0)){{'
-                     f'if(!spu_block_enter(s,t,block,ls,a,code+0x{offset:x},{length},{len(block)}))return;}}')
+        region_lo, region_hi = offset // REGION, (offset + length - 1) // REGION
+        mask = ((1 << (region_hi + 1)) - 1) ^ ((1 << region_lo) - 1)
+        lines.append(f'const unsigned a=(0x{start:x}u+delta)&0x3fffcu;')
+        # First tier: the block's (at most two) regions are compared inline in one straight-line expression (the first block
+        # touched in each region of a call); everything else (budget gone, regions differ, wide blocks) calls the
+        # out-of-line helper, which runs the exact entry guard (decline, dynamic miss, interrupt delivery) and returns
+        # the new bitmap and budget by value so that ex/lim/vm stay in registers.
+        slow_call = (f'block.executed=ex;const SpuSlow slow=spu_block_slow(s,t,block,ls,fnls,code,0x{flen:x}u,a,0x{offset:x}u,{length},{len(block)},lim,vm,0x{mask:x}ull);'
+                     f'if(!slow.ok)return;lim=slow.lim;vm=slow.vm;')
+        if region_hi - region_lo <= 1:
+            eq = '&'.join(f'spu_code_eq<{min(REGION, flen - r * REGION)}>(fnls+0x{r * REGION:x}u,code+0x{r * REGION:x}u)' for r in range(region_lo, region_hi + 1))
+            lines.append(f'if(__builtin_expect((ex>=lim)|((vm&0x{mask:x}ull)!=0x{mask:x}ull),0)){{'
+                         f'if(__builtin_expect((ex>=lim)|!({eq}),0)){{{slow_call}}}else vm|=0x{mask:x}ull;}}')
+        else:
+            lines.append(f'if(__builtin_expect((ex>=lim)|((vm&0x{mask:x}ull)!=0x{mask:x}ull),0)){{{slow_call}}}')
         index = {x.pc: i for i, x in enumerate(block)}
-        values = BlockValues(lines, end, lambda pc: index[pc])
+        values = BlockValues(lines, end, lambda pc: index[pc], flen)
         values.block_start = start
         last = block[-1]
         here = lambda pc: f'(a+0x{pc - start:x}u)'
         if last.kind == 'effect':
-            lines.append(f't.pc=a;{{[[maybe_unused]] SpuRegister out{{}};{last.body}}}++block.executed;')
-            lines.append(f'if(t.block_control_exit){{t.pc={_relocated((last.pc + 4) & 0x3fffc)};return;}}')
+            # The effect may write LS (DMA) or let other writers run: forget every validated region, re-derive the budget.
+            lines.append(f'block.executed=ex;t.pc=a;{{[[maybe_unused]] SpuRegister out{{}};{last.body}}}++ex;vm=0;lim=spu_block_lim(t,block);')
+            lines.append(f'if(t.block_control_exit){{block.executed=ex;t.pc={_relocated((last.pc + 4) & 0x3fffc)};return;}}')
             lines.append(edge((last.pc + 4) & 0x3fffc) + '}')
             continue
         body_insns = block if last.kind in ('plain', 'store') else block[:-1]
@@ -338,17 +376,14 @@ def emit_function(name, code_name, lo, words, lift_parts, templates=True, insns=
                 used = {int(r) for r in re.findall(r'g\[(\d+)\]', x.body)}
                 values.flush(used)
                 if x.kind == 'store':
-                    lines.append(f'{{[[maybe_unused]] SpuRegister out{{}};{x.body}'
-                                 f'if(__builtin_expect(address<{here(x.pc + 4)}+0x{end - x.pc - 4:x}u && address+16u>{here(x.pc + 4)},0)){{'
-                                 f'{values.pending_stores()}block.executed+={index[x.pc] + 1};t.pc={here(x.pc + 4)};return;}}}}'
-                                 if end - x.pc - 4 > 0 else f'{{[[maybe_unused]] SpuRegister out{{}};{x.body}}}')
+                    lines.append(f'{{[[maybe_unused]] SpuRegister out{{}};{x.body}{values.self_store_exit("address", x.pc)}}}')
                 else:
                     lines.append(f'{{[[maybe_unused]] SpuRegister out{{}};{x.body}}}')
                 values.drop(used)
         n = len(block)
         if last.kind in ('plain', 'store'):
             values.flush()
-            lines.append(f'block.executed+={n};{edge((last.pc + 4) & 0x3fffc)}}}')
+            lines.append(f'ex+={n};{edge((last.pc + 4) & 0x3fffc)}}}')
             continue
         values.current = last.pc
         if last.kind == 'br' or last.kind == 'bra':
@@ -356,9 +391,9 @@ def emit_function(name, code_name, lo, words, lift_parts, templates=True, insns=
                 values.set(last.word & 127, 'b', f'spu_vlink({here(last.pc + 4)}&0x3fffc)')
             values.flush()
             if last.kind == 'br':
-                lines.append(f'block.executed+={n};{edge(last.target)}}}')
+                lines.append(f'ex+={n};{edge(last.target)}}}')
             else:
-                lines.append(f'block.executed+={n};t.pc=0x{last.target:x}u;return;}}')
+                lines.append(f'block.executed=ex+{n};t.pc=0x{last.target:x}u;return;}}')
             continue
         if last.kind == 'brc':
             kind = last.op >> 2
@@ -367,12 +402,12 @@ def emit_function(name, code_name, lo, words, lift_parts, templates=True, insns=
                 value = f'({value}&0xffffu)'
             values.flush()
             relation = '==' if kind in (0x40, 0x44) else '!='
-            lines.append(f'block.executed+={n};if({value}{relation}0u){edge(last.target)}else {edge((last.pc + 4) & 0x3fffc)}}}')
+            lines.append(f'ex+={n};if({value}{relation}0u){edge(last.target)}else {edge((last.pc + 4) & 0x3fffc)}}}')
             continue
         # Indirect branches (incl. interrupt flag updates, BISLED, IRET): precise state first.
         values.flush()
-        lines.append(f't.pc={here(last.pc)};block.executed+={n - 1};'
-                     f'{{[[maybe_unused]] SpuRegister out{{}};{last.body}{last.nxt}}}++block.executed;'
+        lines.append(f't.pc={here(last.pc)};block.executed=ex+{n - 1};'
+                     f'{{[[maybe_unused]] SpuRegister out{{}};{last.body}{last.nxt}}}ex+={n};lim=spu_block_lim(t,block);'
                      'goto spu_dispatch_local;}')
     lines.append('}')
     emit_function.last_starts = starts
@@ -460,6 +495,11 @@ CORE_CPP = r'''
 static constexpr unsigned SPU_MAX_BLOCK=''' + str(MAX_BLOCK) + r''';
 static constexpr std::uint64_t SPU_IRQ_INTERVAL=256;
 template<unsigned N> [[gnu::always_inline]] static inline bool spu_code_eq(const std::uint8_t* p,const std::uint8_t* e){
+#if defined(__AVX512BW__)
+    if constexpr(N==64){
+        return _mm512_cmpeq_epi8_mask(_mm512_loadu_si512(p),_mm512_loadu_si512(e))==~0ull;
+    }else
+#endif
 #if defined(__SSE2__)
     if constexpr(N>=16){
         __m128i acc=_mm_setzero_si128();
@@ -476,11 +516,42 @@ template<unsigned N> [[gnu::always_inline]] static inline bool spu_code_eq(const
 #endif
 }
 bool spu_block_enter(PpuState&,NativeSpu::Thread&,SpuBlockScope&,const std::uint8_t*,unsigned,const std::uint8_t*,unsigned,unsigned);
+struct SpuSlow {std::uint64_t vm;std::uint32_t lim,ok;};
+// Slow tier of the per-block guard (see spu_block.py): block.executed is already synchronised by the caller.
+SpuSlow spu_block_slow(PpuState&,NativeSpu::Thread&,SpuBlockScope&,const std::uint8_t* ls,const std::uint8_t* fn_ls,const std::uint8_t* code,unsigned flen,
+                       unsigned a,unsigned offset,unsigned length,unsigned count,unsigned lim,std::uint64_t vm,std::uint64_t mask);
+// Number of instructions a call may retire before the exact block-entry guard must run again: the soft/hard
+// budget (scope.fast) and, with interrupts enabled, the distance to the next interrupt sampling point.  Equivalent
+// to the conditions `executed<fast && (!interrupts_enabled || steps+executed<irq_next)` the guard used per block.
+// t.steps is constant during a call (the scope adds `executed` on exit), so the bound is computed once.
+[[gnu::always_inline]] static inline unsigned spu_block_lim(const NativeSpu::Thread& t,const SpuBlockScope& block){
+    unsigned lim=block.fast;
+    if(t.interrupts_enabled){
+        const std::uint64_t room=t.irq_next>t.steps?t.irq_next-t.steps:0;
+        if(room<lim)lim=static_cast<unsigned>(room);
+    }
+    return lim;
+}
+// Regions (SPU_REGION bytes each) of a native function whose current LS bytes equal the translated bytes.
+// `lsd` = LS address of the function start, `code` = its translated bytes, `flen` = their length; `want` = bitmap
+// of regions to test.  Returns the subset that matches completely (the last region may be partial).
+static constexpr unsigned SPU_REGION=''' + str(REGION) + r''';
+[[maybe_unused,gnu::noinline]] static std::uint64_t spu_regions_valid(const std::uint8_t* lsd,const std::uint8_t* code,unsigned flen,std::uint64_t want){
+    std::uint64_t ok=0;
+    for(std::uint64_t rest=want;rest;rest&=rest-1){
+        const unsigned r=static_cast<unsigned>(__builtin_ctzll(rest)),off=r*SPU_REGION;
+        if(off>=flen)continue;
+        const unsigned n=std::min(SPU_REGION,flen-off);
+        if(!std::memcmp(lsd+off,code+off,n))ok|=std::uint64_t(1)<<r;
+    }
+    return ok;
+}
 '''
 
 DISPATCH_CPP = r'''
 // Exact entry guard for the slow cases of a superblock entry (see spu_block.py).
 bool spu_block_enter(PpuState& s,NativeSpu::Thread& t,SpuBlockScope& block,const std::uint8_t* ls,unsigned a,const std::uint8_t* expected,unsigned length,unsigned count){
+    spu_stat(t,26);
     if(block.executed>=block.limit){t.pc=a;return false;}
     if(block.hard-block.executed<count || (t.block_exact && block.limit-block.executed<count)){t.pc=a;t.block_decline=true;return false;}
     if(a>0x40000u-length || std::memcmp(ls+a,expected,length)){t.pc=a;t.dynamic_miss=true;return false;}
@@ -491,6 +562,17 @@ bool spu_block_enter(PpuState& s,NativeSpu::Thread& t,SpuBlockScope& block,const
         t.pc=a;spu_take_interrupt(s,t);if(t.pc!=a)return false;
     }
     return true;
+}
+SpuSlow spu_block_slow(PpuState& s,NativeSpu::Thread& t,SpuBlockScope& block,const std::uint8_t* ls,const std::uint8_t* fn_ls,const std::uint8_t* code,unsigned flen,
+                       unsigned a,unsigned offset,unsigned length,unsigned count,unsigned lim,std::uint64_t vm,std::uint64_t mask){
+    // (1) Budget left: compare the block's regions that were not proven yet (first touch of a region in this call).
+    if(block.executed<lim)vm|=spu_regions_valid(fn_ls,code,flen,mask&~vm);
+    // (2) Budget gone or bytes differ: the exact guard decides.
+    if(block.executed>=lim || (vm&mask)!=mask){
+        if(!spu_block_enter(s,t,block,ls,a,code+offset,length,count))return {vm,lim,0};
+        lim=spu_block_lim(t,block);vm|=spu_regions_valid(fn_ls,code,flen,mask&~vm);
+    }
+    return {vm,lim,1};
 }
 static const std::array<std::vector<const SpuNativeRange*>,64>& spu_native_pages(){
     static const auto pages=[]{
@@ -516,31 +598,51 @@ static SpuNativeResult spu_native_call(PpuState& s,NativeSpu::Thread& t,std::uin
 static bool spu_native_candidates(PpuState& s,NativeSpu::Thread& t,std::uint8_t* ls,NativeSpu::Thread::DispatchEntry& slot,std::uint32_t pc,std::uint32_t original){
     const auto word=spu_load_word(ls+pc);const auto delta=(pc-original)&0x3fffc;
     for(const auto* r:spu_native_pages()[original>>12]){
+        // Only the first word is a pre-filter: the block at pc may be shorter than any wider window, and the bytes after it
+        // can legitimately differ from the translated source (the function validates exactly the bytes it executes).
         if(original<r->lo || original>=r->hi || spu_load_word(r->code+(original-r->lo))!=word)continue;
-        slot={pc,delta,r->fn};
+        slot={pc,delta,r->fn};spu_stat(t,21);
         const auto result=spu_native_call(s,t,ls,r->fn,delta);
-        if(result==SpuNativeResult::Miss){slot.pc=UINT32_MAX;continue;}
+        if(result==SpuNativeResult::Miss){spu_stat(t,22);slot.pc=UINT32_MAX;continue;}
         return result==SpuNativeResult::Progress;
     }
     return false;
 }
+// ANYPS3_SPU_STATS: count dispatcher entries per PC (open addressing, lane-written; reported by spu_dynamic_perf_report).
+static void spu_note_entry(NativeSpu::Thread& t,std::uint32_t pc){
+    if(!t.native_entries)t.native_entries=std::make_shared<std::array<std::atomic<std::uint64_t>,1024>>();
+    auto& table=*t.native_entries;
+    for(unsigned i=0,h=(pc>>2)*2654435761u>>22;i<64;++i,h=(h+1)&1023){
+        const auto v=table[h].load(std::memory_order_relaxed);
+        if(!v || (v>>32)==pc+1){table[h].store((std::uint64_t(pc+1)<<32)|((v&0xffffffffu)+1),std::memory_order_relaxed);break;}
+    }
+}
 // True when native code made progress or changed state; false: interpret.
 static bool spu_native_enter(PpuState& s,NativeSpu::Thread& t,std::uint8_t* ls){
     const auto pc=t.pc;t.block_decline=false;
+    if(__builtin_expect(spu_stats_on,0))spu_note_entry(t,pc);
     if(t.dispatch_cache.empty())t.dispatch_cache.resize(NativeSpu::Thread::dispatch_slots);
     auto& slot=t.dispatch_cache[(pc>>2)&(NativeSpu::Thread::dispatch_slots-1)];
     if(slot.pc==pc){
         spu_stat(t,9);
         const auto result=spu_native_call(s,t,ls,slot.fn,slot.delta);
         if(result!=SpuNativeResult::Miss)return result==SpuNativeResult::Progress;
-        slot.pc=UINT32_MAX;
+        slot.pc=UINT32_MAX;spu_stat(t,20);
         if(t.pc!=pc)return true;
+    }
+    // Calls and returns of relocated code stay inside the image the previous native call ran: try its coordinates
+    // before the unrelocated ones and before the content search.  Only a hint; every candidate validates its bytes.
+    if(const auto last=t.reloc_delta){
+        if(spu_native_candidates(s,t,ls,slot,pc,(pc-last)&0x3fffc))return true;
+        if(t.block_decline || t.pc!=pc)return !t.block_decline;
     }
     if(spu_native_candidates(s,t,ls,slot,pc,pc))return true;
     if(t.block_decline || t.pc!=pc)return !t.block_decline;
     std::uint32_t original=0;
+    spu_stat(t,23);
     if(spu_reloc_find(t,ls,original) && original!=pc){
         if(spu_provenance_enabled())spu_dynamic_record(t,ls,"relocated");
+        spu_stat(t,24);
         if(spu_native_candidates(s,t,ls,slot,pc,original))return true;
     }
     return false;
