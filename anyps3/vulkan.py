@@ -22,11 +22,11 @@ struct RsxPerfCounters {
     enum Id : unsigned {draws,gpu_draws,fifo_runs,packets,leave_fifo,guard_rearm,submits,submit_draw_prefix,submit_labels,submit_other,
         finish_waits,collect_waits,wait_ns,readback_flushes,readback_surfaces,host_access,label_syncs,alias_flushes,
         descriptor_allocs,descriptor_writes,pipeline_misses,framebuffer_misses,render_passes,upload_bytes,state_uploads,
-        surface_binds_new,clears,mprotect,vertex_bytes,blob_bytes,draw_layers,history_copies,pass_ends,alias_merges,fp_hits,fp_misses,timeline_polls,fence_polls,mprotect_arm,mprotect_labels,vk_memory_allocs,vk_memory_frees,vk_buffers,vk_images,vk_framebuffers,merge_rej_new,merge_rej_old,merge_rej_capacity,merge_rej_overlap,count};
+        surface_binds_new,clears,mprotect,vertex_bytes,blob_bytes,draw_layers,history_copies,pass_ends,alias_merges,fp_hits,fp_misses,timeline_polls,fence_polls,mprotect_arm,mprotect_labels,vk_memory_allocs,vk_memory_frees,vk_buffers,vk_images,vk_framebuffers,merge_rej_new,merge_rej_old,merge_rej_capacity,merge_rej_overlap,vk_memory_reuses,count};
     static constexpr const char* names[count]={"draws","gpu_draws","fifo_runs","packets","leave_fifo","guard_rearm","submits","submit_draw_prefix","submit_labels","submit_other",
         "finish_waits","collect_waits","wait_ns","readback_flushes","readback_surfaces","host_access","label_syncs","alias_flushes",
         "descriptor_allocs","descriptor_writes","pipeline_misses","framebuffer_misses","render_passes","upload_bytes","state_uploads",
-        "surface_binds_new","clears","mprotect","vertex_bytes","blob_bytes","draw_layers","history_copies","pass_ends","alias_merges","fp_hits","fp_misses","timeline_polls","fence_polls","mprotect_arm","mprotect_labels","vk_memory_allocs","vk_memory_frees","vk_buffers","vk_images","vk_framebuffers","merge_rej_new","merge_rej_old","merge_rej_capacity","merge_rej_overlap"};
+        "surface_binds_new","clears","mprotect","vertex_bytes","blob_bytes","draw_layers","history_copies","pass_ends","alias_merges","fp_hits","fp_misses","timeline_polls","fence_polls","mprotect_arm","mprotect_labels","vk_memory_allocs","vk_memory_frees","vk_buffers","vk_images","vk_framebuffers","merge_rej_new","merge_rej_old","merge_rej_capacity","merge_rej_overlap","vk_memory_reuses"};
     static inline std::array<std::atomic<std::uint64_t>,count> values{};
     static void add(Id id,std::uint64_t n=1){auto& v=values[id];v.store(v.load(std::memory_order_relaxed)+n,std::memory_order_relaxed);}
 };
@@ -115,6 +115,9 @@ class NativeVulkan {
             compute_pipelines.clear();
 #endif
             if(pool)vkDestroyCommandPool(device,pool,nullptr);
+#ifdef ANYPS3_RSX_VK
+            release_memory_cache(device);
+#endif
             vkDestroyDevice(device,nullptr);
         }
         if(instance)vkDestroyInstance(instance,nullptr);
@@ -243,6 +246,9 @@ public:
             di.enabledExtensionCount=device_extensions.size();di.ppEnabledExtensionNames=device_extensions.data();
 #endif
             check(vkCreateDevice(physical,&di,nullptr,&device),"vkCreateDevice");
+#ifdef ANYPS3_RSX_VK
+            configure_memory_cache(device);
+#endif
             vkGetDeviceQueue(device,family,0,&queue);
 #ifdef ANYPS3_RSX_VK
             if(conditional_available){

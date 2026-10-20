@@ -51,8 +51,64 @@ private:
         resource_stats().remove("descriptor_pools",resource_id(object));release_descriptor_sets(object);::vkDestroyDescriptorPool(d,object,a);
     }
 
-    static VkResult vkAllocateMemory(VkDevice d,const VkMemoryAllocateInfo* ci,const VkAllocationCallbacks* a,VkDeviceMemory* out){::RsxPerfCounters::add(::RsxPerfCounters::vk_memory_allocs);const auto r=::vkAllocateMemory(d,ci,a,out);if(r==VK_SUCCESS)resource_stats().add("device_memory",resource_id(*out),ci->allocationSize);return r;}
-    static void vkFreeMemory(VkDevice d,VkDeviceMemory object,const VkAllocationCallbacks* a){::RsxPerfCounters::add(::RsxPerfCounters::vk_memory_frees);resource_stats().remove("device_memory",resource_id(object));::vkFreeMemory(d,object,a);}
+    // Device-local (never host-visible, hence never mapped) allocations are recycled by exact
+    // (memory type, size): vkFreeMemory/vkAllocateMemory cost dozens of RM ioctls each on NVIDIA.
+    // The Vulkan lifetime rules are unchanged: a block enters the cache only where the old code
+    // freed it, i.e. after the GPU finished with every resource bound to it. ANYPS3_RSX_MEMORY_CACHE_MB
+    // (default 384, 0 = off) bounds the cached bytes; the oldest blocks are really freed first.
+    struct MemoryCache {
+        struct Free {VkDevice device;std::uint32_t type;VkDeviceSize size;VkDeviceMemory memory;std::uint64_t stamp;};
+        std::mutex mutex;std::vector<Free> free;std::map<std::uint64_t,std::pair<std::uint32_t,VkDeviceSize>> live;
+        std::map<VkDevice,std::uint32_t> types;VkDeviceSize bytes=0,limit=UINT64_C(384)<<20;std::uint64_t clock=0;
+    };
+    static MemoryCache& memory_cache(){static MemoryCache cache;return cache;}
+    void configure_memory_cache(VkDevice d){
+        std::uint32_t mask=0;
+        for(std::uint32_t i=0;i<memory.memoryTypeCount;++i){const auto f=memory.memoryTypes[i].propertyFlags;
+            if((f&VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) && !(f&VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT))mask|=1u<<i;}
+        auto& c=memory_cache();std::lock_guard<std::mutex> lock(c.mutex);
+        if(const char* v=std::getenv("ANYPS3_RSX_MEMORY_CACHE_MB")){char* end=nullptr;const auto n=std::strtoull(v,&end,10);
+            if(!*v || *end || n>65536){throw std::runtime_error("invalid ANYPS3_RSX_MEMORY_CACHE_MB");}
+            c.limit=n<<20;}
+        c.types[d]=c.limit?mask:0;
+    }
+    static void release_memory_cache(VkDevice d)noexcept{
+        auto& c=memory_cache();std::lock_guard<std::mutex> lock(c.mutex);
+        for(auto it=c.free.begin();it!=c.free.end();){if(it->device==d){c.bytes-=it->size;::vkFreeMemory(d,it->memory,nullptr);it=c.free.erase(it);}else ++it;}
+        c.types.erase(d);
+    }
+    static VkResult vkAllocateMemory(VkDevice d,const VkMemoryAllocateInfo* ci,const VkAllocationCallbacks* a,VkDeviceMemory* out){
+        auto& c=memory_cache();bool cacheable=false;
+        {std::lock_guard<std::mutex> lock(c.mutex);
+            const auto t=c.types.find(d);cacheable=!ci->pNext && !a && t!=c.types.end() && ci->memoryTypeIndex<32 && (t->second&(1u<<ci->memoryTypeIndex));
+            if(cacheable){
+                for(auto it=c.free.begin();it!=c.free.end();++it)if(it->device==d && it->type==ci->memoryTypeIndex && it->size==ci->allocationSize){
+                    *out=it->memory;c.bytes-=it->size;c.free.erase(it);c.live[resource_id(*out)]={ci->memoryTypeIndex,ci->allocationSize};
+                    ::RsxPerfCounters::add(::RsxPerfCounters::vk_memory_reuses);resource_stats().add("device_memory",resource_id(*out),ci->allocationSize);return VK_SUCCESS;}}}
+        ::RsxPerfCounters::add(::RsxPerfCounters::vk_memory_allocs);auto r=::vkAllocateMemory(d,ci,a,out);
+        if(r==VK_ERROR_OUT_OF_DEVICE_MEMORY && cacheable){release_memory_cache_blocks(d);r=::vkAllocateMemory(d,ci,a,out);}
+        if(r==VK_SUCCESS){resource_stats().add("device_memory",resource_id(*out),ci->allocationSize);
+            if(cacheable){std::lock_guard<std::mutex> lock(c.mutex);c.live[resource_id(*out)]={ci->memoryTypeIndex,ci->allocationSize};}}
+        return r;
+    }
+    static void release_memory_cache_blocks(VkDevice d){
+        auto& c=memory_cache();std::lock_guard<std::mutex> lock(c.mutex);
+        for(auto it=c.free.begin();it!=c.free.end();){if(it->device==d){c.bytes-=it->size;::RsxPerfCounters::add(::RsxPerfCounters::vk_memory_frees);::vkFreeMemory(d,it->memory,nullptr);it=c.free.erase(it);}else ++it;}
+    }
+    static void vkFreeMemory(VkDevice d,VkDeviceMemory object,const VkAllocationCallbacks* a){
+        resource_stats().remove("device_memory",resource_id(object));
+        auto& c=memory_cache();
+        {std::lock_guard<std::mutex> lock(c.mutex);
+            const auto live=c.live.find(resource_id(object));
+            if(live!=c.live.end() && !a){
+                const auto entry=live->second;c.live.erase(live);
+                if(entry.second<=c.limit){
+                    c.free.push_back({d,entry.first,entry.second,object,++c.clock});c.bytes+=entry.second;
+                    while(c.bytes>c.limit){auto oldest=std::min_element(c.free.begin(),c.free.end(),[](const auto& x,const auto& y){return x.stamp<y.stamp;});
+                        c.bytes-=oldest->size;::RsxPerfCounters::add(::RsxPerfCounters::vk_memory_frees);::vkFreeMemory(oldest->device,oldest->memory,nullptr);c.free.erase(oldest);}
+                    return;}}}
+        ::RsxPerfCounters::add(::RsxPerfCounters::vk_memory_frees);::vkFreeMemory(d,object,a);
+    }
     static void vkDestroyPipeline(VkDevice d,VkPipeline object,const VkAllocationCallbacks* a){resource_stats().remove("pipelines",resource_id(object));::vkDestroyPipeline(d,object,a);}
     static void release_descriptor_sets(VkDescriptorPool pool){auto& stats=resource_stats();std::lock_guard<std::recursive_mutex> lock(stats.mutex);auto it=stats.descriptor_sets.find(resource_id(pool));if(it!=stats.descriptor_sets.end()){for(auto id:it->second)stats.remove("descriptor_sets",id);stats.descriptor_sets.erase(it);}}
     static VkResult vkResetDescriptorPool(VkDevice d,VkDescriptorPool pool,VkDescriptorPoolResetFlags flags){const auto r=::vkResetDescriptorPool(d,pool,flags);if(r==VK_SUCCESS)release_descriptor_sets(pool);return r;}
