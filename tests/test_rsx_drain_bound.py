@@ -57,13 +57,14 @@ static void prefix(){
  assert(!rsx_worker_request(s,64).completed);w.queue->drain();
  auto* f=static_cast<PpuState*>(w.facade.get());
  std::atomic<bool> go{false},producing{true};std::atomic<unsigned> served{0},need{0},posted{0};
- std::mutex order_mutex;std::vector<unsigned> order;unsigned refill_id=100;
+ std::mutex order_mutex;std::vector<unsigned> order;unsigned refill_id=100;std::atomic<bool> refill_timeout{false};
  const unsigned refill_limit=12;   // requests number 1..12 each make the producer queue one more
  std::function<Hook(unsigned)> make;
  make=[&](unsigned id)->Hook{return [&,id]{
   {std::lock_guard<std::mutex> lock(order_mutex);order.push_back(id);}
   const unsigned n=++served;
-  if(n<=refill_limit){need.store(n);const auto until=now_ms()+5000;while(producing && posted.load()<n && now_ms()<until)std::this_thread::yield();}   // the successor is queued before this request returns
+  if(n<=refill_limit){need.store(n);const auto until=now_ms()+5000;while(producing && posted.load()<n && now_ms()<until)std::this_thread::yield();   // the successor is queued before this request returns
+   if(producing && posted.load()<n)refill_timeout=true;}
  };};
  std::thread producer([&]{while(producing){
   if(posted.load()<need.load()){w.queue->post(RsxOwnerQueue::Kind::HostAccess,make(refill_id++),0,1);++posted;}else std::this_thread::yield();}});
@@ -83,6 +84,7 @@ static void prefix(){
  // the owner returns from the blocker, then serves barrier and D3 normally; wait until everything including all refills is done
  {const auto until=now_ms()+20000;while(now_ms()<until){std::lock_guard<std::mutex> lock(order_mutex);if(std::find(order.begin(),order.end(),3u)!=order.end() && served.load()>=refill_limit+2)break;}std::this_thread::yield();}
  producing=false;producer.join();w.queue->drain();
+ if(refill_timeout)throw std::runtime_error("phase A: the producer did not queue the successor within 5 s (the premise 'the queue is never empty' was not established)");
  if(served_a!=2 || nested!=0 || d3_ran_inside)throw std::runtime_error("phase A: drain served "+std::to_string(served_a)+" requests (expected the 2 before the barrier), nested drain served "+std::to_string(nested)+(d3_ran_inside?", D3 ran behind the barrier":""));
  if(order.size()<5 || order[0]!=1 || order[1]!=2 || order[2]!=50 || order[3]!=3)throw std::runtime_error("phase A: service order is not queue order");
  std::puts("PASS prefix: a poll serves the drainable requests before the barrier only, in order; a nested drain serves nothing");
@@ -101,6 +103,7 @@ static void prefix(){
  go=true;
  {const auto until=now_ms()+20000;while(now_ms()<until){if(served.load()>=15 && polls_done.load()==5)break;std::this_thread::yield();}}
  producing=false;producer2.join();w.queue->drain();
+ if(refill_timeout)throw std::runtime_error("phase B: the producer did not queue the successor within 5 s (the premise 'the queue is never empty' was not established)");
  std::string text;for(const auto c:counts)text+=" "+std::to_string(c);
  if(counts!=std::vector<unsigned>{3,3,3,3,3})throw std::runtime_error("phase B: requests served per poll:"+text+" (expected 3 3 3 3 3)");
  std::vector<unsigned> expected_order{1,2,3};for(unsigned id=100;id<112;++id)expected_order.push_back(id);
@@ -115,9 +118,10 @@ static void sustained(){
  PpuState s;const auto put=setup_clears(s);s.memory.regions.push_back({0x71000000,6,s.memory.regions[0].bytes});
  setenv("ANYPS3_RSX_WORKER","1",1);
  SpuWorkerSession life(s);auto& w=s.process.rsx_worker;assert(w.enabled);
- std::atomic<bool> producing{true};std::atomic<unsigned> served{0},need{0},posted{0};
+ std::atomic<bool> producing{true},refill_timeout{false};std::atomic<unsigned> served{0},need{0},posted{0};
  auto make=[&]()->Hook{return [&]{const unsigned n=++served;need.store(n+1);
-  const auto until=now_ms()+5000;while(producing && posted.load()<n+1 && now_ms()<until)std::this_thread::yield();};};   // the next request is queued before this one returns
+  const auto until=now_ms()+5000;while(producing && posted.load()<n+1 && now_ms()<until)std::this_thread::yield();
+  if(producing && posted.load()<n+1)refill_timeout=true;};};   // the next request is queued before this one returns
  std::thread producer([&]{while(producing){if(posted.load()<need.load()){w.queue->post(RsxOwnerQueue::Kind::HostAccess,make(),0,1);++posted;}else std::this_thread::yield();}});
  rsx_host_waiters.fetch_add(1);                                      // a requester is blocked on a guarded page: the owner polls at every packet
  w.queue->post(RsxOwnerQueue::Kind::HostAccess,make(),0,1);++posted;
@@ -128,6 +132,7 @@ static void sustained(){
  const unsigned served_mid_run=served.load();
  producing=false;producer.join();rsx_host_waiters.fetch_sub(1);
  w.queue->drain();
+ if(refill_timeout)throw std::runtime_error("sustained: the producer did not queue the successor within 5 s (the premise 'the queue is never empty' was not established)");
  if(!finished)throw std::runtime_error("sustained producer starved the FIFO: GET stayed at "+std::to_string(s.memory.load(0x70008044,4))+" of "+std::to_string(put));
  std::vector<std::uint8_t> pixels(32*16*4);s.memory.transfer(0xc0100000,pixels.data(),pixels.size(),false);
  if(uniform_clear(pixels)!=kClears)throw std::runtime_error("final surface is not the last clear colour: "+dump(pixels)+" expected "+std::to_string(clear_color(kClears)));
@@ -137,7 +142,9 @@ static void sustained(){
 }
 
 // Phase D: a guarded guest read from another thread while the FIFO runs is served between packets and returns uniform clear bytes.
-static void guarded_read(bool drain_on){
+// Returns false when the read was served after the run although the run was under way when it started: a descheduled reader and a drain
+// that never served mid-run look the same in one execution, so the caller (exit status 77) repeats the execution and fails only if every attempt is inconclusive.
+static bool guarded_read(bool drain_on){
  setenv("ANYPS3_RSX_BACKEND","gpu",1);setenv("ANYPS3_RSX_WORKER","0",1);setenv("ANYPS3_SPU_THREADS","0",1);
  PpuState s;const auto put=setup_clears(s);s.memory.regions.push_back({0x71000000,6,s.memory.regions[0].bytes});
  setenv("ANYPS3_RSX_WORKER","1",1);
@@ -155,10 +162,11 @@ static void guarded_read(bool drain_on){
  std::vector<std::uint8_t> last(pixels.size());s.memory.transfer(0xc0100000,last.data(),last.size(),false);
  if(uniform_clear(last)!=kClears)throw std::runtime_error("final surface is not the last clear colour");
  life.finish();
- if(drain_on){if(k>=kClears)throw std::runtime_error("drain on, but the read was served only after the run");
+ if(drain_on){if(k>=kClears){std::printf("INCONCLUSIVE guarded read, drain on: served after the run (clear %u in [%u,%u])\n",k,k_before,k_after);return false;}
   std::printf("PASS guarded read, drain on: served mid-run, clear %u in [%u,%u] of %u\n",k,k_before,k_after,kClears);}
  else{if(k!=kClears)throw std::runtime_error("drain off: the read returned clear "+std::to_string(k)+" instead of the final one");
   std::printf("PASS guarded read, drain off: served after the run (clear %u)\n",k);}
+ return true;
 }
 
 // Phase E: a real FIFO with flips. Frame i: clear(colour i); label A_i (front-end release, deferred behind the GPU prefix); flip gate
@@ -167,7 +175,7 @@ static void guarded_read(bool drain_on){
 // see B_j without the completed flips <= j and all labels A_i, i <= j. The first 8 flips take the synchronous capture path of
 // rsx_graphics_flip_async (ANYPS3_FRAME_DIR, huge stride); every later flip is deferred on the GPU timeline.
 static constexpr unsigned kFlips=24;
-static std::uint64_t gate_value(unsigned i){return 0x5000000000000000ull+i+1;}
+static std::uint32_t gate_word(unsigned i){return 0x50000001u+i;}   // the 32-bit semaphore release word of flip i (stored big endian at the gate, high half of the 8-byte word)
 static unsigned setup_flips(PpuState& s){
  setup_draw(s,32,16,128,false);auto& g=s.rsx;auto& m=s.memory;
  m.map(0x80000000,0x10000,6,nullptr,0);m.map(0x72000000,0x3000,6,nullptr,0);
@@ -181,7 +189,7 @@ static unsigned setup_flips(PpuState& s){
  for(unsigned i=0;i<kFlips;++i){
   packet(0x1d90,clear_color(i+1));packet(0x1d94,0xf3);
   packet(0x60,0x66606660);packet(0x64,0x200+16*i);packet(0x6c,0x1000+i);                       // label A_i
-  packet(0x64,0x10);packet(0x6c,unsigned(gate_value(i)));                                       // flip gate: written at once, cleared by the flip
+  packet(0x64,0x10);packet(0x6c,gate_word(i));                                       // flip gate: written at once, cleared by the flip
   packet(0xe944,1);packet(0xe924,0x8000010f);
   packet(0x64,0x400+16*i);packet(0x6c,0x2000+i);                                               // label B_i
  }
@@ -207,7 +215,8 @@ static void flip_order(){
   ++samples;if(samples%20000==0)std::fprintf(stderr,"INFO flip_order t=%llu ms GET=%llx PUT=%x flips=%llu events=%zu highest B=%d\n",(unsigned long long)(now_ms()+60000-until),(unsigned long long)m.load(0x70008044,4),put,(unsigned long long)s.rsx.flips,events,j);
   if(j>=0){++seen;
    if(events<2u*(j+1))violation="B_"+std::to_string(j)+" visible but only "+std::to_string(events)+" events published (need "+std::to_string(2*(j+1))+")";
-   else for(int i=0;i<=j;++i)if(gate==gate_value(i)){violation="B_"+std::to_string(j)+" visible while the gate still holds the value of flip "+std::to_string(i);break;}
+   else if((gate>>32)>=gate_word(0) && (gate>>32)<=gate_word(unsigned(j)))   // the release word of a flip <= j: its completion has not cleared the gate
+    violation="B_"+std::to_string(j)+" visible while the gate still holds the release word of flip "+std::to_string((gate>>32)-gate_word(0));
    if(violation.empty() && gate==UINT64_MAX)violation="B_"+std::to_string(j)+" visible while the gate still holds its initial value";
    if(violation.empty() && !missing.empty())violation="B_"+std::to_string(j)+" visible but label A_"+std::to_string(missing[0])+" is not";
    if(j<highest)violation="label B_"+std::to_string(j)+" became the latest after B_"+std::to_string(highest);
@@ -229,7 +238,7 @@ static void flip_order(){
 int main(int argc,char** argv){try{
  const std::string mode=argc>1?argv[1]:"";
  if(mode=="prefix")prefix();else if(mode=="sustained")sustained();
- else if(mode=="flip_order")flip_order();else if(mode=="read_on")guarded_read(true);else if(mode=="read_off")guarded_read(false);
+ else if(mode=="flip_order")flip_order();else if(mode=="read_on")return guarded_read(true)?0:77;else if(mode=="read_off")guarded_read(false);
  else return 3;
 }catch(const std::exception& e){std::fprintf(stderr,"FAIL %s\n",e.what());return 1;}}
 '''
@@ -247,13 +256,18 @@ class BoundedDrain(unittest.TestCase):
         cpp.with_suffix('.build.log').write_text(result.stdout + result.stderr)
         assert result.returncode == 0, result.stderr[-12000:]
 
-    def run_mode(self, mode, **extra):
+    def run_mode(self, mode, attempts=1, **extra):
         env = dict(os.environ, LP_NUM_THREADS='4', ANYPS3_VK_DEVICE='lavapipe', VK_DRIVER_FILES='/usr/share/vulkan/icd.d/lvp_icd.json',
                    ANYPS3_SPU_WORKER='0')
         env.pop('ANYPS3_RSX_HOST_DRAIN', None)
         env.pop('ANYPS3_RSX_FLIP_EARLY', None)
         env.update(extra)
-        result = subprocess.run([str(self.exe), mode], capture_output=True, text=True, env=env, timeout=180)
+        for attempt in range(attempts):
+            result = subprocess.run([str(self.exe), mode], capture_output=True, text=True, env=env, timeout=180)
+            if result.returncode != 77:        # 77: the execution could not tell a late reader from a drain that never serves mid-run
+                break
+        else:
+            self.fail(f'{attempts} attempts were inconclusive (every read was served after the run): {result.stdout}')
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr[-6000:])
         self.assertIn('PASS ', result.stdout)
         return result.stdout
@@ -266,7 +280,7 @@ class BoundedDrain(unittest.TestCase):
         self.run_mode('sustained')
 
     def test_guarded_read_is_materialised_between_packets(self):
-        self.run_mode('read_on')
+        self.run_mode('read_on', attempts=5)
 
     def test_flip_publication_order_with_releases_on_both_sides(self):
         directory = ARTIFACTS / 'flip-frames'

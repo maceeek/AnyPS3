@@ -115,9 +115,10 @@ static void gate(){
  const double back=session.batch->record_back_ms;
  if(report){assert(back>0.0);assert(rsx_service_calls().load()>0 && rsx_service_ns().load()>0);}
  else{assert(back==0.0);assert(rsx_service_calls().load()==0 && rsx_service_ns().load()==0);}
- if(adaptive)assert(session.flight_ns!=300000.0);else assert(session.flight_ns==300000.0);
+ const double flight=session.flight_ns;    // copied: the session dies with the worker session
+ if(adaptive)assert(flight!=300000.0);else assert(flight==300000.0);
  life.finish();
- std::printf("PASS gate report=%d adaptive=%d: record_back_ms=%.3f service_calls=%llu flight_ns=%.0f\n",int(report),int(adaptive),back,(unsigned long long)rsx_service_calls().load(),session.flight_ns);
+ std::printf("PASS gate report=%d adaptive=%d: record_back_ms=%.3f service_calls=%llu flight_ns=%.0f\n",int(report),int(adaptive),back,(unsigned long long)rsx_service_calls().load(),flight);
 }
 int main(int argc,char** argv){try{
  const std::string mode=argc>1?argv[1]:"";
