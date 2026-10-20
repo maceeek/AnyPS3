@@ -168,8 +168,6 @@ struct NativeSpu {
 };
 using SpuNativeFunction=void(*)(PpuState&,NativeSpu::Thread&,std::uint8_t*);
 struct SpuNativeRange {std::uint32_t lo,hi;const std::uint8_t* code;SpuNativeFunction fn;const std::uint8_t* leaders;};
-// ANYPS3_SPU_STATS=1: diagnostic counters (spu_stat), read by the lane worker and the PERF report.
-inline const bool spu_stats_on=[](){const char* v=std::getenv("ANYPS3_SPU_STATS");return v && v[0]=='1' && !v[1];}();
 '''
 
 CPP = r'''
