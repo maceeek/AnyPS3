@@ -1,5 +1,12 @@
 # Progress toward the menu
 
+**2026-10-20 manager worktree:** CLI-backed game library and PySide6 wrapper added
+on `fast2/manager-gui`, with scoped synthetic tests and a real-CLI offscreen
+preview. All 30 manager/GUI tests pass. GPT-6-Astra's five findings were fixed and
+rechecked. Save preservation, build verification and detached jobs are tested.
+No new original-game run or physical-controller acceptance.
+See [manager record](knowledge/experiments/2026-10-20-manager-gui.md).
+
 Goal: the original menu of Ratchet & Clank: A Crack in Time and navigation with a gamepad.
 The menu has not yet been reached. The PPU/SPU continue to run exclusively from static translation;
 the Vulkan backend is our own, RPCS3 serves only as a local technical reference.

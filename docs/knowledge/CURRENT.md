@@ -1,5 +1,16 @@
 # Current state and goal
 
+## Manager worktree — 2026-10-20
+
+**Verified manager milestone:** CLI and PySide6 wrapper implemented in isolated
+`fast2/manager-gui` (base `abf2450`); 30 scoped manager/GUI tests and a real-CLI
+offscreen integration preview pass. Original-game and physical-controller
+acceptance were not performed. Runtime player-mode and pad-config work packages
+remain separate. The original game/menu/gamepad performance goal is unchanged.
+See the [manager record](experiments/2026-10-20-manager-gui.md)
+and [usage](../manager/README.md). Runtime notes below are historical;
+this wrapper does not establish a new best game build or FPS result.
+
 **2026-10-20 FAST2 wave — ended on user instruction ~15:15 (Claude Opus 5.5 + Sonnet 5.5 subagents, Codex gpt-6.1-sol reviews; PC with
 the game and the RTX 4070 SUPER).** Goal: the game at 60 FPS with headroom — **not reached**. **Best verified build: 472 = live `main`
 b3281ed (live tree = `source-snapshot-472`), measured `472a`: 46.68 FPS mean (median 45.97, min 32.0, max 58.0), correct image, no

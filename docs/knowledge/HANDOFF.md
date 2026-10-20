@@ -1,5 +1,20 @@
 # Handoff to the next instance
 
+## Manager worktree — 2026-10-20
+
+Continue from [manager implementation](experiments/2026-10-20-manager-gui.md)
+and [usage](../manager/README.md). Worktree:
+`local/ratchet/work/manager-gui/tree`, branch `fast2/manager-gui`, base `abf2450`.
+Manager/Qt tests use synthetic data; original-game build/play/rebuild/save and
+physical-controller acceptance remain outstanding. Keep audio silent and use the
+specified memory-capped scopes. No diagnostic game build is registered as a
+manager build. The primary checkout and its existing edits were preserved.
+Thirty scoped synthetic tests pass, including regressions for the five findings
+in the [GPT-6-Astra review](../manager/ASTRA-REVIEW.md). Logs and source hashes are
+under `docs/manager/evidence/`; commands and limitations are in the topic record.
+Astra's recheck resolved all five reported issues and found no new confirmed
+finding. No manager test/preview worker or scope remained at handoff.
+
 The handing-over party fills in CURRENT and the links to verification. The receiving party checks the working tree, opens the latest log and verifies the paths and the profile. A handoff is not a request for a new plan: continue from the nearest concrete question.
 
 ## Handoff 2026-10-20 — FAST2 wave (Claude Opus 5.5 coordinator; Sonnet 5.5 xhigh agents; Codex gpt-6.1-sol reviews)

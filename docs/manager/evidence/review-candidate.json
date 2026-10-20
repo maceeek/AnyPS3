@@ -1,0 +1,33 @@
+{
+  "base_commit": "abf245064fd8c31990ca3fa5f96f53820feff179",
+  "state": "review-candidate",
+  "source_sha256": {
+    "anyps3/native_build.py": "7134172b660d1f572f2186b48f07f82dd6da2ca474d1c2ac22864b7717d4aefa",
+    "anyps3_gui/__init__.py": "83fb620954568d6d4e030f8594871815eac48990d26071a82f13d7bd6387ef14",
+    "anyps3_gui/__main__.py": "a67c172046323b0efcafe92cb83abc266d5dd4bc931d9312cde1b7bed50643db",
+    "anyps3_gui/app.py": "0487d370d8203686f1d861f7c7670b0189d28724e2dfc91bacb7b0d8ab9c4d60",
+    "anyps3_gui/client.py": "2d70a6f799b7e9e2102af57e311af9b77986cb7e89cd8583e8dc47d0f22da6a8",
+    "anyps3_gui/import_wizard.py": "b595f37e05ad56524d53ef9bbdf7a20facc0dcede20481c0777294717ee8128a",
+    "anyps3_gui/settings.py": "8898d8ce383d586b8d72dabb277b716b190323c12a0b4d2a1ff4c834f60a5838",
+    "anyps3_manager/__init__.py": "b2d83a36503cbe039fc01798729674a4a8a638becfde0e0752d187a4e90c8c9b",
+    "anyps3_manager/__main__.py": "935a1c1166b0c1ea35a82256345000bf2c73ded718d77773bc27a71ecce28f7d",
+    "anyps3_manager/cli.py": "e3457c33be3b6f3dbd532f6b5b5f59e04b5ac6e87b33ffd609247d675f2ae00c",
+    "anyps3_manager/jobs.py": "9b68f3ef49f2323bd7000d232bf7fc7accee7d8c8f8911f0b328fdebeb29ff35",
+    "anyps3_manager/pads.py": "5de71aba8b17d0e9e4b75d2fd7c079bdc0ea90ebd657be50a8f78289f41da821",
+    "anyps3_manager/pipeline.py": "1639b2389135860057aa68fbd122bda0ab206e9dc81eb40140670331d83573fb",
+    "anyps3_manager/processes.py": "8ce3737dc1269c7b711e6921ba77b29e845bddd1a83dd10611d55d0d47ab2b95",
+    "anyps3_manager/runs.py": "b580ce1fa6d7562e94cd66b7650af5d486db9fe7c5258b60c727c51b06364403",
+    "anyps3_manager/saves.py": "bca0907d82165510fcbd18bef0141d6ced751db67c9d85056473d7d1758dab8e",
+    "anyps3_manager/settings.py": "bf6ee3a2343829d90ec00fcaedc4ea86ef8cc48f901d495b4d459f6a737a2af0",
+    "anyps3_manager/storage.py": "d36373315afe5854758006e1a7d8ee3fa4bd4c95accf29d3d82b702b92b2f221",
+    "pyproject.toml": "440f297f9caa2b498e2aaa6d895c94f8e7c8fe3ecceeaa2727fe58a8bcae8b45",
+    "tests/gui/__init__.py": "a3c19694f4654e6afba826708b51f9da0dacd096d15f822ee7eec89b56455ddc",
+    "tests/gui/preview.py": "12565f2c3883b77cbaff0253ecdb48d3eb30d63958f6fe2bbf0a5c2b705ff3e1",
+    "tests/gui/stub_cli.py": "bbd0526471b87df83d6cc73282a9fe16a3becf1037515552938f16b857c5cc85",
+    "tests/gui/test_gui.py": "1e25cc07b6cd2e0942ce16bd47b7f02d25bb5a039a98786de052af44a71bc4d5",
+    "tests/manager/__init__.py": "852bd77f67dca7b2cfdb8dcf229b33afdaf37e48e5ec40e24681d933459a3939",
+    "tests/manager/test_manager.py": "46824b4c2d2ce44cf116791daef1a0395e874b613e8f903a4b0975261719772d",
+    "tests/manager/test_native_flags.py": "74191fae33dcddcca328fe4b22ad57a460a211d6071d162fa25da858d8db5f98",
+    "tests/manager/toolchain_stub.py": "faffa7cd0c800e888d8c75851aa16f5bb74480dcfb19e45d6a5f8f78288f1c95"
+  }
+}

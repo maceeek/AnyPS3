@@ -1,0 +1,29 @@
+Running as unit: anyps3-manager-suite-9.scope; invocation ID: 70743efd86374c44997fee01fdc39353
+test_all_process_environments_silent_and_unavailable_switch_omitted (tests.manager.test_manager.ManagerTests.test_all_process_environments_silent_and_unavailable_switch_omitted) ... ok
+test_cancel_stops_compiler_descendants (tests.manager.test_manager.ManagerTests.test_cancel_stops_compiler_descendants) ... ok
+test_detached_job_survives_client_exit_and_replays (tests.manager.test_manager.ManagerTests.test_detached_job_survives_client_exit_and_replays) ... ok
+test_iso_identification_and_partial_refusal (tests.manager.test_manager.ManagerTests.test_iso_identification_and_partial_refusal) ... ok
+test_locks_and_stale_pid_do_not_signal_other_processes (tests.manager.test_manager.ManagerTests.test_locks_and_stale_pid_do_not_signal_other_processes) ... ok
+test_missing_systemd_refuses_before_run_side_effects (tests.manager.test_manager.ManagerTests.test_missing_systemd_refuses_before_run_side_effects) ... ok
+test_resume_keeps_verified_extraction_and_userdata (tests.manager.test_manager.ManagerTests.test_resume_keeps_verified_extraction_and_userdata) ... ok
+test_run_lock_prevents_restore_and_title_removal (tests.manager.test_manager.ManagerTests.test_run_lock_prevents_restore_and_title_removal) ... ok
+test_same_iso_noop_and_key_reference_permissions (tests.manager.test_manager.ManagerTests.test_same_iso_noop_and_key_reference_permissions) ... ok
+test_save_roundtrip_and_zip_traversal_rejection (tests.manager.test_manager.ManagerTests.test_save_roundtrip_and_zip_traversal_rejection) ... ok
+test_scoped_import_build_and_run (tests.manager.test_manager.ManagerTests.test_scoped_import_build_and_run) ... ok
+test_settings_layers_validation_and_lock (tests.manager.test_manager.ManagerTests.test_settings_layers_validation_and_lock) ... ok
+test_title_removal_preserves_userdata_and_last_backup (tests.manager.test_manager.ManagerTests.test_title_removal_preserves_userdata_and_last_backup) ... ok
+test_usage_errors_are_versioned_json (tests.manager.test_manager.ManagerTests.test_usage_errors_are_versioned_json) ... ok
+test_userdata_unchanged_across_build_activate_prune_and_reimport (tests.manager.test_manager.ManagerTests.test_userdata_unchanged_across_build_activate_prune_and_reimport) ... ok
+test_verify_rejects_modified_game_bytes (tests.manager.test_manager.ManagerTests.test_verify_rejects_modified_game_bytes) ... ok
+test_extra_flags_are_applied_and_recorded (tests.manager.test_native_flags.NativeFlagsTests.test_extra_flags_are_applied_and_recorded) ... ok
+test_errors_preserve_code_message_and_detail (tests.gui.test_gui.GuiTests.test_errors_preserve_code_message_and_detail) ... ok
+test_gui_has_no_runtime_or_manager_imports (tests.gui.test_gui.GuiTests.test_gui_has_no_runtime_or_manager_imports) ... ok
+test_malformed_protocol_is_visible (tests.gui.test_gui.GuiTests.test_malformed_protocol_is_visible) ... ok
+test_streaming_events_and_unknown_fields (tests.gui.test_gui.GuiTests.test_streaming_events_and_unknown_fields) ... ok
+test_window_smoke_and_geometry (tests.gui.test_gui.GuiTests.test_window_smoke_and_geometry) ... This plugin does not support propagateSizeHints()
+ok
+
+----------------------------------------------------------------------
+Ran 22 tests in 10.568s
+
+OK
