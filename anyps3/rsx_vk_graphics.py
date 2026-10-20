@@ -737,6 +737,50 @@ public:
         }
         if(r.failed.load(std::memory_order_acquire))r.rethrow();
     }
+    // ---- GPU completion notifier (ANYPS3_RSX_COMPLETION=1) ----
+    // A thread waits (vkWaitSemaphores in 2 ms steps) for the timeline value of every submitted batch in submission order and calls
+    // graphics_completion_hook after each one. The RSX owner pokes its queue from the hook, so retirement and label publication run when a
+    // batch completes instead of on a 100 us poll while flights are outstanding. The hook must not block (it runs on the notifier thread).
+    struct CompletionWaiter {
+        NativeVulkan* owner;std::mutex mutex;std::condition_variable wake;std::deque<std::uint64_t> values;std::function<void()> hook;
+        std::atomic<bool> stopping{false};std::thread thread;std::uint64_t notified=0;bool calling=false;std::condition_variable idle;
+        explicit CompletionWaiter(NativeVulkan* o):owner(o){thread=std::thread([this]{run();});}
+        ~CompletionWaiter(){{std::lock_guard<std::mutex> lock(mutex);stopping.store(true,std::memory_order_release);}wake.notify_all();if(thread.joinable())thread.join();}
+        void run(){
+            ::pthread_setname_np(::pthread_self(),"rsx-complete");
+            std::unique_lock<std::mutex> lock(mutex);
+            for(;;){
+                wake.wait(lock,[&]{return stopping.load(std::memory_order_acquire) || !values.empty();});
+                if(stopping.load(std::memory_order_acquire))return;
+                const std::uint64_t value=values.front();lock.unlock();
+                for(;;){
+                    VkSemaphoreWaitInfo info{};info.sType=VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;info.semaphoreCount=1;info.pSemaphores=&owner->graphics_timeline;info.pValues=&value;
+                    const auto result=vkWaitSemaphores(owner->device,&info,2000000);
+                    if(result!=VK_TIMEOUT || stopping.load(std::memory_order_acquire))break;   // success, or an error the owner's own poll reports
+                }
+                lock.lock();
+                if(stopping.load(std::memory_order_acquire))return;
+                values.pop_front();++notified;const auto callback=hook;
+                if(callback){calling=true;lock.unlock();callback();lock.lock();calling=false;idle.notify_all();}
+            }
+        }
+    };
+    std::unique_ptr<CompletionWaiter> completion_waiter;
+    void completion_start(){
+        const char* v=std::getenv("ANYPS3_RSX_COMPLETION");
+        if(v && std::strcmp(v,"0") && std::strcmp(v,"1"))throw std::runtime_error("invalid ANYPS3_RSX_COMPLETION");
+        if(v && !std::strcmp(v,"1"))completion_waiter=std::make_unique<CompletionWaiter>(this);
+    }
+    bool completion_notifier_enabled()const{return bool(completion_waiter);}
+    // Installs/clears the hook (owner thread); no-op without the notifier.
+    // Returns after any call of the previous hook has finished, so state captured by it may be destroyed afterwards.
+    void set_completion_hook(std::function<void()> hook){if(completion_waiter){auto& w=*completion_waiter;std::unique_lock<std::mutex> lock(w.mutex);w.hook=std::move(hook);w.idle.wait(lock,[&]{return !w.calling;});}}
+    void completion_watch(std::uint64_t value){
+        if(!completion_waiter)return;
+        {std::lock_guard<std::mutex> lock(completion_waiter->mutex);completion_waiter->values.push_back(value);}
+        completion_waiter->wake.notify_one();
+    }
+    void completion_stop()noexcept{completion_waiter.reset();}
     // Same wait without reporting a recorder failure (destructors, teardown).
     void recorder_quiesce()noexcept{
         if(!draw_recorder || in_recorder_thread())return;
@@ -1090,7 +1134,7 @@ public:
                 std::fprintf(stderr,"PERF GPU_LOOP batches=%llu steady_ns=%llu warm_ns=%llu\n",(unsigned long long)graphics_loop_batches,(unsigned long long)graphics_loop_ns,(unsigned long long)graphics_loop_warm_ns);
             }
             if(graphics_test_submit_fault){graphics_test_submit_fault=false;throw std::runtime_error("injected graphics submit failure (test hook)");}
-            check(vkQueueSubmit(queue,1,&si,b.fence),"graphics submit");::RsxPerfCounters::add(::RsxPerfCounters::submits);graphics_serial=value;b.completion=value;b.submitted=true;++b.submissions;return value;
+            check(vkQueueSubmit(queue,1,&si,b.fence),"graphics submit");::RsxPerfCounters::add(::RsxPerfCounters::submits);graphics_serial=value;b.completion=value;b.submitted=true;++b.submissions;completion_watch(value);return value;
         }catch(...){b.failed=true;throw;}
     }
     std::uint64_t graphics_completed(){::RsxPerfCounters::add(::RsxPerfCounters::timeline_polls);std::uint64_t value=0;check(vkGetSemaphoreCounterValue(device,graphics_timeline,&value),"graphics timeline counter");return value;}

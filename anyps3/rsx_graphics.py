@@ -1637,6 +1637,7 @@ template<class Vertex> static bool prepared(Session& session,const std::vector<s
             vk.graphics_copy(*session.batch,texture.resident_image,snapshot);texture.resident_image=std::move(snapshot);attempt.path("rtt_feedback_snapshot");}
     }
     if(device && alias){materialize();device=nullptr;}
+    phase.next(HostStage::g_inputs);
     IndexBounds bounds(indices,device);
     // Vertex attributes frequently interleave one buffer: attributes whose spans overlap or touch
     // share one guest Range (one lease/claim, one copy) and index into it by byte offset.
@@ -1696,6 +1697,7 @@ template<class Vertex> static bool prepared(Session& session,const std::vector<s
     if(alias){for(auto& t:*owned_textures)materialize_texture(state,t);colors=supplied_colors;session.flush(true,nullptr,0,"attachment_alias");session.clear_surfaces();session.allow_resident_textures=false;
         try{for(unsigned unit=0;unit<16;++unit)if((*owned_textures)[unit].resident_image)(*owned_textures)[unit]=decode_texture(state,r,unit);}
         catch(...){session.allow_resident_textures=true;throw;}session.allow_resident_textures=true;}
+    phase.next(HostStage::g_state);
     const bool packed=packed_color(r),srgb=!packed && r(0x1fec);
     NativeVulkan::GraphicsState fixed;fixed.width=width;fixed.height=height;fixed.samples=samples;fixed.colors=count;fixed.color=packed?VK_FORMAT_R32_UINT:color_format(r(0x208)&31,srgb);
     if(!alias && (count && !vk.graphics_format(fixed.color)))return attempt.reject("device_color_format");
@@ -1734,6 +1736,7 @@ template<class Vertex> static bool prepared(Session& session,const std::vector<s
     if(!alias && (!vk.graphics_fragment_storage()))return attempt.reject("device_fragment_storage");
     if(!alias && (r(0x17cc) && !vk.graphics_precise_visibility()))return attempt.reject("device_precise_visibility");
     if(!alias && (count>1 && !vk.graphics_independent_blend()))return attempt.reject("device_independent_blend");
+    phase.next(HostStage::g_shaders);
     rsxvk::FragmentFailure failure;std::shared_ptr<const std::string> fs;
     if(alias){auto source=rsxvk::fragment(fp,true,false,&failure);if(source)fs=std::make_shared<const std::string>(std::move(*source));}
     else fs=fragment_source(fp,r,count,textures,lines!=nullptr,&failure);
@@ -1790,6 +1793,7 @@ template<class Vertex> static bool prepared(Session& session,const std::vector<s
     std::uint64_t tail_bytes=0;unsigned tail_attributes=0;std::array<unsigned,16> tail_rel{},group_rel{};std::array<bool,16> group_added{};
     struct TailPad {std::uint64_t at,n;};std::array<TailPad,16> tail_pads{};unsigned tail_pad_count=0;DrawReadBatch input_reads;
     std::vector<std::array<unsigned,3>> accepted;
+    phase.next(HostStage::g_data);
     unsigned vertices=0;
     if(!direct)for(const auto& tri:indices){std::array<const ShadedVertex*,3> v{&vertex(tri[0]),&vertex(tri[1]),&vertex(tri[2])};
         const auto polygon=clip_polygon(v,point?0:r(0x1478),r.get(0x1ff4,0x3fffff),sz,vz,bits_float(r.get(0x394,0)),bits_float(r.get(0x398,0x3f800000)));

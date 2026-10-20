@@ -23,7 +23,7 @@ struct NativeRsxWorker {
 #ifdef ANYPS3_RSX_PERF_COUNTERS
     std::optional<std::array<std::uint64_t,RsxPerfCounters::count>> last_counters;
 #endif
-    std::array<std::atomic<std::uint64_t>,16> stage_ns{};std::array<std::uint64_t,16> last_stage_ns{};
+    std::array<std::atomic<std::uint64_t>,32> stage_ns{};std::array<std::uint64_t,32> last_stage_ns{};
     std::function<void()> stop;
     std::shared_ptr<VulkanHostService> host;
     bool on_owner()const{return enabled && queue && RsxOwnerQueue::current==queue.get();}
@@ -39,7 +39,7 @@ TYPES = TYPES.replace('    std::shared_ptr<VulkanHostService> host;', '''#ifdef 
 CPP = r'''
 static bool rsx_run_inline(PpuState&,unsigned);
 static bool rsx_tick_vblank(PpuState&,std::uint64_t);
-static_assert(unsigned(rsxdraw::HostStage::count)<=16,"NativeRsxWorker::stage_ns holds 16 host stages");
+static_assert(unsigned(rsxdraw::HostStage::count)<=32,"NativeRsxWorker::stage_ns holds 32 host stages");
 // Idle service ticks of the RSX owner (GPU completion polling every 100 us while flights are outstanding): count and time (PERF RSX_SERVICE).
 static std::atomic<std::uint64_t>& rsx_service_calls(){static std::atomic<std::uint64_t> v{0};return v;}
 static std::atomic<std::uint64_t>& rsx_service_ns(){static std::atomic<std::uint64_t> v{0};return v;}
@@ -191,7 +191,8 @@ static void rsx_worker_start(PpuState& s){
             // (EWMA of earlier flights), then every 40 us; default: every 100 us.
             static const bool adaptive=[]{const char* v=std::getenv("ANYPS3_RSX_POLL");if(v && std::strcmp(v,"adaptive") && std::strcmp(v,"fixed"))throw std::runtime_error("invalid ANYPS3_RSX_POLL");return v && !std::strcmp(v,"adaptive");}();
             const auto now=std::chrono::steady_clock::now();
-            if(adaptive){auto& session=*static_cast<rsxgraphics::Session*>(f->rsx.graphics_owner.get());
+            if(f->rsx.renderer && f->rsx.renderer->completion_notifier_enabled())due=now+std::chrono::milliseconds(2);   // safety net: completions poke the queue
+            else if(adaptive){auto& session=*static_cast<rsxgraphics::Session*>(f->rsx.graphics_owner.get());
                 const auto expected=session.flights.front().submitted+std::chrono::nanoseconds(std::int64_t(session.flight_ns*0.7));
                 due=std::max(expected,now+std::chrono::microseconds(40));}
             else due=now+std::chrono::microseconds(100);
@@ -324,7 +325,7 @@ static void rsx_worker_perf(const PpuState& s){
         if(w.last_memory)std::fprintf(stderr,"PERF GUEST_MEMORY membarriers=%" PRIu64 " slow_leases=%" PRIu64 " gpu_claims=%" PRIu64 "\n",mem[0]-(*w.last_memory)[0],mem[1]-(*w.last_memory)[1],mem[2]-(*w.last_memory)[2]);
         w.last_memory=mem;}
     if(rsxdraw::host_stats().enabled){
-        static const char* names[]={"idle","indices","assembly","state","texture_metadata","targets","certification","shader_source","geometry","vertex_upload","texture_upload","record","flush","tail","draw","kick"};
+        static const char* names[]={"idle","indices","assembly","state","texture_metadata","targets","certification","shader_source","geometry","vertex_upload","texture_upload","record","flush","tail","draw","kick","g_inputs","g_state","g_shaders","g_data"};
         std::string line="PERF RSX_STAGES";char item[64];
         for(unsigned i=0;i<unsigned(rsxdraw::HostStage::count);++i){const auto v=w.stage_ns[i].load(std::memory_order_relaxed);std::snprintf(item,sizeof(item)," %s_ns=%" PRIu64,names[i],v-w.last_stage_ns[i]);line+=item;w.last_stage_ns[i]=v;}
         std::fprintf(stderr,"%s\n",line.c_str());

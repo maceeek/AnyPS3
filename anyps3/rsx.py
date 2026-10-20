@@ -505,6 +505,24 @@ static unsigned rsx_method_class(std::uint32_t reg){
     static const auto table=[]{std::array<std::uint8_t,0x4000> t{};for(std::uint32_t r=0;r<0x10000;r+=4)t[r/4]=!rsx_method_supported(r)?0:rsx_method_action(r)?2:1;return t;}();
     return reg<0x10000 && !(reg&3)?table[reg/4]:(rsx_method_supported(reg)?(rsx_method_action(reg)?2u:1u):0u);
 }
+// Registers whose method only stores its value (class 1 and none of the special cases of the execution chain in rsx_run_impl: channel/copy
+// objects, clear, zcull, vertex data and inline-array registers, begin/end/draw, program and constant uploads, flips, reports, blits,
+// semaphores, ...). The consumer takes a table lookup for them instead of walking the chain. The list below must name every register that
+// the chain treats individually; tests/test_rsx_fifo_plain.py compares both paths for every register.
+static bool rsx_plain_register(std::uint32_t reg){
+    switch(reg){case 0:case 0x50:case 0x68:case 0x6c:case 0x100:case 0x110:case 0x234:case 0x2000:case 0x6000:case 0x8000:case 0xa000:case 0xc000:case 0xe000:
+    case 0x1d94:case 0xa1c:case 0x1fd8:case 0x1710:case 0x1714:case 0x1800:case 0x1808:case 0x180c:case 0x1810:case 0x1814:case 0x1818:case 0x1824:
+    case 0x1e98:case 0x17c8:case 0x1438:case 0x2328:case 0xc40c:case 0x1d70:case 0x1d74:case 0xe920:case 0xe924:case 0xe940:case 0xe944:return false;
+    default:break;}
+    if((reg>=0xb80 && reg<=0xbfc) || (reg>=0x1f00 && reg<=0x1f7c) || (reg>=0xa400 && reg<0xc000))return false;
+    if((reg>=0xa80 && reg<0xb00) || (reg>=0x1900 && reg<0x1a00) || (reg>=0x1e40 && reg<0x1e80) || (reg>=0x1880 && reg<0x1900) || (reg>=0x1500 && reg<0x1600) || (reg>=0x1c00 && reg<0x1d00))return false;
+    return true;
+}
+static bool rsx_fifo_plain_fast=true;   // TEST HOOK: false walks the full chain for every method
+static const std::array<std::uint8_t,0x4000>& rsx_plain_table(){
+    static const auto table=[]{std::array<std::uint8_t,0x4000> t{};for(std::uint32_t r=0;r<0x10000;r+=4)t[r/4]=rsx_method_class(r)==1 && rsx_plain_register(r);return t;}();
+    return table;
+}
 // One admitted read per 1 MiB IO page for longer packets; any failure
 // repeats the original per-word loads, which raise the original error.
 static void rsx_fifo_values(NativeRsx& gpu,GuestMemory& m,std::uint32_t at,unsigned count,std::uint32_t* out){
@@ -587,8 +605,10 @@ static bool rsx_run_impl(PpuState& s,unsigned budget,bool idle_poll=false){
                     }
                 }
                 rsx_fifo_values(gpu,m,get+4,count,values);
+                const auto& plain=rsx_plain_table();
                 for(unsigned i=gpu.packet_index;i<count;++i){
                     const auto reg=method+i*increment,value=values[i];
+                    if(rsx_fifo_plain_fast && reg<0x10000 && !(reg&3) && plain[reg>>2]){rsx_capture_method(s,reg,value);gpu.registers.write(reg,value);continue;}
                     if(rsx_method_class(reg)==2)publish();
                     if(reg!=0x68)rsx_capture_method(s,reg,value);
                     if(reg==0 && value!=0x31337000)throw std::runtime_error("unsupported RSX channel object");
@@ -741,6 +761,8 @@ static bool rsx_run_impl(PpuState& s,unsigned budget,bool idle_poll=false){
             rsxgraphics::RendererContext context{s.memory,s.rsx,s.pc,s.thread_id,
                 [&s](unsigned id,std::uint64_t name,std::uint64_t flags){rsx_event_publish(s,id,name,flags,"RSX deferred flip event cannot be delivered");},s.memory.regions,false};
             s.rsx.graphics_owner=std::make_shared<rsxgraphics::Session>(*s.rsx.renderer,std::move(context));
+            // GPU completion events wake the owner (ANYPS3_RSX_COMPLETION=1) instead of a 100 us poll while flights are outstanding.
+            if(s.rsx.renderer->completion_notifier_enabled() && s.process.rsx_worker.queue){auto* queue=s.process.rsx_worker.queue.get();s.rsx.renderer->set_completion_hook([queue]{queue->poke();});}
         }else s.rsx.graphics_owner=std::make_shared<rsxgraphics::Session>(*s.rsx.renderer,s);
     }
     auto& session=*static_cast<rsxgraphics::Session*>(s.rsx.graphics_owner.get());

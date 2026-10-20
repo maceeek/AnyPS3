@@ -27,12 +27,12 @@ layout(push_constant) uniform Push{vec4 extent;uint plane;};layout(location=0) o
 void main(){c=unpackUnorm4x8(st[w[0]]);}
 )GLSL";
 // NativeVulkan is neither copyable nor movable: construct it with the environment already set.
-struct Env {Env(const char* v){setenv("ANYPS3_RSX_RECORDER",v,1);}};
+struct Env {Env(const char* v,const char* completion="0"){setenv("ANYPS3_RSX_RECORDER",v,1);setenv("ANYPS3_RSX_COMPLETION",completion,1);}};
 struct Gpu : Env {
  NativeVulkan vk;std::unique_ptr<NativeVulkan::GraphicsBatch> b;NativeVulkan::GraphicsState s{};
  std::shared_ptr<NativeVulkan::GraphicsImage> image[2];std::vector<unsigned> data=std::vector<unsigned>(16,0);unsigned word=0,version=0;
  std::array<std::array<float,2>,4> positions{};
- explicit Gpu(const char* recorder,unsigned capacity=8*1024*1024):Env(recorder),vk(){
+ explicit Gpu(const char* recorder,unsigned capacity=8*1024*1024,const char* completion="0"):Env(recorder,completion),vk(){
   b=vk.graphics_batch(capacity);
   s.width=s.height=16;s.samples=1;s.colors=1;s.color=VK_FORMAT_R8G8B8A8_UNORM;s.scissor={{0,0},{16,16}};
   s.blend[0].colorWriteMask=15;s.blend[0].blendEnable=false;
@@ -103,6 +103,23 @@ static void two_batches(){
  for(unsigned i=0;i<256;++i){assert(got[0][i]==0xff00ffffu && got[1][i]==0xff000000u+1199);}
  std::puts("PASS recorder with two batches: a submitted batch is collected and reset while the other one has queued draws");
 }
+// The completion notifier calls the hook once per submitted batch, after the GPU reached the batch's timeline value, in submission order.
+static void completion(){
+ Gpu g("1",8*1024*1024,"1");assert(g.vk.completion_notifier_enabled());
+ std::mutex mutex;std::vector<std::uint64_t> done;
+ g.vk.set_completion_hook([&]{const auto value=g.vk.graphics_completed();std::lock_guard<std::mutex> lock(mutex);done.push_back(value);});
+ std::vector<std::uint64_t> values;
+ for(unsigned round=0;round<8;++round){
+  g.draw(0,0,0,16,16,0xff000000u|round);values.push_back(g.vk.graphics_submit(*g.b));g.vk.graphics_collect(*g.b,true);g.vk.graphics_reset(*g.b);
+  for(unsigned wait=0;wait<2000;++wait){{std::lock_guard<std::mutex> lock(mutex);if(done.size()>round)break;}std::this_thread::sleep_for(std::chrono::milliseconds(1));}
+ }
+ {std::lock_guard<std::mutex> lock(mutex);
+  if(done.size()!=values.size())throw std::runtime_error("completion hook calls "+std::to_string(done.size())+" for "+std::to_string(values.size())+" batches");
+  for(std::size_t i=0;i<values.size();++i)if(done[i]<values[i])throw std::runtime_error("completion hook ran before the GPU reached batch "+std::to_string(i));}
+ g.vk.set_completion_hook({});   // the hook captures locals of this function
+ g.draw(0,0,0,16,16,1);(void)g.vk.graphics_submit(*g.b);   // destroyed with a batch in flight and the notifier waiting
+ std::puts("PASS completion notifier: one hook call per batch, after its timeline value, shutdown with a batch in flight");
+}
 static void failure(){
  Gpu g("1");g.vk.graphics_test_recorder_fault=5;
  bool stopped=false;std::string what;
@@ -135,7 +152,7 @@ int main(){try{
  if(std::getenv("RECORDER_BENCH")){bench();return 0;}
  for(const char* mode:{"0","1"})model_sequence(mode,12345,4,400);
  model_sequence("1",777,6,700);
- back_pressure();two_batches();failure();teardown();
+ back_pressure();two_batches();completion();failure();teardown();
 }catch(const std::exception& e){std::fprintf(stderr,"FAIL %s\n",e.what());return 1;}}
 '''
 
@@ -162,7 +179,7 @@ class RsxRecorderTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertNotIn('Validation Error', result.stdout + result.stderr)
             self.assertNotIn('Validation Warning', result.stdout + result.stderr)
-            self.assertEqual(result.stdout.count('PASS '), 7, result.stdout)
+            self.assertEqual(result.stdout.count('PASS '), 8, result.stdout)
 
 
 if __name__ == '__main__':
