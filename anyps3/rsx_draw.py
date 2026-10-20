@@ -591,20 +591,15 @@ static std::shared_ptr<const std::vector<FpInst>> load_fragment_program_shared(P
     ::RsxPerfCounters::add(::RsxPerfCounters::fp_misses);
     std::vector<FpInst> program;std::vector<std::uint8_t> image;
     std::uint32_t offset=start;
-    // Instruction blocks are fetched in 256-byte chunks (one admitted read instead of a Range per 16 bytes); a chunk
-    // that cannot be read as a whole (unmapped/forbidden tail) falls back to the exact 16-byte reads, which raise the
-    // original error at the original block. Only consumed blocks enter the image (the hit check reads exactly those).
-    std::array<std::uint8_t,256> chunk{};std::uint32_t chunk_at=0;unsigned chunk_size=0;
+    // The extent of an unknown program is only discovered by decoding: the original parser reads one 16-byte block at a time
+    // (an instruction, plus one constant block when an operand selects it) until END, and every observer (surface readback,
+    // label synchronization) sees exactly those spans. A read-ahead chunk would also touch bytes behind END, so every block is
+    // read on its own. The admitted transfer is the cheaper form of the same read (no Range); any failure repeats the read
+    // through Range, which raises the original error at the original block.
     auto block=[&](std::uint32_t at){
         std::array<std::uint8_t,16> bytes{};
-        if(!(at>=chunk_at && at+16<=chunk_at+chunk_size)){
-            chunk_size=0;chunk_at=at;
-            try{const unsigned n=std::min<unsigned>(unsigned(chunk.size()),0x100000-(at&0xfffff));
-                if(n>=16){read_fragment_bytes(s,location,at,chunk.data(),n&~15u,true);chunk_size=n&~15u;}}
-            catch(const std::exception&){chunk_size=0;}
-        }
-        if(chunk_size)std::memcpy(bytes.data(),chunk.data()+(at-chunk_at),16);
-        else read_fragment_bytes(s,location,at,bytes.data(),16);
+        try{read_fragment_bytes(s,location,at,bytes.data(),16,true);}
+        catch(const std::exception&){read_fragment_bytes(s,location,at,bytes.data(),16);}
         image.insert(image.end(),bytes.begin(),bytes.end());
         std::array<unsigned,4> words{};
         for(unsigned i=0;i<4;++i){const auto w=read_be(bytes.data()+4*i,4);words[i]=(w<<16)|(w>>16);}return words;

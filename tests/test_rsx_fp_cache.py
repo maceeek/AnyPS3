@@ -1,9 +1,11 @@
-"""Fragment program loader: chunked reads, content sharing and bounded eviction equal the original 16-byte loader (native oracles).
+"""Fragment program loader: exact observed spans, content sharing and bounded eviction equal the original 16-byte loader (native oracles).
 
 The reference below is the literal original algorithm (one Range read per 16-byte block, no content cache). Random programs
 (constant blocks, lengths 1..40, VRAM and IO locations, 256-byte-chunk and 1 MiB-page straddles, a program ending at the last
 readable bytes, a program without END) must decode identically; equal bytes at different addresses share one prepared program;
-more than 1024 distinct programs evict without ever returning a wrong program.
+more than 1024 distinct programs evict without ever returning a wrong program. A miss may only touch the bytes the original parser
+reads (instructions + constant blocks up to END): an observer records every read and a watched region directly behind END (a stand-in
+for an adjacent dirty surface) must never be reached.
 """
 import os
 from pathlib import Path
@@ -80,8 +82,69 @@ static void random_programs(){
  assert(compared>200 && erred>=1);
  std::puts("PASS fragment program loader equals the original 16-byte loader (random programs, page and chunk straddles)");
 }
+static std::uintptr_t host_of(PpuState& s,std::uint64_t address){auto r=s.memory.range(address,1,false);return reinterpret_cast<std::uintptr_t>(r.parts.at(0).data);}
+// Coverage of the observed reads over [lo,hi) host bytes (one flag per byte); reads outside are reported through `outside`.
+struct Coverage {
+ std::uintptr_t lo,hi;std::vector<char> seen;unsigned outside=0;std::vector<std::pair<std::uintptr_t,std::uint64_t>> raw;
+ Coverage(std::uintptr_t l,std::uintptr_t h):lo(l),hi(h),seen(h-l,0){}
+ void add(const void* p,std::uint64_t n){const auto a=reinterpret_cast<std::uintptr_t>(p);raw.push_back({a,n});
+  for(std::uint64_t i=0;i<n;++i){if(a+i>=lo && a+i<hi)seen[a+i-lo]=1;else ++outside;}}
+ bool equals(const Coverage& o)const{return seen==o.seen && outside==o.outside;}
+};
+// Only the bytes the original parser reads may be observed; a watched region directly behind END (an adjacent dirty surface) is never reached.
+static void observer_spans(){
+ unsigned cases=0;
+ for(unsigned location=1;location<=2;++location)for(unsigned variant=0;variant<6;++variant){
+  PpuState s;setup_draw(s,8,8,32,false);auto& m=s.memory;auto& R=s.rsx.registers;
+  m.map(0x70010000,0xf0000,6,nullptr,0);m.map(0x70100000,0x100000,6,nullptr,0);s.rsx.io[1]=0x70100000;
+  const unsigned base=location==1?0xc0000000u:0x70000000u;
+  std::uint32_t r=9000+location*100+variant;
+  const std::uint32_t offset=0x20000+0x1000*(location*10+variant);
+  const unsigned length=write_program(s,base+offset,r,1+variant*2,true,variant,variant%2==0);
+  // valid-looking continuation behind END (instructions without END/constants), so a read-ahead would decode fine
+  std::uint32_t tail=r+1;write_program(s,base+offset+length,tail,40,false,variant,false);
+  R[0x8e4]=value_of(location,offset);
+  const auto start=host_of(s,base+offset),behind=host_of(s,base+offset+length);
+  assert(behind==start+length);
+  // 1. coverage of the reference (original loader) and of the miss path must agree exactly and equal [start,start+length)
+  Coverage ref(start-256,start+length+1024),got(start-256,start+length+1024);
+  m.host_access_observer=[&](const void* p,std::uint64_t n,bool write){if(!write)ref.add(p,n);};
+  (void)reference(s,location,offset);m.host_access_observer=nullptr;
+  m.host_access_observer=[&](const void* p,std::uint64_t n,bool write){if(!write)got.add(p,n);};
+  std::shared_ptr<const std::vector<FpInst>> loaded;
+  try{loaded=rsxdraw::load_fragment_program_shared(s,rsxdraw::Reg{s.rsx});}catch(...){m.host_access_observer=nullptr;throw;}
+  m.host_access_observer=nullptr;
+  for(unsigned i=0;i<length;++i)if(!ref.seen[256+i])throw std::runtime_error("reference missed a program byte (test bug)");
+  for(unsigned i=256+length;i<ref.seen.size();++i)if(ref.seen[i])throw std::runtime_error("reference read behind END (test bug)");
+  if(!got.equals(ref)){unsigned first=0;for(unsigned i=0;i<got.seen.size();++i)if(got.seen[i]!=ref.seen[i]){first=i;break;}
+   throw std::runtime_error("location "+std::to_string(location)+" variant "+std::to_string(variant)+": observed bytes differ from the original parser (program "+std::to_string(length)+
+    " bytes, first differing byte at program offset "+std::to_string(long(first)-256)+")");}
+  same(reference(s,location,offset),*loaded);
+  // 2. an observer watching the 256 bytes behind END must never fire; the same observer on the last program block must fire (it sees reads)
+  for(unsigned watch_behind=0;watch_behind<2;++watch_behind){
+   PpuState t;setup_draw(t,8,8,32,false);auto& n=t.memory;
+   n.map(0x70010000,0xf0000,6,nullptr,0);n.map(0x70100000,0x100000,6,nullptr,0);t.rsx.io[1]=0x70100000;
+   const std::uint32_t second=offset+0x40000+watch_behind*0x800;std::uint32_t q=r;                 // fresh address: a miss
+   const unsigned len2=write_program(t,base+second,q,1+variant*2,true,variant,variant%2==0);
+   std::uint32_t q2=q+1;write_program(t,base+second+len2,q2,40,false,variant,false);
+   t.rsx.registers[0x8e4]=value_of(location,second);
+   const auto at=host_of(t,base+second+(watch_behind?len2-16:len2));
+   unsigned fired=0;
+   n.host_access_observer=[&](const void*,std::uint64_t,bool write){if(!write)++fired;};
+   n.host_access_observer.filtered=true;n.host_access_observer.supports_exact_bytes=true;
+   n.host_access_observer.watch(reinterpret_cast<const void*>(at),watch_behind?16:256);
+   try{(void)rsxdraw::load_fragment_program_shared(t,rsxdraw::Reg{t.rsx});}catch(...){n.host_access_observer=nullptr;throw;}
+   n.host_access_observer.watch(reinterpret_cast<const void*>(at),watch_behind?16:256,false);n.host_access_observer=nullptr;
+   if(watch_behind==0 && fired)throw std::runtime_error("a watched region directly behind END was read ("+std::to_string(fired)+" notifications) at location "+std::to_string(location));
+   if(watch_behind==1 && !fired)throw std::runtime_error("the watched last block of the program was not observed (test bug)");
+  }
+  ++cases;
+ }
+ assert(cases==12);
+ std::puts("PASS a miss reads exactly the original parser's bytes (VRAM and IO, with/without constants); a watched region behind END is never touched");
+}
 static void tail_of_memory(){
- // The END block is the last readable block: the 256-byte chunk read runs past the mapping and must fall back to exact reads.
+ // The END block is the last readable block of VRAM: nothing may be read past it.
  PpuState s;setup_draw(s,8,8,32,false);auto& R=s.rsx.registers;std::uint32_t r=7;
  const std::uint32_t offset=0x800000-16*5;const auto length=write_program(s,0xc0000000u+offset,r,5,true,1,false);
  (void)length;R[0x8e4]=value_of(1,offset);
@@ -113,7 +176,7 @@ static void sharing_and_eviction(){
  (void)r;
  std::puts("PASS equal programs share one result; eviction past 1024 entries never returns a wrong program; rewrites are seen");
 }
-int main(){try{random_programs();tail_of_memory();sharing_and_eviction();}catch(const std::exception& e){std::fprintf(stderr,"FAIL %s\n",e.what());return 1;}}
+int main(){try{random_programs();observer_spans();tail_of_memory();sharing_and_eviction();}catch(const std::exception& e){std::fprintf(stderr,"FAIL %s\n",e.what());return 1;}}
 '''
 
 
@@ -133,7 +196,7 @@ class RsxFpCacheTests(unittest.TestCase):
             env = dict(os.environ, ANYPS3_VK_DEVICE='lavapipe', VK_DRIVER_FILES='/usr/share/vulkan/icd.d/lvp_icd.json')
             result = subprocess.run([str(root / 'test')], env=env, capture_output=True, text=True, timeout=300)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            self.assertEqual(result.stdout.count('PASS '), 3, result.stdout)
+            self.assertEqual(result.stdout.count('PASS '), 4, result.stdout)
 
 
 if __name__ == '__main__':
