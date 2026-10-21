@@ -64,7 +64,11 @@ static Result run(bool fast){
  rsx_fifo_plain_fast=true;return out;
 }
 static void equal_paths(){
- const auto fast=run(true),slow=run(false);
+ rsx_fifo_window=false;const auto unwindowed=run(true);rsx_fifo_window=true;
+ const auto fills=rsx_fifo_window_fills;const auto fast=run(true),slow=run(false);
+ if(rsx_fifo_window_fills==fills)throw std::runtime_error("the FIFO window was never filled");
+ if(fast.registers!=unwindowed.registers || fast.program!=unwindowed.program || fast.constants!=unwindowed.constants || fast.commands!=unwindowed.commands)
+  throw std::runtime_error("the FIFO window changes the executed stream");
  if(fast.registers!=slow.registers)throw std::runtime_error("register bank differs between the fast path and the chain");
  if(fast.program!=slow.program || fast.constants!=slow.constants)throw std::runtime_error("transform program/constants differ");
  if(fast.commands!=slow.commands || fast.zcull!=slow.zcull || fast.vertex_cache!=slow.vertex_cache)throw std::runtime_error("counters differ");
@@ -95,7 +99,95 @@ static void extracted_are_special(){
  if(n<300)throw std::runtime_error("too few extracted registers");
  std::printf("PASS every register named by the chain, the vertex-data handler and the action table (%u addresses) walks the chain\n",n);
 }
-int main(){try{extracted_are_special();plain_set();equal_paths();}catch(const std::exception& e){std::fprintf(stderr,"FAIL %s\n",e.what());return 1;}}
+// FIFO window: a front-end semaphore release (0x6c, device context) stores into the command buffer AHEAD of GET, over the value of a
+// later plain packet that the window has already read. The consumer must execute the stored value (independent expectation: the
+// released value, not the original word), with the window on and off, and with plain packets (window hits) before the release.
+static void window_release_into_fifo(){
+ for(bool windowed:{false,true}){
+  rsx_fifo_window=windowed;
+  PpuState s;setup_fifo(s);auto& gpu=s.rsx;gpu.device=0x70000000;
+  Stream st;for(unsigned i=0;i<8;++i)st.method(0x300+4*i,{0x100+i});   // plain packets read through the window
+  st.method(0x60,{0x56616660});
+  const std::uint32_t patch_at=BASE+std::uint32_t(st.words.size()+4)*4+4;   // value word of the packet after 0x64 and 0x6c
+  st.method(0x64,{patch_at});st.method(0x6c,{0xdeadbeef});st.method(0x340,{0x12345678});
+  for(unsigned i=0;i<4;++i)st.method(0x344+4*i,{0x200+i});
+  std::uint32_t at=BASE;for(auto w:st.words){put(s,at,w);at+=4;}
+  if(s.memory.load(0x70000000+patch_at,4)!=0x12345678)throw std::runtime_error("test: patch position does not hold the 0x340 value");
+  s.memory.store(gpu.dma+0x44,4,BASE);s.memory.store(gpu.dma+0x40,4,at);
+  const auto fills=rsx_fifo_window_fills;
+  for(unsigned n=0;n<64 && s.memory.load(gpu.dma+0x44,4)!=at;++n)(void)rsx_run_impl(s,1000000);
+  if(s.memory.load(gpu.dma+0x44,4)!=at)throw std::runtime_error("consumer did not reach PUT");
+  if(s.memory.load(0x70000000+patch_at,4)!=0xdeadbeef)throw std::runtime_error("the release did not store into the command buffer");
+  if(rsx_reg(gpu,0x340)!=0xdeadbeef)throw std::runtime_error(std::string(windowed?"windowed":"unwindowed")+": register 0x340 = "+std::to_string(rsx_reg(gpu,0x340))+", expected the released value");
+  if(rsx_reg(gpu,0x31c)!=0x107 || rsx_reg(gpu,0x350)!=0x203)throw std::runtime_error("plain packets around the release were not executed");
+  if(windowed && rsx_fifo_window_fills<fills+2)throw std::runtime_error("the window was not refilled after the release");
+ }
+ rsx_fifo_window=true;
+ std::puts("PASS a release into the command buffer ahead of GET is executed (FIFO window invalidated by non-plain methods)");
+}
+static std::uint8_t* host_byte(PpuState& s,std::uint64_t address){
+ for(const auto& r:s.memory.regions)if(address>=r.base && address-r.base<r.bytes->size())return r.bytes->data()+(address-r.base);
+ throw std::runtime_error("test: unmapped guest address");
+}
+static void store_be(std::uint8_t* p,std::uint32_t v){p[0]=v>>24;p[1]=v>>16;p[2]=v>>8;p[3]=v;}
+// review-rsxw4-1 #2: callbacks between packets that rewrite a later command word. (a) gpu.trace publishes GET after every packet;
+// a filtered observer watching only GET rewrites the value of the third plain packet on the first GET write. (b) an owner request
+// (rsx_owner_hook, rsx_host_waiters) served before the second packet rewrites the third packet's value. Independent expectation:
+// the rewritten value executes, with the window on and off.
+static void window_callbacks(){
+ for(int variant=0;variant<2;++variant)for(bool windowed:{false,true}){
+  rsx_fifo_window=windowed;
+  PpuState s;setup_fifo(s);auto& gpu=s.rsx;gpu.device=0x70000000;
+  Stream st;st.method(0x300,{1});st.method(0x304,{2});st.method(0x308,{3});st.method(0x30c,{4});
+  std::uint32_t at=BASE;for(auto w:st.words){put(s,at,w);at+=4;}
+  const std::uint64_t third=0x70000000+BASE+5*4;   // value word of the 0x308 packet
+  s.memory.store(gpu.dma+0x44,4,BASE);s.memory.store(gpu.dma+0x40,4,at);
+  int calls=0;
+  if(variant==0){
+   gpu.trace=true;
+   s.memory.host_access_observer=[&](const void*,std::uint64_t,bool write){if(write && calls++==0)store_be(host_byte(s,third),0x77);};
+   s.memory.host_access_observer.filtered=true;s.memory.host_access_observer.watch(host_byte(s,gpu.dma+0x44),4);
+  }else{
+   rsx_owner_hook()=[&]{if(++calls==2){store_be(host_byte(s,third),0x77);rsx_host_waiters=0;}};rsx_host_waiters=1;
+  }
+  for(unsigned n=0;n<64 && s.memory.load(gpu.dma+0x44,4)!=at;++n)(void)rsx_run_impl(s,1000000);
+  gpu.trace=false;s.memory.host_access_observer={};rsx_owner_hook()=nullptr;rsx_host_waiters=0;
+  if(s.memory.load(gpu.dma+0x44,4)!=at)throw std::runtime_error("consumer did not reach PUT");
+  if(rsx_reg(gpu,0x308)!=0x77 || rsx_reg(gpu,0x30c)!=4)throw std::runtime_error(std::string(variant?"owner request":"traced GET observer")+(windowed?" (window)":" (no window)")+
+   ": register 0x308 = "+std::to_string(rsx_reg(gpu,0x308))+", expected the rewritten 0x77");
+ }
+ rsx_fifo_window=true;
+ std::puts("PASS command words rewritten by a GET-publication callback or an owner request execute (window invalidated)");
+}
+// review-rsxw4-1 #3: a claimed page inside the window range whose coherence service fails once (then releases the claim). The fill
+// must not service the claim (declined); the per-word path services it at the original packet, so the first failure propagates
+// there exactly as without the window: same error, same registers.
+static void window_claimed_page(){
+ std::string error[2];std::uint32_t regs[2][8]{};unsigned services[2]{};
+ for(int side=0;side<2;++side){
+  rsx_fifo_window=side==1;
+  PpuState s;setup_fifo(s);auto& gpu=s.rsx;gpu.device=0x70000000;
+  const std::uint32_t base=0x20fe0;   // the window starting here crosses into the next 4 KiB page (0x21000)
+  Stream st;for(unsigned i=0;i<8;++i)st.method(0x300+4*i,{0x10+i});   // 64 bytes: packets 4..7 on the claimed page
+  std::uint32_t at=base;for(auto w:st.words){put(s,at,w);at+=4;}
+  auto& m=s.memory;m.store(gpu.dma+0x44,4,base);m.store(gpu.dma+0x40,4,at);
+  m.enable_concurrency();m.enable_page_broker();
+  std::shared_ptr<GuestBacking> backing;for(const auto& r:m.regions)if(r.base==0x70010000)backing=r.bytes;
+  auto claim=std::make_unique<GuestMemory::GpuPages>(m,std::vector<GuestMemory::HostSpan>{{host_byte(s,0x70021000),4,backing}});
+  bool thrown=false;
+  m.page_broker.coherence=[&](const std::vector<GuestMemory::HostSpan>&,bool){++services[side];if(!thrown){thrown=true;throw std::runtime_error("injected coherence failure");}claim.reset();};
+  try{(void)rsx_run_impl(s,1000000);}catch(const std::runtime_error& e){error[side]=e.what();}
+  m.page_broker.coherence={};claim.reset();
+  for(unsigned i=0;i<8;++i)regs[side][i]=rsx_reg(gpu,0x300+4*i);
+ }
+ rsx_fifo_window=true;
+ if(error[0]!=error[1] || error[0]!="injected coherence failure")throw std::runtime_error("claimed page: error '"+error[1]+"' (window) vs '"+error[0]+"' (no window)");
+ if(services[0]!=services[1])throw std::runtime_error("claimed page: coherence services "+std::to_string(services[1])+" (window) vs "+std::to_string(services[0]));
+ for(unsigned i=0;i<8;++i)if(regs[0][i]!=regs[1][i])throw std::runtime_error("claimed page: register state differs");
+ if(services[0]!=1 || regs[0][3]!=0x13 || regs[0][4]==0x14)throw std::runtime_error("claimed page: the failure did not stop at the first packet on the claimed page");
+ std::puts("PASS a claimed page inside the window range is serviced only by the per-word path (first coherence failure propagates)");
+}
+int main(){try{extracted_are_special();plain_set();equal_paths();window_release_into_fifo();window_callbacks();window_claimed_page();}catch(const std::exception& e){std::fprintf(stderr,"FAIL %s\n",e.what());return 1;}}
 '''
 
 
@@ -141,7 +233,7 @@ class RsxFifoPlainTests(unittest.TestCase):
             env = dict(os.environ, ANYPS3_VK_DEVICE='lavapipe', VK_DRIVER_FILES='/usr/share/vulkan/icd.d/lvp_icd.json')
             result = subprocess.run([str(root / 'test')], env=env, capture_output=True, text=True, timeout=300)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            self.assertEqual(result.stdout.count('PASS '), 3, result.stdout)
+            self.assertEqual(result.stdout.count('PASS '), 6, result.stdout)
 
 
 if __name__ == '__main__':
