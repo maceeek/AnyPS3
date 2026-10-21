@@ -567,7 +567,7 @@ static bool read_fragment_bytes(PpuState& s,unsigned location,std::uint32_t at,s
         // same bytes without building a Range; the parser keeps Range::read.
         if(bulk){
             try{s.memory.transfer(address,out+done,count,false);}
-            catch(const std::exception&){if(s.memory.readable_span(address,count,true))throw;return false;}
+            catch(const std::exception&){if(s.memory.readable_span(address,count))throw;return false;}
         }
         else{auto mapping=s.memory.range(address,count,false);mapping.read(0,out+done,count);}
         done+=count;
@@ -605,15 +605,15 @@ static std::shared_ptr<const std::vector<FpInst>> load_fragment_program_shared(P
     // label synchronization) sees exactly those spans. A read-ahead chunk would also touch bytes behind END, so every block is
     // read on its own, as ONE admitted 16-byte transfer inside one 1 MiB IO page (no Range): the transfer validates the complete
     // block before any observer sees a byte, so a block that is half readable notifies nothing, exactly like Range. A block
-    // straddling an IO page edge, a block that continues into an adjacent mapping within one guest page (the scalar admission of a
-    // concurrent transfer resolves one mapping) and a block whose admission faults take the Range path, which raises the original
-    // error at the original block; a failure of an admitted block (an observer error) propagates and is never replayed.
+    // straddling an IO page edge and a block whose admission faults take the Range path, which raises the original error at the
+    // original block; a failure of an admitted block (an observer error, also for a block split over two mappings) propagates and is
+    // never replayed.
     auto block=[&](std::uint32_t at){
         std::array<std::uint8_t,16> bytes{};bool loaded=false;
         if(((at&0xfffff)+16)<=0x100000){
             const auto address=location_address(s.rsx,location-1,at,16);   // the Range path below would raise the same error
             try{s.memory.transfer(address,bytes.data(),16,false);loaded=true;}
-            catch(const std::exception&){if(s.memory.readable_span(address,16,true))throw;}
+            catch(const std::exception&){if(s.memory.readable_span(address,16))throw;}
         }
         if(!loaded)read_fragment_bytes(s,location,at,bytes.data(),16);
         image.insert(image.end(),bytes.begin(),bytes.end());

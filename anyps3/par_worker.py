@@ -294,6 +294,11 @@ struct NativeSpuWorker {
             if(stop && lanes.empty())return;
             try{pause();service();}catch(...){}
             for(auto& lane:lanes)lane->shutdown();
+            // Every lane is joined: unpublish it from its guest thread record before destroying it. The records (and their groups)
+            // can outlive this session, and a lane of the next session reads Thread::pool_lane on the peer-LS fast path
+            // (spu_peer_ls_read_direct) before any lane of it may have replaced the pointer.
+            for(auto& lane:lanes)if(lane->context){void* self=lane.get();
+                __atomic_compare_exchange_n(&lane->context->pool_lane,&self,static_cast<void*>(nullptr),false,__ATOMIC_RELEASE,__ATOMIC_RELAXED);}
             // Keep failed lane exception_ptrs available to the next entry.
             for(auto& lane:lanes){if(lane->error && !error){error=lane->error;failed.store(true,std::memory_order_release);}worker_ns+=lane->worker_ns;completed+=lane->completed;}
             if(detach)detach();

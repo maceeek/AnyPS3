@@ -142,8 +142,26 @@ MUTUAL = COMMON + r'''
  std::puts("PASS mutual running peers complete through bounded waits");
 '''
 
+# Pool shutdown destroys the lanes while the guest thread records survive (a later session relaunches lanes one at a time): no record may
+# keep pointing at a destroyed lane, or the next session's first peer-LS GET dereferences it. A pointer that names another (newer) lane
+# is not touched.
+RESTART = COMMON + r'''
+ peer.step=[&](unsigned){peer.event_driven=true;return false;};
+ caller.step=[&](unsigned){caller.event_driven=true;return false;};
+ NativeSpuWorker newer;g.threads[2].pool_lane=&newer;(void)peer_ls;
+ peer.launch();unrelated.launch();caller.launch();
+ release=true;pool.shutdown();
+ assert(pool.lanes.empty() && s.spu.groups.size()==1);
+ assert(g.threads[0].pool_lane==nullptr && g.threads[1].pool_lane==nullptr && g.threads[2].pool_lane==&newer);
+ g.threads[2].pool_lane=nullptr;
+ std::puts("PASS pool shutdown unpublishes destroyed lanes from surviving thread records");
+'''
+
 
 class SpuPutPeerLs(par15.Par15RpcContracts):
+    def test_shutdown_unpublishes_lanes(self):
+        self.native('spuput-peer-restart', RESTART)
+
     def test_mutual_running_peers_terminate(self):
         self.native('spuput-peer-mutual', MUTUAL)
 

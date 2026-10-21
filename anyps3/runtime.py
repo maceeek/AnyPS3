@@ -954,10 +954,9 @@ struct GuestMemory {
     // Side-effect-free admission test: true when [address,address+size) is wholly mapped and readable (the span may cross adjacent
     // regions). It calls no observer, takes no page-broker cell and reads no guest byte, so a caller that reads one logical block
     // through an admitted transfer can tell an admission fault (nothing was notified) from any other failure (not to be replayed).
-    // transfer_admission: also require what transfer() asks of a span inside ONE guest page when the memory is concurrent: it is admitted
-    // like a scalar access, which resolves one mapping, so a span of that kind that continues into an adjacent mapping fails admission
-    // (before any observer call) although every byte is readable. Longer spans take the general path and may cross mappings.
-    bool readable_span(std::uint64_t address,unsigned size,bool transfer_admission=false){
+    // Its verdict equals transfer()'s read admission: a span inside one guest page that continues into an adjacent readable mapping is
+    // admitted there too (the scalar fast admission declines it and the general admission splits it per mapping).
+    bool readable_span(std::uint64_t address,unsigned size){
         if(address>UINT32_MAX || size>UINT64_C(0x100000000)-address)return false;
         if(!concurrent()){
             auto next=address;auto remaining=size;
@@ -971,10 +970,8 @@ struct GuestMemory {
         }
         Lease lease(*this,address,0,false,true,false);   // zero-byte translation-only admission: reader gate and map snapshot, no span reaches an observer
         try{auto next=address;unsigned left=size;
-            const bool one_page=size && (address>>12)==((address+size-1)>>12);
             while(left){const auto& map=translate_parallel(next,1,false);const auto& r=map.region;
                 const unsigned n=std::min<std::uint64_t>(left,r.bytes->size()-(next-r.base));
-                if(transfer_admission && one_page && n<left)return false;
                 next+=n;left-=n;}
         }catch(const std::runtime_error&){return false;}
         return true;
@@ -1023,12 +1020,19 @@ struct GuestMemory {
     // Concurrent read body of transfer() for a caller that already holds the Lease of exactly these bytes
     // (Range::read): same translation, permission checks and atomic word reads, without the nested lease
     // revalidation, the span vector and the shared_ptr copies of parallel_spans.
+    // Every source mapping and its read permission are resolved before the first destination byte is written, so a span that continues
+    // into a hole or an unreadable mapping faults with the destination untouched (transfer() reaches this for split one-page reads).
     void read_admitted(std::uint64_t address,std::uint8_t* buffer,unsigned size){
         if(address>UINT32_MAX || size>UINT64_C(0x100000000)-address)throw std::runtime_error("guest transfer outside 32-bit space");
-        auto next=address;unsigned left=size;
+        if(!size)return;
+        {const auto& map=translate_parallel(address,1,false);const auto& r=map.region;
+            if(r.bytes->size()-(address-r.base)>=size){atomic_read(byte_pointer(r.bytes,r.bytes->data()+address-r.base),buffer,size);return;}}
+        struct Part {const std::uint8_t* source;unsigned size;};
+        std::vector<Part> parts;auto next=address;unsigned left=size;
         while(left){const auto& map=translate_parallel(next,1,false);const auto& r=map.region;
             const unsigned n=std::min<std::uint64_t>(left,r.bytes->size()-(next-r.base));
-            atomic_read(byte_pointer(r.bytes,r.bytes->data()+next-r.base),buffer,n);buffer+=n;next+=n;left-=n;}
+            parts.push_back({byte_pointer(r.bytes,r.bytes->data()+next-r.base),n});next+=n;left-=n;}
+        for(const auto& part:parts){atomic_read(part.source,buffer,part.size);buffer+=part.size;}
     }
     void transfer(std::uint64_t address,std::uint8_t* buffer,unsigned size,bool write) {
         HostByteAccess exact_bytes{host_access_observer.supports_exact_bytes.load(std::memory_order_acquire)};
