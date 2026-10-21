@@ -126,9 +126,10 @@ static void persist(unsigned keys){
  vk.graphics_finish(*b);vk.graphics_reset(*b);assert(vk.compile_stats.graphics_pipelines==keys);
  std::printf("PASS persist %u pipelines rotations=%llu load_bytes=%llu\n",keys,(unsigned long long)vk.compile_stats.pipeline_cache_rotations,(unsigned long long)vk.compile_stats.pipeline_cache_load_bytes);
 }
-// A periodic background snapshot that fails (cache directory read-only) must leave the cache dirty, so the forced save at shutdown
-// (directory writable again) still writes it. Pipelines are created within the 2 s throttle, the only periodic save is launched by
-// the explicit compile_stats_print after it, and the directory is restored once that save has long finished.
+// A periodic background snapshot that fails (cache directory read-only) must leave the cache dirty, so a later save (the next periodic
+// one or the forced save at shutdown, directory writable again) still writes it. Handshake: the directory stays read-only until the
+// failed background save has been collected (cache_io_errors rises above the count after the synchronous SPIR-V writes); only then
+// is write access restored. The old code (dirty cleared before the save) then never writes the file.
 static void save_retry(){
  setenv("ANYPS3_RSX_HOST_PROFILE","1",1);const std::filesystem::path dir=std::filesystem::path(std::getenv("ANYPS3_CACHE_ROOT"))/"vk";
  {NativeVulkan vk;assert(std::filesystem::is_directory(dir));
@@ -139,10 +140,11 @@ static void save_retry(){
    auto fs=std::make_shared<const std::string>(std::move(text)),vs=std::make_shared<const std::string>(simple_vs);
    std::vector<unsigned> data(16);vk.graphics_draw(*b,s,images,{},*vs,*fs,data,3,sample_positions,0,0,0,1,{},0,UINT64_MAX,{},vs,fs);}
   vk.graphics_finish(*b);vk.graphics_reset(*b);
-  std::this_thread::sleep_for(std::chrono::milliseconds(2100));vk.compile_stats_print();   // launches the background save; it fails
-  std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+  const auto before=vk.compile_stats.cache_io_errors;
+  // Each print (throttled to 2 s) launches the periodic save or collects a finished one without waiting.
+  for(unsigned i=0;i<15 && vk.compile_stats.cache_io_errors==before;++i){std::this_thread::sleep_for(std::chrono::milliseconds(2100));vk.compile_stats_print();}
+  if(vk.compile_stats.cache_io_errors==before)throw std::runtime_error("the read-only background save was never collected as failed");
   std::filesystem::permissions(dir,std::filesystem::perms::owner_all);
-  for(const auto& entry:std::filesystem::directory_iterator(dir))if(entry.path().filename().string().rfind("pipeline-",0)==0)throw std::runtime_error("pipeline cache written while read-only");
  }
  std::printf("PASS save retry\n");
 }

@@ -86,6 +86,15 @@ static void rsx_worker_pump(PpuState& s){
     auto& w=s.process.rsx_worker;if(!w.enabled){w.check();return;}if(w.on_owner())return;
     GuestMemory::RawYield yield(s.memory);w.queue->pump_coordinator();w.check();
 }
+// Normal end of a run (generated main after anyps3_entry returns; tests): a graphics owner that is still alive belongs to serial RSX
+// execution (ANYPS3_RSX_WORKER=0; the worker releases its own in idle_teardown). Release it like the worker does, which drains its
+// GPU completion hooks, then collect the last background capture write so its failure is an explicit stop in both modes.
+[[maybe_unused]] static void rsx_finalize(PpuState& s){
+#ifdef ANYPS3_RSX_VK
+    if(s.rsx.graphics_owner && !s.process.rsx_worker.enabled)rsx_worker_release(s);
+#endif
+    rsx_capture_writer_join();
+}
 static void rsx_worker_events(PpuState& s,const std::function<void()>& invoke){
     auto& w=s.process.rsx_worker;
     if(w.on_owner())w.queue->owner_call(invoke);else invoke();
