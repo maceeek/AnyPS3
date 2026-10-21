@@ -9,8 +9,14 @@ from .rsx_vk_compute import HEADERS as COMPUTE_HEADERS, MEMBERS as COMPUTE_MEMBE
 from .rsx_vk_graphics import MEMBERS as GRAPHICS_MEMBERS
 from .rsx_vk_present import MEMBERS as PRESENT_MEMBERS
 from .rsx_vk_conditional import MEMBERS as CONDITIONAL_MEMBERS
+from .rsx_vblank import VBLANK_CPP
 
 CPP = r'''
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <string>
+''' + VBLANK_CPP + r'''
 #ifndef ANYPS3_RSX_PERF_COUNTERS
 #define ANYPS3_RSX_PERF_COUNTERS 1
 #include <atomic>

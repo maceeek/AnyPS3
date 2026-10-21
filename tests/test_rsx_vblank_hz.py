@@ -13,7 +13,7 @@ import unittest
 from fractions import Fraction
 from pathlib import Path
 
-from anyps3.rsx import VBLANK_CPP
+from anyps3.rsx_vblank import VBLANK_CPP
 
 
 def cases():

@@ -86,7 +86,7 @@ private:
             VkPresentModeKHR mode=VK_PRESENT_MODE_FIFO_KHR;
             // ANYPS3_VBLANK_HZ (emulated rate other than the default 60000/1001): the host monitor's FIFO refresh must not cap the
             // emulated rate, so VSYNC flips fall back to IMMEDIATE rather than FIFO when MAILBOX is missing.
-            const char* vblank_hz=std::getenv("ANYPS3_VBLANK_HZ");const bool custom_rate=vblank_hz && std::string(vblank_hz)!="60000/1001";
+            const bool custom_rate=rsx_vblank_rate().custom;   // the normalized rate (120000/2002 is the default)
             const std::vector<VkPresentModeKHR> preferred=sync?(custom_rate?std::vector<VkPresentModeKHR>{VK_PRESENT_MODE_MAILBOX_KHR,VK_PRESENT_MODE_IMMEDIATE_KHR}:
                 std::vector<VkPresentModeKHR>{VK_PRESENT_MODE_MAILBOX_KHR}):
                 std::vector<VkPresentModeKHR>{VK_PRESENT_MODE_IMMEDIATE_KHR,VK_PRESENT_MODE_MAILBOX_KHR};

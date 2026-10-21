@@ -527,12 +527,14 @@ struct Prepared {
     // scope is unavailable, any destination byte became observable or the map epoch moved, the chunks are written exactly as the
     // reference's phase B writes the same pixels from the Ranges its phase A acquired: pixel by pixel in raster order, a serial
     // single-mapping pixel through mark_write + direct copy, otherwise Range::write. Nothing is replayed or re-read.
-    // A non-deferred commit runs inside the stability scope of its own admission (scaled()).
+    // A non-deferred commit runs inside the stability scope of its own admission (scaled()). Inside a scope no access can wait
+    // for a claim (claimed bytes are declined and no claim can be published), so holding the lock never blocks a claim owner.
     void commit(PpuState& s,const Image& dst,bool deferred){
         if(deferred){
-            StableScope scope;
-            if(stable_scope(s.memory,scope) && stable(s.memory)){if(stability_probe)stability_probe(1);write_runs();}
-            else{reference_writes(s,dst.bpp);++deferred_fallbacks;}
+            bool written=false;
+            {StableScope scope;   // released before the fallback: reference writes may wait for a claim (review-rsxw4-1 #1)
+                if(stable_scope(s.memory,scope) && stable(s.memory)){if(stability_probe)stability_probe(1);write_runs();written=true;}}
+            if(!written){reference_writes(s,dst.bpp);++deferred_fallbacks;}
         }else write_runs();
         ++batch_executed;if(copy)++batch_copy_executed;
     }

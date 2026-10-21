@@ -7,47 +7,6 @@ from .rsx_draw import CPP as DRAW_CPP, TYPES as DRAW_TYPES
 from .rsx_blit import CPP as BLIT_CPP
 from .rsx_registers import TYPES as REGISTER_TYPES
 
-# Emulated vblank rate (VBLANKHZ task, headroom instrument). Self-contained so tests/test_rsx_vblank_hz.py compiles it alone.
-VBLANK_CPP = r'''
-// ANYPS3_VBLANK_HZ: the emulated display rate as a positive integer "N" or rational "N/M" Hz (digits only, no sign/blank, no
-// overflow; reduced N and M <= 1000000, N*M <= 9000000000 so the split arithmetic below cannot overflow; 1 <= rate <= 1000 Hz).
-// Unset = 60000/1001, whose tick numbers and tick times are bit-identical to the former 60/1.001 arithmetic: both compute the
-// exact floors of elapsed*60/1.001e9 and N*1.001e9/60 (same rationals, exact integer splits). A MEASUREMENT INSTRUMENT only:
-// guest-visible refresh information (cellVideoOut state, 59.94 Hz) is not changed; GCM vblank count/time follow the ticks.
-struct RsxVblankRate {
-    std::uint64_t num=60000,den=1001;bool custom=false;
-    std::uint64_t span()const{return den*UINT64_C(1000000000);}   // nanoseconds per `num` ticks
-    std::uint64_t ticks(std::uint64_t elapsed_ns)const{return (elapsed_ns/span())*num+(elapsed_ns%span())*num/span();}   // floor(elapsed*rate)
-    std::uint64_t tick_ns(std::uint64_t n)const{return (n/num)*span()+(n%num)*span()/num;}   // floor(n/rate), relative to the epoch
-};
-// Returns an empty string and sets `out`, or the grammar/range error.
-static std::string rsx_parse_vblank_hz(const char* text,RsxVblankRate& out){
-    auto number=[](const char*& p,std::uint64_t& value)->bool{
-        if(*p<'0' || *p>'9')return false;
-        value=0;
-        for(;*p>='0' && *p<='9';++p){if(value>(UINT64_MAX-9)/10)return false;value=value*10+unsigned(*p-'0');}
-        return true;};
-    const char* p=text;std::uint64_t num=0,den=1;
-    if(!number(p,num))return "expected digits";
-    if(*p=='/'){++p;if(!number(p,den))return "expected digits after '/'";}
-    if(*p)return "unexpected character";
-    if(!num || !den)return "zero numerator or denominator";
-    std::uint64_t a=num,b=den;while(b){const auto t=a%b;a=b;b=t;}num/=a;den/=a;
-    if(num>1000000 || den>1000000 || num*den>UINT64_C(9000000000))return "numerator/denominator too large";
-    if(num<den || num>1000*den)return "rate outside 1..1000 Hz";
-    out.num=num;out.den=den;out.custom=!(num==60000 && den==1001);return "";
-}
-[[maybe_unused]] static const RsxVblankRate& rsx_vblank_rate(){
-    static const RsxVblankRate rate=[]{RsxVblankRate r;const char* v=std::getenv("ANYPS3_VBLANK_HZ");if(!v)return r;
-        const auto error=rsx_parse_vblank_hz(v,r);
-        if(!error.empty()){std::fprintf(stderr,"invalid ANYPS3_VBLANK_HZ=%s: %s (expected N or N/M Hz, e.g. 90 or 120000/1001)\n",v,error.c_str());std::_Exit(2);}
-        if(r.custom)std::fprintf(stderr,"ANYPS3_VBLANK_HZ=%llu/%llu: emulated vblank %.3f Hz (measurement instrument; default 60000/1001)\n",
-            (unsigned long long)r.num,(unsigned long long)r.den,double(r.num)/double(r.den));
-        return r;}();
-    return rate;
-}
-'''
-
 TYPES = CAPTURE_TYPES + DRAW_TYPES + REGISTER_TYPES + r'''
 struct NativeRsx {
     RsxPerfCapture perf_capture;
@@ -94,7 +53,7 @@ struct NativeRsx {
 };
 '''
 
-CPP = VBLANK_CPP + r'''
+CPP = r'''
 static void rsx_worker_events(PpuState&,const std::function<void()>&);
 static std::uint32_t rsx_worker_display_call(PpuState&);
 static void rsx_worker_release(PpuState&);
@@ -653,11 +612,26 @@ static void rsx_fifo_values(NativeRsx& gpu,GuestMemory& m,std::uint32_t at,unsig
 // then only moved earlier within a stretch in which the consumer is unobservable, i.e. an equivalent consumer schedule. Any
 // non-plain method (semaphores, labels, draws, flips, uploads, blits...) or a pending owner request invalidates the window, so
 // commands written behind a semaphore/label wait or by the consumer itself (a release into the command buffer) are re-read.
-// The window is declined for the rest of the run (per-packet reads as before) when its bytes are observed (HostObserver / raw
-// CPU-dirty interest: the per-word notification granularity is kept) or its translation fails (the per-word path raises the
-// original error at the original word). ANYPS3_RSX_FIFO_WINDOW=0 disables it (A/B switch; also a test hook).
-static bool rsx_fifo_window=[]{const char* v=std::getenv("ANYPS3_RSX_FIFO_WINDOW");return !v || std::string(v)!="0";}();
+// Every other guest access of the loop (GET publication, PUT/GET loads, per-word fallback reads) may run an observer callback, so it
+// invalidates the window too (review-rsxw4-1 #2), as does the decision to run the owner hook (one load decides both).
+// A fill is admitted like the RSX blit fast paths (review-rsxw4-1 #3): translation only (GuestMemory::range(...,brokered=false)
+// under ObserverPause, the only code inside the catch), then the window is declined for the rest of the run when a byte is
+// observed (HostObserver / raw CPU-dirty interest), guarded (HostGuard on the primary mapping) or claimed (page broker), so the
+// read itself cannot run a callback, coherence service or fault; in concurrent memory the fill holds the metadata lock (try-lock,
+// busy = no window for this packet) that every watch/claim publisher takes, from admission through the read. The read is never
+// caught. A translation failure declines the window (the per-word path raises the original error at the original word).
+// OPT-IN (ANYPS3_RSX_FIFO_WINDOW=1; also a test hook): with the window, tests/test_rsx_drain_bound.py
+// test_guarded_read_is_materialised_between_packets failed 4 of 6 runs (a host-served guarded read saw one clear more than the
+// GET read after it implies), 0 of 5 without; not root-caused (WARMUP4, 2026-10-21), so the default stays the per-packet path.
+static bool rsx_fifo_window=[]{const char* v=std::getenv("ANYPS3_RSX_FIFO_WINDOW");return v && std::string(v)=="1";}();
 static std::uint64_t rsx_fifo_window_fills=0;   // test hook
+// Whether touching host bytes [data,data+size) could have an effect besides the bytes (same conditions as rsxblit::observable).
+static bool rsx_fifo_bytes_observable(GuestMemory& m,const std::uint8_t* data,unsigned size){
+    if(m.host_access_observer && (m.host_access_observer.interested(data,size) || m.raw_cpu_dirty_interested(data,size,false)))return true;
+    const bool alias_access=m.concurrent() && m.host_access_observer.supports_exact_bytes.load(std::memory_order_acquire);
+    if(!alias_access)for(const auto* guard=GuestMemory::HostGuard::head;guard;guard=guard->next)if(guard->touches_any(data,size))return true;
+    return m.concurrent() && m.page_broker.enabled.load(std::memory_order_acquire) && !m.page_broker.owner_unclaimed(data,size);
+}
 static bool rsx_run_impl(PpuState& s,unsigned budget,bool idle_poll=false){
     auto& gpu=s.rsx;auto& m=s.memory;if(!gpu.fifo_enabled)return false;
     // Wall-clock pacing need not perform a vDSO clock read after every 256
@@ -676,30 +650,34 @@ static bool rsx_run_impl(PpuState& s,unsigned budget,bool idle_poll=false){
     // action method, before every return and on every exception.
     rsxdraw::HostPhase fifo_phase(rsxdraw::HostStage::fifo);   // HOST_PROFILE: FIFO decode (draws switch to their own stages and return here)
     std::uint32_t put=0,get=0;bool cursor=false,pending=false;
-    auto publish=[&]{if(pending){m.store(gpu.dma+0x44,4,get);pending=false;}};
     struct FifoWindow {std::uint32_t base=0,end=0;bool valid=false,off=false;std::uint32_t words[1024];} window;
+    auto publish=[&]{if(pending){window.valid=false;m.store(gpu.dma+0x44,4,get);pending=false;}};
     auto window_fill=[&](std::uint32_t at){
         window.valid=false;
         if(!rsx_fifo_window || window.off || at>=put)return;
         const auto end=std::uint32_t(std::min<std::uint64_t>({std::uint64_t(put),std::uint64_t(at)+sizeof(window.words),(std::uint64_t(at)|0xfffff)+1}));
         const unsigned n=end-at;std::uint8_t bytes[sizeof(window.words)];
-        try{
-            GuestMemory::Range range;
-            {GuestMemory::ObserverPause pause(m);range=m.range(rsx_address(gpu,at),n,false,false);}
-            for(const auto& part:range.parts)
-                if(m.host_access_observer && (m.host_access_observer.interested(part.data,part.size) || m.raw_cpu_dirty_interested(part.data,part.size,false))){window.off=true;return;}
-            range.read(0,bytes,n);
-        }catch(const std::exception&){window.off=true;return;}
+        std::unique_lock<std::recursive_mutex> scope;
+        if(m.concurrent()){
+            if(m.renderer_enabled?!m.renderer_owner():!m.memory_owner()){window.off=true;return;}
+            scope=std::unique_lock<std::recursive_mutex>(m.metadata_mutex.value,std::try_to_lock);
+            if(!scope.owns_lock())return;
+        }
+        GuestMemory::Range range;
+        try{GuestMemory::ObserverPause pause(m);range=m.range(rsx_address(gpu,at),n,false,false);}
+        catch(const std::exception&){window.off=true;return;}
+        for(const auto& part:range.parts)if(rsx_fifo_bytes_observable(m,part.data,part.size)){window.off=true;return;}
+        range.read(0,bytes,n);
         for(unsigned i=0;i<n/4;++i){const auto* b=bytes+4*i;window.words[i]=(std::uint32_t(b[0])<<24)|(std::uint32_t(b[1])<<16)|(std::uint32_t(b[2])<<8)|b[3];}
         window.base=at;window.end=end;window.valid=true;++rsx_fifo_window_fills;
     };
     auto in_window=[&](std::uint32_t at,std::uint64_t n){return window.valid && at>=window.base && std::uint64_t(at)+n<=window.end;};
     try{
     for(unsigned step=0;step<budget;++step){
-        if(__builtin_expect(rsx_host_waiters.load(std::memory_order_relaxed)!=0,0))window.valid=false;   // an owner request may run below
-        rsx_owner_poll();
-        if(!cursor){put=static_cast<std::uint32_t>(m.load(gpu.dma+0x40,4));get=static_cast<std::uint32_t>(m.load(gpu.dma+0x44,4));cursor=true;}
-        else if(get==put)put=static_cast<std::uint32_t>(m.load(gpu.dma+0x40,4));
+        if(__builtin_expect(rsx_host_waiters.load(std::memory_order_relaxed)!=0,0)){   // = rsx_owner_poll(); the request may change memory
+            window.valid=false;auto& hook=rsx_owner_hook();if(hook)hook();}
+        if(!cursor){window.valid=false;put=static_cast<std::uint32_t>(m.load(gpu.dma+0x40,4));get=static_cast<std::uint32_t>(m.load(gpu.dma+0x44,4));cursor=true;}
+        else if(get==put){window.valid=false;put=static_cast<std::uint32_t>(m.load(gpu.dma+0x40,4));}
         if((get|put)&3)throw std::runtime_error("unaligned RSX FIFO position");
         if(get==put){publish();return progress;}
         if(!in_window(get,4))window_fill(get);
@@ -720,7 +698,7 @@ static bool rsx_run_impl(PpuState& s,unsigned budget,bool idle_poll=false){
             const auto count=(header>>18)&0x7ff,method=header&0xfffc,increment=(header&0x40000000)?0u:4u;
             if(count){
                 if(get<put && count*4+4>put-get){
-                    put=static_cast<std::uint32_t>(m.load(gpu.dma+0x40,4));
+                    window.valid=false;put=static_cast<std::uint32_t>(m.load(gpu.dma+0x40,4));
                     if(put&3)throw std::runtime_error("unaligned RSX FIFO position");
                     if(get<put && count*4+4>put-get){publish();return progress;}
                 }
@@ -746,7 +724,7 @@ static bool rsx_run_impl(PpuState& s,unsigned budget,bool idle_poll=false){
                     }
                 }
                 if(in_window(get+4,std::uint64_t(count)*4))std::copy_n(window.words+(get+4-window.base)/4,count,values);
-                else rsx_fifo_values(gpu,m,get+4,count,values);
+                else{window.valid=false;rsx_fifo_values(gpu,m,get+4,count,values);}
                 const auto& plain=rsx_plain_table();
                 for(unsigned i=gpu.packet_index;i<count;++i){
                     const auto reg=method+i*increment,value=values[i];

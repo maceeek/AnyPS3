@@ -647,8 +647,50 @@ static void analytic_stability(){
  }
  std::puts("PASS publications between admission and access wait for the stability scope (watch and claim, batch and deferred segment)");
 }
+// review-rsxw4-1 #1: a deferred segment whose destination page A was claimed after its admission falls back to the reference's
+// writes, which wait for A. The claim owner (memory owner) acquires a second claim on page B before releasing A; that publication
+// takes the metadata lock, so the fallback must not hold it while waiting (deadlock otherwise; a watchdog fails the test).
+static void analytic_two_claims(){
+ PpuState s;setup(s);auto& m=s.memory;
+ for(unsigned i=0;i<4;++i){m.store(0x70001000+i,1,i==0?0xff:0x20+i);m.store(0x70003000+i,1,i==0?0xff:0x30+i);
+  m.store(0xc0001000+i,1,0x5a);m.store(0xc0003000+i,1,0x5a);}
+ m.enable_concurrency();m.enable_page_broker();
+ std::shared_ptr<GuestBacking> vram;for(const auto& r:m.regions)if(r.base==0xc0000000)vram=r.bytes;
+ // Source row 1 observed: row 0 is a deferred batch segment. The reference row's callback (renderer thread, outside any stability
+ // scope) holds the renderer until page A (row 0's destination) is claimed, so the commit deterministically finds A claimed.
+ std::atomic<bool> in_callback{false},a_published{false};
+ m.host_access_observer=[&](const void*,std::uint64_t,bool){in_callback=true;
+  for(int i=0;i<5000 && !a_published.load();++i)std::this_thread::sleep_for(std::chrono::milliseconds(1));};
+ m.host_access_observer.filtered=true;m.host_access_observer.watch(host_of(s,0x70003000),4);
+ m.renderer_access=[&m](const void* p,std::uint64_t n,bool write){if(m.observer_paused())return;GuestMemory::ObserverPause pause(m);
+  if(m.host_access_observer && (m.host_access_observer.interested(p,n) || m.raw_cpu_dirty_interested(p,n,write)))m.host_access_observer.callback(p,n,write);};
+ Case c{};c.op=0;c.src_format=3;c.dst_format=10;c.origin=2;c.w=1;c.h=2;c.src_pitch=8192;c.ow=1;c.oh=2;c.cw=1;c.ch=2;c.dst_pitch=8192;
+ c.dx=c.dy=0x100000;c.src_io=true;c.src_offset=0x1000;c.dst_io=false;c.dst_offset=0x1000;
+ const auto fallbacks=rsxblit::deferred_fallbacks;std::string error;std::atomic<bool> done{false},second{false};
+ m.renderer_enabled=true;
+ std::thread renderer([&]{m.renderer_thread=std::this_thread::get_id();error=run(s,c);done=true;});
+ while(!in_callback.load() && !done.load())std::this_thread::sleep_for(std::chrono::microseconds(100));
+ auto claim=[&](std::uint64_t at){return std::make_unique<GuestMemory::GpuPages>(m,std::vector<GuestMemory::HostSpan>{{host_of(s,at),4,vram}});};
+ std::unique_ptr<GuestMemory::GpuPages> a,b;std::string problem;
+ if(!in_callback.load())problem="the reference row's callback did not run";
+ else{
+  a=claim(0xc0001000);a_published=true;
+  std::this_thread::sleep_for(std::chrono::milliseconds(300));   // the renderer reaches the commit and waits for page A
+  if(done.load())problem="the transfer finished while page A was claimed";
+  std::thread watchdog([&]{for(int i=0;i<5000 && !second.load();++i)std::this_thread::sleep_for(std::chrono::milliseconds(1));
+   if(!second.load()){std::fprintf(stderr,"FAIL two claims: a second claim waited 5 s for the metadata lock held by the waiting fallback (deadlock)\n");std::fflush(stderr);std::_Exit(1);}});
+  b=claim(0xc0005000);second=true;watchdog.join();
+ }
+ a_published=true;a.reset();renderer.join();b.reset();
+ m.renderer_enabled=false;m.renderer_thread={};m.host_access_observer={};
+ if(!problem.empty())throw std::runtime_error("two claims: "+problem);
+ if(!error.empty())throw std::runtime_error("two claims: "+error);
+ if(rsxblit::deferred_fallbacks!=fallbacks+1)throw std::runtime_error("two claims: the deferred segment did not fall back");
+ for(unsigned i=1;i<4;++i)if(unsigned(m.load(0xc0001000+i,1))!=0x20+i)throw std::runtime_error("two claims: destination row 0 not written");
+ std::puts("PASS a deferred fallback waiting for a claim does not hold the metadata lock (second claim proceeds)");
+}
 int main(){
- try{analytic();analytic_layouts();analytic_alias();analytic_alias_raster();analytic_observer();analytic_growing_interest();analytic_broker();analytic_guard();analytic_sparse();analytic_remap();analytic_stability();differential(false);std::puts("PASS row-wise equals per-pixel (serial)");differential(true);std::puts("PASS row-wise equals per-pixel (concurrent)");}
+ try{analytic();analytic_layouts();analytic_alias();analytic_alias_raster();analytic_observer();analytic_growing_interest();analytic_broker();analytic_guard();analytic_sparse();analytic_remap();analytic_stability();analytic_two_claims();differential(false);std::puts("PASS row-wise equals per-pixel (serial)");differential(true);std::puts("PASS row-wise equals per-pixel (concurrent)");}
  catch(const std::exception& e){std::fprintf(stderr,"FAIL %s\n",e.what());return 1;}
 }
 '''
@@ -673,7 +715,7 @@ class RsxBlitRowsTests(unittest.TestCase):
                 env['VK_DRIVER_FILES'] = str(lavapipe)
             run = subprocess.run([str(root / 'blit')], capture_output=True, text=True, env=env, timeout=300)
             self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
-            self.assertEqual(run.stdout.count('PASS '), 13, run.stdout)
+            self.assertEqual(run.stdout.count('PASS '), 14, run.stdout)
 
 
 if __name__ == '__main__':
