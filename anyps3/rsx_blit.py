@@ -86,6 +86,9 @@ static void copy(PpuState& s,unsigned notify){
         for(unsigned x=0;x<cols;++x)dst[y].write(x*out_step,snapshot.data()+std::size_t(y)*cols+x,1);
     }
 }
+// Image::locate evaluations (test hook of the bounded-work test; counted inside locate itself, every caller included).
+// Transfers run on one thread (the RSX command thread), so a plain counter suffices.
+static std::uint64_t locate_calls=0;
 struct Image {
     unsigned context=0,offset=0,pitch=0,bpp=0,width=0,height=0,log_w=0,log_h=0;
     bool swizzled=false;
@@ -134,6 +137,7 @@ struct Image {
         return unsigned(std::max<std::uint64_t>(pixels,1));
     }
     std::uint64_t locate(const NativeRsx& gpu,unsigned x,unsigned y,Memo* memo)const{
+        ++locate_calls;
         const auto at=logical(x,y);
         // Byte lanes inside a word are preserved by rsx_tiled_offset. Tile
         // pitch describes the memory permutation, not necessarily this subimage's
@@ -275,21 +279,34 @@ static bool force_pixel_path=[]{const char* v=std::getenv("ANYPS3_RSX_BLIT_PIXEL
 // have no effect besides the bytes themselves:
 //  * PLANNING and ADMISSION are side-effect free and come first: addressing through Image::locate (configuration errors
 //    decline), budgets, then admit(): every source/destination interval (a superset of the bytes the reference touches) is
-//    mapped with the needed permission (checked under ObserverPause, which invokes no callback), no observer is interested in
-//    any of its host bytes (GuestMemory::HostObserver::interested, raw_cpu_dirty_interested), no HostGuard covers it, and no two
+//    translated with the needed permission (GuestMemory::range(...,brokered=false) under ObserverPause: no page-broker cell,
+//    coherence service, pump or callback), no observer is interested in any of its host bytes (HostObserver::interested,
+//    raw_cpu_dirty_interested), no HostGuard covers it, no page-broker claim covers it (declined, never serviced), and no two
 //    destination intervals share backing bytes (aliased mappings: raster order decides). In concurrent memory only the observer
 //    owner (renderer thread or memory owner) can see that state; elsewhere every fast path declines.
 //  * Any decline happens before the first observable access, and the next path (finally the reference) starts from scratch with
 //    its own callbacks and its own first fault.
 //  * EXECUTION after admission is never caught or retried: a failure there (which admission rules out) propagates.
+//  * A batch row segment committed after other accesses ran (reference rows, their callbacks and phase-B writes) re-validates
+//    its destination first (Prepared::commit): callbacks may ADD interest, guards or claims. If anything changed, the segment's
+//    pixels are written exactly like the reference's phase B (see Prepared); nothing is replayed.
 // Under these conditions the reference's accesses of the same bytes invoke no callback either (whatever their order), the bytes
 // read are the same (all source bytes are staged before the first write in both), and the written bytes land in distinct
 // backing locations, so the final guest state is identical. Source bytes between taps may be read (never written) when they
 // are mapped and unobserved; they influence nothing.
+// Concurrent writers (other CPU threads storing into the transfer's bytes without synchronization) are outside this equivalence
+// and need none: a fast path reads each source byte once (one snapshot) where the reference may sample a byte for several taps
+// at different times, and writes in a different granularity. On the PS3 such a race has no defined outcome. The RSX is an I/O
+// unit on the Cell IOIF; CBE Programming Handbook v1.1 (24 Apr 2007, sec. 7.7.2.2 "Inbound (IOIF to EIB) Accesses", PDF page 191):
+// "Inbound I/O accesses are unordered relative to the PPE and SPEs" (the listed exceptions order one I/O unit's own accesses to
+// the same location or by SO/S bits, never against a processor store), and sec. 7.7 "I/O Storage Model" (PDF page 187) leaves
+// the ordering inside the I/O subsystem (RSX local memory) to that subsystem, for which no public RSX/NV3089 per-sample ordering rule exists. A store that
+// lands entirely before or after the transfer's reads of that byte is a schedule the hardware allows, so "every tap of one source
+// byte sees one value" is one legal outcome. Games order such buffers with labels/semaphores (as the draw path's upload
+// snapshots assume, GuestMemory::snapshot). Derived; not a per-sample guarantee of the reference either.
 static std::uint64_t batch_executed=0;        // transfers completed by a batch path (diagnostics / differential test)
 static std::uint64_t batch_copy_executed=0;   // ... of which by the run-wise identity copy
 static std::uint64_t batch_tap_work=0;        // source taps / pixel runs enumerated by batch planning (bounded-work test)
-static std::uint64_t locate_calls=0;          // Image::locate evaluations by batch planning (test hook: bounded-work test)
 static bool force_no_batch=[]{const char* v=std::getenv("ANYPS3_RSX_BLIT_BATCH");return v && std::string(v)=="0";}();
 // Diagnostic (ANYPS3_RSX_BLIT_TRACE=3): the first 200 fast-path declines with their reason (and exception text).
 static bool blit_decline(const char* why,const char* detail=""){
@@ -332,32 +349,46 @@ static std::uint64_t prefix_escapes=0;   // transfers mixing reference rows and 
 static constexpr std::uint64_t source_slack=256;   // unused source bytes a covering read may include (only when unobserved)
 // Side-effect-free admission of `intervals` of one DMA context (see the contract above). `distinct`: destination intervals must
 // not share backing bytes.
-static bool admit(PpuState& s,unsigned context,const std::vector<Span>& intervals,bool write,bool distinct){
+// Why touching host bytes [data,data+size) could have an effect besides the bytes themselves, or nullptr: observer interest
+// (HostObserver, raw CPU-dirty watches), a HostGuard on the primary mapping (concurrent exact-byte accesses use the coherent alias
+// on both paths and never fault), a page-broker claim (a brokered lease would run the coherence service, pump and wait). Pure.
+static const char* observable(GuestMemory& m,const std::uint8_t* data,unsigned size,bool write){
+    if(m.host_access_observer && (m.host_access_observer.interested(data,size) || m.raw_cpu_dirty_interested(data,size,write)))return "observed";
+    const bool alias_access=m.concurrent() && m.host_access_observer.supports_exact_bytes.load(std::memory_order_acquire);
+    if(!alias_access)for(const auto* guard=GuestMemory::HostGuard::head;guard;guard=guard->next)if(guard->touches_any(data,size))return "guarded";
+    if(m.concurrent() && m.page_broker.enabled.load(std::memory_order_acquire) && !m.page_broker.owner_unclaimed(data,size))return "claimed";
+    return nullptr;
+}
+// Side-effect-free admission of `intervals` of one DMA context (see the contract above): translation and permission only.
+// GuestMemory::range(...,brokered=false) under ObserverPause enters the map reader gate and translates, but acquires no page-broker
+// cell, runs no coherence service, pump or callback; a claimed page is declined (the reference then services it), never serviced
+// here. Only failures of that pure translation (unmapped, permission, DMA addressing) are caught. `distinct`: destination
+// intervals must not share backing bytes. `keep`: the admitted Ranges (what the reference's phase A would hold for these bytes).
+static bool admit(PpuState& s,unsigned context,const std::vector<Span>& intervals,bool write,bool distinct,std::vector<GuestMemory::Range>* keep=nullptr){
     auto& m=s.memory;
     if(m.concurrent() && !m.renderer_enabled && !m.memory_owner())return blit_decline("foreign observer owner");
-    try{
-        GuestMemory::ObserverPause pause(m);
-        const bool alias_access=m.concurrent() && m.host_access_observer.supports_exact_bytes.load(std::memory_order_acquire);
-        std::vector<std::pair<std::uintptr_t,std::uintptr_t>> hosts;
-        for(const auto& interval:intervals){
-            if(interval.end-interval.at>(UINT64_C(64)<<20))return blit_decline("interval size");
-            const auto range=access(s,context,std::int64_t(interval.at),unsigned(interval.end-interval.at),write);
-            for(const auto& part:range.parts){
-                if(m.host_access_observer && (m.host_access_observer.interested(part.data,part.size) || m.raw_cpu_dirty_interested(part.data,part.size,write)))
-                    {admission_dynamic=true;return blit_decline("observed");}
-                // A HostGuard protects the primary mapping. Concurrent Range reads/writes with exact-byte observation go through
-                // the coherent alias (GuestMemory::byte_pointer) on both paths and never fault; otherwise (including the
-                // reference's serial direct-pointer writes) a guarded byte may fault and synchronize.
-                if(!alias_access)for(const auto* guard=GuestMemory::HostGuard::head;guard;guard=guard->next)if(guard->touches_any(part.data,part.size)){admission_dynamic=true;return blit_decline("guarded");}
-                if(distinct){const auto begin=reinterpret_cast<std::uintptr_t>(part.data);hosts.push_back({begin,begin+part.size});}
-            }
+    GuestMemory::ObserverPause pause(m);
+    std::vector<std::pair<std::uintptr_t,std::uintptr_t>> hosts;
+    for(const auto& interval:intervals){
+        if(interval.end-interval.at>(UINT64_C(64)<<20))return blit_decline("interval size");
+        const unsigned size=unsigned(interval.end-interval.at);
+        GuestMemory::Range range;
+        try{
+            const auto addr=address(s.rsx,context,std::int64_t(interval.at),size);
+            range=m.range(addr,size,false,false);              // access() acquires a read Range before a write Range
+            if(write)range=m.range(addr,size,true,false);
+        }catch(const std::exception& e){return blit_decline("admission fault",e.what());}
+        for(const auto& part:range.parts){
+            if(const char* why=observable(m,part.data,part.size,write)){admission_dynamic=true;return blit_decline(why);}
+            if(distinct){const auto begin=reinterpret_cast<std::uintptr_t>(part.data);hosts.push_back({begin,begin+part.size});}
         }
-        if(distinct){
-            std::sort(hosts.begin(),hosts.end());
-            for(std::size_t i=1;i<hosts.size();++i)if(hosts[i].first<hosts[i-1].second)return blit_decline("host overlap");
-        }
-        return true;
-    }catch(const std::exception& e){return blit_decline("admission fault",e.what());}
+        if(keep)keep->push_back(std::move(range));
+    }
+    if(distinct){
+        std::sort(hosts.begin(),hosts.end());
+        for(std::size_t i=1;i<hosts.size();++i)if(hosts[i].first<hosts[i-1].second)return blit_decline("host overlap");
+    }
+    return true;
 }
 // Row-wise SRCCOPY transfer: one Range per touched source row and per destination row instead of two per pixel (every pixel
 // Range is a slow guest lease on the renderer thread). Linear images whose touched bytes overlap no bound tile of the same
@@ -455,10 +486,48 @@ static void read_pieces(PpuState& s,unsigned context,const Pieces& pieces,std::v
     snapshot.resize(pieces.total);
     for(const auto& item:pieces.items)access(s,context,std::int64_t(item.at),unsigned(item.end-item.at),false).read(0,snapshot.data()+item.offset,unsigned(item.end-item.at));
 }
+static std::uint64_t deferred_fallbacks=0;   // deferred batch segments written with the reference's phase-B writes (test hook)
+// A sub-Range of an admitted Range: the Range the reference would have acquired for these bytes at the same point (same parts,
+// owners, mapping ids and map epoch).
+static GuestMemory::Range slice(const GuestMemory::Range& range,unsigned offset,unsigned count){
+    GuestMemory::Range out;out.memory=range.memory;out.size=count;out.writable=range.writable;out.address=range.address+offset;
+    out.epoch=std::uint64_t(range.epoch);
+    for(const auto& part:range.parts){const auto begin=std::max(offset,part.offset),end=std::min(offset+count,part.offset+part.size);
+        if(begin<end)out.parts.push_back({begin-offset,end-begin,part.data+(begin-part.offset),part.owner,part.mapping_id});}
+    return out;
+}
 // A batch transfer whose source has been read: its destination chunks (admitted, distinct bytes) wait for commit().
 struct Prepared {
     std::vector<std::uint8_t> snapshot,bytes;std::vector<Chunk> chunks;bool copy=false;
-    void commit(PpuState& s,const Image& dst){write_chunks(s,dst,chunks);++batch_executed;if(copy)++batch_copy_executed;}
+    std::vector<Span> runs;std::vector<GuestMemory::Range> targets;   // admitted destination runs and their Ranges (sorted by offset)
+    // `deferred`: other accesses (reference rows, their callbacks and writes) ran between admission and this commit. Callbacks can
+    // add observer interest, guards or claims, so admission is re-validated on the retained destination Ranges first (pure, no
+    // translation); if any destination byte became observable (or the map epoch moved), the chunks are written exactly as the
+    // reference's phase B writes the same pixels from the Ranges its phase A acquired: pixel by pixel in raster order, a serial
+    // single-mapping pixel through mark_write + direct copy, otherwise Range::write. Nothing is replayed or re-read.
+    void commit(PpuState& s,const Image& dst,bool deferred){
+        if(deferred && !stable(s.memory)){reference_writes(s,dst);++deferred_fallbacks;}
+        else write_chunks(s,dst,chunks);
+        ++batch_executed;if(copy)++batch_copy_executed;
+    }
+    bool stable(GuestMemory& m)const{
+        for(const auto& target:targets){
+            if(m.concurrent() && std::uint64_t(target.epoch)!=m.parallel->epoch)return false;
+            for(const auto& part:target.parts)if(observable(m,part.data,part.size,true))return false;
+        }
+        return true;
+    }
+    void reference_writes(PpuState& s,const Image& dst)const{
+        auto& m=s.memory;const unsigned bpp=dst.bpp;
+        for(const auto& chunk:chunks)for(std::size_t done=0;done<chunk.size;done+=bpp){   // chunks are in raster order
+            const auto at=chunk.at+done;
+            auto it=std::upper_bound(runs.begin(),runs.end(),at,[](std::uint64_t v,const Span& r){return v<r.at;});
+            if(it==runs.begin() || at+bpp>(--it)->end)throw std::runtime_error("RSX blit batch pixel outside its admitted destination");
+            const auto pixel=slice(targets[std::size_t(it-runs.begin())],unsigned(at-it->at),bpp);
+            if(!m.concurrent() && pixel.parts.size()==1){m.mark_write(pixel.parts[0].data,bpp);std::copy_n(chunk.data+done,bpp,pixel.parts[0].data);}
+            else pixel.write(0,chunk.data+done,bpp);
+        }
+    }
 };
 // Pure byte copy: SRCCOPY, 1:1 unfiltered, identical byte layout on both sides (A8R8G8B8 -> A8R8G8B8, R5G6B5 -> R5G6B5, raw Y32),
 // every source tap inside the image. Works on runs of consecutive pixels (Image::run) instead of single pixels.
@@ -476,9 +545,8 @@ static bool scaled_copy(PpuState& s,const Image& src,const Image& dst,unsigned s
             for(unsigned x=x0;x<x1;){
                 const unsigned left=x1-x,source_x=unsigned(std::int64_t(x)+sx),source_y=unsigned(std::int64_t(y)+sy);
                 const unsigned n=std::min(src.run(s.rsx,source_x,source_y,left),dst.run(s.rsx,x,y,left));
-                const auto from=src.locate(s.rsx,source_x,source_y,&from_memo),to=dst.locate(s.rsx,x,y,&to_memo);locate_calls+=2;
+                const auto from=src.locate(s.rsx,source_x,source_y,&from_memo),to=dst.locate(s.rsx,x,y,&to_memo);
                 if(n>1){   // the last pixel of the run must validate too and sit exactly (n-1) pixels further on both sides
-                    locate_calls+=2;
                     if(src.locate(s.rsx,source_x+n-1,source_y,&from_memo)!=from+std::uint64_t(n-1)*src.bpp ||
                        dst.locate(s.rsx,x+n-1,y,&to_memo)!=to+std::uint64_t(n-1)*dst.bpp)return blit_decline("copy run");
                 }
@@ -491,8 +559,9 @@ static bool scaled_copy(PpuState& s,const Image& src,const Image& dst,unsigned s
         }
         if(segments.empty() || !pieces.build(spans,0) || !plan.build(dest))return false;
     }catch(const std::exception& e){return blit_decline("copy planning",e.what());}
-    if(!admit(s,src.context,pieces.intervals(),false,false) || !admit(s,dst.context,plan.runs,true,true))return false;
-    out=Prepared{};out.copy=true;read_pieces(s,src.context,pieces,out.snapshot);
+    out=Prepared{};
+    if(!admit(s,src.context,pieces.intervals(),false,false) || !admit(s,dst.context,plan.runs,true,true,&out.targets))return false;
+    out.runs=plan.runs;out.copy=true;read_pieces(s,src.context,pieces,out.snapshot);
     out.chunks.reserve(segments.size());
     for(const auto& segment:segments)out.chunks.push_back({segment.to,out.snapshot.data()+pieces.find(segment.from),segment.bytes});
     return true;
@@ -510,7 +579,7 @@ static bool scaled_batch(PpuState& s,const Image& src,const Image& dst,unsigned 
         tap_at.reserve(out_pixels*per_pixel);dst_at.reserve(out_pixels);dest.reserve(out_pixels);
         Image::Memo source_memo,dest_memo;
         auto tap=[&](std::int64_t x,std::int64_t y){
-            const auto at=src.locate(s.rsx,unsigned(clamp_to(x,src.width-1)),unsigned(clamp_to(y,src.height-1)),&source_memo);++locate_calls;
+            const auto at=src.locate(s.rsx,unsigned(clamp_to(x,src.width-1)),unsigned(clamp_to(y,src.height-1)),&source_memo);
             if(at>UINT32_MAX-4)throw std::runtime_error("RSX blit batch source offset");
             tap_at.push_back(std::uint32_t(at));add_span(spans,at,src.bpp,source_slack);++batch_tap_work;};
         for(unsigned y=y0;y<y1;++y)for(unsigned x=x0;x<x1;++x){
@@ -518,14 +587,15 @@ static bool scaled_batch(PpuState& s,const Image& src,const Image& dst,unsigned 
             const auto ix=floor_fixed(fx),iy=floor_fixed(fy);
             tap(ix,iy);
             if(filter){tap(ix+1,iy);tap(ix,iy+1);tap(ix+1,iy+1);}
-            const auto at=dst.locate(s.rsx,x,y,&dest_memo);++locate_calls;
+            const auto at=dst.locate(s.rsx,x,y,&dest_memo);
             if(at>UINT32_MAX-4)return blit_decline("dst offset");
             dst_at.push_back(std::uint32_t(at));dest.push_back({at,at+dst.bpp});
         }
         if(!pieces.build(spans,source_slack) || !plan.build(std::move(dest)))return false;
     }catch(const std::exception& e){return blit_decline("planning",e.what());}
-    if(!admit(s,src.context,pieces.intervals(),false,false) || !admit(s,dst.context,plan.runs,true,true))return false;
-    out=Prepared{};auto& snapshot=out.snapshot;auto& bytes=out.bytes;read_pieces(s,src.context,pieces,snapshot);
+    out=Prepared{};
+    if(!admit(s,src.context,pieces.intervals(),false,false) || !admit(s,dst.context,plan.runs,true,true,&out.targets))return false;
+    out.runs=plan.runs;auto& snapshot=out.snapshot;auto& bytes=out.bytes;read_pieces(s,src.context,pieces,snapshot);
     bytes.reserve(out_pixels*dst.bpp);std::vector<std::uint64_t> where;
     {   // colours in raster order (the reference's order); zero-alpha pixels of SRCCOPY_AND are not written
         std::size_t next_tap=0,pixel=0;
@@ -626,7 +696,7 @@ static void scaled(PpuState& s,unsigned point){
         account(::RsxPerfCounters::blit_rows,::RsxPerfCounters::blit_rows_ns);return;}
     Prepared whole;admission_dynamic=false;
     if(!force_pixel_path && !force_no_batch && scaled_batch(s,src,dst,src_format,dst_format,raw_copy,operation,filter,dx,dy,u,v,ox,oy,x0,y0,x1,y1,whole)){
-        whole.commit(s,dst);account(::RsxPerfCounters::blit_batch,::RsxPerfCounters::blit_batch_ns);return;}
+        whole.commit(s,dst,false);account(::RsxPerfCounters::blit_batch,::RsxPerfCounters::blit_batch_ns);return;}
     // Reference path with batch row segments. When the whole-transfer batch declined only because of observer interest or a guard
     // (admission_dynamic), each next group of rows is planned and admitted as a batch segment (1 row, doubling while admitted, back
     // to 1 after a decline); rows that are still observed run through the reference. The reference reads every source in raster
@@ -675,7 +745,7 @@ static void scaled(PpuState& s,unsigned point){
     // Snapshot also makes in-place conversion/scaling and IO aliases safe.
     bool any_batch=false,any_reference=false;
     for(auto& segment:segments){
-        if(segment.batch){segment.prepared.commit(s,dst);any_batch=true;continue;}
+        if(segment.batch){segment.prepared.commit(s,dst,true);any_batch=true;continue;}
         any_reference=true;
         for(std::size_t i=segment.first;i<segment.last;++i){const auto& p=pixels[i];
             if(p.direct){const auto bytes=packed(dst_format,p.color);const auto n=dest_bpp(dst_format);
