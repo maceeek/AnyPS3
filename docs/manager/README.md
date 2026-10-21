@@ -154,11 +154,16 @@ Verified boot means observed flips, **not** a verified original menu or gameplay
 
 ## Runtime-dependent features
 
-This worktree does not implement SPEC WP4 or pad-runtime P2–P7. Current runtime
-window/fullscreen settings and custom pad configuration are therefore unavailable.
-Controller enumeration, live input and rumble diagnostics use lazy SDL2 ctypes,
-without initialising audio. The controller screen states the missing runtime
-capabilities; default SDL mapping remains in use.
+Runtime window/fullscreen settings and custom pad configuration remain unavailable.
+PADMOTION implements game-side SDL rumble and SIXAXIS motion, plus the existing
+PS bit through SDL GUIDE. `input.rumble` defaults on and can be disabled globally
+or per title; it is available only for builds containing `ANYPS3_PAD_RUMBLE`.
+The controller screen shows rumble and combined accelerometer/gyro capability.
+Basic DualSense input and motion require SDL >= 2.0.14; confirmed rumble capability
+requires SDL >= 2.0.18. Controller diagnostics initialise no audio. Default SDL
+mapping remains in use. See [DualSense behavior, scales and limits](DUALSENSE.md)
+and [PADMOTION verification](evidence/padmotion/README.md). Existing game builds
+need rebuilding by their owner before they include this runtime change.
 
 Physical Xbox and DualSense gameplay acceptance, the original-game
 build → play → rebuild → reload-save acceptance, unlimited runtime budgets and

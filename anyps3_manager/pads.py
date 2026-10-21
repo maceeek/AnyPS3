@@ -43,11 +43,26 @@ class Pads:
             "SDL_JoystickCurrentPowerLevel": (C.c_int, [C.c_void_p]),
         }
         for name, (result, args) in signatures.items():
-            function = getattr(self.sdl, name)
+            function = getattr(self.sdl, name, None)
+            if function is None and name in ("SDL_GameControllerHasRumble", "SDL_GameControllerHasSensor", "SDL_GameControllerRumble"):
+                continue
+            if function is None:
+                raise ManagerError("missing-sdl-symbol", f"SDL2 is missing {name}; use SDL >= 2.0.14.", 6)
             function.restype, function.argtypes = result, args
         # SDL_INIT_GAMECONTROLLER includes joystick support, not audio.
         if self.sdl.SDL_InitSubSystem(0x2000):
             raise ManagerError("sdl-error", self.error())
+
+    def has_rumble(self, controller):
+        rumble = getattr(self.sdl, "SDL_GameControllerRumble", None)
+        has = getattr(self.sdl, "SDL_GameControllerHasRumble", None)
+        # SDL 2.0.14 caches a zero amplitude and may return success without
+        # consulting the driver. Only the actual support query is evidence.
+        return bool(rumble and has and has(controller))
+
+    def has_sensor(self, controller, kind):
+        has = getattr(self.sdl, "SDL_GameControllerHasSensor", None)
+        return bool(has and has(controller, kind))
 
     def error(self):
         return (self.sdl.SDL_GetError() or b"SDL error").decode(errors="replace")
@@ -73,12 +88,13 @@ class Pads:
                 record = dict(id=str(instance), guid=guid, serial=serial,
                     name=(self.sdl.SDL_GameControllerName(controller) or b"Controller").decode(errors="replace"),
                     type=self.sdl.SDL_GameControllerGetType(controller),
-                    rumble=bool(self.sdl.SDL_GameControllerHasRumble(controller)),
-                    sensors=dict(accelerometer=bool(self.sdl.SDL_GameControllerHasSensor(controller, 1)),
-                                 gyro=bool(self.sdl.SDL_GameControllerHasSensor(controller, 2))),
+                    rumble=self.has_rumble(controller),
+                    sensors=dict(accelerometer=self.has_sensor(controller, 1),
+                                 gyro=self.has_sensor(controller, 2)),
                     battery=self.sdl.SDL_JoystickCurrentPowerLevel(joystick),
                     axes=[self.sdl.SDL_GameControllerGetAxis(controller, n) for n in range(6)],
                     buttons=[self.sdl.SDL_GameControllerGetButton(controller, n) for n in range(21)])
+                record["motion"] = all(record["sensors"].values())
                 records.append(record)
                 if rumble == str(instance):
                     found = True

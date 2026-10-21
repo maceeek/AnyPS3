@@ -39,6 +39,7 @@ FIELDS = {
     "video.height": field(720, "Initial window height.", "Video", env="ANYPS3_WINDOW_HEIGHT", minimum=240, maximum=4320),
     "audio.sink": field("null", "Audio sink; null is silent.", "Audio", choices=["null", "sdl"]),
     "audio.audible_allowed": field(False, "CLI-only audible lock. Keep locked on the development PC.", "Audio", editable=False, global_only=True),
+    "input.rumble": field(True, "Allow game controller vibration.", "Input", env="ANYPS3_PAD_RUMBLE"),
     "input.sdl_mappings": field("", "SDL GameController mapping database entries.", "Input", env="SDL_GAMECONTROLLERCONFIG"),
     "input.ps5_hidapi": field(True, "Enable SDL DualSense HIDAPI support.", "Input", env="SDL_JOYSTICK_HIDAPI_PS5"),
     "input.pad_config": field('{"ports":[]}', "Port assignments and mappings (requires pad-config runtime).", "Input", env="ANYPS3_PAD_CONFIG", format="pad-config"),

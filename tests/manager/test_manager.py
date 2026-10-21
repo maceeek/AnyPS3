@@ -148,6 +148,21 @@ class ManagerTests(unittest.TestCase):
         self.assertEqual(self.cli("settings", "set", "--title", "BCES00511", "build.jobs", "4")[0], 0)
         self.assertEqual(self.cli("settings", "get", "--title", "BCES00511")[1]["settings"]["build.jobs"], 4)
 
+    def test_game_rumble_setting_reaches_supported_runtime_only(self):
+        self.import_title()
+        values = settings.effective(self.lib, "BCES00511")
+        self.assertIs(values["input.rumble"], True)
+        self.assertFalse(settings.schema([])["input.rumble"]["available"])
+        available = ["ANYPS3_PAD_RUMBLE"]
+        self.assertTrue(settings.schema(available)["input.rumble"]["available"])
+        env = settings.run_environment(self.lib, "BCES00511", values, available, self.root)
+        self.assertEqual(env["ANYPS3_PAD_RUMBLE"], "1")
+        values["input.rumble"] = False
+        env = settings.run_environment(self.lib, "BCES00511", values, available, self.root)
+        self.assertEqual(env["ANYPS3_PAD_RUMBLE"], "0")
+        env = settings.run_environment(self.lib, "BCES00511", values, [], self.root)
+        self.assertNotIn("ANYPS3_PAD_RUMBLE", env)
+
     def test_all_process_environments_silent_and_unavailable_switch_omitted(self):
         self.import_title()
         ambient = {"ANYPS3_AUDIO_AUDIBLE": "1", "SDL_AUDIODRIVER": "pulseaudio",
@@ -422,6 +437,7 @@ class ManagerTests(unittest.TestCase):
         self.import_title()
         capabilities = available(self.lib, None)
         self.assertIn("ANYPS3_RSX_WORKER", capabilities)
+        self.assertIn("ANYPS3_PAD_RUMBLE", capabilities)
         self.assertTrue(settings.schema(capabilities)["performance.rsx_worker"]["available"])
         env = settings.run_environment(self.lib, "BCES00511", settings.effective(self.lib, "BCES00511"),
                                        capabilities, self.root)
