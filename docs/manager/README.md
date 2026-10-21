@@ -137,10 +137,34 @@ values, per-title overrides, and one-off `run --set KEY=VALUE` values. The GUI
 renders this schema and disables switches absent from the active source snapshot.
 Advanced/diagnostic groups are hidden by default.
 
-The audible lock defaults to locked. Ambient `ANYPS3_*`, `SDL_*`, `VK_*` and
-`LD_PRELOAD` variables are removed before composing a launch. Locked launches and
-all build/import tools force `SDL_AUDIODRIVER=dummy ANYPS3_AUDIO_SINK=null`.
-On the development PC **keep the lock locked**. The GUI cannot unlock it.
+### Game audio
+
+**Game audio is on by default for Play.** In **Settings → Audio**, use **Enable
+game audio** (`audio.enabled`) globally or for a title. A title can inherit the
+global value; a one-off CLI override uses `run TITLE --set audio.enabled=false`.
+Enabled Play launches select `ANYPS3_AUDIO_SINK=sdl` and
+`ANYPS3_AUDIO_AUDIBLE=1`, allowing SDL to select its output driver. Disabled Play
+launches force `SDL_AUDIODRIVER=dummy ANYPS3_AUDIO_SINK=null` without an audible
+flag. The runtime's explicit audible-output guard remains in place.
+
+Legacy settings files still load. The old `audio.audible_allowed` and `audio.sink`
+are interpreted together using their old defaults (false and null), including
+global values inherited by a title: only an unlocked SDL choice becomes enabled.
+Thus a saved lock or null sink preserves silence; a file with no audio keys uses
+the new default. Explicit `audio.enabled` wins within its layer. Migration occurs
+on read without rewriting files; the next edit/reset of `audio.enabled` removes
+that scope's legacy audio keys. Unrelated edits retain them. The GUI reports
+migrated overrides so **Inherit**/**Reset** also works on legacy files. The retired
+keys and `--i-understand` are no longer settings commands; doctor reports
+`audio_enabled` instead of `audio_locked`.
+
+Ambient `ANYPS3_*`, `SDL_*`, `VK_*` and `LD_PRELOAD` variables are removed before
+composing a launch. Build/import tools, detached supervisors and other non-Play
+processes always force dummy/null audio, regardless of the Play setting.
+On the development PC, set `audio.enabled=false` before Play; inherited shell
+dummy/null variables do not override the player's saved audio choice. Development
+tests must compose enabled environments only, and force silence for every real
+subprocess. Never launch the game or GUI with audio enabled on this PC.
 
 Translation, compilation and game launches require systemd user scopes with
 `MemoryMax` and `MemorySwapMax=0`. On this PC the defaults are the specification's
@@ -154,11 +178,18 @@ Verified boot means observed flips, **not** a verified original menu or gameplay
 
 ## Runtime-dependent features
 
-This worktree does not implement SPEC WP4 or pad-runtime P2–P7. Current runtime
-window/fullscreen settings and custom pad configuration are therefore unavailable.
-Controller enumeration, live input and rumble diagnostics use lazy SDL2 ctypes,
-without initialising audio. The controller screen states the missing runtime
-capabilities; default SDL mapping remains in use.
+Runtime window/fullscreen settings and custom pad configuration remain unavailable.
+PADMOTION implements game-side SDL rumble and SIXAXIS motion, plus the existing
+PS bit through SDL GUIDE. `input.rumble` defaults on and can be disabled globally
+or per title; it is available only for builds containing `ANYPS3_PAD_RUMBLE`.
+The controller screen shows rumble and combined accelerometer/gyro capability.
+Basic DualSense input and motion require SDL >= 2.0.14; confirmed rumble capability
+requires SDL >= 2.0.18. Manager diagnostics require SDL >= 2.0.18 and report
+missing required symbols before initializing the controller subsystem. Diagnostics
+initialise no audio. Default SDL mapping remains in use. See
+[DualSense behavior, scales and limits](DUALSENSE.md)
+and [PADMOTION verification](evidence/padmotion/README.md). Existing game builds
+need rebuilding by their owner before they include this runtime change.
 
 Physical Xbox and DualSense gameplay acceptance, the original-game
 build → play → rebuild → reload-save acceptance, unlimited runtime budgets and

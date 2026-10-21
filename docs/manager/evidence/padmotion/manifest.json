@@ -1,0 +1,37 @@
+{
+  "base": "73c93e3a10c54866d8a2f447de16fd44da90e044",
+  "branch": "feat/pad-motion",
+  "source_sha256": {
+    "anyps3/native_pad.py": "6bade70751be2fa667580db2cf7300d98971e4a3a94ccd73873b4c9f4255b690",
+    "anyps3_manager/pads.py": "e0f7e848b9ceeec4fb744bb58378e2662314f6faea17e3ecf833fdd0c003856e",
+    "anyps3_manager/settings.py": "6ba0f57ec5de66019ec6061321af7dbdeb7dc4428df07cf33b47e53add01d64d",
+    "anyps3_gui/app.py": "434db7049caf33aa1fec5ca62981606bbd9ad8bf4b9a0f7471af0ea0ad329fff",
+    "tests/test_native_pad_motion.py": "b3742588b79f83cbf5cdc1cd910534c0bd1b2ef88a66f0a2db2ec0ae581394b0",
+    "tests/padmotion_mutations.py": "8324de476cc7c5407c7555b0df6ceb6ed87468e33135d24f73189a29be3b362e",
+    "tests/manager/test_manager.py": "e219c51604f0b90fe0d501e303ce9125646697c5a28b40b1d49a556cccff7256",
+    "tests/manager/test_pads.py": "e95296c4af5ba5757372a009685783d61a5213a0173b27d4b09485d5aeef9d2d",
+    "tests/gui/test_gui.py": "e79c10e84c76efc23107fde9275f1d2690f454cd6e3e6df6a611b7b35db9b25a",
+    "profiles/ratchet-acit.json": "acb245fa3294234cc5305a4b564ceeba33a8470c7e977ee692867427685275a3"
+  },
+  "logs_sha256": {
+    "mutations.log": "e2f4944092317f353d030de5308a7cbf6fe4f436a0b04e402efbd1d5f63f4c01",
+    "manager-capability.log": "0ec3a8f561750550fa124da1407d04e302fa6a610b0ca059aa901d46bf83331a",
+    "native.log": "79bab8a32495c67fab3c5e92c56b13be3788840af8f6e73e765940c4346204ec",
+    "manager-gui.log": "bbb191cb937a77b0f6e5d5126d561e82a77d3bd392de931f4a2e61b20ac9707f"
+  },
+  "references": {
+    "rpcs3": "ffba2bf09ef3980638f9327b25240d81414034ab",
+    "PSL1GHT": "f649a08fd536a9e27c08c7db2d93a2d7ee4c3bbe",
+    "SDL2_headers": "2.32.74",
+    "SDL_legacy_source": "release-2.0.14 src/joystick/SDL_joystick.c:807-814"
+  },
+  "results": {
+    "native_tests": 24,
+    "manager_gui_tests": 33,
+    "additional_source_capability_test": 1,
+    "compiled_mutations_rejected": 27,
+    "game_build": false,
+    "game_run": false,
+    "physical_controller_verified": false
+  }
+}

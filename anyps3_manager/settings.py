@@ -37,8 +37,8 @@ FIELDS = {
     "video.window_mode": field("windowed", "Window mode (requires player-mode runtime).", "Video", env="ANYPS3_WINDOW_MODE", choices=["windowed", "fullscreen", "borderless"]),
     "video.width": field(1280, "Initial window width.", "Video", env="ANYPS3_WINDOW_WIDTH", minimum=320, maximum=7680),
     "video.height": field(720, "Initial window height.", "Video", env="ANYPS3_WINDOW_HEIGHT", minimum=240, maximum=4320),
-    "audio.sink": field("null", "Audio sink; null is silent.", "Audio", choices=["null", "sdl"]),
-    "audio.audible_allowed": field(False, "CLI-only audible lock. Keep locked on the development PC.", "Audio", editable=False, global_only=True),
+    "audio.enabled": field(True, "Play game audio through SDL. Turn off for silent playback.", "Audio", label="Enable game audio"),
+    "input.rumble": field(True, "Allow game controller vibration.", "Input", env="ANYPS3_PAD_RUMBLE"),
     "input.sdl_mappings": field("", "SDL GameController mapping database entries.", "Input", env="SDL_GAMECONTROLLERCONFIG"),
     "input.ps5_hidapi": field(True, "Enable SDL DualSense HIDAPI support.", "Input", env="SDL_JOYSTICK_HIDAPI_PS5"),
     "input.pad_config": field('{"ports":[]}', "Port assignments and mappings (requires pad-config runtime).", "Input", env="ANYPS3_PAD_CONFIG", format="pad-config"),
@@ -102,31 +102,59 @@ def parse_value(raw):
         return raw
 
 
-def effective(lib, title=None, overrides=None):
-    values = {k: f["default"] for k, f in FIELDS.items()}
-    layers = [read_json(lib.root/"settings.json", {})]
+def _stored_layers(lib, title=None):
+    paths = [lib.root/"settings.json"]
     if title:
         lib.title(title)
-        layers.append(read_json(lib.title_dir(title)/"settings.json", {}))
-    layers.append(overrides or {})
-    for index, layer in enumerate(layers):
+        paths.append(lib.title_dir(title)/"settings.json")
+    layers = []
+    # Interpret legacy lock + sink together, including a title's inherited
+    # global lock. Reading settings never rewrites a user's file.
+    allowed, sink = False, "null"
+    for path in paths:
+        layer = read_json(path, {})
+        if not isinstance(layer, dict):
+            raise ManagerError("invalid-settings", "Settings must be a JSON object.")
+        layer = dict(layer)
+        legacy = "audio.audible_allowed" in layer or "audio.sink" in layer
+        if "audio.audible_allowed" in layer:
+            allowed = layer.pop("audio.audible_allowed")
+            if type(allowed) is not bool:
+                raise ManagerError("invalid-setting", "audio.audible_allowed must be boolean.", 2)
+        if "audio.sink" in layer:
+            sink = layer.pop("audio.sink")
+            if type(sink) is not str or sink not in ("null", "sdl"):
+                raise ManagerError("invalid-setting", "audio.sink must be null or sdl.", 2)
+        if "audio.enabled" in layer:
+            allowed = validate("audio.enabled", layer["audio.enabled"])
+            sink = "sdl" if allowed else "null"
+        elif legacy:
+            layer["audio.enabled"] = allowed and sink == "sdl"
+        layers.append(layer)
+    return layers
+
+
+def stored_values(lib, title=None):
+    """Overrides for the GUI, using the same legacy migration as effective()."""
+    return _stored_layers(lib, title)[-1]
+
+
+def effective(lib, title=None, overrides=None):
+    values = {k: f["default"] for k, f in FIELDS.items()}
+    for layer in [*_stored_layers(lib, title), overrides if overrides is not None else {}]:
         if not isinstance(layer, dict):
             raise ManagerError("invalid-settings", "Settings must be a JSON object.")
         for key, value in layer.items():
             validate(key, value)
-            if key == "audio.audible_allowed" and index > 0:
-                raise ManagerError("audio-lock", "The audible lock is global and cannot be overridden.", 2)
             values[key] = value
     return values
 
 
-def set_value(lib, key, value, title=None, understand=False, reset=False):
+def set_value(lib, key, value, title=None, reset=False):
     if key not in FIELDS:
         validate(key, value)
     if FIELDS[key].get("global_only") and title:
         raise ManagerError("global-setting", f"{key} is global-only.", 2)
-    if key == "audio.audible_allowed" and value is True and not understand:
-        raise ManagerError("audio-lock", "Unlocking audio requires --global and --i-understand.", 2)
     if not reset:
         validate(key, value)
     path = lib.title_dir(title)/"settings.json" if title else lib.root/"settings.json"
@@ -134,6 +162,9 @@ def set_value(lib, key, value, title=None, understand=False, reset=False):
         lib.title(title)
     with lib.metadata():
         data = read_json(path, {})
+        if key == "audio.enabled":
+            data.pop("audio.audible_allowed", None)
+            data.pop("audio.sink", None)
         if reset:
             data.pop(key, None)
         else:
@@ -183,7 +214,7 @@ def run_environment(lib, title, settings, available, run_dir):
         (run_dir/"frames").mkdir(exist_ok=True)
         env.update(ANYPS3_FRAME_DIR=str(run_dir/"frames"),
                    ANYPS3_FRAME_STRIDE=str(settings["diagnostics.capture_stride"]))
-    if settings["audio.audible_allowed"] and settings["audio.sink"] == "sdl":
+    if settings["audio.enabled"]:
         env.pop("SDL_AUDIODRIVER")
         env.update(ANYPS3_AUDIO_SINK="sdl", ANYPS3_AUDIO_AUDIBLE="1")
     return env
