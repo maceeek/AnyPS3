@@ -19,8 +19,8 @@ def records(lib, title):
     return [read_json(p) for p in sorted((lib.title_dir(title)/"runs").glob("*/run.json"), reverse=True)]
 
 
-def stop(lib, title):
-    running = [r for r in records(lib, title) if r["state"] == "running"]
+def stop(lib, title, run_id=None):
+    running = [r for r in records(lib, title) if r["state"] == "running" and (run_id is None or r["id"] == run_id)]
     if not running:
         return dict(title=title, stopped=False)
     record = running[0]
@@ -38,27 +38,81 @@ def stop(lib, title):
     if not alive(record.get("manager_process")):
         record.update(state="finished", ended=now(), stopped_by_user=True, exit_code=None,
                       supervisor_lost=True)
-        stderr = lib.title_dir(title)/"runs"/record["id"]/"stderr.log"
-        if stderr.exists():
-            record.update(summarize(stderr))
-        atomic_json(lib.title_dir(title)/"runs"/record["id"]/"run.json", record)
+        record_evidence(lib, title, record)
+        prune_records(lib, title, effective(lib, title)["run.keep"])
     return dict(title=title, stop_requested=True, run=record["id"])
 
 
+class RunSummary:
+    """Shared line parser for incremental live evidence and the final summary."""
+    def __init__(self):
+        self.rates = []
+        self.stop_line = self.error = None
+        self.flips = self.captured_frames = 0
+        self.pending = b""
+
+    def line(self, line):
+        if "STOP pc=" in line:
+            self.stop_line = line.rstrip()
+        if "error" in line.lower() or "terminate called" in line:
+            self.error = line.rstrip()
+        if "PERF interval" in line:
+            match = re.search(r"\bflips_per_s=([0-9]+(?:\.[0-9]+)?)(?=\s|$)", line)
+            if match:
+                self.rates.append(float(match[1]))
+        if "PERF interval" in line or "RSX captured_frames=" in line:
+            match = re.search(r"\bflips=(\d+)(?=\s|$)", line)
+            if match:
+                self.flips = max(self.flips, int(match[1]))
+        match = re.search(r"\bRSX captured(?: frame|_frames)=(\d+)(?=\s|$)", line)
+        if match:
+            self.captured_frames = max(self.captured_frames, int(match[1]))
+
+    def read_new(self, stream):
+        # Keep the file offset and incomplete line across polls; consume each
+        # complete line once, including lines split across writes/UTF-8 bytes.
+        while chunk := stream.read(65536):
+            lines = (self.pending+chunk).split(b"\n")
+            self.pending = lines.pop()
+            for line in lines:
+                self.line(line.decode(errors="replace"))
+
+    def result(self):
+        return dict(stop=self.stop_line, last_error=self.error,
+                    fps_mean=statistics.mean(self.rates) if self.rates else None,
+                    fps_median=statistics.median(self.rates) if self.rates else None,
+                    fps_samples=len(self.rates), flips=self.flips, captured_frames=self.captured_frames)
+
+
 def summarize(stderr):
-    rates, stop_line, error = [], None, None
+    summary = RunSummary()
     with Path(stderr).open(errors="replace") as stream:
         for line in stream:
-            if "STOP pc=" in line:
-                stop_line = line.rstrip()
-            if "error" in line.lower() or "terminate called" in line:
-                error = line.rstrip()
-            if "PERF interval" in line:
-                match = re.search(r"flips_per_s=([0-9.]+)", line)
-                if match:
-                    rates.append(float(match[1]))
-    return dict(stop=stop_line, last_error=error, fps_mean=statistics.mean(rates) if rates else None,
-                fps_median=statistics.median(rates) if rates else None, fps_samples=len(rates))
+            summary.line(line)
+    return summary.result()
+
+
+def record_evidence(lib, title, record):
+    """Publish evidence for both supervised and recovered run finalization."""
+    directory = lib.title_dir(title)/"runs"/safe_id(record["id"])
+    stderr = directory/"stderr.log"
+    if stderr.exists():
+        record.update(summarize(stderr))
+    # Rates alone do not prove a flip, menu or play.
+    booted = record.get("flips", 0) > 0
+    if booted:
+        record["verification_status"] = "verified-boot"
+    atomic_json(directory/"run.json", record)
+    current = lib.title(title)
+    if booted and current.get("active_build") == record.get("build") and current.get("status") != "verified-play":
+        lib.update_title(title, status="verified-boot")
+
+
+def prune_records(lib, title, keep):
+    """Retain N completed runs without counting or removing active records."""
+    completed = [record for record in records(lib, title) if record["state"] == "finished"]
+    for old in completed[keep:]:
+        shutil.rmtree(lib.title_dir(title)/"runs"/safe_id(old["id"]))
 
 
 def run(lib, title, build=None, overrides=None, unscoped=False, job=None):
@@ -93,22 +147,29 @@ def run(lib, title, build=None, overrides=None, unscoped=False, job=None):
         record = dict(id=run_id, title=title, build=build_id, started=now(), state="running",
                       scope=unit if not unscoped else None, settings=settings, manager_process=identity(os.getpid()),
                       program_process=None, launcher_process=None, command=command)
+        live_summary = RunSummary()
+        record.update(live_summary.result())
         atomic_json(run_dir/"run.json", record)
         if job:
             job.emit("stage", stage="run", index=1, count=1)
-            job.update(run=run_id, title=title)
+            job.update(run=run_id, title=title, tool_scope=unit if not unscoped else None)
         started = time.monotonic()
         info = {}
         process = None
         try:
-            with (run_dir/"stdout.log").open("wb") as stdout, (run_dir/"stderr.log").open("wb") as stderr:
+            with (run_dir/"stdout.log").open("wb") as stdout, (run_dir/"stderr.log").open("wb") as stderr, \
+                 (run_dir/"stderr.log").open("rb") as evidence:
                 if (run_dir/"stop-request.json").exists():
                     raise ManagerError("cancelled", "Launch cancelled before starting.", 5)
-                process = subprocess.Popen(command, stdout=stdout, stderr=stderr, env=env, pass_fds=(title_fd, run_fd))
+                job_fds = (job.lock_fd,) if job and hasattr(job, "lock_fd") else ()
+                process = subprocess.Popen(command, stdout=stdout, stderr=stderr, env=env, pass_fds=(title_fd, run_fd, *job_fds))
                 record["launcher_process"] = identity(process.pid)
+                if job:
+                    job.update(tool_process=record["launcher_process"])
                 if unscoped:
                     record["program_process"] = identity(process.pid)
                 atomic_json(run_dir/"run.json", record)
+                next_evidence = time.monotonic()
                 while process.poll() is None:
                     if (run_dir/"stop-request.json").exists():
                         raise ManagerError("cancelled", "Run stopped by the user.", 5)
@@ -121,7 +182,11 @@ def run(lib, title, build=None, overrides=None, unscoped=False, job=None):
                                     record["program_process"] = identity(pid)
                             except OSError:
                                 pass
+                    if time.monotonic() >= next_evidence:
+                        live_summary.read_new(evidence)
+                        record.update(live_summary.result())
                         atomic_json(run_dir/"run.json", record)
+                        next_evidence = time.monotonic()+1
                     time.sleep(.25)
         except BaseException:
             if process is not None and process.poll() is None:
@@ -135,20 +200,10 @@ def run(lib, title, build=None, overrides=None, unscoped=False, job=None):
                           play_seconds=time.monotonic()-started, scope_result=info,
                           oom_killed=info.get("memory_events", {}).get("oom_kill", "0") != "0",
                           stopped_by_user=(run_dir/"stop-request.json").exists())
-            if (run_dir/"stderr.log").exists():
-                record.update(summarize(run_dir/"stderr.log"))
-            atomic_json(run_dir/"run.json", record)
+            record_evidence(lib, title, record)
             lib.update_title(title, last_played=record["started"],
                              play_seconds=current.get("play_seconds", 0)+record["play_seconds"])
-        # A flip is boot evidence only. Never infer menu/play from frame counts.
-        if record["fps_samples"] and record["fps_mean"] > 0:
-            record["verification_status"] = "verified-boot"
-            atomic_json(run_dir/"run.json", record)
-            if current.get("active_build") == build_id:
-                lib.update_title(title, status="verified-boot")
-        for old in records(lib, title)[settings["run.keep"]:]:
-            if old["state"] == "finished":
-                shutil.rmtree(root/"runs"/old["id"])
+            prune_records(lib, title, settings["run.keep"])
         if record["stop"]:
             raise ManagerError("guest-stop", record["stop"], 3, run=run_id, log=str(run_dir/"stderr.log"))
         if record["exit_code"]:

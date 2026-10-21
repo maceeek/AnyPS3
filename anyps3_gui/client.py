@@ -19,6 +19,7 @@ class Call(QObject):
         self.stderr = bytearray()
         self.received = False
         self.failed = False
+        self.closing = False
         self.process = QProcess(self)
         env = QProcessEnvironment.systemEnvironment()
         env.insert("SDL_AUDIODRIVER", "dummy")
@@ -55,7 +56,7 @@ class Call(QObject):
             self.process.kill()
 
     def parse(self, line):
-        if not line.strip():
+        if self.closing or not line.strip():
             return
         try:
             value = json.loads(line)
@@ -74,7 +75,7 @@ class Call(QObject):
             self.result.emit(value)
 
     def fail(self, code, message):
-        if not self.failed:
+        if not self.closing and not self.failed:
             self.failed = True
             self.error.emit(dict(code=code, message=message, detail={}))
 
@@ -103,8 +104,11 @@ class Client(QObject):
         super().__init__(parent)
         self.command, self.library = command, library
         self.calls = set()
+        self.closing = False
 
     def call(self, arguments, result=None, event=None, error=None, input_data=None):
+        if self.closing:
+            raise RuntimeError("The manager client is closed.")
         args = list(arguments)
         if self.library:
             args += ["--library", self.library]
@@ -127,5 +131,13 @@ class Client(QObject):
 
     def close(self):
         # These are CLI clients/followers. Build/import/game workers are detached.
-        for call in tuple(self.calls):
+        # Suppress callbacks before killing: a follower error must not start a refresh.
+        self.closing = True
+        calls = tuple(self.calls)
+        for call in calls:
+            call.closing = True
+        for call in calls:
             call.process.kill()
+        for call in calls:
+            if call.process.state() != QProcess.ProcessState.NotRunning:
+                call.process.waitForFinished(1000)

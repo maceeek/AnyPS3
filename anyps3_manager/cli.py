@@ -51,7 +51,7 @@ def parser():
     scan = commands.add_parser("inspect-iso")
     scan.add_argument("iso")
     titles = commands.add_parser("titles")
-    titles.add_argument("action", choices=["list", "show", "remove"], nargs="?", default="list")
+    titles.add_argument("action", choices=["list", "show", "remove", "resume"], nargs="?", default="list")
     titles.add_argument("title", nargs="?")
     titles.add_argument("--delete-userdata", action="store_true")
     titles.add_argument("--no-backup", action="store_true")
@@ -86,13 +86,15 @@ def parser():
     group.add_argument("--title")
     group.add_argument("--global", dest="global_scope", action="store_true")
     job = commands.add_parser("jobs")
-    job.add_argument("action", choices=["list", "show", "follow", "cancel"])
-    job.add_argument("id", nargs="?")
+    job.add_argument("action", choices=["list", "show", "follow", "cancel", "remove", "clear"])
+    job.add_argument("ids", nargs="*")
     pads = commands.add_parser("pads")
     pads.add_argument("action", choices=["list", "monitor", "rumble-test"])
     pads.add_argument("pad", nargs="?")
     commands.add_parser("adopt-ratchet").add_argument("path")
-    commands.add_parser("_worker").add_argument("id")
+    worker = commands.add_parser("_worker")
+    worker.add_argument("id")
+    worker.add_argument("--lock-fd", type=int)
     return root
 
 
@@ -162,7 +164,7 @@ def dispatch(args, lib):
     if cmd == "init":
         return lib.init()
     if cmd == "_worker":
-        return jobs.work(lib, args.id)
+        return jobs.work(lib, args.id, args.lock_fd)
     if not (lib.root/"library.json").exists():
         lib.init()
     if cmd == "doctor":
@@ -216,8 +218,18 @@ def dispatch(args, lib):
             raise ManagerError("usage", "Specify a title ID.", 2)
         if args.action == "show":
             return dict(title=pipeline.title_details(lib, args.title))
+        if args.action == "resume":
+            detail = pipeline.title_details(lib, args.title)
+            if detail["busy"]:
+                raise ManagerError("title-busy", "A job or game is active for this title; wait or cancel it first.", 4)
+            recovery = detail.get("recovery")
+            if detail["status"] != "incomplete" or not recovery:
+                raise ManagerError("no-recovery", "Choose the original ISO in Import ISO, or repeat Adopt Ratchet with its source directory.", 6)
+            return jobs.start(lib, recovery["operation"], recovery["arguments"], args.toolchain, args.unscoped)
         with lib.title_lock(args.title), lib.run_lock(args.title):
             lib.title(args.title)
+            if pipeline.title_jobs(lib, args.title):
+                raise ManagerError("title-busy", "A job is active for this title; wait or cancel it before removal.", 4)
             root = lib.title_dir(args.title)
             if args.delete_userdata and not args.no_backup:
                 saves.backup(lib, args.title, reason="before-remove")
@@ -292,10 +304,17 @@ def dispatch(args, lib):
         return settings.set_value(lib, key, value, args.title, reset=args.action == "reset")
     if cmd == "jobs":
         if args.action == "list":
-            return dict(jobs=[jobs.Job(lib, p.parent.name).record() for p in sorted((lib.root/"jobs").glob("*/job.json"), reverse=True)])
-        if not args.id:
+            require_values(args.ids, 0)
+            return dict(jobs=jobs.records(lib))
+        if args.action == "clear":
+            require_values(args.ids, 0)
+            return jobs.remove(lib)
+        if not args.ids:
             raise ManagerError("usage", "Specify a job ID.", 2)
-        job = jobs.Job(lib, args.id)
+        if args.action == "remove":
+            return jobs.remove(lib, args.ids)
+        require_values(args.ids, 1)
+        job = jobs.Job(lib, args.ids[0])
         if args.action == "show":
             return dict(job=job.record(), log=str(job.path/"log.txt"))
         if args.action == "cancel":

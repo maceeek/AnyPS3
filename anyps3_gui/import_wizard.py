@@ -1,7 +1,7 @@
 """Import preflight and key selection; the manager owns every write."""
 
 from PySide6.QtCore import Signal
-from PySide6.QtWidgets import (QCheckBox, QComboBox, QFileDialog, QFormLayout, QLabel, QLineEdit,
+from PySide6.QtWidgets import (QCheckBox, QComboBox, QFileDialog, QFormLayout, QHBoxLayout, QLabel, QLineEdit,
                               QMessageBox, QPushButton, QScrollArea, QVBoxLayout, QWidget, QWizard, QWizardPage)
 
 from .keys import KeyEntry, KEY_EXPLANATION
@@ -49,6 +49,7 @@ class ImportWizard(QWizard):
         self.scan = {}
         self.firmware_id = ""
         self.key_busy = False
+        self.import_busy = False
         self.setWindowTitle("Import a PS3 disc")
         self.resize(700, 500)
         page = QWizardPage()
@@ -58,7 +59,15 @@ class ImportWizard(QWizard):
         page.registerField("iso*", self.iso)
         choose = QPushButton("Choose ISO…")
         choose.clicked.connect(lambda: self.choose(self.iso, "PS3 disc (*.iso)"))
-        form.addRow(self.iso, choose)
+        self.iso.setAccessibleName("PS3 disc ISO path")
+        self.iso.textChanged.connect(self.iso.setToolTip)
+        path_row = QWidget()
+        path_layout = QHBoxLayout(path_row)
+        path_layout.setContentsMargins(0, 0, 0, 0)
+        path_layout.addWidget(self.iso, 1)
+        path_layout.addWidget(choose)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        form.addRow("Disc ISO", path_row)
         self.addPage(page)
         self.addPage(ScanPage(client, self.iso))
         sources = QWizardPage()
@@ -105,7 +114,7 @@ class ImportWizard(QWizard):
         layout = QVBoxLayout(confirm)
         label = QLabel("Import extracts and verifies the original game, then creates a new native build.\n"
                        "This can take significant time and disk space. Closing the GUI leaves the job running.\n"
-                       "The development PC stays silent.")
+                       "Follow import and build progress in Jobs, then choose Play when the build is ready.")
         label.setWordWrap(True)
         layout.addWidget(label)
         self.no_build = QCheckBox("Import only; build later")
@@ -214,9 +223,11 @@ class ImportWizard(QWizard):
         self.client.call(["keys", "fetch-rpcs3", *self.target_args()], self.keys_saved, error=failed)
 
     def accept(self):
-        if self.key_busy:
+        if self.key_busy or self.import_busy:
             return
-        self.button(QWizard.WizardButton.FinishButton).setEnabled(False)
+        self.import_busy = True
+        for role in (QWizard.WizardButton.FinishButton, QWizard.WizardButton.BackButton):
+            self.button(role).setEnabled(False)
         self.import_status.setText("Validating key selections and preparing import…")
         self.firmware_id = self.firmware_choice.currentData() or ""
         operations = []
@@ -250,6 +261,8 @@ class ImportWizard(QWizard):
                 next_operation()
 
         def failed(error):
+            self.import_busy = False
+            self.button(QWizard.WizardButton.BackButton).setEnabled(True)
             self.import_status.setText(error["code"] + ": " + error["message"] + "\nUse Back to return to Firmware and keys, then retry.")
             self.button(QWizard.WizardButton.FinishButton).setEnabled(True)
 

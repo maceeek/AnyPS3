@@ -43,7 +43,7 @@ class KeyEntry(QDialog):
         for name, size in lengths:
             edit = QLineEdit()
             edit.setPlaceholderText(f"Paste exactly {size} hex digits, without 0x or spaces")
-            edit.setEchoMode(QLineEdit.EchoMode.PasswordEchoOnEdit)
+            edit.setEchoMode(QLineEdit.EchoMode.Password)
             self.values[name] = edit
             form.addRow(name, edit)
         self.revision = QSpinBox()
