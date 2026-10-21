@@ -536,7 +536,6 @@ struct Session {
     // Host-only consumers of bytes that the GPU writes into the current batch (asynchronous frame capture): run once that batch
     // completed (retire, or the synchronous flush), before its staging memory is reset. They never touch guest state.
     std::vector<std::function<void(const NativeVulkan::GraphicsBatch&)>> completions;
-    std::uint64_t presented_flip=0;   // flip number (NativeRsx::flips + 1) whose host presentation is already recorded (ANYPS3_RSX_PRESENT_EARLY)
     double flight_ns=300000;   // EWMA of submit -> retire latency of a flight; only maintained for ANYPS3_RSX_POLL=adaptive (rsx_poll_adaptive)
     // Three persistent mappings/command+descriptor pools; an arena cannot be
     // reused until its exact timeline value completed and results retired.
