@@ -195,7 +195,7 @@ static unsigned setup_flips(PpuState& s){
  }
  m.store(g.dma+0x44,4,0x100);m.store(g.dma+0x40,4,put);return put;
 }
-static void flip_order(){
+static void flip_order(bool capture=false){
  setenv("ANYPS3_RSX_BACKEND","gpu",1);setenv("ANYPS3_RSX_WORKER","0",1);setenv("ANYPS3_SPU_THREADS","0",1);
  PpuState s;const auto put=setup_flips(s);s.memory.regions.push_back({0x71000000,6,s.memory.regions[0].bytes});
  setenv("ANYPS3_RSX_WORKER","1",1);
@@ -232,13 +232,19 @@ static void flip_order(){
   if(m.load(0x80000000+0x200+16*i,4)!=0x1000u+i || m.load(0x80000000+0x400+16*i,4)!=0x2000u+i)throw std::runtime_error("final label of frame "+std::to_string(i)+" is wrong");}
  if(m.load(0x80000010,8)!=0)throw std::runtime_error("flip gate not cleared by the last flip");
  if(s.rsx.flips!=kFlips || queue.data.size()!=2*kFlips)throw std::runtime_error("flips "+std::to_string(s.rsx.flips)+" events "+std::to_string(queue.data.size())+" (expected "+std::to_string(kFlips)+" and "+std::to_string(2*kFlips)+")");
+ if(capture){   // stride 4: flips 12, 16, 20, 24 ride on the deferred flip; their files appear once the owner retired those flights
+  const auto last=std::filesystem::path(std::getenv("ANYPS3_FRAME_DIR"))/"frame-000012.ppm";
+  for(const auto until=now_ms()+20000;now_ms()<until && !std::filesystem::exists(last);std::this_thread::sleep_for(std::chrono::milliseconds(2)))(void)rsx_worker_request(s,12);
+  if(s.rsx.async_captures!=4 || s.rsx.captured_frames!=12)throw std::runtime_error("captures: async "+std::to_string(s.rsx.async_captures)+" total "+std::to_string(s.rsx.captured_frames)+" (expected 4 and 12)");
+  if(!std::filesystem::exists(last))throw std::runtime_error("the last stride capture was not written");
+ }
  life.finish();
  std::printf("PASS flip order: %u flips in %llu ms, %u samples (%u with a visible B label): A_i < flip i (gate, event) < B_i in every reverse-order sample\n",kFlips,(unsigned long long)(now_ms()-started),samples,seen);
 }
 int main(int argc,char** argv){try{
  const std::string mode=argc>1?argv[1]:"";
  if(mode=="prefix")prefix();else if(mode=="sustained")sustained();
- else if(mode=="flip_order")flip_order();else if(mode=="read_on")return guarded_read(true)?0:77;else if(mode=="read_off")guarded_read(false);
+ else if(mode=="flip_order")flip_order();else if(mode=="flip_capture")flip_order(true);else if(mode=="read_on")return guarded_read(true)?0:77;else if(mode=="read_off")guarded_read(false);
  else return 3;
 }catch(const std::exception& e){std::fprintf(stderr,"FAIL %s\n",e.what());return 1;}}
 '''
@@ -293,6 +299,22 @@ class BoundedDrain(unittest.TestCase):
         shutil.rmtree(directory, ignore_errors=True)
         directory.mkdir(parents=True)
         self.run_mode('flip_order', ANYPS3_FRAME_DIR=str(directory.resolve()), ANYPS3_FRAME_STRIDE='1000000', ANYPS3_RSX_FLIP_EARLY='0')
+
+    def test_stride_captures_ride_on_deferred_flips(self):
+        # Flips 1-8 are captured synchronously, flips 12/16/20/24 (stride 4) asynchronously; the publication-order invariants of
+        # flip_order hold for both. Independent expectation: flip n scans out frame n-1, cleared to clear_color(n) =
+        # 0x40000000 + n*0x010203 (A8R8G8B8), so every pixel of its P6 file is (n, 2n, 3n).
+        directory = ARTIFACTS / 'flip-frames-stride'
+        shutil.rmtree(directory, ignore_errors=True)
+        directory.mkdir(parents=True)
+        self.run_mode('flip_capture', ANYPS3_FRAME_DIR=str(directory.resolve()), ANYPS3_FRAME_STRIDE='4')
+        flips = list(range(1, 9)) + [12, 16, 20, 24]
+        self.assertEqual(sorted(p.name for p in directory.iterdir()), [f'frame-{k:06d}.ppm' for k in range(1, 13)])
+        for number, flip in enumerate(flips, 1):
+            data = (directory / f'frame-{number:06d}.ppm').read_bytes()
+            header = b'P6\n# AnyPS3 native display buffer 1\n32 16\n255\n'
+            self.assertEqual(data[:len(header)], header, number)
+            self.assertEqual(data[len(header):], bytes([flip, 2 * flip, 3 * flip]) * (32 * 16), f'frame {number} (flip {flip})')
 
     def test_guarded_read_without_drain_waits_for_the_run(self):
         self.run_mode('read_off', ANYPS3_RSX_HOST_DRAIN='0')

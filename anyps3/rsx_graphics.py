@@ -531,7 +531,11 @@ struct Session {
         std::vector<Pending> pending;std::vector<Label> labels;
         std::shared_ptr<std::vector<std::uint64_t>> results;
         std::chrono::steady_clock::time_point submitted{};
+        std::vector<std::function<void(const NativeVulkan::GraphicsBatch&)>> completions{};
     };
+    // Host-only consumers of bytes that the GPU writes into the current batch (asynchronous frame capture): run once that batch
+    // completed (retire, or the synchronous flush), before its staging memory is reset. They never touch guest state.
+    std::vector<std::function<void(const NativeVulkan::GraphicsBatch&)>> completions;
     double flight_ns=300000;   // EWMA of submit -> retire latency of a flight; only maintained for ANYPS3_RSX_POLL=adaptive (rsx_poll_adaptive)
     // Three persistent mappings/command+descriptor pools; an arena cannot be
     // reused until its exact timeline value completed and results retired.
@@ -578,6 +582,7 @@ struct Session {
             anyps3_ft::mark(anyps3_ft::GpuRetire,flight.batch->completion,flight.pending.size(),wait?1:0,flight.labels.size());
             anyps3_ft::current_completion=flight.batch->completion;
             retire_work(*flight.batch,flight.pending,flight.results,flight.labels);
+            for(auto& completion:flight.completions)completion(*flight.batch);
             if(rsx_poll_adaptive())flight_ns=0.8*flight_ns+0.2*double(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-flight.submitted).count());
             vk.graphics_reset(*flight.batch);vk.graphics_move_stats(*flight.batch,*batch);
             spare_batches.push_back(std::move(flight.batch));flights.pop_front();++async_retires;
@@ -591,7 +596,7 @@ struct Session {
         // No new GPU instruction means the last queued prefix is also this
         // completion point. Do not create an empty submission just for a
         // flip marker or another release/report at the same queue position.
-        if(!batch->recording && !batch->submitted && !batch->completion && !batch->used && pending.empty() && !flights.empty() && flights.back().labels.size()+labels.size()<=256){
+        if(!batch->recording && !batch->submitted && !batch->completion && !batch->used && pending.empty() && completions.empty() && !flights.empty() && flights.back().labels.size()+labels.size()<=256){
             auto& tail=flights.back();tail.batch->frames+=batch->frames;batch->frames=0;
             for(auto& label:labels)tail.labels.push_back(std::move(label));
             labels.clear();if(fallback_stats().enabled){++fallback_stats().flush_calls[reason];++fallback_stats().paths["completion_prefix_reuse"];}
@@ -610,8 +615,8 @@ struct Session {
             else{{PerfTimer arena_timer(fallback_stats().enabled?&fallback_stats().flush_retire_time["arena_rotation"]:nullptr);retire(true,flights.front().batch->completion);}
                 next=std::move(spare_batches.back());spare_batches.pop_back();}
             vk.graphics_move_stats(*batch,*next);
-            flights.push_back({std::move(batch),std::move(pending),std::move(labels),std::move(query_results),rsx_poll_adaptive()?std::chrono::steady_clock::now():std::chrono::steady_clock::time_point{}});
-            batch=std::move(next);pending.clear();labels.clear();query_results=std::make_shared<std::vector<std::uint64_t>>();++async_submits;
+            flights.push_back({std::move(batch),std::move(pending),std::move(labels),std::move(query_results),rsx_poll_adaptive()?std::chrono::steady_clock::now():std::chrono::steady_clock::time_point{},std::move(completions)});
+            batch=std::move(next);pending.clear();labels.clear();completions.clear();query_results=std::make_shared<std::vector<std::uint64_t>>();++async_submits;
         }catch(...){failed=true;throw;}
     }
     bool label_page_overlap(const Label& label,const void* pointer,std::uint64_t size)const{
@@ -1069,7 +1074,7 @@ struct Session {
         {PerfTimer retire_timer(fallback_stats().enabled?&fallback_stats().flush_retire_time[reason]:nullptr);retire(true);}
         auto& stats=fallback_stats();if(stats.enabled)++stats.flush_calls[reason];
         bool dirty_read=false;if(download)for(const auto& surface:surfaces)if(surface.dirty && (!pointer || surface.overlaps(pointer,size))){dirty_read=true;break;}
-        if(!batch->recording && !dirty_read && pending.empty() && labels.empty()){
+        if(!batch->recording && !dirty_read && pending.empty() && labels.empty() && completions.empty()){
             // Scanout can finish a readback directly before releasing its
             // staging bytes. Its signalled fence/command pool still need reset.
             if(batch->used || batch->visibility_count || !batch->pins.empty() || !batch->buffer_pins.empty() || batch->signal)vk.graphics_reset(*batch);
@@ -1085,6 +1090,8 @@ struct Session {
             if(!reads.empty()){::RsxPerfCounters::add(::RsxPerfCounters::readback_flushes);::RsxPerfCounters::add(::RsxPerfCounters::readback_surfaces,reads.size());}
             vk.graphics_finish(*batch);
             retire_work(*batch,pending,query_results,labels);pending.clear();
+            for(auto& completion:completions)completion(*batch);
+            completions.clear();
             query_results=std::make_shared<std::vector<std::uint64_t>>();
             const auto commit_start=std::chrono::steady_clock::now();
             for(const auto& read:reads){auto& surface=*read.surface;

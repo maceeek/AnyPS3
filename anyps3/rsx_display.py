@@ -58,6 +58,39 @@ CPP = r'''
     if(consume)std::filesystem::remove(path,error);
     return true;
 }
+[[maybe_unused]] static std::string rsx_capture_name(std::uint64_t number){
+    char name[32];std::snprintf(name,sizeof(name),"frame-%06llu.ppm",static_cast<unsigned long long>(number));return name;
+}
+// One binary PPM (P6) of an RGBA scanout: the first three bytes of every pixel, created exclusively ("wbx").
+[[maybe_unused]] static void rsx_capture_write(const std::filesystem::path& path,const std::vector<std::uint8_t>& rgba,unsigned id,unsigned width,unsigned height){
+    if(rgba.size()!=std::size_t(width)*height*4)throw std::runtime_error("RSX frame capture size mismatch");
+    std::vector<std::uint8_t> rgb(rgba.size()/4*3);
+    for(std::size_t i=0,o=0;i<rgba.size();i+=4,o+=3){rgb[o]=rgba[i];rgb[o+1]=rgba[i+1];rgb[o+2]=rgba[i+2];}
+    auto close=[](FILE* f){std::fclose(f);};
+    std::unique_ptr<FILE,decltype(close)> file(std::fopen(path.c_str(),"wbx"),close);
+    if(!file)throw std::runtime_error("cannot create new RSX frame capture");
+    std::fprintf(file.get(),"P6\n# AnyPS3 native display buffer %u\n%u %u\n255\n",id,width,height);
+    if(!rgb.empty() && std::fwrite(rgb.data(),1,rgb.size(),file.get())!=rgb.size())throw std::runtime_error("RSX frame write failed");
+    if(std::fflush(file.get()))throw std::runtime_error("RSX frame flush failed");
+}
+// Stride captures of the asynchronous flip path (rsx_graphics_flip_async): the pixels were copied on the GPU timeline of the flip;
+// the file is written by one background task so the RSX owner never waits for the disk. The bytes go to a hidden ".frame-N.ppm.part"
+// that is hard-linked to its final name only when complete (a killed process never leaves a truncated frame-N.ppm). A failure of
+// the previous write is rethrown at the next capture (an explicit stop), and the task's future joins at process exit.
+[[maybe_unused]] static std::future<void>& rsx_capture_writer(){static std::future<void> pending;return pending;}
+[[maybe_unused]] static void rsx_capture_write_async(std::filesystem::path path,std::vector<std::uint8_t> rgba,unsigned id,unsigned width,unsigned height,std::uint64_t number){
+    auto& pending=rsx_capture_writer();
+    if(pending.valid())pending.get();
+    pending=std::async(std::launch::async,[path=std::move(path),rgba=std::move(rgba),id,width,height,number]{
+        try{
+            auto part=path;part.replace_filename("."+path.filename().string()+".part");
+            rsx_capture_write(part,rgba,id,width,height);
+            if(::link(part.c_str(),path.c_str())!=0)throw std::runtime_error("cannot create new RSX frame capture");
+            ::unlink(part.c_str());
+            std::fprintf(stderr,"RSX captured frame=%llu buffer=%u size=%ux%u file=%s\n",static_cast<unsigned long long>(number),id,width,height,path.c_str());
+        }catch(const std::exception& e){std::fprintf(stderr,"RSX frame capture %s failed: %s\n",path.c_str(),e.what());throw;}
+    });
+}
 static void rsx_capture_display(PpuState& s,unsigned id){
 #ifndef ANYPS3_VULKAN
     (void)s;(void)id;
@@ -96,15 +129,8 @@ static void rsx_capture_display(PpuState& s,unsigned id){
     // readback contract. The graphics backend already captured its GPU image.
     gpu.renderer->readback(rgba,buffer.width,buffer.height);
 #endif
-    char name[32];std::snprintf(name,sizeof(name),"frame-%06llu.ppm",static_cast<unsigned long long>(gpu.captured_frames+1));
-    const auto path=root/name;
-    auto close=[](FILE* f){std::fclose(f);};
-    std::unique_ptr<FILE,decltype(close)> file(std::fopen(path.c_str(),"wbx"),close);
-    if(!file)throw std::runtime_error("cannot create new RSX frame capture");
-    std::fprintf(file.get(),"P6\n# AnyPS3 native display buffer %u\n%u %u\n255\n",id,buffer.width,buffer.height);
-    for(std::size_t at=0;at<rgba.size();at+=4)
-        if(std::fwrite(rgba.data()+at,1,3,file.get())!=3)throw std::runtime_error("RSX frame write failed");
-    if(std::fflush(file.get()))throw std::runtime_error("RSX frame flush failed");
+    const auto path=root/rsx_capture_name(gpu.captured_frames+1);
+    rsx_capture_write(path,rgba,id,buffer.width,buffer.height);
     ++gpu.captured_frames;
     std::fprintf(stderr,"RSX captured frame=%llu buffer=%u size=%ux%u file=%s\n",
         static_cast<unsigned long long>(gpu.captured_frames),id,buffer.width,buffer.height,path.c_str());
