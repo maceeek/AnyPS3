@@ -14,6 +14,7 @@ import time
 
 from .processes import execute
 from .capabilities import environment_reads
+from .keys import key_path, set_key, guidance, targets
 from .settings import FIELDS, effective
 from .storage import (ManagerError, atomic_json, identifier, lock, now, read_json,
                       readonly, remove_tree, safe_id, sha256, tree_hashes)
@@ -68,26 +69,6 @@ def preflight(lib, iso):
                   compatibility="Compatibility is determined from the decrypted executable hash; unknown titles are expected to stop.")
     result["space_ok"] = free >= result["estimated_required_bytes"]
     return result
-
-
-def key_path(lib, kind):
-    record = read_json(lib.root/"keys.json", {}).get(kind)
-    if not record or not Path(record["path"]).is_file():
-        raise ManagerError("missing-key", f"Set the user-supplied {kind} key file first.", 6)
-    if sha256(record["path"]) != record["sha256"]:
-        raise ManagerError("key-changed", f"The {kind} key file changed; register it again.", 6)
-    return record["path"]
-
-
-def set_key(lib, kind, path):
-    path = Path(path).expanduser().resolve()
-    if not path.is_file():
-        raise ManagerError("missing-input", f"Key file not found: {path}", 6)
-    with lib.metadata():
-        keys = read_json(lib.root/"keys.json", {})
-        keys[kind] = dict(path=str(path), sha256=sha256(path))
-        atomic_json(lib.root/"keys.json", keys)
-    return dict(kind=kind, path=str(path), sha256=keys[kind]["sha256"])
 
 
 def profile_for(lib, elf, title):
@@ -503,7 +484,7 @@ class Pipeline:
             # Validate all prerequisites before publishing any title directory.
             for kind, filename in (("app", "app-key.json"), ("pup", "firmware-keys.json")):
                 if not (source/filename).is_file():
-                    raise ManagerError("missing-key", f"Key file not found: {source/filename}", 6)
+                    raise ManagerError("missing-key", f"Key file not found: {source/filename}. {guidance(kind)}", 6)
             username = source/"hdd0/home/00000001/localusername"
             if not username.is_file() or not 1 <= username.stat().st_size <= 63:
                 raise ManagerError("invalid-user", "Source localusername must contain 1–63 bytes.")
@@ -521,8 +502,10 @@ class Pipeline:
                 disc_manifest_sha256=sha256(disc/"anyps3-extraction.json"),
                 compatibility=profile.get("status", "Hash matched; compatibility is not established."),
                 adopted_from=str(source), adopted_at=now())
-            set_key(self.lib, "app", source/"app-key.json")
-            set_key(self.lib, "pup", source/"firmware-keys.json")
+            pup = disc/"PS3_UPDATE/PS3UPDAT.PUP"
+            selected = targets(self_path=disc/"PS3_GAME/USRDIR/EBOOT.BIN", pup=pup if pup.is_file() else None)
+            set_key(self.lib, "app", source/"app-key.json", selected=selected)
+            set_key(self.lib, "pup", source/"firmware-keys.json", selected=selected)
             self.lib.register(record)
             self.stage("copy", 2, 3)
             stage = root/".adopt-staging"

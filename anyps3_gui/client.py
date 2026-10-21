@@ -13,7 +13,7 @@ class Call(QObject):
     error = Signal(object)
     done = Signal()
 
-    def __init__(self, command, arguments, parent):
+    def __init__(self, command, arguments, parent, input_data=None):
         super().__init__(parent)
         self.buffer = b""
         self.stderr = bytearray()
@@ -31,6 +31,11 @@ class Call(QObject):
         self.process.readyReadStandardError.connect(self.read_stderr)
         self.process.errorOccurred.connect(self.process_error)
         self.process.finished.connect(self.finished)
+        if input_data is not None:
+            def send_input():
+                self.process.write(input_data)
+                self.process.closeWriteChannel()
+            self.process.started.connect(send_input)
 
     def start(self):
         self.process.start()
@@ -99,11 +104,11 @@ class Client(QObject):
         self.command, self.library = command, library
         self.calls = set()
 
-    def call(self, arguments, result=None, event=None, error=None):
+    def call(self, arguments, result=None, event=None, error=None, input_data=None):
         args = list(arguments)
         if self.library:
             args += ["--library", self.library]
-        call = Call(self.command, args, self)
+        call = Call(self.command, args, self, input_data)
         self.calls.add(call)
         if result:
             call.result.connect(result)

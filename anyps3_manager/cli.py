@@ -10,7 +10,7 @@ import sys
 import time
 
 from . import SCHEMA
-from . import jobs, pipeline, runs, saves, settings
+from . import jobs, keys as key_setup, pipeline, runs, saves, settings
 from .processes import scope_available
 from .storage import Library, ManagerError, atomic_json, read_json, remove_tree, safe_id
 
@@ -33,9 +33,13 @@ def parser():
     for name in ("init", "doctor"):
         commands.add_parser(name)
     keys = commands.add_parser("keys")
-    keys.add_argument("action", choices=["set"])
-    keys.add_argument("kind", choices=["app", "pup"])
-    keys.add_argument("path")
+    keys.add_argument("action", choices=["set", "fetch-rpcs3"])
+    keys.add_argument("kind", choices=["app", "pup"], nargs="?")
+    keys.add_argument("path", nargs="?")
+    keys.add_argument("--stdin", action="store_true", help="Read pasted key JSON from stdin; store privately (never pass key values as arguments)")
+    keys.add_argument("--iso", help="Validate against EBOOT.BIN and firmware in this ISO")
+    keys.add_argument("--pup", help="Validate against this PUP (overrides ISO firmware)")
+    keys.add_argument("--self", dest="self_path", help="Validate against this EBOOT.BIN SELF")
     firmware = commands.add_parser("firmware")
     firmware.add_argument("action", choices=["list", "add", "add-from-disc"])
     firmware.add_argument("value", nargs="?")
@@ -174,7 +178,23 @@ def dispatch(args, lib):
                           for kind, record in checks["keys"].items()}
         return dict(checks=checks, library=str(lib.root), audio_enabled=settings.effective(lib)["audio.enabled"])
     if cmd == "keys":
-        return pipeline.set_key(lib, args.kind, args.path)
+        if args.action == "fetch-rpcs3" and (args.kind or args.path or args.stdin):
+            raise ManagerError("usage", "keys fetch-rpcs3 accepts only --iso, --pup and --self targets.", 2)
+        if args.action == "set" and (not args.kind or bool(args.path) == bool(args.stdin)):
+            raise ManagerError("usage", "Use keys set app|pup /path/to/key.json or --stdin. " + key_setup.guidance(args.kind or "pup"), 2)
+        selected = key_setup.targets(iso=args.iso, pup=args.pup, self_path=args.self_path)
+        if args.action == "fetch-rpcs3":
+            return key_setup.fetch_rpcs3(lib, selected)
+        if args.stdin:
+            try:
+                data = sys.stdin.read(16385)
+                if len(data) > 16384:
+                    raise ValueError()
+                spec = json.loads(data)
+            except (ValueError, UnicodeError):
+                raise key_setup.invalid(args.kind, "Invalid pasted JSON; enter the required hex fields again.") from None
+            return key_setup.enter_key(lib, args.kind, spec, selected)
+        return pipeline.set_key(lib, args.kind, args.path, selected=selected)
     if cmd == "inspect-iso":
         return pipeline.preflight(lib, args.iso)
     if cmd == "firmware":
