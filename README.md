@@ -76,12 +76,15 @@ The first and only target so far is **Ratchet & Clank: A Crack in Time** (BCES00
 
 - The original game boots, plays its videos, reaches the original main menu and loads a saved game into the
   first level (`great_clock_a`). The menu and the level are rendered by the Vulkan RSX backend.
-- The menu runs at full speed. In the level, the runtime on `main` runs at about 47 FPS on a Ryzen 9 9900X with
-  an RTX 4070 SUPER; unmerged development builds reach about 56 FPS (median 58.5). Reaching a stable 60 FPS with
-  headroom is the current work item.
-- Input works through SDL game controllers; navigation with a virtual and a uinput controller is verified.
-  A physical controller has not been verified yet.
-- Audio is produced through SDL. Linux is the only supported host for the game runtime.
+- The menu runs at full speed. In the level the current runtime holds the 60 Hz VSYNC cap on a Ryzen 9 9900X with an
+  RTX 4070 SUPER: about **59.8–59.9 FPS mean, with 99.8–100 % of frames finishing within one vblank** in quiet
+  measurements (main thread ~11 ms and RSX worker ~12 ms of the 16.7 ms frame). The headroom is about 3–4 ms per frame;
+  an emulated 75 Hz vblank (`ANYPS3_VBLANK_HZ=75`, a measurement switch) is not held yet.
+- Input works through SDL game controllers, including DualSense (PS5) SIXAXIS motion, rumble and the PS button
+  ([details](docs/manager/DUALSENSE.md)). Navigation with a virtual and a uinput controller is verified; a physical
+  controller has not been verified yet.
+- Audio is produced through SDL (on by default in the GUI, switchable per title). Linux is the only supported host
+  for the game runtime.
 
 Measurements, open blockers and reproduction commands are tracked in the
 [knowledge base](docs/knowledge/CURRENT.md).

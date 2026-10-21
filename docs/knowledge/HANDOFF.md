@@ -1,11 +1,14 @@
 # Handoff to the next instance
 
-## Wave 6 — 2026-10-21 (in progress)
+## Wave 6 — 2026-10-21 (ended on user instruction ~17:15)
 
-Read the top of [CURRENT.md](CURRENT.md). Best: build 478 at 59.74/59.80 FPS (integration branch `fast2/integ473`, not on main).
-The machine has RAM bit flips (verified); the previous coordinator crashed without a handoff — wave 5 was reconstructed from the agents'
-STATUS files. Agent state: `local/ratchet/work/{integ473,spuput,warmup}/STATUS.md`; rules `local/ratchet/work/COMMON-FAST2.md` "Wave 6";
-measurement tools now in `local/ratchet/tools/` (`measure_with_gpu.sh`, `ab_measure.sh`, `i5sum.py`, `ivals.py`, `gpu_busy.py`).
+Read the top of [CURRENT.md](CURRENT.md). Branch `claude/wave6-60fps` (pushed; the user merges it into main) = main + integration
+5c266e2 + GUI audio/SIXAXIS/rumble; its runtime is build 706 (~59.7 FPS, ~3–4 ms headroom, 75 Hz not held). The user tests the
+physical DualSense through the GUI (install from main, Adopt Ratchet, Build, Play — **GUI audio is on by default; switch it off on
+this PC**). Fallback for playing the measured binary without the GUI: `local/ratchet/tools/play_physical.sh 706` (silent, SDL pads only).
+No agent, build, suite or game run is live. Agent handoffs: `local/ratchet/work/{integ473,spuput,warmup,guiaudio,padmotion,guimerge}/`
+(INTEG6 stopped at the API session limit after building 705; the coordinator finished its suite/measurements). Rules for the next wave:
+AGENTS.md (QUIET runs, hardware, audio) and `local/ratchet/work/COMMON-FAST2.md` "Wave 6".
 
 ## FAST2 wave 4 handoff — 2026-10-20 ~22:25
 
