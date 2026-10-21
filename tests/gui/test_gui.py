@@ -5,16 +5,18 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
 os.environ["SDL_AUDIODRIVER"] = "dummy"
 os.environ["ANYPS3_AUDIO_SINK"] = "null"
 
-from PySide6.QtCore import QCoreApplication, QEvent, QEventLoop, QSettings, QTimer
-from PySide6.QtWidgets import QApplication
+from PySide6.QtCore import QCoreApplication, QEvent, QEventLoop, QProcess, QSettings, QTimer
+from PySide6.QtWidgets import QApplication, QPushButton
 from anyps3_gui.app import Window
 from anyps3_gui.client import Client
 from anyps3_gui.import_wizard import ImportWizard
+from anyps3_gui.settings import Settings
 
 
 class GuiTests(unittest.TestCase):
@@ -92,6 +94,61 @@ class GuiTests(unittest.TestCase):
         window.close()
         self.assertIsNotNone(window.preferences.value("geometry"))
         self.app.processEvents()
+
+    def test_window_close_reaps_followers_without_new_manager_requests(self):
+        client = self.client()
+        window = Window(client)
+        window.show()
+        self.wait(lambda: not client.calls)
+        window.follow('long')
+        follower = window.followers['long']
+        self.wait(lambda: follower.received)
+        process = follower.process
+        self.assertEqual(process.state(), QProcess.ProcessState.Running)
+        with patch.object(client, 'call', wraps=client.call) as requests:
+            window.close()
+            self.assertEqual(process.state(), QProcess.ProcessState.NotRunning)
+            self.wait(lambda: not client.calls)
+            self.assertEqual(requests.call_count, 0)
+        self.assertTrue(client.closing)
+        self.assertEqual(client.calls, set())
+
+    def test_pending_settings_replies_disconnect_when_widget_is_deleted(self):
+        client = Client([sys.executable, str(Path(__file__).with_name('stub_cli.py')), '--slow-settings'], parent=self.app)
+        self.addCleanup(client.deleteLater)
+        self.addCleanup(client.close)
+        exceptions = []
+        with patch('sys.excepthook', side_effect=lambda *args: exceptions.append(args)):
+            settings = Settings(client, 'BCES00511')
+            self.assertEqual(len(client.calls), 3)
+            settings.deleteLater()
+            QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+            self.wait(lambda: not client.calls)
+        self.assertEqual(exceptions, [])
+
+    def test_pending_setting_writes_disconnect_after_widget_deletion(self):
+        client = Client([sys.executable, str(Path(__file__).with_name('stub_cli.py')), '--slow-settings'], parent=self.app)
+        self.addCleanup(client.deleteLater)
+        self.addCleanup(client.close)
+        for operation in ('apply', 'inherit'):
+            with self.subTest(operation=operation):
+                settings = Settings(client, 'BCES00511')
+                self.wait(lambda: not client.calls)
+                settings.values = {'audio.enabled': False}
+                settings.got_schema({'settings': {'audio.enabled': dict(type='boolean', group='Audio', description='Game audio')}})
+                settings.got_values({'settings': {'audio.enabled': False}, 'overrides': {'audio.enabled': False}})
+                if operation == 'apply':
+                    settings.save('audio.enabled', lambda: False)
+                else:
+                    next(button for button in settings.findChildren(QPushButton) if button.text() == 'Inherit' and button.isEnabled()).click()
+                self.assertEqual(len(client.calls), 1)
+                exceptions = []
+                with patch.object(client, 'call', wraps=client.call) as requests, patch('sys.excepthook', side_effect=lambda *args: exceptions.append(args)):
+                    settings.deleteLater()
+                    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+                    self.wait(lambda: not client.calls)
+                    self.assertEqual(requests.call_count, 0)
+                self.assertEqual(exceptions, [])
 
     def test_controllers_show_motion_and_rumble_capabilities(self):
         from anyps3_gui.app import Controllers

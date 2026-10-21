@@ -1,0 +1,205 @@
+test_download_error_is_actionable_and_allows_retry (tests.manager.test_gui_keys.GuiKeyTests.test_download_error_is_actionable_and_allows_retry) ... ok
+test_download_requires_confirmation_and_passes_selected_targets (tests.manager.test_gui_keys.GuiKeyTests.test_download_requires_confirmation_and_passes_selected_targets) ... ok
+test_existing_keys_can_be_replaced (tests.manager.test_gui_keys.GuiKeyTests.test_existing_keys_can_be_replaced) ... ok
+test_hex_entry_uses_stdin_and_failure_keeps_dialog_open (tests.manager.test_gui_keys.GuiKeyTests.test_hex_entry_uses_stdin_and_failure_keeps_dialog_open) ... ok
+test_json_file_setup_sends_validation_targets_before_import (tests.manager.test_gui_keys.GuiKeyTests.test_json_file_setup_sends_validation_targets_before_import) ... ok
+test_real_qprocess_stdin_private_save (tests.manager.test_gui_keys.GuiKeyTests.test_real_qprocess_stdin_private_save) ... ok
+test_build_activate_pin_prune_and_selection_gates (tests.manager.test_guifix_gui.GuiFixTests.test_build_activate_pin_prune_and_selection_gates) ... This plugin does not support propagateSizeHints()
+This plugin does not support propagateSizeHints()
+This plugin does not support propagateSizeHints()
+ok
+test_busy_title_blocks_conflicts_but_allows_stop_for_run (tests.manager.test_guifix_gui.GuiFixTests.test_busy_title_blocks_conflicts_but_allows_stop_for_run) ... This plugin does not support propagateSizeHints()
+This plugin does not support propagateSizeHints()
+This plugin does not support propagateSizeHints()
+ok
+test_clear_finished_jobs_uses_terminal_only_cli (tests.manager.test_guifix_gui.GuiFixTests.test_clear_finished_jobs_uses_terminal_only_cli) ... This plugin does not support propagateSizeHints()
+This plugin does not support propagateSizeHints()
+ok
+test_controller_rumble_requires_supported_selected_device (tests.manager.test_guifix_gui.GuiFixTests.test_controller_rumble_requires_supported_selected_device) ... This plugin does not support propagateSizeHints()
+This plugin does not support propagateSizeHints()
+ok
+test_empty_library_gates_actions_and_clears_removed_title (tests.manager.test_guifix_gui.GuiFixTests.test_empty_library_gates_actions_and_clears_removed_title) ... This plugin does not support propagateSizeHints()
+This plugin does not support propagateSizeHints()
+This plugin does not support propagateSizeHints()
+This plugin does not support propagateSizeHints()
+ok
+test_error_display_retains_cli_code_and_message (tests.manager.test_guifix_gui.GuiFixTests.test_error_display_retains_cli_code_and_message) ... This plugin does not support propagateSizeHints()
+This plugin does not support propagateSizeHints()
+This plugin does not support propagateSizeHints()
+ok
+test_failed_follower_preserves_error_and_refreshes_title_controls (tests.manager.test_guifix_gui.GuiFixTests.test_failed_follower_preserves_error_and_refreshes_title_controls) ... This plugin does not support propagateSizeHints()
+This plugin does not support propagateSizeHints()
+This plugin does not support propagateSizeHints()
+This plugin does not support propagateSizeHints()
+ok
+test_foreground_live_run_without_detached_job_enables_stop (tests.manager.test_guifix_gui.GuiFixTests.test_foreground_live_run_without_detached_job_enables_stop) ... This plugin does not support propagateSizeHints()
+This plugin does not support propagateSizeHints()
+This plugin does not support propagateSizeHints()
+ok
+test_imported_title_explains_build_then_play (tests.manager.test_guifix_gui.GuiFixTests.test_imported_title_explains_build_then_play) ... This plugin does not support propagateSizeHints()
+This plugin does not support propagateSizeHints()
+This plugin does not support propagateSizeHints()
+ok
+test_incomplete_resume_and_remove_preserve_userdata_contract (tests.manager.test_guifix_gui.GuiFixTests.test_incomplete_resume_and_remove_preserve_userdata_contract) ... This plugin does not support propagateSizeHints()
+This plugin does not support propagateSizeHints()
+This plugin does not support propagateSizeHints()
+ok
+test_jobs_multiselect_remove_preserves_selection_on_refresh (tests.manager.test_guifix_gui.GuiFixTests.test_jobs_multiselect_remove_preserves_selection_on_refresh) ... This plugin does not support propagateSizeHints()
+This plugin does not support propagateSizeHints()
+ok
+test_legacy_incomplete_can_choose_original_iso (tests.manager.test_guifix_gui.GuiFixTests.test_legacy_incomplete_can_choose_original_iso) ... This plugin does not support propagateSizeHints()
+This plugin does not support propagateSizeHints()
+This plugin does not support propagateSizeHints()
+ok
+test_play_uses_detached_cli_and_idle_stop_is_disabled (tests.manager.test_guifix_gui.GuiFixTests.test_play_uses_detached_cli_and_idle_stop_is_disabled) ... This plugin does not support propagateSizeHints()
+This plugin does not support propagateSizeHints()
+This plugin does not support propagateSizeHints()
+ok
+test_polled_terminal_job_refreshes_title_after_missed_follower (tests.manager.test_guifix_gui.GuiFixTests.test_polled_terminal_job_refreshes_title_after_missed_follower) ... This plugin does not support propagateSizeHints()
+This plugin does not support propagateSizeHints()
+This plugin does not support propagateSizeHints()
+ok
+test_recovered_title_does_not_inherit_another_titles_settings (tests.manager.test_guifix_gui.GuiFixTests.test_recovered_title_does_not_inherit_another_titles_settings) ... This plugin does not support propagateSizeHints()
+This plugin does not support propagateSizeHints()
+This plugin does not support propagateSizeHints()
+This plugin does not support propagateSizeHints()
+This plugin does not support propagateSizeHints()
+ok
+test_same_title_build_change_refreshes_setting_capabilities (tests.manager.test_guifix_gui.GuiFixTests.test_same_title_build_change_refreshes_setting_capabilities) ... This plugin does not support propagateSizeHints()
+This plugin does not support propagateSizeHints()
+This plugin does not support propagateSizeHints()
+ok
+test_saves_backup_restore_export_import (tests.manager.test_guifix_gui.GuiFixTests.test_saves_backup_restore_export_import) ... This plugin does not support propagateSizeHints()
+This plugin does not support propagateSizeHints()
+This plugin does not support propagateSizeHints()
+ok
+test_selected_iso_path_expands_instead_of_becoming_a_narrow_label (tests.manager.test_guifix_gui.GuiFixTests.test_selected_iso_path_expands_instead_of_becoming_a_narrow_label) ... This plugin does not support propagateSizeHints()
+This plugin does not support propagateSizeHints()
+ok
+test_settings_audio_rumble_and_advanced_schema (tests.manager.test_guifix_gui.GuiFixTests.test_settings_audio_rumble_and_advanced_schema) ... This plugin does not support propagateSizeHints()
+This plugin does not support propagateSizeHints()
+This plugin does not support propagateSizeHints()
+ok
+test_title_polls_do_not_overlap (tests.manager.test_guifix_gui.GuiFixTests.test_title_polls_do_not_overlap) ... This plugin does not support propagateSizeHints()
+This plugin does not support propagateSizeHints()
+ok
+test_title_switch_clears_actions_before_delayed_cli_replies (tests.manager.test_guifix_gui.GuiFixTests.test_title_switch_clears_actions_before_delayed_cli_replies) ... This plugin does not support propagateSizeHints()
+This plugin does not support propagateSizeHints()
+This plugin does not support propagateSizeHints()
+ok
+test_unchanged_empty_jobs_poll_detects_foreground_run_exit (tests.manager.test_guifix_gui.GuiFixTests.test_unchanged_empty_jobs_poll_detects_foreground_run_exit) ... This plugin does not support propagateSizeHints()
+This plugin does not support propagateSizeHints()
+This plugin does not support propagateSizeHints()
+ok
+test_wizard_file_selection_scan_all_pages_and_masks_keys (tests.manager.test_guifix_gui.GuiFixTests.test_wizard_file_selection_scan_all_pages_and_masks_keys) ... This plugin does not support propagateSizeHints()
+This plugin does not support propagateSizeHints()
+This plugin does not support propagateSizeHints()
+This plugin does not support propagateSizeHints()
+This plugin does not support propagateSizeHints()
+This plugin does not support propagateSizeHints()
+ok
+test_cancel_during_bootstrap_records_request_without_terminalizing (tests.manager.test_guifix_jobs.JobLifetimeTests.test_cancel_during_bootstrap_records_request_without_terminalizing) ... ok
+test_dead_submitter_before_spawn_is_failed_and_removable (tests.manager.test_guifix_jobs.JobLifetimeTests.test_dead_submitter_before_spawn_is_failed_and_removable) ... ok
+test_history_cleanup_does_not_lock_unrelated_title_metadata (tests.manager.test_guifix_jobs.JobLifetimeTests.test_history_cleanup_does_not_lock_unrelated_title_metadata) ... ok
+test_killed_supervisor_keeps_live_tool_and_cancel_stops_descendants (tests.manager.test_guifix_jobs.JobLifetimeTests.test_killed_supervisor_keeps_live_tool_and_cancel_stops_descendants) ... ok
+test_orphan_run_cancellation_is_bound_to_original_run (tests.manager.test_guifix_jobs.JobLifetimeTests.test_orphan_run_cancellation_is_bound_to_original_run) ... ok
+test_scoped_orphan_tool_is_retained_and_cancelled (tests.manager.test_guifix_jobs.JobLifetimeTests.test_scoped_orphan_tool_is_retained_and_cancelled) ... ok
+test_submission_failure_is_terminal_removable_and_does_not_block_title (tests.manager.test_guifix_jobs.JobLifetimeTests.test_submission_failure_is_terminal_removable_and_does_not_block_title) ... ok
+test_unknown_inherited_child_keeps_history_and_cannot_claim_cancellation (tests.manager.test_guifix_jobs.JobLifetimeTests.test_unknown_inherited_child_keeps_history_and_cannot_claim_cancellation) ... ok
+test_worker_holds_lock_before_spawn_publication_and_python_worker_entry (tests.manager.test_guifix_jobs.JobLifetimeTests.test_worker_holds_lock_before_spawn_publication_and_python_worker_entry) ... ok
+test_audio_and_rumble_layers_compose_without_launching_enabled_audio (tests.manager.test_guifix_operations.GuiFixOperationsTests.test_audio_and_rumble_layers_compose_without_launching_enabled_audio) ... ok
+test_boot_observation_preserves_existing_play_verification (tests.manager.test_guifix_operations.GuiFixOperationsTests.test_boot_observation_preserves_existing_play_verification) ... ok
+test_export_rejects_selected_save_and_ancestor_symlinks (tests.manager.test_guifix_operations.GuiFixOperationsTests.test_export_rejects_selected_save_and_ancestor_symlinks) ... ok
+test_export_without_hardlinks_preserves_raced_in_destination (tests.manager.test_guifix_operations.GuiFixOperationsTests.test_export_without_hardlinks_preserves_raced_in_destination) ... ok
+test_export_without_hardlinks_produces_readable_portable_zip (tests.manager.test_guifix_operations.GuiFixOperationsTests.test_export_without_hardlinks_produces_readable_portable_zip) ... ok
+test_failed_export_copy_without_hardlinks_removes_partial_destination (tests.manager.test_guifix_operations.GuiFixOperationsTests.test_failed_export_copy_without_hardlinks_removes_partial_destination) ... ok
+test_failed_export_does_not_publish_partial_file (tests.manager.test_guifix_operations.GuiFixOperationsTests.test_failed_export_does_not_publish_partial_file) ... ok
+test_import_rejects_metadata_without_touching_userdata (tests.manager.test_guifix_operations.GuiFixOperationsTests.test_import_rejects_metadata_without_touching_userdata) ... ok
+test_live_summary_reads_each_line_once_and_waits_for_partial_lines (tests.manager.test_guifix_operations.GuiFixOperationsTests.test_live_summary_reads_each_line_once_and_waits_for_partial_lines) ... ok
+test_log_summary_uses_cumulative_counters_and_ignores_malformed_rates (tests.manager.test_guifix_operations.GuiFixOperationsTests.test_log_summary_uses_cumulative_counters_and_ignores_malformed_rates) ... ok
+test_lost_supervisor_stop_publishes_boot_evidence_and_prunes_finished_runs (tests.manager.test_guifix_operations.GuiFixOperationsTests.test_lost_supervisor_stop_publishes_boot_evidence_and_prunes_finished_runs) ... ok
+test_manual_backups_survive_automatic_retention (tests.manager.test_guifix_operations.GuiFixOperationsTests.test_manual_backups_survive_automatic_retention) ... ok
+test_manual_stop_keeps_flip_and_capture_boot_evidence (tests.manager.test_guifix_operations.GuiFixOperationsTests.test_manual_stop_keeps_flip_and_capture_boot_evidence) ... ok
+test_rate_without_flip_count_does_not_claim_boot (tests.manager.test_guifix_operations.GuiFixOperationsTests.test_rate_without_flip_count_does_not_claim_boot) ... ok
+test_restore_of_empty_snapshot_clears_later_saves_and_preserves_pre_restore_backup (tests.manager.test_guifix_operations.GuiFixOperationsTests.test_restore_of_empty_snapshot_clears_later_saves_and_preserves_pre_restore_backup) ... ok
+test_save_mutations_refuse_while_run_lock_is_held (tests.manager.test_guifix_operations.GuiFixOperationsTests.test_save_mutations_refuse_while_run_lock_is_held) ... ok
+test_save_roundtrip_preserves_nested_empty_directories (tests.manager.test_guifix_operations.GuiFixOperationsTests.test_save_roundtrip_preserves_nested_empty_directories) ... ok
+test_tool_cancellation_stops_process_and_releases_log (tests.manager.test_guifix_operations.GuiFixOperationsTests.test_tool_cancellation_stops_process_and_releases_log) ... ok
+test_cleanup_obeys_worker_lifetime_lock (tests.manager.test_guifix_recovery.JobRemovalTests.test_cleanup_obeys_worker_lifetime_lock) ... ok
+test_clear_retains_active_jobs_and_live_terminal_worker (tests.manager.test_guifix_recovery.JobRemovalTests.test_clear_retains_active_jobs_and_live_terminal_worker) ... ok
+test_job_command_arity_and_id_validation (tests.manager.test_guifix_recovery.JobRemovalTests.test_job_command_arity_and_id_validation) ... ok
+test_mixed_selection_is_atomic_and_rejects_running_or_queued (tests.manager.test_guifix_recovery.JobRemovalTests.test_mixed_selection_is_atomic_and_rejects_running_or_queued) ... ok
+test_multiremove_deletes_only_terminal_history_never_title (tests.manager.test_guifix_recovery.JobRemovalTests.test_multiremove_deletes_only_terminal_history_never_title) ... ok
+test_orphan_worker_is_failed_and_removable (tests.manager.test_guifix_recovery.JobRemovalTests.test_orphan_worker_is_failed_and_removable) ... ok
+test_adoption_replaces_failed_import_and_cleans_staging (tests.manager.test_guifix_recovery.RecoveryTests.test_adoption_replaces_failed_import_and_cleans_staging) ... ok
+test_different_iso_may_replace_only_disposable_incomplete_title (tests.manager.test_guifix_recovery.RecoveryTests.test_different_iso_may_replace_only_disposable_incomplete_title) ... ok
+test_failed_adoption_can_be_replaced_by_import_without_published_userdata (tests.manager.test_guifix_recovery.RecoveryTests.test_failed_adoption_can_be_replaced_by_import_without_published_userdata) ... ok
+test_failed_import_is_resumable_and_keeps_verified_extraction (tests.manager.test_guifix_recovery.RecoveryTests.test_failed_import_is_resumable_and_keeps_verified_extraction) ... ok
+test_foreground_run_without_job_is_visible_and_blocks_conflicts (tests.manager.test_guifix_recovery.RecoveryTests.test_foreground_run_without_job_is_visible_and_blocks_conflicts) ... ok
+test_legacy_incomplete_import_recovers_source_from_job (tests.manager.test_guifix_recovery.RecoveryTests.test_legacy_incomplete_import_recovers_source_from_job) ... ok
+test_replacement_refuses_userdata_builds_and_live_job (tests.manager.test_guifix_recovery.RecoveryTests.test_replacement_refuses_userdata_builds_and_live_job) ... ok
+test_resume_cli_replays_source_and_options (tests.manager.test_guifix_recovery.RecoveryTests.test_resume_cli_replays_source_and_options) ... ok
+test_conflicting_launcher_is_preserved (tests.manager.test_installer.InstallerTests.test_conflicting_launcher_is_preserved) ... skipped 'set ANYPS3_INSTALLER_WHEELS to run real offline installations'
+test_install_update_failure_and_development_isolation (tests.manager.test_installer.InstallerTests.test_install_update_failure_and_development_isolation) ... skipped 'set ANYPS3_INSTALLER_WHEELS to run real offline installations'
+test_missing_ref_does_not_publish (tests.manager.test_installer.InstallerTests.test_missing_ref_does_not_publish) ... skipped 'set ANYPS3_INSTALLER_WHEELS to run real offline installations'
+test_truncated_download_does_not_start_installing (tests.manager.test_installer.InstallerTests.test_truncated_download_does_not_start_installing) ... skipped 'set ANYPS3_INSTALLER_WHEELS to run real offline installations'
+test_cli_fetch_without_targets_is_format_only (tests.manager.test_keys.KeyTests.test_cli_fetch_without_targets_is_format_only) ... ok
+test_cli_validation_target_arguments_and_missing_arguments (tests.manager.test_keys.KeyTests.test_cli_validation_target_arguments_and_missing_arguments) ... ok
+test_fetch_network_or_hash_failure_preserves_previous_keys (tests.manager.test_keys.KeyTests.test_fetch_network_or_hash_failure_preserves_previous_keys) ... ok
+test_fetch_pinned_hashes_validation_and_provenance (tests.manager.test_keys.KeyTests.test_fetch_pinned_hashes_validation_and_provenance) ... ok
+test_fetch_selects_actual_self_revision (tests.manager.test_keys.KeyTests.test_fetch_selects_actual_self_revision) ... ok
+test_fetch_validation_failure_stores_neither_key (tests.manager.test_keys.KeyTests.test_fetch_validation_failure_stores_neither_key) ... ok
+test_format_exact_lengths_types_and_no_values_in_errors (tests.manager.test_keys.KeyTests.test_format_exact_lengths_types_and_no_values_in_errors) ... ok
+test_format_only_explicit_without_targets (tests.manager.test_keys.KeyTests.test_format_only_explicit_without_targets) ... ok
+test_invalid_json_errors_do_not_echo_paste_or_file_contents (tests.manager.test_keys.KeyTests.test_invalid_json_errors_do_not_echo_paste_or_file_contents) ... ok
+test_malformed_decrypted_metadata_rejected (tests.manager.test_keys.KeyTests.test_malformed_decrypted_metadata_rejected) ... ok
+test_missing_key_explains_purpose_format_and_sources (tests.manager.test_keys.KeyTests.test_missing_key_explains_purpose_format_and_sources) ... ok
+test_parser_rejects_ambiguous_app_revision (tests.manager.test_keys.KeyTests.test_parser_rejects_ambiguous_app_revision) ... ok
+test_parser_synthetic_arrays_and_multiple_app_revisions (tests.manager.test_keys.KeyTests.test_parser_synthetic_arrays_and_multiple_app_revisions) ... ok
+test_private_store_permissions_and_safe_cli_stdin (tests.manager.test_keys.KeyTests.test_private_store_permissions_and_safe_cli_stdin) ... ok
+test_private_store_refuses_symlink (tests.manager.test_keys.KeyTests.test_private_store_refuses_symlink) ... ok
+test_pup_valid_and_wrong_erk_riv_hmac (tests.manager.test_keys.KeyTests.test_pup_valid_and_wrong_erk_riv_hmac) ... ok
+test_redirect_refused (tests.manager.test_keys.KeyTests.test_redirect_refused) ... ok
+test_self_decrypted_structure_wrong_keys_and_revision (tests.manager.test_keys.KeyTests.test_self_decrypted_structure_wrong_keys_and_revision) ... ok
+test_set_file_validates_before_registration_and_keeps_reference (tests.manager.test_keys.KeyTests.test_set_file_validates_before_registration_and_keeps_reference) ... ok
+test_targets_from_iso_and_pup_override (tests.manager.test_keys.KeyTests.test_targets_from_iso_and_pup_override) ... ok
+test_adoption_missing_key_is_retryable_without_published_data (tests.manager.test_manager.ManagerTests.test_adoption_missing_key_is_retryable_without_published_data) ... ok
+test_adoption_publication_resumes_after_interrupted_rename (tests.manager.test_manager.ManagerTests.test_adoption_publication_resumes_after_interrupted_rename) ... ok
+test_adoption_wrong_app_key_does_not_publish_title (tests.manager.test_manager.ManagerTests.test_adoption_wrong_app_key_does_not_publish_title) ... ok
+test_audio_defaults_on_and_is_a_normal_gui_setting (tests.manager.test_manager.ManagerTests.test_audio_defaults_on_and_is_a_normal_gui_setting) ... ok
+test_audio_migrates_old_files_without_rewriting_them (tests.manager.test_manager.ManagerTests.test_audio_migrates_old_files_without_rewriting_them) ... ok
+test_audio_migration_rejects_invalid_legacy_values (tests.manager.test_manager.ManagerTests.test_audio_migration_rejects_invalid_legacy_values) ... ok
+test_audio_title_and_one_off_overrides_and_reset (tests.manager.test_manager.ManagerTests.test_audio_title_and_one_off_overrides_and_reset) ... ok
+test_build_and_import_tools_stay_silent_with_audio_enabled (tests.manager.test_manager.ManagerTests.test_build_and_import_tools_stay_silent_with_audio_enabled) ... ok
+test_cancel_stops_compiler_descendants (tests.manager.test_manager.ManagerTests.test_cancel_stops_compiler_descendants) ... ok
+test_capabilities_emit_actual_runtime_worker_default (tests.manager.test_manager.ManagerTests.test_capabilities_emit_actual_runtime_worker_default) ... ok
+test_detached_job_survives_client_exit_and_replays (tests.manager.test_manager.ManagerTests.test_detached_job_survives_client_exit_and_replays) ... ok
+test_detached_worker_builds_explicit_source_and_profile (tests.manager.test_manager.ManagerTests.test_detached_worker_builds_explicit_source_and_profile) ... ok
+test_disabled_play_and_tool_environments_silent_and_unavailable_switch_omitted (tests.manager.test_manager.ManagerTests.test_disabled_play_and_tool_environments_silent_and_unavailable_switch_omitted) ... ok
+test_game_rumble_setting_reaches_supported_runtime_only (tests.manager.test_manager.ManagerTests.test_game_rumble_setting_reaches_supported_runtime_only) ... ok
+test_iso_identification_and_partial_refusal (tests.manager.test_manager.ManagerTests.test_iso_identification_and_partial_refusal) ... ok
+test_launch_exception_terminates_and_reaps_child (tests.manager.test_manager.ManagerTests.test_launch_exception_terminates_and_reaps_child) ... ok
+test_locks_and_stale_pid_do_not_signal_other_processes (tests.manager.test_manager.ManagerTests.test_locks_and_stale_pid_do_not_signal_other_processes) ... ok
+test_missing_systemd_refuses_before_run_side_effects (tests.manager.test_manager.ManagerTests.test_missing_systemd_refuses_before_run_side_effects) ... ok
+test_resume_keeps_verified_extraction_and_userdata (tests.manager.test_manager.ManagerTests.test_resume_keeps_verified_extraction_and_userdata) ... ok
+test_run_lock_prevents_restore_and_title_removal (tests.manager.test_manager.ManagerTests.test_run_lock_prevents_restore_and_title_removal) ... ok
+test_same_iso_noop_and_key_reference_permissions (tests.manager.test_manager.ManagerTests.test_same_iso_noop_and_key_reference_permissions) ... ok
+test_save_roundtrip_and_zip_traversal_rejection (tests.manager.test_manager.ManagerTests.test_save_roundtrip_and_zip_traversal_rejection) ... ok
+test_scoped_import_build_and_run (tests.manager.test_manager.ManagerTests.test_scoped_import_build_and_run) ... ok
+test_settings_layers_validation_and_retired_lock (tests.manager.test_manager.ManagerTests.test_settings_layers_validation_and_retired_lock) ... ok
+test_stop_during_launch_prevents_child_start (tests.manager.test_manager.ManagerTests.test_stop_during_launch_prevents_child_start) ... ok
+test_supervisor_death_preserves_locks_until_child_stops (tests.manager.test_manager.ManagerTests.test_supervisor_death_preserves_locks_until_child_stops) ... ok
+test_title_removal_preserves_userdata_and_last_backup (tests.manager.test_manager.ManagerTests.test_title_removal_preserves_userdata_and_last_backup) ... ok
+test_usage_errors_are_versioned_json (tests.manager.test_manager.ManagerTests.test_usage_errors_are_versioned_json) ... ok
+test_userdata_unchanged_across_build_activate_prune_and_reimport (tests.manager.test_manager.ManagerTests.test_userdata_unchanged_across_build_activate_prune_and_reimport) ... ok
+test_verify_rejects_modified_game_bytes (tests.manager.test_manager.ManagerTests.test_verify_rejects_modified_game_bytes) ... ok
+test_extra_flags_are_applied_and_recorded (tests.manager.test_native_flags.NativeFlagsTests.test_extra_flags_are_applied_and_recorded) ... ok
+test_rumble_detection_requires_support_query (tests.manager.test_pads.PadDiagnosticsTests.test_rumble_detection_requires_support_query) ... ok
+test_sensor_capabilities_are_independent (tests.manager.test_pads.PadDiagnosticsTests.test_sensor_capabilities_are_independent) ... ok
+test_diagnostics_initialize_controller_subsystem_only (tests.manager.test_pads.PadLibraryTests.test_diagnostics_initialize_controller_subsystem_only) ... ok
+test_old_sdl_reports_required_version_before_initializing (tests.manager.test_pads.PadLibraryTests.test_old_sdl_reports_required_version_before_initializing) ... ok
+
+----------------------------------------------------------------------
+Ran 129 tests in 25.751s
+
+OK (skipped=4)

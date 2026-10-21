@@ -3,12 +3,20 @@ import sys
 import time
 
 args = sys.argv[1:]
+slow_settings = "--slow-settings" in args
+if slow_settings:
+    args.remove("--slow-settings")
+    if args[0] in ("settings", "doctor"):
+        time.sleep(.15)
 
 def emit(value):
     print(json.dumps({"schema": "anyps3.manager/1", "future_field": "ignored",
                       "uint64": 18446744073709551615, **value}), flush=True)
 
-if args[0] == "jobs" and args[1] == "follow":
+if args[:3] == ["jobs", "follow", "long"]:
+    emit(dict(event="stage", stage="waiting", index=0, count=1))
+    time.sleep(60)
+elif args[0] == "jobs" and args[1] == "follow":
     for value in (dict(event="stage", stage="compile", index=2, count=3),
                   dict(event="progress", stage="compile", done=1, total=2, unit="objects"),
                   dict(event="result", build="fixture")):

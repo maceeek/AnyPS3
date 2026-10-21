@@ -1,0 +1,14 @@
+test_cancel_during_bootstrap_records_request_without_terminalizing (tests.manager.test_guifix_jobs.JobLifetimeTests.test_cancel_during_bootstrap_records_request_without_terminalizing) ... ok
+test_dead_submitter_before_spawn_is_failed_and_removable (tests.manager.test_guifix_jobs.JobLifetimeTests.test_dead_submitter_before_spawn_is_failed_and_removable) ... ok
+test_history_cleanup_does_not_lock_unrelated_title_metadata (tests.manager.test_guifix_jobs.JobLifetimeTests.test_history_cleanup_does_not_lock_unrelated_title_metadata) ... ok
+test_killed_supervisor_keeps_live_tool_and_cancel_stops_descendants (tests.manager.test_guifix_jobs.JobLifetimeTests.test_killed_supervisor_keeps_live_tool_and_cancel_stops_descendants) ... ok
+test_orphan_run_cancellation_is_bound_to_original_run (tests.manager.test_guifix_jobs.JobLifetimeTests.test_orphan_run_cancellation_is_bound_to_original_run) ... ok
+test_scoped_orphan_tool_is_retained_and_cancelled (tests.manager.test_guifix_jobs.JobLifetimeTests.test_scoped_orphan_tool_is_retained_and_cancelled) ... ok
+test_submission_failure_is_terminal_removable_and_does_not_block_title (tests.manager.test_guifix_jobs.JobLifetimeTests.test_submission_failure_is_terminal_removable_and_does_not_block_title) ... ok
+test_unknown_inherited_child_keeps_history_and_cannot_claim_cancellation (tests.manager.test_guifix_jobs.JobLifetimeTests.test_unknown_inherited_child_keeps_history_and_cannot_claim_cancellation) ... ok
+test_worker_holds_lock_before_spawn_publication_and_python_worker_entry (tests.manager.test_guifix_jobs.JobLifetimeTests.test_worker_holds_lock_before_spawn_publication_and_python_worker_entry) ... ok
+
+----------------------------------------------------------------------
+Ran 9 tests in 0.440s
+
+OK

@@ -1,7 +1,9 @@
 """Save backups and portable exports. Restore never runs alongside the game."""
 
+import errno
 import io
 import json
+import os
 from pathlib import Path, PurePosixPath
 import shutil
 import tarfile
@@ -18,6 +20,16 @@ try:
     BACKUP_SUFFIX, WRITE_MODE = ".tar.zst", "w:zst"
 except ImportError:
     BACKUP_SUFFIX, WRITE_MODE = ".tar.gz", "w:gz"
+
+
+def checked_path(root, relative):
+    """Reject links in save paths, including ancestors outside the leaf tree."""
+    path = root
+    for part in Path(relative).parts:
+        path = path/part
+        if path.is_symlink():
+            raise ManagerError("unsafe-save", "Save paths cannot contain symbolic links.")
+    return path
 
 
 def save_root(lib, title):
@@ -58,11 +70,17 @@ def backup(lib, title, reason="manual", automatic=False):
     try:
         with tarfile.open(temporary, WRITE_MODE) as archive:
             for path in paths:
-                origin = root/"userdata"/path
+                origin = checked_path(root, "userdata/"+path)
                 if origin.exists():
                     if any(p.is_symlink() for p in [origin, *origin.rglob("*")]):
                         raise ManagerError("unsafe-save", "Save backups cannot contain symbolic links.")
                     archive.add(origin, arcname=path)
+                elif path != "hdd0/game/"+title:
+                    # Absence is an empty snapshot too: restoring it must clear
+                    # saves/trophies created after this backup.
+                    entry = tarfile.TarInfo(path)
+                    entry.type, entry.mode = tarfile.DIRTYPE, 0o700
+                    archive.addfile(entry)
         temporary.rename(target)
     finally:
         temporary.unlink(missing_ok=True)
@@ -118,6 +136,8 @@ def restore(lib, title, backup_id):
             backup(lib, title, reason="before-restore")
             replace = [name for name in allowed if (stage/name).exists()]
             for name in replace:
+                checked_path(root, "userdata/"+name)
+            for name in replace:
                 target = root/"userdata"/name
                 replace_directory(stage/name, target)
         return dict(restored=backup_id)
@@ -125,19 +145,43 @@ def restore(lib, title, backup_id):
 
 def export_save(lib, title, save, output):
     with lib.run_lock(title):
-        source = save_root(lib, title)/safe_id(save)
+        lib.title(title)
+        source = checked_path(lib.title_dir(title), "userdata/hdd0/home/00000001/savedata/"+safe_id(save))
         if not source.is_dir():
             raise ManagerError("missing-save", "Save not found.", 6)
         output = Path(output).expanduser().resolve()
         if output.exists() or output.is_relative_to(lib.title_dir(title)):
             raise ManagerError("export-path", "Export must be a new file outside this title.")
-        with zipfile.ZipFile(output, "x", zipfile.ZIP_DEFLATED) as archive:
-            archive.writestr("anyps3-save.json", json.dumps(dict(schema=EXPORT_SCHEMA, title=title, save=save)))
-            for path in sorted(source.rglob("*")):
-                if path.is_symlink():
-                    raise ManagerError("unsafe-save", "Export cannot contain symbolic links.")
-                if path.is_file():
-                    archive.write(path, "save/"+path.relative_to(source).as_posix())
+        fd, temporary = tempfile.mkstemp(prefix=".save-export-", dir=output.parent)
+        os.close(fd)
+        try:
+            with zipfile.ZipFile(temporary, "w", zipfile.ZIP_DEFLATED) as archive:
+                archive.writestr("anyps3-save.json", json.dumps(dict(schema=EXPORT_SCHEMA, title=title, save=save)))
+                for path in sorted(source.rglob("*")):
+                    if path.is_symlink():
+                        raise ManagerError("unsafe-save", "Export cannot contain symbolic links.")
+                    if path.is_file() or path.is_dir():
+                        archive.write(path, "save/"+path.relative_to(source).as_posix())
+            # Publish only a complete archive and never replace a raced-in file.
+            try:
+                os.link(temporary, output)
+            except OSError as exc:
+                if exc.errno not in (errno.EOPNOTSUPP, errno.ENOTSUP, errno.EPERM, errno.EXDEV):
+                    raise
+                # FAT/exFAT destinations lack hardlinks. Exclusive creation
+                # still prevents overwrite; the copy is visible until complete.
+                created = False
+                try:
+                    with output.open("xb") as destination:
+                        created = True
+                        with Path(temporary).open("rb") as source_archive:
+                            shutil.copyfileobj(source_archive, destination)
+                except BaseException:
+                    if created:
+                        output.unlink(missing_ok=True)
+                    raise
+        finally:
+            Path(temporary).unlink(missing_ok=True)
         return dict(path=str(output))
 
 
@@ -149,9 +193,12 @@ def import_save(lib, title, path):
                 metadata = json.loads(archive.read("anyps3-save.json"))
             except (KeyError, ValueError) as exc:
                 raise ManagerError("unsupported-save", "Only AnyPS3 save exports are accepted.") from exc
+            if not isinstance(metadata, dict):
+                raise ManagerError("unsupported-save", "Save export metadata must be a JSON object.")
             if metadata.get("schema") != EXPORT_SCHEMA or metadata.get("title") != title:
                 raise ManagerError("wrong-save", "Save export schema or title does not match.")
-            target = save_root(lib, title)/safe_id(metadata["save"])
+            save = safe_id(metadata.get("save"))
+            target = checked_path(root, "userdata/hdd0/home/00000001/savedata/"+save)
             stage = Path(temporary)/"save"
             stage.mkdir()
             total, names = 0, set()
@@ -159,7 +206,7 @@ def import_save(lib, title, path):
                 name = safe_member(member.filename)
                 if member.filename == "anyps3-save.json":
                     continue
-                if name.parts[0] != "save" or len(name.parts) < 2 or member.filename in names:
+                if not name.parts or name.parts[0] != "save" or len(name.parts) < 2 or member.filename in names:
                     raise ManagerError("unsafe-archive", "Unexpected or duplicate export member.")
                 names.add(member.filename)
                 if (member.external_attr >> 16) & 0o170000 == 0o120000:

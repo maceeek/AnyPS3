@@ -23,7 +23,7 @@ It does not require sudo or change system Python. **Rerun the same installation 
 then close and reopen the GUI. A failed download or dependency installation keeps the previous version active.
 Previous app versions stay on disk so an update does not remove files used by running jobs.
 
-1. Choose **Import ISO**, select your game disc image and provide your firmware and key files in the wizard.
+1. Choose **Import ISO**, select your game disc image, then use the wizard's explained [key setup](docs/manager/README.md#key-setup) to choose JSON files, paste hex values, or explicitly download published keys from RPCS3.
    If you already have this project's `local/ratchet` setup, **Adopt Ratchet** copies it into the library.
 2. Wait for import and compilation in **Jobs**. Closing the GUI leaves these jobs running.
 3. Select the title and choose **Play**. Use **Rebuild** after an app update to build with the new runtime;

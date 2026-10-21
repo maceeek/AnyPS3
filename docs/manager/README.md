@@ -79,6 +79,81 @@ Use **Import ISO**, or adopt an existing Ratchet setup with **Adopt Ratchet**.
 Adoption copies the disc, executable, firmware and HDD; it does not register
 diagnostic virtual-pad builds or modify the source directory.
 
+### Key setup
+
+The **PUP key** decrypts the firmware update `PS3UPDAT.PUP`. The **APP key**
+decrypts the game's `EBOOT.BIN` SELF executable. These are PS3 system keys,
+the same for every user, not per-game. APP keys select the revision recorded in
+the SELF header; Ratchet uses type **4**, revision **1**.
+Obtain them from your own console or published sources such as RPCS3's
+`rpcs3/Crypto/key_vault.{h,cpp}`. AnyPS3 includes no key bytes.
+
+The wizard's **Firmware and keys** page explains both files. Choose a JSON file,
+or open **JSON format / paste hex values…** to enter the fields directly.
+Pasted values are sent to the manager over stdin, never command arguments;
+the manager writes JSON into the library's `private-keys/` directory (0700),
+with files restricted to the current user (0600). User-selected JSON files
+remain referenced at their original path; keep them outside the repository,
+restrict their permissions, and register them again if they change.
+
+The exact required JSON shapes are below. Angle-bracket text denotes a placeholder,
+not a key. Hex strings accept upper/lowercase digits, without `0x` or spaces.
+
+PUP key file:
+
+```json
+{"erk":"<64 hex digits>","riv":"<32 hex digits>","pup_hmac":"<128 hex digits>"}
+```
+
+APP key file (revision must match the selected SELF):
+
+```json
+{"type":4,"revision":1,"erk":"<64 hex digits>","riv":"<32 hex digits>"}
+```
+
+Choose any external firmware PUP **before** entering or downloading keys.
+The manager validates the PUP's structure and entry HMACs, then decrypts and checks
+an encrypted `dev_flash` package using ERK/RIV. APP validation decrypts the SELF
+metadata, checks padding, revision/type and section/key-table structure. These are
+key setup checks, not ECDSA signature verification or full game import verification.
+The selected ISO supplies its EBOOT and disc PUP; an external PUP overrides the disc PUP.
+Without a target, only the JSON format and hex lengths are checked, and the result
+explicitly says **Format only**. File selections are validated on **Finish**;
+paste and download validate immediately and show the result on the key page.
+Wrong keys give an actionable `invalid-key` error; no entry is saved for a failed check.
+
+CLI equivalents (select the same library as your GUI):
+
+```bash
+anyps3-manager keys set pup /private/firmware-keys.json --pup /path/PS3UPDAT.PUP
+anyps3-manager keys set app /private/app-key.json --iso /path/game.iso
+# Or use --self /path/EBOOT.BIN instead of --iso.
+# Pasted JSON may also be read privately from stdin with keys set app|pup --stdin.
+```
+
+**Download from RPCS3…** is optional and runs only after a confirmation naming the
+files, source and your responsibility for complying with local law. It downloads
+only the public `key_vault.h` and `key_vault.cpp` source files from
+`https://raw.githubusercontent.com/RPCS3/rpcs3/ffba2bf09ef3980638f9327b25240d81414034ab/rpcs3/Crypto/`.
+Both SHA-256 digests must match constants computed from that exact local reference
+revision. Redirects and unpinned fallback URLs are refused. Keys are parsed locally;
+downloaded source is not retained. The APP revision is read from the selected EBOOT;
+without an EBOOT the default is Ratchet revision 1, with format-only validation.
+Both keys must pass before either is saved. Network, hash, parser or validation
+errors preserve existing keys. Private JSON records the pinned source URL; the key
+registry also records validation scope. CLI invocation itself explicitly opts in:
+
+```bash
+anyps3-manager keys fetch-rpcs3 --iso /path/game.iso --pup /path/PS3UPDAT.PUP
+```
+
+`missing-key` explains the key's purpose, exact format, sources and next command;
+`key-changed` asks you to register the file again. `key-target` means select a
+complete readable ISO/PUP/SELF. `key-dependency` means install the `[self]` extra.
+`key-download` means check HTTPS connectivity and retry; `key-source-hash` or
+`key-source-format` means retry or report the source mismatch. Never bypass the
+hash check or paste key values into bug reports or logs.
+
 Equivalent CLI:
 
 ```bash
@@ -107,6 +182,53 @@ ID and process start time.
 Detached workers use the selected `--source` checkout for profiles and source
 snapshots. Tool/game processes inherit their operation locks; a killed supervisor
 cannot make a still-running game available for restore, prune or another launch.
+
+## Recovering imports and cleaning job history
+
+An unfinished title shows **Resume import** and **Remove incomplete title**.
+Resume repeats its recorded source/options and reuses verified extraction. For
+older records, the manager recovers the source from import-job history when
+possible; otherwise **Choose ISO to resume…** opens the wizard. Adoption is also
+resumed from its recorded source, including interrupted publication journals.
+
+A new import or adoption may replace an incomplete entry only when it has **no
+userdata, no builds and no active title job/game**. Complete titles still require
+explicit disc replacement; adoption refuses to overwrite them. If an incomplete
+entry already has userdata, resume its original operation, or remove its entry
+while preserving userdata and then import the ISO. Adoption never overwrites
+retained userdata. Title removal preserves saves and backups by default.
+
+```bash
+anyps3-manager titles resume BCES00511 --events
+anyps3-manager titles remove BCES00511
+anyps3-manager jobs remove JOB_ID [OTHER_JOB_ID ...]
+anyps3-manager jobs clear
+```
+
+Select several completed, failed or cancelled jobs and choose **Remove selected**,
+or use **Clear finished**. Removal affects only job history and logs. An explicit
+selection containing any active job is rejected without removing the others.
+Active jobs offer **Cancel**, including a surviving recorded tool after supervisor
+failure. Inherited lifecycle locks protect both startup and tool/game execution;
+an unidentified surviving child keeps its job history and produces an actionable
+`orphan-active` error rather than pretending cancellation succeeded.
+
+After import/adoption, **Build** is the next step. Disabled Play explains that a
+native build is required; active operations show progress in Jobs. Title controls
+refresh after success, errors, cancellation and foreground-game exit. Switching
+titles clears selected rows immediately so delayed replies cannot act on another
+title. Changing the active build reloads setting availability.
+
+Run records update observed flips, capture counts and FPS while running, and retain them after Stop,
+including recovery after supervisor loss. `verified-boot` requires observed flips;
+it does not establish an original menu, gameplay or physical-controller input.
+Stopped runs obey the completed-run retention setting. Save exports preserve empty
+directories and reject symlinks. ZIP publication uses an atomic hard link when
+supported; FAT/exFAT-style filesystems use exclusive copying with cleanup on
+failure (the destination is visible during that fallback copy).
+
+The [GUIFIX report and screenshots](evidence/guifix/README.md) record the defects,
+regressions, original-game acceptance and remaining visual-platform limits.
 
 ## Builds and saves
 
@@ -230,6 +352,8 @@ rejection, immutable-byte verification and the Qt protocol/import boundary.
 Focused regressions also cover supervisor death, cancellation during launch,
 alternate source snapshots, runtime helper capabilities, adoption recovery, and
 firmware-job completion in the import wizard.
+Key setup tests generate synthetic encrypted headers and mock all downloads;
+see [GUIKEYS verification and limits](evidence/guikeys.md).
 `tests.gui.preview` also exercises the real CLI and captures a synthetic title
 screen. A missing systemd user manager skips only the scoped integration test.
 

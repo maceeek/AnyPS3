@@ -12,8 +12,9 @@ import subprocess
 import tempfile
 import time
 
-from .processes import execute
+from .processes import alive, execute, identity, scope_info
 from .capabilities import environment_reads
+from .keys import key_path, set_key, guidance, targets
 from .settings import FIELDS, effective
 from .storage import (ManagerError, atomic_json, identifier, lock, now, read_json,
                       readonly, remove_tree, safe_id, sha256, tree_hashes)
@@ -68,26 +69,6 @@ def preflight(lib, iso):
                   compatibility="Compatibility is determined from the decrypted executable hash; unknown titles are expected to stop.")
     result["space_ok"] = free >= result["estimated_required_bytes"]
     return result
-
-
-def key_path(lib, kind):
-    record = read_json(lib.root/"keys.json", {}).get(kind)
-    if not record or not Path(record["path"]).is_file():
-        raise ManagerError("missing-key", f"Set the user-supplied {kind} key file first.", 6)
-    if sha256(record["path"]) != record["sha256"]:
-        raise ManagerError("key-changed", f"The {kind} key file changed; register it again.", 6)
-    return record["path"]
-
-
-def set_key(lib, kind, path):
-    path = Path(path).expanduser().resolve()
-    if not path.is_file():
-        raise ManagerError("missing-input", f"Key file not found: {path}", 6)
-    with lib.metadata():
-        keys = read_json(lib.root/"keys.json", {})
-        keys[kind] = dict(path=str(path), sha256=sha256(path))
-        atomic_json(lib.root/"keys.json", keys)
-    return dict(kind=kind, path=str(path), sha256=keys[kind]["sha256"])
 
 
 def profile_for(lib, elf, title):
@@ -162,6 +143,60 @@ def build_records(lib, title):
             for p in sorted((lib.title_dir(title)/"builds").glob("*/record.json"), reverse=True)]
 
 
+def title_jobs(lib, title, current=None, exclude=None):
+    from .jobs import records
+    current = current or lib.title(title)
+    result = []
+    for job in records(lib):
+        args = job.get("arguments", {})
+        associated = (job.get("title") == title or args.get("title") == title or args.get("replace_disc") == title
+                      or (args.get("iso") and args["iso"] == current.get("iso_path"))
+                      or (args.get("path") and args["path"] == current.get("adopted_from")))
+        if associated and job.get("id") != exclude and job["state"] not in ("succeeded", "failed", "cancelled"):
+            result.append(job)
+    return result
+
+
+def recovery_for(lib, current):
+    if current.get("status") != "incomplete":
+        return None
+    if current.get("recovery"):
+        return current["recovery"]
+    if current.get("adopted_from"):
+        return dict(operation="adopt", arguments=dict(path=current["adopted_from"]))
+    if current.get("iso_path"):
+        return dict(operation="import", arguments=dict(iso=current["iso_path"], no_build=False))
+    # Old imports omitted iso_path until commit. Recover their selected source
+    # from the detached job's arguments, after checking its disc identity.
+    from .jobs import records
+    for job in records(lib):
+        args = job.get("arguments", {})
+        if job.get("operation") != "import" or not args.get("iso"):
+            continue
+        try:
+            if disc_identity(args["iso"])["id"] == current["id"]:
+                return dict(operation="import", arguments=args)
+        except (ManagerError, OSError):
+            continue
+    return None
+
+
+def clear_unfinished(lib, root, current, job_id):
+    """Reset only disposable failed publication, while title/run locks are held."""
+    if current.get("status") != "incomplete":
+        raise ManagerError("already-exists", "A complete title already exists; use Import ISO with --replace-disc to change its disc.")
+    if (root/"userdata").exists() or (root/"userdata").is_symlink():
+        raise ManagerError("retained-userdata", "Unfinished title has userdata; resume its original operation or remove it while keeping userdata.")
+    if (root/"builds").is_symlink() or any((root/"builds").glob("*")) or current.get("active_build"):
+        raise ManagerError("retained-builds", "Unfinished title has builds; resume its original operation instead.")
+    if title_jobs(lib, root.name, current, exclude=job_id):
+        raise ManagerError("title-busy", "A job is active for this title; wait or cancel it first.", 4)
+    for path in root.iterdir():
+        if path.name in ("title.json", "backups", "settings.json"):
+            continue
+        remove_tree(path) if path.is_dir() or path.is_symlink() else path.unlink()
+
+
 def title_details(lib, title):
     result = lib.title(title)
     root = lib.title_dir(title)
@@ -185,6 +220,29 @@ def title_details(lib, title):
             reasons.append("Build settings changed")
     result.update(stale=bool(reasons), staleness_reasons=reasons,
                   icon=str(root/"disc/PS3_GAME/ICON0.PNG"), background=str(root/"disc/PS3_GAME/PIC1.PNG"))
+    active_jobs = title_jobs(lib, title, result)
+    busy = bool(active_jobs)
+    running = False
+    for path in (root/"runs").glob("*/run.json"):
+        run = read_json(path)
+        if run.get("state") == "running":
+            live = any(alive(run.get(key)) for key in ("manager_process", "program_process", "launcher_process"))
+            if not live and run.get("scope"):
+                live = bool(scope_info(run["scope"]).get("pids"))
+            running |= live
+    busy |= running
+    try:
+        with lib.title_lock(title), lib.run_lock(title):
+            pass
+    except ManagerError as exc:
+        if exc.code != "lock-busy":
+            raise
+        busy = True
+    recovery = recovery_for(lib, result)
+    result.update(busy=busy, running=running,
+                  busy_jobs=[{key: j.get(key) for key in ("id", "operation", "state", "stage")} for j in active_jobs], recovery=recovery,
+                  resume_available=result.get("status") == "incomplete" and not busy and bool(recovery),
+                  next_action="resume" if result.get("status") == "incomplete" else "play" if active else "build")
     return result
 
 
@@ -232,7 +290,7 @@ def prune(lib, title, keep):
 class Pipeline:
     def __init__(self, lib, tools, job, unscoped=False):
         self.lib, self.tools, self.job, self.unscoped = lib, tools, job, unscoped
-        self.lock_fds = ()
+        self.lock_fds = (job.lock_fd,) if hasattr(job, "lock_fd") else ()
 
     @contextmanager
     def locked(self, *contexts):
@@ -252,9 +310,23 @@ class Pipeline:
         memory = settings["build.compile_memory_max" if name == "compile" else "build.translate_memory_max"]
         env = self.tools.environment(source)
         env["ANYPS3_OBJECT_CACHE"] = str(self.lib.root/"object-cache")
-        return execute([*self.tools.command(name), *map(str, arguments)], log, env=env,
-                       unit=f"anyps3-{self.job.id}-{name}-{identifier()[-8:]}", memory=memory, cpus=settings["build.cpus"],
-                       unscoped=self.unscoped, progress=progress, lock_fds=self.lock_fds)
+        unit = f"anyps3-{self.job.id}-{name}-{identifier()[-8:]}"
+        self.job.update(tool_scope=None if self.unscoped else unit, tool_process=None)
+        recorded = False
+
+        def observe(process, observed):
+            nonlocal recorded
+            if not recorded:
+                self.job.update(tool_process=identity(process.pid))
+                recorded = True
+            if progress:
+                progress(process, observed)
+
+        result = execute([*self.tools.command(name), *map(str, arguments)], log, env=env,
+                         unit=unit, memory=memory, cpus=settings["build.cpus"],
+                         unscoped=self.unscoped, progress=observe, lock_fds=self.lock_fds)
+        self.job.update(tool_scope=None, tool_process=None)
+        return result
 
     def firmware(self, path):
         path = Path(path).resolve()
@@ -296,6 +368,7 @@ class Pipeline:
         info = preflight(self.lib, iso)
         digest = sha256(iso)
         title = info["id"]
+        self.job.update(title=title)
         if replace_disc and replace_disc != title:
             raise ManagerError("wrong-title", "--replace-disc must match the ISO title ID.", 2)
         with self.locked(self.lib.title_lock(title), self.lib.run_lock(title)):
@@ -303,6 +376,9 @@ class Pipeline:
             if (root/"import-transaction.json").exists():
                 self.commit_import(root)
             previous = read_json(root/"title.json", {})
+            if previous.get("status") == "incomplete" and (previous.get("iso_sha256") != digest or previous.get("adopted_from")):
+                clear_unfinished(self.lib, root, previous, self.job.id)
+                previous = {}
             if previous.get("iso_sha256") == digest and previous.get("status") != "incomplete":
                 return dict(title=title, already_imported=True)
             if previous and previous.get("iso_sha256") != digest and not replace_disc:
@@ -311,7 +387,9 @@ class Pipeline:
                 raise ManagerError("disk-space", "Insufficient free space for extraction and build.", 6, **info)
             if not previous:
                 self.lib.register(dict(id=title, title=info["title"], version=info["version"], status="incomplete",
-                                       iso_sha256=digest, active_build=None, pinned_builds=[], play_seconds=0))
+                                       iso_sha256=digest, iso_path=str(iso), active_build=None, pinned_builds=[], play_seconds=0,
+                                       recovery=dict(operation="import", arguments=dict(iso=str(iso), no_build=no_build,
+                                                     replace_disc=replace_disc, firmware=firmware))))
             stage = root/(".import-"+digest[:16])
             stage.mkdir(parents=True, exist_ok=True)
             settings = effective(self.lib, title)
@@ -491,19 +569,20 @@ class Pipeline:
         if title != "BCES00511":
             raise ManagerError("wrong-title", "adopt-ratchet requires BCES00511.")
         root = self.lib.title_dir(title)
-        with self.lib.title_lock(title), self.lib.run_lock(title):
+        self.job.update(title=title)
+        with self.locked(self.lib.title_lock(title), self.lib.run_lock(title)):
             if (root/"adopt-transaction.json").exists():
                 return self.commit_adoption(root)
             previous = read_json(root/"title.json", {})
-            if previous and (previous.get("status") != "incomplete" or previous.get("adopted_from") != str(source)):
-                raise ManagerError("already-exists", "Title already exists; adoption never overwrites it.")
+            if previous and previous.get("status") != "incomplete":
+                raise ManagerError("already-exists", "A complete title already exists; adoption never overwrites it.")
             if (root/"userdata").exists():
                 raise ManagerError("retained-userdata", "This title has retained userdata. Adoption never overwrites it; import the disc instead.")
             self.stage("verify-source", 1, 3)
             # Validate all prerequisites before publishing any title directory.
             for kind, filename in (("app", "app-key.json"), ("pup", "firmware-keys.json")):
                 if not (source/filename).is_file():
-                    raise ManagerError("missing-key", f"Key file not found: {source/filename}", 6)
+                    raise ManagerError("missing-key", f"Key file not found: {source/filename}. {guidance(kind)}", 6)
             username = source/"hdd0/home/00000001/localusername"
             if not username.is_file() or not 1 <= username.stat().st_size <= 63:
                 raise ManagerError("invalid-user", "Source localusername must contain 1–63 bytes.")
@@ -521,8 +600,12 @@ class Pipeline:
                 disc_manifest_sha256=sha256(disc/"anyps3-extraction.json"),
                 compatibility=profile.get("status", "Hash matched; compatibility is not established."),
                 adopted_from=str(source), adopted_at=now())
-            set_key(self.lib, "app", source/"app-key.json")
-            set_key(self.lib, "pup", source/"firmware-keys.json")
+            pup = disc/"PS3_UPDATE/PS3UPDAT.PUP"
+            selected = targets(self_path=disc/"PS3_GAME/USRDIR/EBOOT.BIN", pup=pup if pup.is_file() else None)
+            set_key(self.lib, "app", source/"app-key.json", selected=selected)
+            set_key(self.lib, "pup", source/"firmware-keys.json", selected=selected)
+            if previous:
+                clear_unfinished(self.lib, root, previous, self.job.id)
             self.lib.register(record)
             self.stage("copy", 2, 3)
             stage = root/".adopt-staging"

@@ -1,0 +1,118 @@
+{
+  "original_game_sha256": "6debdca0f181f35d98ebe23faabe2531b697c558b4e3384b06630173400674c1",
+  "elf_sha256": "ad8405fb84a81c9e1ff5ea4cd0f9b72235bb2f69e1ddc5dc4875cfb49ec94e79",
+  "translated_instructions": 2975207,
+  "trap_count": 14,
+  "native_modules": [
+    {
+      "ids": [
+        0
+      ],
+      "name": "libnet",
+      "start": 537069156,
+      "resident": false
+    },
+    {
+      "ids": [
+        3
+      ],
+      "name": "libssl",
+      "start": 0,
+      "resident": false
+    },
+    {
+      "ids": [
+        1,
+        2,
+        4
+      ],
+      "name": "libhttp",
+      "start": 0,
+      "resident": false
+    },
+    {
+      "ids": [
+        21
+      ],
+      "name": "libsysutil",
+      "start": 538116356,
+      "resident": false
+    },
+    {
+      "ids": [
+        50
+      ],
+      "name": "libsysutil_userinfo",
+      "start": 538247384,
+      "resident": false
+    },
+    {
+      "ids": [
+        34
+      ],
+      "name": "libmic",
+      "start": 538378812,
+      "resident": false
+    },
+    {
+      "ids": [
+        14
+      ],
+      "name": "libfs",
+      "start": 538510480,
+      "resident": false
+    },
+    {
+      "ids": [
+        20
+      ],
+      "name": "libnetctl",
+      "start": 0,
+      "resident": false
+    },
+    {
+      "ids": [
+        22
+      ],
+      "name": "libsysutil_np",
+      "start": 0,
+      "resident": false
+    },
+    {
+      "ids": [
+        9
+      ],
+      "name": "librtc",
+      "start": 0,
+      "resident": false
+    },
+    {
+      "ids": [
+        61493
+      ],
+      "name": "libsysutil_np_trophy",
+      "start": 0,
+      "resident": false
+    },
+    {
+      "ids": [],
+      "name": "libsre",
+      "start": 0,
+      "resident": true
+    },
+    {
+      "ids": [],
+      "name": "libgcm_sys",
+      "start": 539559576,
+      "resident": true
+    },
+    {
+      "ids": [
+        23
+      ],
+      "name": "libio",
+      "start": 539689776,
+      "resident": false
+    }
+  ]
+}

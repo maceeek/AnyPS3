@@ -10,7 +10,7 @@ import sys
 import time
 
 from . import SCHEMA
-from . import jobs, pipeline, runs, saves, settings
+from . import jobs, keys as key_setup, pipeline, runs, saves, settings
 from .processes import scope_available
 from .storage import Library, ManagerError, atomic_json, read_json, remove_tree, safe_id
 
@@ -33,9 +33,13 @@ def parser():
     for name in ("init", "doctor"):
         commands.add_parser(name)
     keys = commands.add_parser("keys")
-    keys.add_argument("action", choices=["set"])
-    keys.add_argument("kind", choices=["app", "pup"])
-    keys.add_argument("path")
+    keys.add_argument("action", choices=["set", "fetch-rpcs3"])
+    keys.add_argument("kind", choices=["app", "pup"], nargs="?")
+    keys.add_argument("path", nargs="?")
+    keys.add_argument("--stdin", action="store_true", help="Read pasted key JSON from stdin; store privately (never pass key values as arguments)")
+    keys.add_argument("--iso", help="Validate against EBOOT.BIN and firmware in this ISO")
+    keys.add_argument("--pup", help="Validate against this PUP (overrides ISO firmware)")
+    keys.add_argument("--self", dest="self_path", help="Validate against this EBOOT.BIN SELF")
     firmware = commands.add_parser("firmware")
     firmware.add_argument("action", choices=["list", "add", "add-from-disc"])
     firmware.add_argument("value", nargs="?")
@@ -47,7 +51,7 @@ def parser():
     scan = commands.add_parser("inspect-iso")
     scan.add_argument("iso")
     titles = commands.add_parser("titles")
-    titles.add_argument("action", choices=["list", "show", "remove"], nargs="?", default="list")
+    titles.add_argument("action", choices=["list", "show", "remove", "resume"], nargs="?", default="list")
     titles.add_argument("title", nargs="?")
     titles.add_argument("--delete-userdata", action="store_true")
     titles.add_argument("--no-backup", action="store_true")
@@ -82,13 +86,15 @@ def parser():
     group.add_argument("--title")
     group.add_argument("--global", dest="global_scope", action="store_true")
     job = commands.add_parser("jobs")
-    job.add_argument("action", choices=["list", "show", "follow", "cancel"])
-    job.add_argument("id", nargs="?")
+    job.add_argument("action", choices=["list", "show", "follow", "cancel", "remove", "clear"])
+    job.add_argument("ids", nargs="*")
     pads = commands.add_parser("pads")
     pads.add_argument("action", choices=["list", "monitor", "rumble-test"])
     pads.add_argument("pad", nargs="?")
     commands.add_parser("adopt-ratchet").add_argument("path")
-    commands.add_parser("_worker").add_argument("id")
+    worker = commands.add_parser("_worker")
+    worker.add_argument("id")
+    worker.add_argument("--lock-fd", type=int)
     return root
 
 
@@ -158,7 +164,7 @@ def dispatch(args, lib):
     if cmd == "init":
         return lib.init()
     if cmd == "_worker":
-        return jobs.work(lib, args.id)
+        return jobs.work(lib, args.id, args.lock_fd)
     if not (lib.root/"library.json").exists():
         lib.init()
     if cmd == "doctor":
@@ -174,7 +180,23 @@ def dispatch(args, lib):
                           for kind, record in checks["keys"].items()}
         return dict(checks=checks, library=str(lib.root), audio_enabled=settings.effective(lib)["audio.enabled"])
     if cmd == "keys":
-        return pipeline.set_key(lib, args.kind, args.path)
+        if args.action == "fetch-rpcs3" and (args.kind or args.path or args.stdin):
+            raise ManagerError("usage", "keys fetch-rpcs3 accepts only --iso, --pup and --self targets.", 2)
+        if args.action == "set" and (not args.kind or bool(args.path) == bool(args.stdin)):
+            raise ManagerError("usage", "Use keys set app|pup /path/to/key.json or --stdin. " + key_setup.guidance(args.kind or "pup"), 2)
+        selected = key_setup.targets(iso=args.iso, pup=args.pup, self_path=args.self_path)
+        if args.action == "fetch-rpcs3":
+            return key_setup.fetch_rpcs3(lib, selected)
+        if args.stdin:
+            try:
+                data = sys.stdin.read(16385)
+                if len(data) > 16384:
+                    raise ValueError()
+                spec = json.loads(data)
+            except (ValueError, UnicodeError):
+                raise key_setup.invalid(args.kind, "Invalid pasted JSON; enter the required hex fields again.") from None
+            return key_setup.enter_key(lib, args.kind, spec, selected)
+        return pipeline.set_key(lib, args.kind, args.path, selected=selected)
     if cmd == "inspect-iso":
         return pipeline.preflight(lib, args.iso)
     if cmd == "firmware":
@@ -196,8 +218,18 @@ def dispatch(args, lib):
             raise ManagerError("usage", "Specify a title ID.", 2)
         if args.action == "show":
             return dict(title=pipeline.title_details(lib, args.title))
+        if args.action == "resume":
+            detail = pipeline.title_details(lib, args.title)
+            if detail["busy"]:
+                raise ManagerError("title-busy", "A job or game is active for this title; wait or cancel it first.", 4)
+            recovery = detail.get("recovery")
+            if detail["status"] != "incomplete" or not recovery:
+                raise ManagerError("no-recovery", "Choose the original ISO in Import ISO, or repeat Adopt Ratchet with its source directory.", 6)
+            return jobs.start(lib, recovery["operation"], recovery["arguments"], args.toolchain, args.unscoped)
         with lib.title_lock(args.title), lib.run_lock(args.title):
             lib.title(args.title)
+            if pipeline.title_jobs(lib, args.title):
+                raise ManagerError("title-busy", "A job is active for this title; wait or cancel it before removal.", 4)
             root = lib.title_dir(args.title)
             if args.delete_userdata and not args.no_backup:
                 saves.backup(lib, args.title, reason="before-remove")
@@ -272,10 +304,17 @@ def dispatch(args, lib):
         return settings.set_value(lib, key, value, args.title, reset=args.action == "reset")
     if cmd == "jobs":
         if args.action == "list":
-            return dict(jobs=[jobs.Job(lib, p.parent.name).record() for p in sorted((lib.root/"jobs").glob("*/job.json"), reverse=True)])
-        if not args.id:
+            require_values(args.ids, 0)
+            return dict(jobs=jobs.records(lib))
+        if args.action == "clear":
+            require_values(args.ids, 0)
+            return jobs.remove(lib)
+        if not args.ids:
             raise ManagerError("usage", "Specify a job ID.", 2)
-        job = jobs.Job(lib, args.id)
+        if args.action == "remove":
+            return jobs.remove(lib, args.ids)
+        require_values(args.ids, 1)
+        job = jobs.Job(lib, args.ids[0])
         if args.action == "show":
             return dict(job=job.record(), log=str(job.path/"log.txt"))
         if args.action == "cancel":

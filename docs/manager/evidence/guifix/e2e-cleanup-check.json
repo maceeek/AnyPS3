@@ -1,0 +1,10 @@
+{
+  "source_hdd_unchanged": true,
+  "source_elf_unchanged": true,
+  "source_disc_manifest_unchanged": true,
+  "source_firmware_manifest_unchanged": true,
+  "no_game_process": true,
+  "no_game_scope": true,
+  "jobs_terminal": true,
+  "temporary_library_removed": true
+}

@@ -1,0 +1,4 @@
+{"schema": "anyps3.manager/1", "event": "stage", "job": "20261021T153528208030Z-f28f0ce4", "time": "2026-10-21T15:35:28.254954+00:00", "stage": "verify-source", "index": 1, "count": 3}
+{"schema": "anyps3.manager/1", "event": "stage", "job": "20261021T153528208030Z-f28f0ce4", "time": "2026-10-21T15:35:39.866206+00:00", "stage": "copy", "index": 2, "count": 3}
+{"schema": "anyps3.manager/1", "event": "stage", "job": "20261021T153528208030Z-f28f0ce4", "time": "2026-10-21T15:36:16.804470+00:00", "stage": "complete", "index": 3, "count": 3}
+{"schema": "anyps3.manager/1", "event": "result", "job": "20261021T153528208030Z-f28f0ce4", "time": "2026-10-21T15:36:16.815064+00:00", "title": "BCES00511", "status": "imported", "next": "build"}

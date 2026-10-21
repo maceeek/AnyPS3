@@ -70,7 +70,7 @@ class ManagerTests(unittest.TestCase):
         self.iso = self.root/"disc.iso"
         self.iso.write_bytes(iso_fixture())
         self.key = self.root/"key.json"
-        self.key.write_text("{}")
+        atomic_json(self.key, dict(type=4, revision=1, erk=bytes(range(32)).hex(), riv=bytes(range(16)).hex()))
         pipeline.set_key(self.lib, "app", self.key)
         firmware = self.lib.root/"firmware/test"
         (firmware/"dev_flash/sys/external").mkdir(parents=True)
@@ -576,6 +576,18 @@ class ManagerTests(unittest.TestCase):
         root = self.import_title()
         source = self.root/"old-ratchet"
         shutil.copytree(root/"disc", source/"game-complete")
+        (source/"game-complete").chmod(0o700)
+        from tests.test_ingest import SelfTests
+        encrypted, _, _ = SelfTests.fixture()
+        eboot = source/"game-complete/PS3_GAME/USRDIR/EBOOT.BIN"
+        eboot.chmod(0o600)
+        eboot.write_bytes(encrypted)
+        manifest_path = source/"game-complete/anyps3-extraction.json"
+        manifest = read_json(manifest_path)
+        for entry in manifest["extracted"]:
+            if entry["path"] == "PS3_GAME/USRDIR/EBOOT.BIN":
+                entry.update(size=len(encrypted), sha256=hashlib.sha256(encrypted).hexdigest())
+        atomic_json(manifest_path, manifest)
         shutil.copytree(root/"userdata/hdd0", source/"hdd0")
         shutil.copytree(self.lib.root/"firmware/test", source/"firmware-verified")
         shutil.copyfile(root/"eboot/EBOOT.analysis.elf", source/"EBOOT.analysis.elf")
@@ -596,16 +608,27 @@ class ManagerTests(unittest.TestCase):
                 worker.adopt(source)
             self.assertEqual(caught.exception.code, "missing-key")
             self.assertFalse(lib.title_dir("BCES00511").exists())
-            (source/"app-key.json").write_text("{}")
-            (source/"firmware-keys.json").write_text("{}")
+            atomic_json(source/"app-key.json", dict(type=4, revision=1, erk=bytes(range(32)).hex(), riv=bytes(range(16)).hex()))
+            atomic_json(source/"firmware-keys.json", dict(erk=bytes(range(32)).hex(), riv=bytes(range(16)).hex(), pup_hmac=bytes(range(64)).hex()))
             self.assertEqual(worker.adopt(source)["status"], "imported")
         self.assertEqual(tree_hashes(source/"hdd0"), before)
         self.assertEqual(tree_hashes(lib.title_dir("BCES00511")/"userdata/hdd0"), before)
 
+    def test_adoption_wrong_app_key_does_not_publish_title(self):
+        source, lib, worker, profile = self.adoption_fixture()
+        atomic_json(source/"app-key.json", dict(type=4, revision=2, erk=bytes(range(32)).hex(), riv=bytes(range(16)).hex()))
+        atomic_json(source/"firmware-keys.json", dict(erk=bytes(range(32)).hex(), riv=bytes(range(16)).hex(), pup_hmac=bytes(range(64)).hex()))
+        with patch("anyps3_manager.pipeline.profile_for", return_value=(SOURCE/"profiles/fixture.json", profile)):
+            with self.assertRaises(ManagerError) as caught:
+                worker.adopt(source)
+        self.assertEqual(caught.exception.code, "invalid-key")
+        self.assertFalse((lib.title_dir("BCES00511")/"disc").exists())
+        self.assertEqual(lib.titles(), [])
+
     def test_adoption_publication_resumes_after_interrupted_rename(self):
         source, lib, worker, profile = self.adoption_fixture()
-        (source/"app-key.json").write_text("{}")
-        (source/"firmware-keys.json").write_text("{}")
+        atomic_json(source/"app-key.json", dict(type=4, revision=1, erk=bytes(range(32)).hex(), riv=bytes(range(16)).hex()))
+        atomic_json(source/"firmware-keys.json", dict(erk=bytes(range(32)).hex(), riv=bytes(range(16)).hex(), pup_hmac=bytes(range(64)).hex()))
         before = tree_hashes(source/"hdd0")
         rename = Path.rename
         root = lib.title_dir("BCES00511")

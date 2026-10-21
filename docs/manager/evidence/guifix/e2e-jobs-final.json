@@ -1,0 +1,57 @@
+{
+  "jobs": [
+    {
+      "id": "20261021T153750336723Z-0b62916a",
+      "operation": "build",
+      "arguments": {
+        "title": "BCES00511",
+        "reason": "GUIFIX original-game acceptance",
+        "no_activate": false
+      },
+      "state": "succeeded",
+      "stage": "verify",
+      "created": "2026-10-21T15:37:50.336825+00:00",
+      "updated": "2026-10-21T15:59:53.242456+00:00",
+      "source": "/home/martink/AnyPS3/local/ratchet/work/guifix/tree",
+      "toolchain": null,
+      "unscoped": false,
+      "process": {
+        "pid": 1795089,
+        "start_ticks": "12275221",
+        "boot_id": "36d83028-bae0-48b8-a029-52e9020a3ca6"
+      },
+      "result": {
+        "title": "BCES00511",
+        "build": "0001-20261021T153750378281Z-aa77a141",
+        "status": "built"
+      },
+      "ended": "2026-10-21T15:59:53.242428+00:00"
+    },
+    {
+      "id": "20261021T153528208030Z-f28f0ce4",
+      "operation": "adopt",
+      "arguments": {
+        "path": "/home/martink/AnyPS3/local/ratchet"
+      },
+      "state": "succeeded",
+      "stage": "complete",
+      "created": "2026-10-21T15:35:28.208140+00:00",
+      "updated": "2026-10-21T15:36:16.815157+00:00",
+      "source": "/home/martink/AnyPS3/local/ratchet/work/guifix/tree",
+      "toolchain": null,
+      "unscoped": false,
+      "process": {
+        "pid": 1793123,
+        "start_ticks": "12261009",
+        "boot_id": "36d83028-bae0-48b8-a029-52e9020a3ca6"
+      },
+      "title": "BCES00511",
+      "result": {
+        "title": "BCES00511",
+        "status": "imported",
+        "next": "build"
+      },
+      "ended": "2026-10-21T15:36:16.815124+00:00"
+    }
+  ]
+}

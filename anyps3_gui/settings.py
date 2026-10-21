@@ -25,7 +25,7 @@ class Settings(QWidget):
     def args(self):
         return ["--title", self.title] if self.title else ["--global"]
 
-    def load(self):
+    def load(self, _result=None):
         self.client.call(["settings", "schema", *self.args()], self.got_schema)
         self.client.call(["settings", "get", *self.args()], self.got_values)
         self.client.call(["doctor"], self.got_host)
@@ -58,6 +58,7 @@ class Settings(QWidget):
     def render_fields(self):
         if self.schema is None or self.values is None:
             return
+        current_group = self.tabs.tabText(self.tabs.currentIndex())
         self.editors.clear()
         while self.tabs.count():
             widget = self.tabs.widget(0)
@@ -102,18 +103,24 @@ class Settings(QWidget):
             save.clicked.connect(lambda checked=False, k=key, g=getter: self.save(k, g))
             reset = QPushButton("Inherit" if self.title else "Reset")
             reset.setEnabled(editable and key in self.overrides)
-            reset.clicked.connect(lambda checked=False, k=key: self.client.call(["settings", "reset", *self.args(), k], lambda _: self.load()))
+            reset.clicked.connect(lambda checked=False, k=key: self.client.call(["settings", "reset", *self.args(), k], self.load))
             horizontal.addWidget(save)
             horizontal.addWidget(reset)
             description = spec["description"]
             if not spec.get("available", True):
                 description += "\nUnavailable in the active build."
+            if self.title and spec.get("global_only"):
+                description += "\nChange this setting in global Settings."
             if not spec.get("editable", True):
                 description += "\nRead-only in the GUI."
             label = QLabel(spec.get("label", key)+(" • override" if key in self.overrides else ""))
             label.setToolTip(description)
             row.setToolTip(description)
             forms[group].addRow(label, row)
+        for index in range(self.tabs.count()):
+            if self.tabs.tabText(index) == current_group:
+                self.tabs.setCurrentIndex(index)
+                break
 
     def save(self, key, getter):
         try:
@@ -121,4 +128,4 @@ class Settings(QWidget):
         except ValueError:
             self.client.error.emit(dict(code="invalid-setting", message="Enter a whole number.", detail={}))
             return
-        self.client.call(["settings", "set", *self.args(), key, json.dumps(value)], lambda _: self.load())
+        self.client.call(["settings", "set", *self.args(), key, json.dumps(value)], self.load)
