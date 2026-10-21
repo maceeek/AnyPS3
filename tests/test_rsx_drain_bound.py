@@ -261,16 +261,22 @@ static void event_claim(){
    std::this_thread::yield();}};
  s.rsx.vblank_epoch_ns=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
  assert(!rsx_worker_request(s,12).completed);
- // Completions (and their events) may still be published after GET reached PUT: keep serving until 500 ms pass without a new event.
- unsigned probes=0;const auto until=now_ms()+60000;auto quiet_since=now_ms();
- while(now_ms()<until && (m.load(0x70008044,4)!=put || served.load()<asked.load() || now_ms()-quiet_since<500)){
+ // Completions (and their events) are published after GET reached PUT: keep serving the hook until the last label B_{n-1} is visible.
+ // B_{n-1} follows the last flip in program order and is published after that flip's events (flip_order invariant), so once it is
+ // visible no hook call is pending or can still start; only then is the hook cleared on the owner (acknowledged request) and the
+ // worker finished, before the captured locals leave scope.
+ unsigned probes=0;bool last_b=false;const auto until=now_ms()+60000;
+ while(now_ms()<until && (m.load(0x70008044,4)!=put || served.load()<asked.load() || !last_b)){
   (void)rsx_worker_request(s,12);
-  if(served.load()<asked.load()){(void)m.load(0x80000400,4);served.fetch_add(1);++probes;quiet_since=now_ms();}   // label B_0: same page as the flip reports
+  if(served.load()<asked.load()){(void)m.load(0x80000400,4);served.fetch_add(1);++probes;}   // label B_0: same page as the flip reports
+  else last_b=m.load(0x80000000+0x400+16*(kFlips-1),4)==0x2000u+kFlips-1;
   std::this_thread::sleep_for(std::chrono::microseconds(100));
  }
- w.queue->drain();rsx_label_event_test_hook={};
+ if(!last_b || served.load()<asked.load())throw std::runtime_error("last label not published within 60 s");
+ w.queue->drain();w.queue->await(w.queue->post(RsxOwnerQueue::Kind::HostAccess,[]{rsx_label_event_test_hook={};}));
  if(m.load(0x70008044,4)!=put)throw std::runtime_error("FIFO did not finish");
  if(!probes)throw std::runtime_error("no flip event was published from a completion label");
+ life.finish();
  std::printf("PASS event claim: %u deferred flip events, the owner read the label page during each publication\n",probes);
 }
 int main(int argc,char** argv){try{
