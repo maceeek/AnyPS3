@@ -709,17 +709,22 @@ struct Session {
             ::RsxPerfCounters::add(::RsxPerfCounters::mprotect_labels,guard.protection_calls-before);}
         // One GPU claim covers every label of this completion prefix (the same
         // exact-span validation as a per-label ClaimTransfer, one broker round).
+        // An event publication (flip event, kind 2) may wait for the RSX coordinator (owner_call), while the owner may itself wait in
+        // the page broker for these label pages: the claim never spans an event. Labels before the event are committed and the claim
+        // released, the event is published, and a new claim covers the rest (program order of the writes and the event is kept).
         std::unique_ptr<GuestMemory::GpuPages> claim;
-        if(state.memory.concurrent()){
+        auto open_claim=[&](std::size_t first){
+            if(!state.memory.concurrent())return;
             std::vector<GuestMemory::HostSpan> declared;
-            for(const auto& label:completed_labels)for(const auto& span:ClaimTransfer::spans(label.mapping,0,label.size)){
+            for(std::size_t i=first;i<completed_labels.size();++i)for(const auto& span:ClaimTransfer::spans(completed_labels[i].mapping,0,completed_labels[i].size)){
                 if(std::none_of(declared.begin(),declared.end(),[&](const auto& d){return d.pointer==span.pointer && d.size==span.size && d.pin==span.pin;}))declared.push_back(span);}
             auto& m=state.memory;
             if(m.renderer_enabled && !m.memory_owner() && !m.local_state().fault_claim){m.renderer_pin([&]{claim=std::make_unique<GuestMemory::GpuPages>(m,std::move(declared));});claim->adopt();}
             else{m.enable_page_broker();claim=std::make_unique<GuestMemory::GpuPages>(m,std::move(declared));}
-            for(const auto& label:completed_labels)claim->commit_spans(label.mapping,0,0,true);
-        }
-        for(const auto& label:completed_labels){invalidate_raw(label.identity(),label.size,"label_publish");
+            for(std::size_t i=first;i<completed_labels.size();++i)claim->commit_spans(completed_labels[i].mapping,0,0,true);
+        };
+        open_claim(0);
+        for(std::size_t index=0;index<completed_labels.size();++index){const auto& label=completed_labels[index];invalidate_raw(label.identity(),label.size,"label_publish");
             anyps3_ft::mark(anyps3_ft::LabelPub,label.address,label.value,label.kind,anyps3_ft::current_completion);
             std::array<std::uint8_t,24> bytes{};
             if(label.kind==1){
@@ -727,7 +732,9 @@ struct Session {
                 write_be(bytes.data(),8,timebase_ticks());write_be(bytes.data()+16,4,label.value);write_be(bytes.data()+8,4,read_be(bytes.data()+8,4)|0x80000000u);
             }else if(label.kind==2){
                 if(label.event_flags){if(!state.event)throw std::runtime_error("RSX completion has no event transport");
-                    state.event(label.queue,label.event_name,label.event_flags);}
+                    const bool claimed=bool(claim);claim.reset();
+                    state.event(label.queue,label.event_name,label.event_flags);
+                    if(claimed)open_claim(index);}
             }else if(label.report){
                 auto count=label.base;for(const auto& p:label.queries)for(unsigned i=0;i<p.count;++i)count+=p.values->at(p.first+i);
                 unsigned value=unsigned(count);if(label.value>1)value=label.value==5?((value || !label.active || !label.stats)?0u:0xffffu):((label.active && label.stats)?0xffffffffu:0u);

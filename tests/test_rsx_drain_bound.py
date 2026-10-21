@@ -225,6 +225,10 @@ static void flip_order(){
   if(!violation.empty())break;
   std::this_thread::sleep_for(std::chrono::microseconds(300));
  }
+ // GET reaching PUT does not mean every completion is published: the last labels (and flip events) follow on the GPU timeline and
+ // their publication may need the owner (event delivery). Keep pumping until the last label B is final (bounded), then drain.
+ for(const auto settle=now_ms()+10000;violation.empty() && now_ms()<settle && m.load(0x80000000+0x400+16*(kFlips-1),4)!=0x2000u+kFlips-1;){
+  (void)rsx_worker_request(s,12);std::this_thread::sleep_for(std::chrono::microseconds(300));}
  w.queue->drain();
  if(!violation.empty())throw std::runtime_error("publication order violated: "+violation);
  if(m.load(0x70008044,4)!=put)throw std::runtime_error("FIFO did not finish");
@@ -235,10 +239,38 @@ static void flip_order(){
  life.finish();
  std::printf("PASS flip order: %u flips in %llu ms, %u samples (%u with a visible B label): A_i < flip i (gate, event) < B_i in every reverse-order sample\n",kFlips,(unsigned long long)(now_ms()-started),samples,seen);
 }
+// Phase F: deadlock freedom of a deferred flip event. The event (kind-2 completion label) is published through the RSX coordinator
+// (owner_call), so the owner must be able to make progress at that moment; in particular a plain owner read of the label page must
+// complete. Hook (test-only, patched in before the event publication, renderer thread): ask the owner to read a label of the report
+// page and wait for that read to return. If the publication still held the GPU page claim of the label page, the owner's read would
+// wait in the page broker for the renderer, which waits for the owner: the hook ends the process (exit 4) instead of hanging.
+static void event_claim(){
+ setenv("ANYPS3_RSX_BACKEND","gpu",1);setenv("ANYPS3_RSX_WORKER","0",1);setenv("ANYPS3_SPU_THREADS","0",1);
+ PpuState s;const auto put=setup_flips(s);s.memory.regions.push_back({0x71000000,6,s.memory.regions[0].bytes});
+ setenv("ANYPS3_RSX_WORKER","1",1);
+ SpuWorkerSession life(s);auto& w=s.process.rsx_worker;assert(w.enabled);auto& m=s.memory;
+ std::atomic<unsigned> asked{0},served{0};
+ rsx_label_event_test_hook=[&]{const unsigned n=asked.fetch_add(1)+1;const auto deadline=now_ms()+10000;
+  while(served.load()<n){if(now_ms()>deadline){std::fprintf(stderr,"FAIL owner read of the label page did not return while flip event %u was being published\n",n);std::fflush(stderr);std::_Exit(4);}
+   std::this_thread::yield();}};
+ s.rsx.vblank_epoch_ns=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+ assert(!rsx_worker_request(s,12).completed);
+ // Completions (and their events) may still be published after GET reached PUT: keep serving until 500 ms pass without a new event.
+ unsigned probes=0;const auto until=now_ms()+60000;auto quiet_since=now_ms();
+ while(now_ms()<until && (m.load(0x70008044,4)!=put || served.load()<asked.load() || now_ms()-quiet_since<500)){
+  (void)rsx_worker_request(s,12);
+  if(served.load()<asked.load()){(void)m.load(0x80000400,4);served.fetch_add(1);++probes;quiet_since=now_ms();}   // label B_0: same page as the flip reports
+  std::this_thread::sleep_for(std::chrono::microseconds(100));
+ }
+ w.queue->drain();rsx_label_event_test_hook={};
+ if(m.load(0x70008044,4)!=put)throw std::runtime_error("FIFO did not finish");
+ if(!probes)throw std::runtime_error("no flip event was published from a completion label");
+ std::printf("PASS event claim: %u deferred flip events, the owner read the label page during each publication\n",probes);
+}
 int main(int argc,char** argv){try{
  const std::string mode=argc>1?argv[1]:"";
  if(mode=="prefix")prefix();else if(mode=="sustained")sustained();
- else if(mode=="flip_order")flip_order();else if(mode=="read_on")return guarded_read(true)?0:77;else if(mode=="read_off")guarded_read(false);
+ else if(mode=="flip_order")flip_order();else if(mode=="read_on")return guarded_read(true)?0:77;else if(mode=="read_off")guarded_read(false);else if(mode=="event_claim")event_claim();
  else return 3;
 }catch(const std::exception& e){std::fprintf(stderr,"FAIL %s\n",e.what());return 1;}}
 '''
@@ -250,7 +282,13 @@ class BoundedDrain(unittest.TestCase):
         ARTIFACTS.mkdir(parents=True, exist_ok=True)
         cpp = ARTIFACTS / 'drain_bound.cpp'
         cls.exe = cpp.with_suffix('')
-        cpp.write_text(graphics_source().split('int main(int argc,char** argv)')[0] + MAIN)
+        source = graphics_source().split('int main(int argc,char** argv)')[0]
+        event = 'state.event(label.queue,label.event_name,label.event_flags);'
+        assert source.count(event) == 1
+        # Test-only hook immediately before a deferred flip event is published (event_claim mode); empty in every other mode.
+        source = ('#include <functional>\ninline std::function<void()> rsx_label_event_test_hook;\n' +
+                  source.replace(event, '{if(rsx_label_event_test_hook)rsx_label_event_test_hook();}' + event))
+        cpp.write_text(source + MAIN)
         result = subprocess.run(['c++', '-std=c++17', '-O1', '-Wall', '-Wextra', '-Werror', '-Wno-unused-function', '-pthread', '-DANYPS3_VULKAN',
                                  '-DANYPS3_RSX_VK', str(cpp), *LIBRARIES, '-o', str(cls.exe)], capture_output=True, text=True, timeout=600)
         cpp.with_suffix('.build.log').write_text(result.stdout + result.stderr)
@@ -293,6 +331,14 @@ class BoundedDrain(unittest.TestCase):
         shutil.rmtree(directory, ignore_errors=True)
         directory.mkdir(parents=True)
         self.run_mode('flip_order', ANYPS3_FRAME_DIR=str(directory.resolve()), ANYPS3_FRAME_STRIDE='1000000', ANYPS3_RSX_FLIP_EARLY='0')
+
+    def test_owner_reads_label_page_while_flip_event_is_published(self):
+        for name, extra in (('event-frames', {}), ('event-frames-late', {'ANYPS3_RSX_FLIP_EARLY': '0'})):
+            directory = ARTIFACTS / name
+            shutil.rmtree(directory, ignore_errors=True)
+            directory.mkdir(parents=True)
+            out = self.run_mode('event_claim', ANYPS3_FRAME_DIR=str(directory.resolve()), ANYPS3_FRAME_STRIDE='1000000', **extra)
+            self.assertIn('PASS event claim', out)
 
     def test_guarded_read_without_drain_waits_for_the_run(self):
         self.run_mode('read_off', ANYPS3_RSX_HOST_DRAIN='0')
