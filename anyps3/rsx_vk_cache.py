@@ -30,14 +30,18 @@ private:
         if(*text=='-' || *end || !n || n>4096)throw std::runtime_error(std::string("invalid ")+name);
         return unsigned(n);
     }
-    // The measured level working set has 190 pipelines / 206 shader modules.
-    // Retain it without per-frame LRU recompilation; explicit budgets and
-    // caller overrides still bound every cache. Source owners cover VS + FS.
-    unsigned graphics_pipeline_limit=cache_limit("ANYPS3_RSX_PIPELINE_LIMIT",256);
+    // A level's steady working set is ~190 pipelines / ~206 shader modules, but
+    // transient effects add more: with a 256 bound the original level evicted
+    // pipelines that came back seconds later (474hA: 24 re-creations at ~0.8 ms
+    // each inside single FIFO runs -> 22 frames missed a vblank). 1024 retains
+    // one boot + menu + level session (973 distinct pipelines) without LRU
+    // recompilation; explicit budgets and caller overrides still bound every
+    // cache. Source owners cover VS + FS.
+    unsigned graphics_pipeline_limit=cache_limit("ANYPS3_RSX_PIPELINE_LIMIT",1024);
     unsigned compute_pipeline_limit=cache_limit("ANYPS3_RSX_COMPUTE_LIMIT",64);
-    unsigned shader_module_limit=cache_limit("ANYPS3_RSX_MODULE_LIMIT",256);
+    unsigned shader_module_limit=cache_limit("ANYPS3_RSX_MODULE_LIMIT",1024);
     unsigned framebuffer_limit=cache_limit("ANYPS3_RSX_FRAMEBUFFER_LIMIT",64);
-    unsigned identity_limit=cache_limit("ANYPS3_RSX_IDENTITY_LIMIT",512);
+    unsigned identity_limit=cache_limit("ANYPS3_RSX_IDENTITY_LIMIT",2048);
     template<class Map> static auto lru_entry(Map& entries){
         return std::min_element(entries.begin(),entries.end(),[](const auto& a,const auto& b){return a.second->last_use<b.second->last_use;});
     }
