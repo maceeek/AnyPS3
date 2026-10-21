@@ -401,6 +401,12 @@ static bool rsx_graphics_flip_async(PpuState& s,unsigned id,std::uint64_t addres
     if(!image || image->format==VK_FORMAT_R32_UINT)return false;
     if(capture && (image->width!=buffer.width || image->height!=buffer.height || image->layers!=1))return false;
     if(capture && s.rsx.captured_frames>=256)throw std::runtime_error("headless RSX capture budget exhausted (256 frames)");
+    // The capture copy needs width*height*4 bytes of this batch's staging. Decide before defer_flip attaches the flip labels: submit
+    // the preceding work and record the flip into a fresh batch, or take the synchronous capture path when even an empty batch is
+    // too small (never "staging exhausted" in the middle of a deferred flip).
+    if(capture){const auto bytes=std::uint64_t(buffer.width)*buffer.height*4;
+        if(!session->vk.graphics_space_fits(*session->batch,bytes)){session->submit_async("capture_space");
+            if(!session->vk.graphics_space_fits(*session->batch,bytes))return false;}}
     const unsigned head=unsigned((address-(std::uint64_t(s.rsx.driver)+0x10b8))/0x40);
     const auto flags=(UINT64_C(8)<<head)&s.memory.load(std::uint64_t(s.rsx.driver)+0x12c0,4);
     if(!session->defer_flip(address,reports,id,queue,event_name,flags))return false;

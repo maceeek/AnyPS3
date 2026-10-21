@@ -76,7 +76,8 @@ CPP = r'''
 // Stride captures of the asynchronous flip path (rsx_graphics_flip_async): the pixels were copied on the GPU timeline of the flip;
 // the file is written by one background task so the RSX owner never waits for the disk. The bytes go to a hidden ".frame-N.ppm.part"
 // that is hard-linked to its final name only when complete (a killed process never leaves a truncated frame-N.ppm). A failure of
-// the previous write is rethrown at the next capture (an explicit stop), and the task's future joins at process exit.
+// the previous write is rethrown at the next capture or, for the last one, when the graphics owner is released
+// (rsx_worker_release -> rsx_capture_writer_join); both are explicit stops.
 [[maybe_unused]] static std::future<void>& rsx_capture_writer(){static std::future<void> pending;return pending;}
 [[maybe_unused]] static void rsx_capture_write_async(std::filesystem::path path,std::vector<std::uint8_t> rgba,unsigned id,unsigned width,unsigned height,std::uint64_t number){
     auto& pending=rsx_capture_writer();
@@ -91,6 +92,8 @@ CPP = r'''
         }catch(const std::exception& e){std::fprintf(stderr,"RSX frame capture %s failed: %s\n",path.c_str(),e.what());throw;}
     });
 }
+// Collects the last background capture write: its failure is an explicit stop (called after the GPU completion hooks drained).
+[[maybe_unused]] static void rsx_capture_writer_join(){auto& pending=rsx_capture_writer();if(pending.valid())pending.get();}
 static void rsx_capture_display(PpuState& s,unsigned id){
 #ifndef ANYPS3_VULKAN
     (void)s;(void)id;
