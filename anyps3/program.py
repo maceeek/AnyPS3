@@ -329,6 +329,7 @@ class Program:
                       process_setup(self.image) if self.process_entry else "",
                       resident_startup(self.image,self.native_modules),
                       "    anyps3_entry(state, trace);",
+                      "    rsx_finalize(state);" if self.process_entry else "",
                       "    anyps3_trace_dump();",
                       '    std::printf("returned r3=%" PRIu64 " steps=%" PRIu64 "\\n", state.r[3], state.steps); return 0;',
                       "    } catch (const std::exception& error) {",

@@ -241,10 +241,23 @@ static void flip_order(bool capture=false,unsigned clear_mask=0xf3){
  life.finish();
  std::printf("PASS flip order: %u flips in %llu ms, %u samples (%u with a visible B label): A_i < flip i (gate, event) < B_i in every reverse-order sample\n",kFlips,(unsigned long long)(now_ms()-started),samples,seen);
 }
+// Serial RSX (ANYPS3_RSX_WORKER=0): the FIFO runs on this thread through rsx_run; stride captures still ride on deferred flips.
+// rsx_finalize (the generated main calls it after anyps3_entry) must drain the session and collect the last capture write.
+static void serial_capture(){
+ setenv("ANYPS3_RSX_BACKEND","gpu",1);setenv("ANYPS3_RSX_WORKER","0",1);setenv("ANYPS3_SPU_THREADS","0",1);
+ PpuState s;const auto put=setup_flips(s);assert(!s.process.rsx_worker.enabled);
+ s.rsx.vblank_epoch_ns=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+ for(const auto until=now_ms()+60000;now_ms()<until && s.memory.load(0x70008044,4)!=put;)(void)rsx_run(s,12);
+ if(s.memory.load(0x70008044,4)!=put)throw std::runtime_error("FIFO did not finish");
+ if(s.rsx.flips!=kFlips || s.rsx.async_captures!=4 || s.rsx.captured_frames!=12)throw std::runtime_error("serial flips "+std::to_string(s.rsx.flips)+" async captures "+std::to_string(s.rsx.async_captures)+" total "+std::to_string(s.rsx.captured_frames));
+ rsx_finalize(s);
+ if(s.rsx.graphics_owner)throw std::runtime_error("graphics owner not released");
+ std::printf("PASS serial capture finalized\n");
+}
 int main(int argc,char** argv){try{
  const std::string mode=argc>1?argv[1]:"";
  if(mode=="prefix")prefix();else if(mode=="sustained")sustained();
- else if(mode=="flip_order")flip_order();else if(mode=="flip_capture")flip_order(true);else if(mode=="flip_capture_masked")flip_order(true,0x70);else if(mode=="read_on")return guarded_read(true)?0:77;else if(mode=="read_off")guarded_read(false);
+ else if(mode=="flip_order")flip_order();else if(mode=="flip_capture")flip_order(true);else if(mode=="flip_capture_masked")flip_order(true,0x70);else if(mode=="serial_capture")serial_capture();else if(mode=="read_on")return guarded_read(true)?0:77;else if(mode=="read_off")guarded_read(false);
  else return 3;
 }catch(const std::exception& e){std::fprintf(stderr,"FAIL %s\n",e.what());return 1;}}
 '''
@@ -360,6 +373,33 @@ class BoundedDrain(unittest.TestCase):
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr[-4000:])
         self.assertIn('cannot create new RSX frame capture', result.stderr)
         self.assertEqual((directory / 'frame-000012.ppm').read_bytes(), b'occupied')
+
+    def test_serial_stride_captures_are_finalized(self):
+        # Re-review rsxw4-1 #4: with ANYPS3_RSX_WORKER=0 the last asynchronous capture is completed and collected by rsx_finalize:
+        # all 12 frames exist with the (n, 2n, 3n) oracle; when frame-000012.ppm already exists the run fails with the writer error.
+        for name, occupied in (('flip-frames-serial', False), ('flip-frames-serial-fail', True)):
+            directory = ARTIFACTS / name
+            shutil.rmtree(directory, ignore_errors=True)
+            directory.mkdir(parents=True)
+            if occupied:
+                (directory / 'frame-000012.ppm').write_bytes(b'occupied')
+            env = dict(os.environ, LP_NUM_THREADS='4', ANYPS3_VK_DEVICE='lavapipe', VK_DRIVER_FILES='/usr/share/vulkan/icd.d/lvp_icd.json',
+                       ANYPS3_SPU_WORKER='0', ANYPS3_FRAME_DIR=str(directory.resolve()), ANYPS3_FRAME_STRIDE='4')
+            env.pop('ANYPS3_RSX_HOST_DRAIN', None)
+            env.pop('ANYPS3_RSX_FLIP_EARLY', None)
+            result = subprocess.run([str(self.exe), 'serial_capture'], capture_output=True, text=True, env=env, timeout=180)
+            if occupied:
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr[-4000:])
+                self.assertIn('cannot create new RSX frame capture', result.stderr)
+                self.assertEqual((directory / 'frame-000012.ppm').read_bytes(), b'occupied')
+                continue
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr[-4000:])
+            self.assertIn('PASS serial capture finalized', result.stdout)
+            flips = list(range(1, 9)) + [12, 16, 20, 24]
+            self.assertEqual(sorted(p.name for p in directory.iterdir()), [f'frame-{k:06d}.ppm' for k in range(1, 13)])
+            for number, flip in enumerate(flips, 1):
+                data = (directory / f'frame-{number:06d}.ppm').read_bytes()
+                self.assertTrue(data.endswith(bytes([flip, 2 * flip, 3 * flip]) * (32 * 16)), f'frame {number} (flip {flip})')
 
     def test_guarded_read_without_drain_waits_for_the_run(self):
         self.run_mode('read_off', ANYPS3_RSX_HOST_DRAIN='0')
