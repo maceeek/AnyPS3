@@ -176,7 +176,7 @@ static bool guarded_read(bool drain_on){
 // rsx_graphics_flip_async (ANYPS3_FRAME_DIR, huge stride); every later flip is deferred on the GPU timeline.
 static constexpr unsigned kFlips=24;
 static std::uint32_t gate_word(unsigned i){return 0x50000001u+i;}   // the 32-bit semaphore release word of flip i (stored big endian at the gate, high half of the 8-byte word)
-static unsigned setup_flips(PpuState& s){
+static unsigned setup_flips(PpuState& s,unsigned clear_mask=0xf3){
  setup_draw(s,32,16,128,false);auto& g=s.rsx;auto& m=s.memory;
  m.map(0x80000000,0x10000,6,nullptr,0);m.map(0x72000000,0x3000,6,nullptr,0);
  g.dma=0x70008000;g.reports=0x80000000;g.driver=0x72000000;g.fifo_enabled=true;g.context=1;g.draw.primitive=0;g.draw.ranges.clear();
@@ -187,7 +187,7 @@ static unsigned setup_flips(PpuState& s){
  m.store(g.reports+0x10,8,UINT64_MAX);
  unsigned put=0x100;auto packet=[&](unsigned reg,unsigned value){m.store(0x70000000+put,4,(1u<<18)|reg);m.store(0x70000000+put+4,4,value);put+=8;};
  for(unsigned i=0;i<kFlips;++i){
-  packet(0x1d90,clear_color(i+1));packet(0x1d94,0xf3);
+  packet(0x1d90,clear_color(i+1));packet(0x1d94,clear_mask);
   packet(0x60,0x66606660);packet(0x64,0x200+16*i);packet(0x6c,0x1000+i);                       // label A_i
   packet(0x64,0x10);packet(0x6c,gate_word(i));                                       // flip gate: written at once, cleared by the flip
   packet(0xe944,1);packet(0xe924,0x8000010f);
@@ -195,9 +195,9 @@ static unsigned setup_flips(PpuState& s){
  }
  m.store(g.dma+0x44,4,0x100);m.store(g.dma+0x40,4,put);return put;
 }
-static void flip_order(bool capture=false){
+static void flip_order(bool capture=false,unsigned clear_mask=0xf3){
  setenv("ANYPS3_RSX_BACKEND","gpu",1);setenv("ANYPS3_RSX_WORKER","0",1);setenv("ANYPS3_SPU_THREADS","0",1);
- PpuState s;const auto put=setup_flips(s);s.memory.regions.push_back({0x71000000,6,s.memory.regions[0].bytes});
+ PpuState s;const auto put=setup_flips(s,clear_mask);s.memory.regions.push_back({0x71000000,6,s.memory.regions[0].bytes});
  setenv("ANYPS3_RSX_WORKER","1",1);
  SpuWorkerSession life(s);auto& w=s.process.rsx_worker;assert(w.enabled);auto& m=s.memory;
  const auto& queue=s.events.queues.back();
@@ -244,7 +244,7 @@ static void flip_order(bool capture=false){
 int main(int argc,char** argv){try{
  const std::string mode=argc>1?argv[1]:"";
  if(mode=="prefix")prefix();else if(mode=="sustained")sustained();
- else if(mode=="flip_order")flip_order();else if(mode=="flip_capture")flip_order(true);else if(mode=="read_on")return guarded_read(true)?0:77;else if(mode=="read_off")guarded_read(false);
+ else if(mode=="flip_order")flip_order();else if(mode=="flip_capture")flip_order(true);else if(mode=="flip_capture_masked")flip_order(true,0x70);else if(mode=="read_on")return guarded_read(true)?0:77;else if(mode=="read_off")guarded_read(false);
  else return 3;
 }catch(const std::exception& e){std::fprintf(stderr,"FAIL %s\n",e.what());return 1;}}
 '''
@@ -315,6 +315,51 @@ class BoundedDrain(unittest.TestCase):
             header = b'P6\n# AnyPS3 native display buffer 1\n32 16\n255\n'
             self.assertEqual(data[:len(header)], header, number)
             self.assertEqual(data[len(header):], bytes([flip, 2 * flip, 3 * flip]) * (32 * 16), f'frame {number} (flip {flip})')
+
+    def test_stride_capture_with_occupied_staging(self):
+        # Review-rsxhead-1 finding 1: a stride capture needs width*height*4 staging bytes in the flip's batch. This binary has
+        # graphics batches of 2300 bytes: one 32x16 capture (2048) fits only at offset 0, because staging offsets are 256-aligned
+        # and a colour-only clear without alpha (mask 0x70) is a masked clear that puts its draw payload into the same
+        # batch first. The capture must still be taken (fresh batch or synchronous path), never stop with "staging exhausted".
+        # FLIP_EARLY=0: the frame's commands are still in the flip's batch (flip_early would submit them before the vblank wait).
+        # Same pixel oracle as above (alpha is not part of the P6 file).
+        cpp = ARTIFACTS / 'drain_bound_staging.cpp'
+        exe = cpp.with_suffix('')
+        cpp.write_text((ARTIFACTS / 'drain_bound.cpp').read_text())
+        result = subprocess.run(['c++', '-std=c++17', '-O1', '-Wall', '-Wextra', '-Werror', '-Wno-unused-function', '-pthread', '-DANYPS3_VULKAN',
+                                 '-DANYPS3_RSX_VK', '-DANYPS3_RSX_GRAPHICS_STAGING_BYTES=2300', str(cpp), *LIBRARIES, '-o', str(exe)],
+                                capture_output=True, text=True, timeout=600)
+        self.assertEqual(result.returncode, 0, result.stderr[-6000:])
+        directory = ARTIFACTS / 'flip-frames-staging'
+        shutil.rmtree(directory, ignore_errors=True)
+        directory.mkdir(parents=True)
+        saved, self.exe = self.exe, exe
+        try:
+            self.run_mode('flip_capture_masked', ANYPS3_FRAME_DIR=str(directory.resolve()), ANYPS3_FRAME_STRIDE='4', ANYPS3_RSX_FLIP_EARLY='0')
+        finally:
+            self.exe = saved
+        flips = list(range(1, 9)) + [12, 16, 20, 24]
+        self.assertEqual(sorted(p.name for p in directory.iterdir()), [f'frame-{k:06d}.ppm' for k in range(1, 13)])
+        for number, flip in enumerate(flips, 1):
+            data = (directory / f'frame-{number:06d}.ppm').read_bytes()
+            self.assertTrue(data.endswith(bytes([flip, 2 * flip, 3 * flip]) * (32 * 16)), f'frame {number} (flip {flip})')
+
+    def test_failed_last_stride_capture_stops_the_run(self):
+        # Review-rsxhead-1 finding 2: the last asynchronous capture (frame 12 = flip 24) cannot be linked to its name (the file
+        # already exists). No later capture collects that failure, so the release of the graphics owner must: the run fails with
+        # the writer's error and the existing file is untouched.
+        directory = ARTIFACTS / 'flip-frames-fail'
+        shutil.rmtree(directory, ignore_errors=True)
+        directory.mkdir(parents=True)
+        (directory / 'frame-000012.ppm').write_bytes(b'occupied')
+        env = dict(os.environ, LP_NUM_THREADS='4', ANYPS3_VK_DEVICE='lavapipe', VK_DRIVER_FILES='/usr/share/vulkan/icd.d/lvp_icd.json',
+                   ANYPS3_SPU_WORKER='0', ANYPS3_FRAME_DIR=str(directory.resolve()), ANYPS3_FRAME_STRIDE='4')
+        env.pop('ANYPS3_RSX_HOST_DRAIN', None)
+        env.pop('ANYPS3_RSX_FLIP_EARLY', None)
+        result = subprocess.run([str(self.exe), 'flip_capture'], capture_output=True, text=True, env=env, timeout=180)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr[-4000:])
+        self.assertIn('cannot create new RSX frame capture', result.stderr)
+        self.assertEqual((directory / 'frame-000012.ppm').read_bytes(), b'occupied')
 
     def test_guarded_read_without_drain_waits_for_the_run(self):
         self.run_mode('read_off', ANYPS3_RSX_HOST_DRAIN='0')

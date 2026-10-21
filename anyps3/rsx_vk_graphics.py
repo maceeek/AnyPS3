@@ -476,7 +476,10 @@ public:
             if(unsigned(f)<graphics_format_flags.size()){graphics_format_flags[f]=flags;graphics_format_known[f]=true;}}
         return (flags&(depth?VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT:VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT))!=0;
     }
-    std::unique_ptr<GraphicsBatch> graphics_batch(std::uint64_t bytes=64*1024*1024){
+#ifndef ANYPS3_RSX_GRAPHICS_STAGING_BYTES
+#define ANYPS3_RSX_GRAPHICS_STAGING_BYTES (64*1024*1024)   // default staging of a graphics batch; native tests may compile a smaller one
+#endif
+    std::unique_ptr<GraphicsBatch> graphics_batch(std::uint64_t bytes=ANYPS3_RSX_GRAPHICS_STAGING_BYTES){
         auto b=std::make_unique<GraphicsBatch>(this);b->capacity=bytes;
         VkBufferCreateInfo bi{};bi.sType=VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;bi.size=bytes;bi.usage=VK_BUFFER_USAGE_STORAGE_BUFFER_BIT|VK_BUFFER_USAGE_INDEX_BUFFER_BIT|VK_BUFFER_USAGE_TRANSFER_SRC_BIT|VK_BUFFER_USAGE_TRANSFER_DST_BIT;
         // Both queue families touch these two buffers (prelude on the DMA queue, batch on the graphics queue); no ownership transfer needed.
@@ -579,6 +582,12 @@ public:
     }
 ''' + READBACK_MEMBERS + UPLOAD_MEMBERS + DECODE_MEMBERS + r'''
     // Images stay GENERAL, allowing explicit cross-draw transfer barriers.
+    // Would graphics_space(b, bytes) (graphics_transfer of that size) succeed now? (Same alignment and bounds; no state change.)
+    bool graphics_space_fits(const GraphicsBatch& b,std::uint64_t bytes)const{
+        const auto alignment=std::max<std::uint64_t>(256,graphics_properties.limits.minStorageBufferOffsetAlignment);
+        const auto at=(b.used+alignment-1)&~(alignment-1);
+        return at<=b.capacity && bytes<=b.capacity-at;
+    }
     std::uint64_t graphics_transfer(GraphicsBatch& b,const std::shared_ptr<GraphicsImage>& image,VkImageAspectFlags aspect,unsigned bpp,const void* data=nullptr){b.sync();
         GraphicsSite site(SiteTransfer);
         graphics_begin(b);const auto bytes=std::uint64_t(image->width)*image->height*image->layers*bpp;

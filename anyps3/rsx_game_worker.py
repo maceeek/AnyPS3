@@ -95,7 +95,8 @@ static void rsx_worker_release(PpuState& s){
     auto& g=s.rsx;
     if(g.graphics_owner){auto& session=*static_cast<rsxgraphics::Session*>(g.graphics_owner.get());
         session.enter_fifo();session.flush(true,nullptr,0,"map_barrier");session.clear_surfaces();session.clear_raw("map_barrier");
-        g.graphics_session=nullptr;g.graphics_clear={};g.graphics_owner.reset();}
+        g.graphics_session=nullptr;g.graphics_clear={};g.graphics_owner.reset();
+        rsx_capture_writer_join();}
 #else
     (void)s;
 #endif
