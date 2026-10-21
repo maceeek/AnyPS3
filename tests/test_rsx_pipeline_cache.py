@@ -115,6 +115,17 @@ static void default_working_set(unsigned keys){
  assert(vk.compile_stats.pipeline_evictions==0 && vk.compile_stats.module_evictions==0 && vk.graphics_cache_size()==keys);
  std::printf("PASS default bounds retain a %u pipeline working set\n",keys);
 }
+// `keys` distinct pipelines in one session; NativeVulkan's destructor saves the VkPipelineCache (ANYPS3_CACHE_ROOT).
+static void persist(unsigned keys){
+ NativeVulkan vk;auto b=vk.graphics_batch(1024*1024);auto s=simple_state();
+ for(unsigned key=0;key<keys;++key){auto image=vk.graphics_image(*b,s.color,4,4,1);std::array<std::shared_ptr<NativeVulkan::GraphicsImage>,4> images{};images[0]=image;
+  auto text=simple_fs;text.insert(text.rfind('}'),"color.b=(("+std::to_string(key)+"u>>(uint(gl_FragCoord.x)+4u*uint(gl_FragCoord.y)))&1u)!=0u?1:0;");
+  auto fs=std::make_shared<const std::string>(std::move(text)),vs=std::make_shared<const std::string>(simple_vs);
+  std::vector<unsigned> data(16);vk.graphics_draw(*b,s,images,{},*vs,*fs,data,3,sample_positions,0,0,0,1,{},0,UINT64_MAX,{},vs,fs);
+  if(key%16==15){vk.graphics_finish(*b);vk.graphics_reset(*b);}}
+ vk.graphics_finish(*b);vk.graphics_reset(*b);assert(vk.compile_stats.graphics_pipelines==keys);
+ std::printf("PASS persist %u pipelines\n",keys);
+}
 static void compute_lru(unsigned keys){
  setenv("ANYPS3_RSX_COMPUTE_LIMIT","4",1);NativeVulkan vk;std::vector<unsigned> words(1);
  for(unsigned i=0;i<keys+1;++i){unsigned key=i==keys?0:i;
@@ -146,7 +157,8 @@ static void raw_lru(unsigned keys){
  assert(session.raw_evictions>0);std::printf("PASS bounded %u raw texture keys, evictions=%llu\n",keys,(unsigned long long)session.raw_evictions);s.rsx.graphics_session=nullptr;
 }
 int main(int argc,char** argv){try{
- if(argc>1 && std::string(argv[1])=="working_set")default_working_set(argc>2?std::stoul(argv[2]):300);
+ if(argc>1 && std::string(argv[1])=="persist")persist(std::stoul(argv[2]));
+ else if(argc>1 && std::string(argv[1])=="working_set")default_working_set(argc>2?std::stoul(argv[2]):300);
  else if(argc>1 && std::string(argv[1])=="stress"){bounded(argc>2?std::stoul(argv[2]):1100);raw_lru(1100);compute_lru(1100);resident_working_set();}
  else if(argc>1 && std::string(argv[1])=="stencil")stencil_oracle();
  else stable_and_disk(argc>1 && (std::string(argv[1])=="warm" || std::string(argv[1])=="reject"),argc>1 && std::string(argv[1])=="reject");
@@ -198,6 +210,19 @@ class PipelineCacheTests(unittest.TestCase):
             self.assertIn('1100 raw texture keys', run('stress'))
             self.assertLessEqual(len(list((root / 'cache/vk').glob('*.bin'))), 1024)
             self.assertIn('retain a 300 pipeline working set', run('working_set', '300'))
+            # The persisted VkPipelineCache must cover the whole session: twice the distinct pipelines -> clearly more cache bytes
+            # (a cache replaced every 128 creations kept only the last segment: 200 pipelines persisted fewer bytes than 100).
+            # Lavapipe keeps no pipelines in a VkPipelineCache (header only), so this check needs the hardware device.
+            sizes, gpu_env = {}, {k: v for k, v in os.environ.items() if k not in ('VK_DRIVER_FILES', 'VK_ICD_FILENAMES', 'VK_INSTANCE_LAYERS')}
+            for keys in (100, 200):
+                gpu_env.update(ANYPS3_CACHE_ROOT=str(root / f'persist-{keys}'), ANYPS3_VK_DEVICE='gpu')
+                result = subprocess.run([str(root / 'test'), 'persist', str(keys)], env=gpu_env, capture_output=True, text=True, timeout=300)
+                if result.returncode and 'gpu' in result.stderr and keys == 100 and not os.environ.get('ANYPS3_REQUIRE_VULKAN'):
+                    self.skipTest('no hardware Vulkan device: ' + result.stderr[-300:])
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn(f'persist {keys} pipelines', result.stdout)
+                sizes[keys] = next((root / f'persist-{keys}' / 'vk').glob('pipeline-*.bin')).stat().st_size
+            self.assertGreater(sizes[200], 1.5 * sizes[100], sizes)
             cache_root = env['ANYPS3_CACHE_ROOT']
             blocked = root / 'not-a-directory'
             blocked.write_text('cache is optional')
