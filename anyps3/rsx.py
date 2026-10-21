@@ -434,10 +434,10 @@ static bool rsx_graphics_flip_async(PpuState& s,unsigned id,std::uint64_t addres
     if(!session->defer_flip(address,reports,id,queue,event_name,flags))return false;
     try{
         ++session->batch->frames;
-        if(s.present.enabled && session->presented_flip!=s.rsx.flips+1)rsx_graphics_present_scanout(s,*session,image,id);
         if(capture){
             // Same bytes as the synchronous scanout capture (rsx_graphics_scanout): the display image copied after every command
-            // of this frame, alpha forced opaque (X8R8G8B8 scanout).
+            // of this frame, alpha forced opaque (X8R8G8B8 scanout). Recorded before the present: an asynchronous present
+            // submits the batch (GraphicsWsi::display), after which nothing more can be recorded into it.
             const auto at=session->vk.graphics_transfer(*session->batch,image,VK_IMAGE_ASPECT_COLOR_BIT,4);
             const auto number=++s.rsx.captured_frames;++s.rsx.async_captures;
             session->completions.push_back([at,number,id,width=buffer.width,height=buffer.height,path=root/rsx_capture_name(number)](const NativeVulkan::GraphicsBatch& b){
@@ -445,6 +445,7 @@ static bool rsx_graphics_flip_async(PpuState& s,unsigned id,std::uint64_t addres
                 for(std::size_t i=3;i<rgba.size();i+=4)rgba[i]=255;
                 rsx_capture_write_async(path,std::move(rgba),id,width,height,number);});
         }
+        if(s.present.enabled && session->presented_flip!=s.rsx.flips+1)rsx_graphics_present_scanout(s,*session,image,id);
         {anyps3_ft::Span ft_submit(anyps3_ft::Mark,0xa3);session->submit_async("flip");}++s.rsx.flips;
     }catch(...){session->failed=true;throw;}
     if(!s.rsx.graphics_session)session->leave_fifo();
