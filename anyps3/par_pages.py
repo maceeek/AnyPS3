@@ -110,11 +110,14 @@ TYPES = r'''
                 changed.wait_for(lock,std::chrono::milliseconds(1),[&]{return stopping || generation.load(std::memory_order_acquire)!=seen;});check();--waiters;
             }catch(...){if(!lock.owns_lock())lock.lock();--waiters;throw;}
         }
-        std::uint64_t acquire(const std::vector<std::uintptr_t>& pages,bool delegated=false){
+        // `publication`: held (never across the wait below) while the claim bits are published, so a claim never appears inside
+        // a scope holding that lock (GuestMemory::metadata_mutex: RSX blit admission-to-access stability, rsx_blit.py).
+        std::uint64_t acquire(const std::vector<std::uintptr_t>& pages,bool delegated=false,std::recursive_mutex* publication=nullptr){
             if(map_owner!=std::thread::id{} && map_owner!=std::this_thread::get_id() && !(delegated && delegated_owner==std::this_thread::get_id()))throw std::runtime_error("foreign page claim acquisition");
             std::uint64_t token=0;
             for(;;){
-                {std::lock_guard<std::mutex> lock(mutex);check();bool busy=false;
+                {std::unique_lock<std::recursive_mutex> metadata;if(publication)metadata=std::unique_lock<std::recursive_mutex>(*publication);
+                    std::lock_guard<std::mutex> lock(mutex);check();bool busy=false;
                     for(auto page:pages){const auto* entry=cell(page);if(!entry)throw std::runtime_error("unprepared guest broker claim");busy|=(entry->state.load(std::memory_order_acquire)&claimed)!=0;}
                     if(!busy){if(next_token==UINT64_MAX)throw std::runtime_error("guest page ownership token overflow");token=next_token++;
                         for(auto page:pages){auto* entry=cell(page);entry->exclusive.store(token,std::memory_order_relaxed);entry->state.fetch_or(claimed,std::memory_order_acq_rel);}++owners;break;}}
@@ -156,7 +159,7 @@ TYPES = r'''
             auto& local=m.local_state();if(local.leases || local.raw)throw std::runtime_error("page ownership inside CPU/raw admission");
             // Only map owner may translate and pin new claims in this phase.
             if(!m.memory_owner() && !(m.renderer_owner() && (local.fault_claim || local.renderer_claim)))throw std::runtime_error("foreign page ownership requires map owner pin transaction");
-            memory=&m;broker=&m.page_broker;GuestMemory::stat_gpu_claims.fetch_add(1,std::memory_order_relaxed);pages=PageBroker::keys(spans);token=broker->acquire(pages,m.renderer_owner() && (local.fault_claim || local.renderer_claim));
+            memory=&m;broker=&m.page_broker;GuestMemory::stat_gpu_claims.fetch_add(1,std::memory_order_relaxed);pages=PageBroker::keys(spans);token=broker->acquire(pages,m.renderer_owner() && (local.fault_claim || local.renderer_claim),&m.metadata_mutex.value);
         }
         GpuPages(GpuPages&& o)noexcept:broker(o.broker),memory(o.memory),spans(std::move(o.spans)),pages(std::move(o.pages)),token(o.token),payload_owner(o.payload_owner){o.broker=nullptr;}
         GpuPages& operator=(GpuPages&& o)noexcept{if(this!=&o){reset();broker=o.broker;memory=o.memory;spans=std::move(o.spans);pages=std::move(o.pages);token=o.token;payload_owner=o.payload_owner;o.broker=nullptr;}return *this;}

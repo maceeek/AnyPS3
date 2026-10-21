@@ -9,6 +9,7 @@ from .host_access import CPP as HOST_ACCESS_CPP
 from .host_fault import CPP as HOST_FAULT_CPP
 from .guest_backing import CPP as GUEST_BACKING_CPP
 from .ppu_memory import CPP as PPU_MEMORY_CPP
+from .frametime import CPP as FRAMETIME_CPP
 from .elf import ElfImage
 from .errors import AnyPS3Error
 
@@ -50,7 +51,8 @@ def memory_loader(image: ElfImage) -> str:
     return "\n".join(lines)
 
 
-MEMORY_CPP = r'''
+# FRAMETIME (guarded) precedes the memory model: the SPUPUT LeaseWait spans in par_memory use anyps3_ft.
+MEMORY_CPP = FRAMETIME_CPP + r'''
 #include <cstdint>
 #include <vector>
 #include <list>
@@ -72,6 +74,7 @@ MEMORY_CPP = r'''
 #include <atomic>
 #include <condition_variable>
 #include <thread>
+#include <future>
 #include <deque>
 #include <exception>
 
@@ -867,6 +870,9 @@ struct GuestMemory {
         }
     }
     std::pair<std::uintptr_t,std::uint64_t> reservation_token(std::uint64_t address) {
+        // The 128-byte line token of GETLLAR/PUTLLC/SPU reservation-lost checks reads versions only, never a payload byte through
+        // a raw pointer: admit it with the same byte-exact observer interest as getllar() (SPUPUT, see spu_collect_events).
+        HostByteAccess exact_bytes{host_access_observer.supports_exact_bytes.load(std::memory_order_acquire)};
         Lease lease(*this,address,128,false);
         if(concurrent()){
             if(!(address&127))if(const auto line=reserved_line(address,128,false);line.map){ScalarLock lock(*this,line.pointer,128);return reserved_token(line);}
@@ -945,6 +951,31 @@ struct GuestMemory {
         Lease lease(*this,address,size,write);
         translate_parallel(address,size,write);
     }
+    // Side-effect-free admission test: true when [address,address+size) is wholly mapped and readable (the span may cross adjacent
+    // regions). It calls no observer, takes no page-broker cell and reads no guest byte, so a caller that reads one logical block
+    // through an admitted transfer can tell an admission fault (nothing was notified) from any other failure (not to be replayed).
+    // Its verdict equals transfer()'s read admission: a span inside one guest page that continues into an adjacent readable mapping is
+    // admitted there too (the scalar fast admission declines it and the general admission splits it per mapping).
+    bool readable_span(std::uint64_t address,unsigned size){
+        if(address>UINT32_MAX || size>UINT64_C(0x100000000)-address)return false;
+        if(!concurrent()){
+            auto next=address;auto remaining=size;
+            while(remaining){
+                const auto region=std::find_if(regions.begin(),regions.end(),[&](const auto& r){return next>=r.base && next-r.base<r.bytes->size();});
+                if(region==regions.end() || !(region->flags&4))return false;
+                const auto count=static_cast<unsigned>(std::min<std::uint64_t>(remaining,region->bytes->size()-(next-region->base)));
+                next+=count;remaining-=count;
+            }
+            return true;
+        }
+        Lease lease(*this,address,0,false,true,false);   // zero-byte translation-only admission: reader gate and map snapshot, no span reaches an observer
+        try{auto next=address;unsigned left=size;
+            while(left){const auto& map=translate_parallel(next,1,false);const auto& r=map.region;
+                const unsigned n=std::min<std::uint64_t>(left,r.bytes->size()-(next-r.base));
+                next+=n;left-=n;}
+        }catch(const std::runtime_error&){return false;}
+        return true;
+    }
     std::uint8_t* access(std::uint64_t address, unsigned size, bool write) {
         require_raw();
         return access_impl(address,size,write,true);
@@ -989,17 +1020,27 @@ struct GuestMemory {
     // Concurrent read body of transfer() for a caller that already holds the Lease of exactly these bytes
     // (Range::read): same translation, permission checks and atomic word reads, without the nested lease
     // revalidation, the span vector and the shared_ptr copies of parallel_spans.
+    // Every source mapping and its read permission are resolved before the first destination byte is written, so a span that continues
+    // into a hole or an unreadable mapping faults with the destination untouched (transfer() reaches this for split one-page reads).
     void read_admitted(std::uint64_t address,std::uint8_t* buffer,unsigned size){
         if(address>UINT32_MAX || size>UINT64_C(0x100000000)-address)throw std::runtime_error("guest transfer outside 32-bit space");
-        auto next=address;unsigned left=size;
+        if(!size)return;
+        {const auto& map=translate_parallel(address,1,false);const auto& r=map.region;
+            if(r.bytes->size()-(address-r.base)>=size){atomic_read(byte_pointer(r.bytes,r.bytes->data()+address-r.base),buffer,size);return;}}
+        struct Part {const std::uint8_t* source;unsigned size;};
+        std::vector<Part> parts;auto next=address;unsigned left=size;
         while(left){const auto& map=translate_parallel(next,1,false);const auto& r=map.region;
             const unsigned n=std::min<std::uint64_t>(left,r.bytes->size()-(next-r.base));
-            atomic_read(byte_pointer(r.bytes,r.bytes->data()+next-r.base),buffer,n);buffer+=n;next+=n;left-=n;}
+            parts.push_back({byte_pointer(r.bytes,r.bytes->data()+next-r.base),n});next+=n;left-=n;}
+        for(const auto& part:parts){atomic_read(part.source,buffer,part.size);buffer+=part.size;}
     }
     void transfer(std::uint64_t address,std::uint8_t* buffer,unsigned size,bool write) {
         HostByteAccess exact_bytes{host_access_observer.supports_exact_bytes.load(std::memory_order_acquire)};
-        Lease lease(*this,address,size,write,true);
+        // A transfer inside one guest page is one span: admit it like a scalar access and skip the per-page broker set.
+        const bool one_page=size && address<=UINT32_MAX && (address>>12)==((address+size-1)>>12);
+        Lease lease(*this,address,size,write,true,true,one_page);
         if(concurrent()){
+            if(one_page && !write){read_admitted(address,buffer,size);return;}
             const auto spans=parallel_spans(address,size,write,true);
             if(write){LineLocks locks(*this,spans);bump_parallel(spans);for(const auto& part:spans){atomic_write(byte_pointer(part.pin,part.pointer),buffer,part.size);buffer+=part.size;publish_cpu_write(part.pointer,part.size);}}
             else for(const auto& part:spans){atomic_read(byte_pointer(part.pin,part.pointer),buffer,part.size);buffer+=part.size;}

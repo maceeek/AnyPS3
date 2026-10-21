@@ -3,7 +3,7 @@ MEMBERS = r'''
     std::uint64_t graphics_surface_uploads=0;
     void graphics_unpack_upload(GraphicsBatch& b,const std::shared_ptr<GraphicsImage>& image,
             unsigned format,bool depth,unsigned bpp,unsigned pitch,unsigned samples,
-            const std::vector<unsigned>& words,std::shared_ptr<GraphicsBuffer>& word_buffer,const void* bytes,std::uint64_t device_input=UINT64_MAX){
+            const std::vector<unsigned>& words,std::shared_ptr<GraphicsBuffer>& word_buffer,const void* bytes,std::uint64_t device_input=UINT64_MAX){b.sync();
         GraphicsSite site(SiteUnpack);
         const auto size=words.size()*4,pixels=std::uint64_t(image->width)*image->height*samples;
         const bool stencil=depth && format==2;

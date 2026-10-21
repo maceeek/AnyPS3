@@ -95,6 +95,59 @@ static void bounded(unsigned keys){
  auto& live=NativeVulkan::resource_stats();assert(live.kinds["pipelines"].peak_count<=28 && live.kinds["shader_modules"].peak_count<=6 && live.kinds["framebuffers"].peak_count<=21);
  std::printf("PASS bounded %u shader/pipeline/framebuffer keys, independent draw bytes after eviction\n",keys);
 }
+// Default bounds (no ANYPS3_RSX_*_LIMIT in the environment): a working set of `keys` distinct shader pairs, then key 0 again.
+// Independent expectation: the repeat creates no VkPipeline/VkShaderModule (nothing was evicted) and still draws key 0's own
+// 4x4 bit pattern. With the former 256-entry defaults, keys=300 evicts key 0 and the repeat recompiles it.
+static void default_working_set(unsigned keys){
+ NativeVulkan vk;auto b=vk.graphics_batch(1024*1024);auto s=simple_state();
+ struct Expected{std::uint64_t at;unsigned key;};std::vector<Expected> expected;
+ auto finish=[&]{vk.graphics_finish(*b);for(const auto& e:expected)for(unsigned pixel=0;pixel<16;++pixel){const auto* p=static_cast<const unsigned char*>(b->map)+e.at+pixel*4;
+   assert(p[0]==255 && p[1]==0 && p[2]==((e.key>>pixel)&1u?255:0) && p[3]==255);}expected.clear();vk.graphics_reset(*b);};
+ auto draw=[&](unsigned key){auto image=vk.graphics_image(*b,s.color,4,4,1);std::array<std::shared_ptr<NativeVulkan::GraphicsImage>,4> images{};images[0]=image;
+  auto text=simple_fs;text.insert(text.rfind('}'),"color.b=(("+std::to_string(key)+"u>>(uint(gl_FragCoord.x)+4u*uint(gl_FragCoord.y)))&1u)!=0u?1:0;");
+  auto fs=std::make_shared<const std::string>(std::move(text)),vs=std::make_shared<const std::string>(simple_vs);
+  std::vector<unsigned> data(16);vk.graphics_draw(*b,s,images,{},*vs,*fs,data,3,sample_positions,0,0,0,1,{},0,UINT64_MAX,{},vs,fs);
+  expected.push_back({vk.graphics_transfer(*b,image,VK_IMAGE_ASPECT_COLOR_BIT,4),key});};
+ for(unsigned key=0;key<keys;++key){draw(key);if(key%16==15)finish();}
+ finish();const auto before=vk.compile_stats;
+ draw(0);finish();
+ assert(before.graphics_pipelines==keys && vk.compile_stats.graphics_pipelines==before.graphics_pipelines && vk.compile_stats.shader_modules==before.shader_modules);
+ assert(vk.compile_stats.pipeline_evictions==0 && vk.compile_stats.module_evictions==0 && vk.graphics_cache_size()==keys);
+ std::printf("PASS default bounds retain a %u pipeline working set\n",keys);
+}
+// `keys` distinct pipelines in one session; NativeVulkan's destructor saves the VkPipelineCache (ANYPS3_CACHE_ROOT).
+static void persist(unsigned keys){
+ NativeVulkan vk;auto b=vk.graphics_batch(1024*1024);auto s=simple_state();
+ for(unsigned key=0;key<keys;++key){auto image=vk.graphics_image(*b,s.color,4,4,1);std::array<std::shared_ptr<NativeVulkan::GraphicsImage>,4> images{};images[0]=image;
+  auto text=simple_fs;text.insert(text.rfind('}'),"color.b=(("+std::to_string(key)+"u>>(uint(gl_FragCoord.x)+4u*uint(gl_FragCoord.y)))&1u)!=0u?1:0;");
+  auto fs=std::make_shared<const std::string>(std::move(text)),vs=std::make_shared<const std::string>(simple_vs);
+  std::vector<unsigned> data(16);vk.graphics_draw(*b,s,images,{},*vs,*fs,data,3,sample_positions,0,0,0,1,{},0,UINT64_MAX,{},vs,fs);
+  if(key%16==15){vk.graphics_finish(*b);vk.graphics_reset(*b);}}
+ vk.graphics_finish(*b);vk.graphics_reset(*b);assert(vk.compile_stats.graphics_pipelines==keys);
+ std::printf("PASS persist %u pipelines rotations=%llu load_bytes=%llu\n",keys,(unsigned long long)vk.compile_stats.pipeline_cache_rotations,(unsigned long long)vk.compile_stats.pipeline_cache_load_bytes);
+}
+// A periodic background snapshot that fails (cache directory read-only) must leave the cache dirty, so a later save (the next periodic
+// one or the forced save at shutdown, directory writable again) still writes it. Handshake: the directory stays read-only until the
+// failed background save has been collected (cache_io_errors rises above the count after the synchronous SPIR-V writes); only then
+// is write access restored. The old code (dirty cleared before the save) then never writes the file.
+static void save_retry(){
+ setenv("ANYPS3_RSX_HOST_PROFILE","1",1);const std::filesystem::path dir=std::filesystem::path(std::getenv("ANYPS3_CACHE_ROOT"))/"vk";
+ {NativeVulkan vk;assert(std::filesystem::is_directory(dir));
+  std::filesystem::permissions(dir,std::filesystem::perms::owner_read|std::filesystem::perms::owner_exec);
+  auto b=vk.graphics_batch(1024*1024);auto s=simple_state();
+  for(unsigned key=0;key<8;++key){auto image=vk.graphics_image(*b,s.color,4,4,1);std::array<std::shared_ptr<NativeVulkan::GraphicsImage>,4> images{};images[0]=image;
+   auto text=simple_fs;text.insert(text.rfind('}'),"color.b=(("+std::to_string(key)+"u>>(uint(gl_FragCoord.x)+4u*uint(gl_FragCoord.y)))&1u)!=0u?1:0;");
+   auto fs=std::make_shared<const std::string>(std::move(text)),vs=std::make_shared<const std::string>(simple_vs);
+   std::vector<unsigned> data(16);vk.graphics_draw(*b,s,images,{},*vs,*fs,data,3,sample_positions,0,0,0,1,{},0,UINT64_MAX,{},vs,fs);}
+  vk.graphics_finish(*b);vk.graphics_reset(*b);
+  const auto before=vk.compile_stats.cache_io_errors;
+  // Each print (throttled to 2 s) launches the periodic save or collects a finished one without waiting.
+  for(unsigned i=0;i<15 && vk.compile_stats.cache_io_errors==before;++i){std::this_thread::sleep_for(std::chrono::milliseconds(2100));vk.compile_stats_print();}
+  if(vk.compile_stats.cache_io_errors==before)throw std::runtime_error("the read-only background save was never collected as failed");
+  std::filesystem::permissions(dir,std::filesystem::perms::owner_all);
+ }
+ std::printf("PASS save retry\n");
+}
 static void compute_lru(unsigned keys){
  setenv("ANYPS3_RSX_COMPUTE_LIMIT","4",1);NativeVulkan vk;std::vector<unsigned> words(1);
  for(unsigned i=0;i<keys+1;++i){unsigned key=i==keys?0:i;
@@ -126,7 +179,10 @@ static void raw_lru(unsigned keys){
  assert(session.raw_evictions>0);std::printf("PASS bounded %u raw texture keys, evictions=%llu\n",keys,(unsigned long long)session.raw_evictions);s.rsx.graphics_session=nullptr;
 }
 int main(int argc,char** argv){try{
- if(argc>1 && std::string(argv[1])=="stress"){bounded(argc>2?std::stoul(argv[2]):1100);raw_lru(1100);compute_lru(1100);resident_working_set();}
+ if(argc>1 && std::string(argv[1])=="persist")persist(std::stoul(argv[2]));
+ else if(argc>1 && std::string(argv[1])=="save_retry")save_retry();
+ else if(argc>1 && std::string(argv[1])=="working_set")default_working_set(argc>2?std::stoul(argv[2]):300);
+ else if(argc>1 && std::string(argv[1])=="stress"){bounded(argc>2?std::stoul(argv[2]):1100);raw_lru(1100);compute_lru(1100);resident_working_set();}
  else if(argc>1 && std::string(argv[1])=="stencil")stencil_oracle();
  else stable_and_disk(argc>1 && (std::string(argv[1])=="warm" || std::string(argv[1])=="reject"),argc>1 && std::string(argv[1])=="reject");
  for(const auto& p:NativeVulkan::resource_stats().kinds)assert(p.second.objects.empty());
@@ -176,6 +232,29 @@ class PipelineCacheTests(unittest.TestCase):
             self.assertIn('fixed stencil oracles', run('stencil'))
             self.assertIn('1100 raw texture keys', run('stress'))
             self.assertLessEqual(len(list((root / 'cache/vk').glob('*.bin'))), 1024)
+            self.assertIn('retain a 300 pipeline working set', run('working_set', '300'))
+            # Lifecycle of the persisted VkPipelineCache, independent of how a driver serializes it: a session creating 200 distinct
+            # pipelines keeps one cache (no rotation; the old code replaced it after every 128 creations and persisted only the last
+            # segment), saves it at shutdown, and the next session loads exactly the saved payload (file = 16-byte envelope + payload).
+            persist_root = root / 'persist'
+            env['ANYPS3_CACHE_ROOT'] = str(persist_root)
+            self.assertIn('PASS persist 200 pipelines rotations=0 load_bytes=0', run('persist', '200'))
+            saved = next((persist_root / 'vk').glob('pipeline-*.bin')).stat().st_size - 16
+            self.assertIn(f'PASS persist 20 pipelines rotations=0 load_bytes={saved}', run('persist', '20'))
+            # A failed background save stays dirty and is retried by the forced save at shutdown.
+            retry_root = root / 'retry'
+            env['ANYPS3_CACHE_ROOT'] = str(retry_root)
+            out = run('save_retry')
+            self.assertIn('PASS save retry', out)
+            self.assertEqual(len(list((retry_root / 'vk').glob('pipeline-*.bin'))), 1)
+            # Driver-specific measurement only (not asserted: a driver may deduplicate or keep a header-only cache): bytes persisted
+            # for 100 vs 200 distinct pipelines on the hardware device.
+            gpu_env = {k: v for k, v in os.environ.items() if k not in ('VK_DRIVER_FILES', 'VK_ICD_FILENAMES', 'VK_INSTANCE_LAYERS')}
+            for keys in (100, 200):
+                gpu_env.update(ANYPS3_CACHE_ROOT=str(root / f'persist-{keys}'), ANYPS3_VK_DEVICE='gpu')
+                result = subprocess.run([str(root / 'test'), 'persist', str(keys)], env=gpu_env, capture_output=True, text=True, timeout=300)
+                files = list((root / f'persist-{keys}' / 'vk').glob('pipeline-*.bin'))
+                print(f'pipeline cache bytes for {keys} pipelines on the hardware device: {files[0].stat().st_size if files else None} (rc {result.returncode})')
             cache_root = env['ANYPS3_CACHE_ROOT']
             blocked = root / 'not-a-directory'
             blocked.write_text('cache is optional')

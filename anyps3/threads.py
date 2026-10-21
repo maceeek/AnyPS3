@@ -96,12 +96,14 @@ static void sync_ext_poll(PpuState& s,std::uint64_t& cached) {
 }
 static void sync_ext_poll(PpuState& s){std::uint64_t cached=0;sync_ext_poll(s,cached);}
 [[noreturn]] static void ppu_block(PpuState& s,unsigned kind,std::uint64_t id) {
+    ANYPS3_FT_BLOCK(s,kind,id);
     s.wait_kind=kind;s.wait_id=id;throw PpuBlocked{};
 }
 // Audited helpers can return a blocked disposition through one AOT operation.
 // Direct/serial callers keep the original exception contract. The fields belong
 // to PpuCpu, not a saved PpuContext; no disposition follows a context switch.
 static void ppu_defer_block(PpuState& s,unsigned kind,std::uint64_t id) {
+    ANYPS3_FT_BLOCK(s,kind,id);
     s.wait_kind=kind;s.wait_id=id;
     if(!s.ppu_defer_allowed)throw PpuBlocked{};
     s.ppu_block_pending=true;
@@ -189,13 +191,13 @@ struct PpuDeferredScope {
             if(earliest!=UINT64_MAX || audio_pending){const auto now=sync_ext_now();
                 const std::uint64_t ceiling=audio_pending?100:1000;
                 const auto delay=earliest==UINT64_MAX?ceiling:earliest>now?std::min(earliest-now,ceiling):0;
-                if(delay){ExecutionScope idle(s.execution,ExecutionPhase::Idle);GuestMemory::RawYield yield(s.memory);std::this_thread::sleep_for(std::chrono::microseconds(delay));}
+                if(delay){ExecutionScope idle(s.execution,ExecutionPhase::Idle);ANYPS3_FT_SPAN(ft_idle,Idle,1,delay);GuestMemory::RawYield yield(s.memory);std::this_thread::sleep_for(std::chrono::microseconds(delay));}
                 continue;}
             if(s.process.spu_worker.enabled && std::any_of(s.spu.groups.begin(),s.spu.groups.end(),[](const auto& g){return g.state==6 || g.state==3;})){
-                ExecutionScope idle(s.execution,ExecutionPhase::Idle);{GuestMemory::RawYield yield(s.memory);s.process.spu_worker.service();s.process.spu_worker.idle_wait();}continue;
+                ExecutionScope idle(s.execution,ExecutionPhase::Idle);ANYPS3_FT_SPAN(ft_idle,Idle,2);{GuestMemory::RawYield yield(s.memory);s.process.spu_worker.service();s.process.spu_worker.idle_wait();}continue;
             }
             if(s.process.rsx_worker.enabled){
-                ExecutionScope idle(s.execution,ExecutionPhase::RsxWait);GuestMemory::RawYield yield(s.memory);
+                ExecutionScope idle(s.execution,ExecutionPhase::RsxWait);ANYPS3_FT_SPAN(ft_idle,Idle,3);GuestMemory::RawYield yield(s.memory);
                 rsx_worker_pump(s);std::this_thread::sleep_for(std::chrono::microseconds(100));continue;
             }
             throw std::runtime_error("native scheduler has no runnable PPU/SPU context or progressing RSX command");
@@ -209,6 +211,7 @@ struct PpuDeferredScope {
     // blocked contexts, so copying it back is the identity — unless the active context itself was blocked (any pass may
     // have woken it: its slot, not `s`, then carries the cleared wait).
     if(!mandatory && next==&*active && !s.wait_kind){s.reschedule=false;return;}
+    ANYPS3_FT_MARK(Switch,s.thread_id,next->thread_id,next->pc);
     static_cast<PpuContext&>(s)=*next;s.reschedule=false;
     return;
     }

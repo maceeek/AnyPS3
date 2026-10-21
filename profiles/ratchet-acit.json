@@ -4902,6 +4902,34 @@
           "local_address": 2560,
           "sha256": "70c39ecd3c505ccc22e77d0c7905ae56779b10b0883fd163f8644ddbb052080e",
           "note": "Original WWS job manager binary in the EBOOT text segment (second SPURS workload, used once audio is configured): data descriptor {0xc18300, 0x2cf8} at EBOOT 0xd309e4 (next to {0xc1b000, 0x220}, amid kWwsJob strings). Observed on SPU 0x100 (CellSpursKernel0) in run native-virtual-351load: DMA GET EA 0xc18300 -> LS 0xa00 size 0x2d00 (and partial reloads 0xc18df0->0x14f0, 0xc18e80->0x1580, 0xc18eb0->0x15b0); all 213 executed 64-byte cells in local/ratchet/ls-dumps-351load/spu-dynamic.jsonl are byte-identical to EBOOT EA = 0xc18300 + (LS - 0xa00). Without this overlay the code ran in the SPUDYN interpreter (~13 M instr/s). Every executed word is still verified at runtime."
+        },
+        {
+          "address": 14445376,
+          "size": 8544,
+          "local_address": 182528,
+          "sha256": "d3d5252c84c1cdd7a33d2db315245c1b998522c766938b1e906bb75266bdd5e1",
+          "note": "Original SPU job module (EBOOT data) executed by the SPUDYN interpreter on SPURS workers 0x2000200/0x3000200/0x4000200 in the level great_clock_a: run native-virtual-470dyn (ANYPS3_SPU_DYNAMIC_LOG, local/ratchet/work/spufast2/spu-dynamic-470dyn.jsonl) logged the interpreted 64-byte cells with last DMA GET EA 0xdc6b00 size 0x21a0 (LS bases vary per load, e.g. 0x2c8c0); all interpreted cells except the first 64 bytes (loader-patched entry stub) are byte-identical to EBOOT 0xdc6b00+(LS-base). The overlay starts after that stub; the variable LS base is served by the content-based relocation index. Every executed word is still verified at runtime."
+        },
+        {
+          "address": 14483648,
+          "size": 5344,
+          "local_address": 179840,
+          "sha256": "b9c0901b5d37cd08f8d264afc43253f2deb20ffb9f8b05b62af153fdd0a2dd5e",
+          "note": "Original SPU job module (EBOOT data) executed by the SPUDYN interpreter on SPURS workers 0x2000200/0x3000200/0x4000200 in the level great_clock_a: run native-virtual-470dyn (ANYPS3_SPU_DYNAMIC_LOG, local/ratchet/work/spufast2/spu-dynamic-470dyn.jsonl) logged the interpreted 64-byte cells with last DMA GET EA 0xdd0080 size 0x1520 (LS bases vary per load, e.g. 0x2be40); all interpreted cells except the first 64 bytes (loader-patched entry stub) are byte-identical to EBOOT 0xdd0080+(LS-base). The overlay starts after that stub; the variable LS base is served by the content-based relocation index. Every executed word is still verified at runtime."
+        },
+        {
+          "address": 14440512,
+          "size": 2400,
+          "local_address": 173136,
+          "sha256": "0309d1d86e49c9f3fa6a575327753731207e98ecaf8c4b035d8698d501e90265",
+          "note": "Original SPU job module (EBOOT data) executed by the SPUDYN interpreter on SPURS workers 0x2000200/0x3000200/0x4000200 in the level great_clock_a: run native-virtual-470dyn (ANYPS3_SPU_DYNAMIC_LOG, local/ratchet/work/spufast2/spu-dynamic-470dyn.jsonl) logged the interpreted 64-byte cells with last DMA GET EA 0xdc5800 size 0x9a0 (LS bases vary per load, e.g. 0x2a410); all interpreted cells except the first 64 bytes (loader-patched entry stub) are byte-identical to EBOOT 0xdc5800+(LS-base). The overlay starts after that stub; the variable LS base is served by the content-based relocation index. Every executed word is still verified at runtime."
+        },
+        {
+          "address": 14462784,
+          "size": 992,
+          "local_address": 175872,
+          "sha256": "5fc0984e5476cf9427c9b14a246624e797b871cacf107d855099e494fd746876",
+          "note": "Original SPU job module (EBOOT data) executed by the SPUDYN interpreter on SPURS workers 0x2000200/0x3000200/0x4000200 in the level great_clock_a: run native-virtual-470dyn (ANYPS3_SPU_DYNAMIC_LOG, local/ratchet/work/spufast2/spu-dynamic-470dyn.jsonl) logged the interpreted 64-byte cells with last DMA GET EA 0xdcaf00 size 0x420 (LS bases vary per load, e.g. 0x2aec0); all interpreted cells except the first 64 bytes (loader-patched entry stub) are byte-identical to EBOOT 0xdcaf00+(LS-base). The overlay starts after that stub; the variable LS base is served by the content-based relocation index. Every executed word is still verified at runtime."
         }
       ]
     }
