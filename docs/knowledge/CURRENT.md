@@ -94,6 +94,15 @@ Full findings, source locations, fixes, verification contracts and commands:
 [sandbox analysis](experiments/2026-10-20-sandbox-analysis.md).
 Evidence: [analysis JSON](../../local/ratchet/analysis-2026-10-20-sandbox/evidence.json).
 
+## Desktop installer — 2026-10-21
+
+**Verified in an isolated test home:** the GUI-first README and per-user installer (`scripts/install.sh`) were prepared on
+branch `feat/gui-installer` (base `3e0f5f9`) and merged into `main` on the user's instruction (worktree removed).
+Four real installer integration tests pass: install/update, failure preservation, development isolation,
+launcher conflicts and truncated downloads. The app uses private source/venv snapshots, a separate
+`anyps3-library` and separate preferences. Runtime/profile are unchanged; no new game or controller acceptance.
+Merged locally, not pushed: the README's curl command works only after `main` is published. [Commands, evidence and limits](experiments/2026-10-21-gui-installer.md).
+
 ## Manager worktree — 2026-10-20
 
 **Verified manager milestone:** CLI and PySide6 wrapper implemented on

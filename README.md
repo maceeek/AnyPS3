@@ -1,6 +1,61 @@
-# About
+# AnyPS3
 
 Experimental static recompiler that ports PlayStation 3 games to native x86-64 Linux executables.
+
+## Quickstart: install the desktop app
+
+On **Linux x86-64**, install Git, curl and **Python 3.11+ with `venv`/`ensurepip`** using your
+distribution's package manager (`python3-venv` on Debian/Ubuntu). Then paste this into Bash,
+as your normal user:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/maceeek/AnyPS3/main/scripts/install.sh | bash
+```
+
+Open **AnyPS3** in your desktop's application menu, or launch it directly:
+
+```bash
+~/.local/bin/anyps3-gui
+```
+
+The installer downloads the app, PySide6 and the decryption library into a private Python environment.
+It does not require sudo or change system Python. **Rerun the same installation command to update**,
+then close and reopen the GUI. A failed download or dependency installation keeps the previous version active.
+Previous app versions stay on disk so an update does not remove files used by running jobs.
+
+1. Choose **Import ISO**, select your game disc image and provide your firmware and key files in the wizard.
+   If you already have this project's `local/ratchet` setup, **Adopt Ratchet** copies it into the library.
+2. Wait for import and compilation in **Jobs**. Closing the GUI leaves these jobs running.
+3. Select the title and choose **Play**. Use **Rebuild** after an app update to build with the new runtime;
+   saves stay separate from builds. **Saves** provides backup and restore.
+
+Building and playing also need GCC with C++17, SDL2, Vulkan and glslang development libraries,
+a Vulkan GPU driver and a working systemd user session. The installer handles Python dependencies;
+install these native dependencies through your distribution. Review **Settings → Build** for memory
+and parallelism appropriate to your machine. Audio is locked to silent by default.
+
+**Experimental:** Ratchet & Clank: A Crack in Time (BCES00511, 01.00) is the only current target.
+The manager/GUI have synthetic integration coverage; a complete real-game import → build → play →
+rebuild → reload-save workflow and physical-controller gameplay remain unverified.
+Game data, firmware and keys are not included.
+
+### Separate from development
+
+| Installed app data | Default location |
+| --- | --- |
+| Private source snapshots and Python environments | `~/.local/share/anyps3-app/` |
+| Game library, builds and saves | `~/.local/share/anyps3-library/` |
+| GUI preferences | `~/.config/anyps3-app/` |
+| Launch commands | `~/.local/bin/anyps3`, `anyps3-manager`, `anyps3-gui` |
+
+The installer respects `XDG_DATA_HOME` and `XDG_CONFIG_HOME` and records those locations in its launchers.
+It never pulls into your development checkout or uses its virtual environment. Launchers ignore the current
+directory, `PYTHONPATH` and development Qt plugin paths. The installed library is separate from the source
+checkout's default `~/.local/share/anyps3` library. App updates do not import, rebuild or delete games or saves.
+
+See the [manager guide](docs/manager/README.md) for CLI commands, development setup and troubleshooting.
+
+## How it works
 
 PPU (PowerPC) and SPU code is translated ahead of time to C++ and compiled together with our own LV2 kernel and
 system-library runtime and a Vulkan implementation of the RSX graphics pipeline. PPU code has no interpreter
@@ -30,7 +85,7 @@ The first and only target so far is **Ratchet & Clank: A Crack in Time** (BCES00
 Measurements, open blockers and reproduction commands are tracked in the
 [knowledge base](docs/knowledge/CURRENT.md).
 
-## Requirements
+## Development requirements
 
 - Linux x86-64, Python 3.11+, GCC with C++17, SDL2, a Vulkan driver (a real GPU; Lavapipe for tests).
 - Optional: `cryptography` for the `unself` command (`python3 -m pip install -e .[self]`).
@@ -52,20 +107,6 @@ The demo ELF is a synthetic PPU program written by this project
 ([examples/answer42.ppu.s](examples/answer42.ppu.s)), not a game dump. `python3 -m anyps3 --help` lists the other
 commands (`analyze`, `recompile-program`, `sfo`, `unself`, `disc-inventory`, `disc-extract`, `recover-zip`).
 Commands never overwrite existing output files.
-
-## Game library manager (CLI and Qt GUI)
-
-`anyps3-manager` imports a disc image into a library, builds and rebuilds the native executable (each build in a
-new directory) and launches it, while save data and installed game data stay in a separate per-title storage that
-rebuilds never touch. `anyps3-gui` is a PySide6 front end that only drives the CLI. Both are early: they are
-tested with synthetic data, not yet end to end with a real game. See [docs/manager/README.md](docs/manager/README.md)
-and the [specification](docs/manager/SPEC.md).
-
-```bash
-python3 -m venv .venv && .venv/bin/python -m pip install -e '.[gui,self]'
-.venv/bin/anyps3-manager --library ~/.local/share/anyps3 init --json
-.venv/bin/anyps3-gui
-```
 
 ## Tests
 

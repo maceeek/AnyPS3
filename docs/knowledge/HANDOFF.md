@@ -14,6 +14,14 @@ build 473 (everything combined) was compiling at handoff and is unmeasured; the 
 finding (fixes uncommitted in the warmup tree, patch backup). main runtime unchanged (472 + ZeroTable).
 Agent handoffs: `local/ratchet/work/{integ473,warmup,spuwake}/{STATUS,RESULT}.md`.
 
+## Desktop installer — 2026-10-21
+
+GUI-first README and installer changes from branch `feat/gui-installer` (base `3e0f5f9`) are merged into `main`
+(worktree removed); not pushed. Four installer integration checks pass
+using real dependencies and an offscreen GUI. Main checkout and user application/library were not modified.
+See [installer record](experiments/2026-10-21-gui-installer.md) for exact commands, evidence and limitations.
+Remaining delivery action: publish `main` (push only on the user's request) before advertising the GitHub copy-paste command. Runtime/game acceptance is unchanged.
+
 ## Manager worktree — 2026-10-20
 
 Continue from [manager implementation](experiments/2026-10-20-manager-gui.md)

@@ -5,16 +5,64 @@ in [SPEC.md](SPEC.md). The runtime remains a separate package and process.
 
 ## Install and start
 
-From this checkout:
+For the desktop application, use the [GUI quickstart](../../README.md#quickstart-install-the-desktop-app):
 
 ```bash
-python -m venv .venv
-.venv/bin/python -m pip install -e '.[gui,self]'
-.venv/bin/anyps3-gui
+curl -fsSL https://raw.githubusercontent.com/maceeek/AnyPS3/main/scripts/install.sh | bash
+~/.local/bin/anyps3-gui
 ```
 
-The default library is `$XDG_DATA_HOME/anyps3` or `~/.local/share/anyps3`.
-It must be outside both the worktree and the primary repository. To choose another:
+Rerun the installation command to update from `main`, then reopen the GUI. Installation is per-user;
+no sudo or virtual-environment activation is needed. The installer checks Python, Qt and game profiles
+before switching the app to a new source snapshot. Old snapshots remain available to existing jobs.
+App updates preserve game builds and saves; choose **Rebuild** to use a newer runtime for a title.
+
+The installed app uses `$XDG_DATA_HOME/anyps3-app` (default `~/.local/share/anyps3-app`),
+a separate library at `$XDG_DATA_HOME/anyps3-library`, and preferences under
+`${XDG_CONFIG_HOME:-~/.config}/anyps3-app`. Launchers use their recorded installation paths and clear
+development Python/Qt paths. They never import packages from the directory you launch them in.
+The installer refuses to replace an unrelated command or desktop entry with the same name.
+
+To inspect the installer before running it, download [scripts/install.sh](../../scripts/install.sh).
+From a checkout you can run `bash scripts/install.sh` directly. Advanced options:
+
+```bash
+bash scripts/install.sh --help
+bash scripts/install.sh --repo https://github.com/maceeek/AnyPS3.git --ref main --python python3
+```
+
+`--ref` selects a branch or tag. `--repo /path/to/checkout` installs a separate clone of its committed
+branch; uncommitted changes are excluded. Neither form modifies the original checkout. Use the same
+options on subsequent updates. Older releases are retained rather than automatically pruned.
+Pip's inherited environment and configuration are ignored so they cannot redirect installation into
+a development environment. `--wheelhouse /path/to/wheels` uses predownloaded dependency/build-backend
+wheels instead of PyPI. If an installation path contains `$`, choose an `XDG_DATA_HOME` without it;
+setuptools treats dollar signs as variable references during editable installation.
+
+If the GUI cannot load its X11/Wayland plugin, install the distribution's native Qt dependencies
+(including `xcb-cursor` for X11); see [Qt's Linux requirements](https://doc.qt.io/qt-6/linux-requirements.html).
+For build/run prerequisites and available resources:
+
+```bash
+~/.local/bin/anyps3-manager doctor --json
+```
+
+The doctor reports missing native dependencies; it does not install them.
+
+## Developing from a checkout
+
+Use a checkout-local environment and a development library outside all source checkouts:
+
+```bash
+python3 -m venv .venv
+.venv/bin/python -m pip install -e '.[gui,self]'
+.venv/bin/anyps3-gui --library ~/.local/share/anyps3-dev
+```
+
+Direct package entry points default to `$XDG_DATA_HOME/anyps3` or `~/.local/share/anyps3`;
+the installed app's launchers explicitly select `anyps3-library` instead. Use `.venv/bin/` for development
+commands so shell PATH lookup cannot select the installed app. Keep development data outside both the
+worktree and primary repository, and do not point tests at the installed app's library. To choose another:
 
 ```bash
 .venv/bin/anyps3-gui --library /path/outside/repository/library
@@ -117,6 +165,22 @@ build → play → rebuild → reload-save acceptance, unlimited runtime budgets
 graceful runtime shutdown remain separate work. No synthetic test claims those.
 
 ## Verification
+
+Installer regression checks use real Git clones, Python environments, dependency wheels and Qt,
+with temporary application/library directories. Predownload the dependencies first, then run from
+the checkout (choose a temporary directory outside any Git repository):
+
+```bash
+# WHEELS is an absolute path containing PySide6, cryptography, setuptools>=68
+# and their transitive wheels for this Python version and platform.
+systemd-run --user --scope -p MemoryMax=4G -p MemorySwapMax=0 \
+  env TMPDIR=/var/tmp ANYPS3_INSTALLER_WHEELS="$WHEELS" \
+  python3 -m unittest tests.manager.test_installer -v
+```
+
+These opt-in tests cover installation, update, failed-update preservation, GUI/CLI launch under a
+conflicting development environment, independent data, launcher collisions and truncated downloads.
+See the [installer evidence](../knowledge/experiments/2026-10-21-gui-installer.md).
 
 Run on the development PC:
 
