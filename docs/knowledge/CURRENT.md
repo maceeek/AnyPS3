@@ -31,6 +31,19 @@ failed 4/6 with it, cause unknown); the FP fast path 559472e has no demonstrated
 **Not verified:** physical gamepad (DualSense) and GUI build/play with the real game — the user tests next; audible audio (never on this PC
 by agents). **Hardware:** RAM bit flips on this PC (verified, see the wave record).
 
+**Local data cleanup (2026-10-21, user-approved):** ~323 GB of `local/ratchet` deleted (452 → 127 GB): all per-run game cache
+scratch dirs `cache/anyps3-*` (`cache/vk` kept), all `native-bundle-*` except 706, binaries/generated C++/objects and all but the last two
+frame dumps of every `native-virtual-*` except builds 380, 386, 460, 472, 478, 603, 660, 703, 705, 706 (run summaries, logs, evidence
+images kept), object-cache entries older than 24 h, frametime rings except 703c/d, 705a–d, 706c/d, all but the 6 newest
+`sample-profile-*`, agents' `work/*/prof` dumps, all agent git worktrees and `work/*/base` copies (branches and STATUS/RESULT notes kept;
+MAINSLACK2's untracked scripts in `work/spuput/untracked/`). Manifest: `local/ratchet/cleanup-2026-10-21-plan.tsv`; tool
+`local/ratchet/tools/cleanup_2026_10_21.py`. Game inputs, source snapshots, `codex/` captures, suites and docs untouched. Older run/build
+numbers cited in records may therefore lack their binaries; rebuild from `source-snapshot-N` if needed.
+
+Open GUI item (user test 2026-10-21): ISO import stops at "missing-key: Set the user-supplied pup key file first" without saying what the
+file is; on this PC use **Adopt Ratchet** (reuses `local/ratchet/firmware-keys.json`, `app-key.json` and the decrypted
+`firmware-verified/`) or set the PUP key to `local/ratchet/firmware-keys.json`. The message/wizard should explain the PUP key file.
+
 Next candidates (unverified ideas): chain SPU native functions without the dispatcher, SPU FP slow path, 16-byte `atomic_read`, the FIFO
 window bracket failure, then render resolution scaling (`local/ratchet/work/_tasks/RESSCALE.md`). Record:
 [FAST2 record, wave 6](experiments/2026-10-20-fast2-wave.md#wave-6-results-2026-10-21).
