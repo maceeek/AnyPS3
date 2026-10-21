@@ -1,11 +1,29 @@
 # Handoff to the next instance
 
+## Wave 6 — 2026-10-21 (ended on user instruction ~17:15)
+
+Read the top of [CURRENT.md](CURRENT.md). Branch `claude/wave6-60fps` (pushed; the user merges it into main) = main + integration
+5c266e2 + GUI audio/SIXAXIS/rumble; its runtime is build 706 (~59.7 FPS, ~3–4 ms headroom, 75 Hz not held). The user tests the
+physical DualSense through the GUI (install from main, Adopt Ratchet, Build, Play — **GUI audio is on by default; switch it off on
+this PC**). Fallback for playing the measured binary without the GUI: `local/ratchet/tools/play_physical.sh 706` (silent, SDL pads only).
+No agent, build, suite or game run is live. Agent handoffs: `local/ratchet/work/{integ473,spuput,warmup,guiaudio,padmotion,guimerge}/`
+(INTEG6 stopped at the API session limit after building 705; the coordinator finished its suite/measurements). Rules for the next wave:
+AGENTS.md (QUIET runs, hardware, audio) and `local/ratchet/work/COMMON-FAST2.md` "Wave 6".
+
 ## FAST2 wave 4 handoff — 2026-10-20 ~22:25
 
 Read the top of [CURRENT.md](CURRENT.md) first. Best measured: 660a 55.96 FPS (integration + blit batch, without SPU work);
 build 473 (everything combined) was compiling at handoff and is unmeasured; the blit batch has an unfixed High review
 finding (fixes uncommitted in the warmup tree, patch backup). main runtime unchanged (472 + ZeroTable).
 Agent handoffs: `local/ratchet/work/{integ473,warmup,spuwake}/{STATUS,RESULT}.md`.
+
+## Desktop installer — 2026-10-21
+
+GUI-first README and installer changes from branch `feat/gui-installer` (base `3e0f5f9`) are merged into `main`
+(worktree removed); not pushed. Four installer integration checks pass
+using real dependencies and an offscreen GUI. Main checkout and user application/library were not modified.
+See [installer record](experiments/2026-10-21-gui-installer.md) for exact commands, evidence and limitations.
+Remaining delivery action: publish `main` (push only on the user's request) before advertising the GitHub copy-paste command. Runtime/game acceptance is unchanged.
 
 ## Manager worktree — 2026-10-20
 

@@ -81,7 +81,6 @@ def parser():
     group = conf.add_mutually_exclusive_group()
     group.add_argument("--title")
     group.add_argument("--global", dest="global_scope", action="store_true")
-    conf.add_argument("--i-understand", action="store_true")
     job = commands.add_parser("jobs")
     job.add_argument("action", choices=["list", "show", "follow", "cancel"])
     job.add_argument("id", nargs="?")
@@ -127,7 +126,7 @@ def normalize_options(argv):
                 options.extend(after[i:i+2])
                 i += 2
                 continue
-            if arg in ("--global", "--i-understand") or arg.startswith("--title="):
+            if arg == "--global" or arg.startswith("--title="):
                 options.append(arg)
             else:
                 positionals.append(arg)
@@ -173,7 +172,7 @@ def dispatch(args, lib):
                       ram_bytes=os.sysconf("SC_PAGE_SIZE")*os.sysconf("SC_PHYS_PAGES"))
         checks["keys"] = {kind: dict(record, exists=Path(record["path"]).is_file())
                           for kind, record in checks["keys"].items()}
-        return dict(checks=checks, library=str(lib.root), audio_locked=not settings.effective(lib)["audio.audible_allowed"])
+        return dict(checks=checks, library=str(lib.root), audio_enabled=settings.effective(lib)["audio.enabled"])
     if cmd == "keys":
         return pipeline.set_key(lib, args.kind, args.path)
     if cmd == "inspect-iso":
@@ -266,13 +265,11 @@ def dispatch(args, lib):
             return dict(settings=settings.schema(available(lib, args.title)))
         if args.action == "get":
             return dict(settings=settings.effective(lib, args.title),
-                        overrides=read_json(lib.title_dir(args.title)/"settings.json" if args.title else lib.root/"settings.json", {}))
+                        overrides=settings.stored_values(lib, args.title))
         require_values(args.values, 2 if args.action == "set" else 1)
         key = args.values[0]
         value = settings.parse_value(args.values[1]) if args.action == "set" else None
-        if key == "audio.audible_allowed" and value is True and not args.global_scope:
-            raise ManagerError("audio-lock", "Unlocking audio requires --global and --i-understand.", 2)
-        return settings.set_value(lib, key, value, args.title, args.i_understand, args.action == "reset")
+        return settings.set_value(lib, key, value, args.title, reset=args.action == "reset")
     if cmd == "jobs":
         if args.action == "list":
             return dict(jobs=[jobs.Job(lib, p.parent.name).record() for p in sorted((lib.root/"jobs").glob("*/job.json"), reverse=True)])

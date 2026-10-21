@@ -13,6 +13,9 @@ FLOAT_CPP = r'''
 #if defined(__SSE2__)
 #include <xmmintrin.h>
 #endif
+#if defined(__AVX512F__)
+#include <immintrin.h>
+#endif
 using Wide = unsigned __int128;
 static unsigned fp_bits(Wide value) {
     const auto upper=static_cast<std::uint64_t>(value>>64),lower=static_cast<std::uint64_t>(value);
@@ -134,6 +137,36 @@ static void fp_inexact(PpuState& s, bool inexact, bool up) {
     const unsigned exponent=(value>>52)&2047;
     return exponent-623u<=800u || !(value&UINT64_C(0x7fffffffffffffff));
 }
+// Host binary64 operations of the fast paths below (fp_host_arithmetic, fp_lazy). With AVX-512F they use EVEX static rounding
+// {rn-sae}: round-to-nearest with every exception suppressed, independent of the thread's MXCSR, so the per-operation MXCSR read
+// (vstmxcsr, the dominant cost of the lazy helpers) is dropped (FP_HOST_NEEDS_MXCSR=0). MXCSR DAZ/FTZ cannot act on these calls
+// either: fp_host_operand admits no denormal operand, every rounded result and residual of in-range operands is zero or normal
+// (see fp_host_operand), and binary32 results are range-checked (exponent 898..1149) before fp_rn_single, so it cannot underflow.
+// Without AVX-512F they are the plain operators and the callers verify the default MXCSR first.
+#if defined(__AVX512F__)
+#define FP_HOST_NEEDS_MXCSR 0
+#define FP_RN (_MM_FROUND_TO_NEAREST_INT|_MM_FROUND_NO_EXC)
+[[gnu::always_inline]] static inline double fp_rn_add(double x,double y){return _mm_cvtsd_f64(_mm_add_round_sd(_mm_set_sd(x),_mm_set_sd(y),FP_RN));}
+[[gnu::always_inline]] static inline double fp_rn_sub(double x,double y){return _mm_cvtsd_f64(_mm_sub_round_sd(_mm_set_sd(x),_mm_set_sd(y),FP_RN));}
+[[gnu::always_inline]] static inline double fp_rn_mul(double x,double y){return _mm_cvtsd_f64(_mm_mul_round_sd(_mm_set_sd(x),_mm_set_sd(y),FP_RN));}
+[[gnu::always_inline]] static inline double fp_rn_div(double x,double y){return _mm_cvtsd_f64(_mm_div_round_sd(_mm_set_sd(x),_mm_set_sd(y),FP_RN));}
+[[gnu::always_inline]] static inline double fp_rn_sqrt(double x){return _mm_cvtsd_f64(_mm_sqrt_round_sd(_mm_set_sd(x),_mm_set_sd(x),FP_RN));}
+[[gnu::always_inline]] static inline double fp_rn_fma(double x,double y,double z){
+    return _mm_cvtsd_f64(_mm_fmadd_round_sd(_mm_set_sd(x),_mm_set_sd(y),_mm_set_sd(z),FP_RN));}
+// Round to binary32 and widen back (the widening of a normal binary32 or zero is exact and raises nothing).
+[[gnu::always_inline]] static inline double fp_rn_single(double x){
+    return _mm_cvtsd_f64(_mm_cvtss_sd(_mm_setzero_pd(),_mm_cvt_roundsd_ss(_mm_setzero_ps(),_mm_set_sd(x),FP_RN)));}
+#undef FP_RN
+#else
+#define FP_HOST_NEEDS_MXCSR 1
+[[maybe_unused,gnu::always_inline]] static inline double fp_rn_add(double x,double y){return x+y;}
+[[maybe_unused,gnu::always_inline]] static inline double fp_rn_sub(double x,double y){return x-y;}
+[[maybe_unused,gnu::always_inline]] static inline double fp_rn_mul(double x,double y){return x*y;}
+[[maybe_unused,gnu::always_inline]] static inline double fp_rn_div(double x,double y){return x/y;}
+[[maybe_unused,gnu::always_inline]] static inline double fp_rn_sqrt(double x){return std::sqrt(x);}
+[[maybe_unused,gnu::always_inline]] static inline double fp_rn_fma(double x,double y,double z){return std::fma(x,y,z);}
+[[maybe_unused,gnu::always_inline]] static inline double fp_rn_single(double x){return static_cast<double>(static_cast<float>(x));}
+#endif
 [[maybe_unused]]
 #if defined(__GNUC__) && !defined(__clang__)
 __attribute__((noinline,optimize("fp-contract=off")))
@@ -147,40 +180,41 @@ static bool fp_host_arithmetic(PpuState& s,std::uint64_t a,std::uint64_t b,
 #pragma clang fp contract(off)
 #endif
     // RN=nearest, guest traps disabled. NI is preserved; the accepted normal
-    // cases are IEEE even under Cell NI. Check the *current thread's* MXCSR
-    // every call, never cache it across host libraries. Require all traps
-    // masked, nearest rounding, FTZ=DAZ=0; ignore existing sticky host flags.
-    if((s.fpscr&0xfbu) || (_mm_getcsr()&0xffc0u)!=0x1f80u ||
+    // cases are IEEE even under Cell NI. Without AVX-512F (FP_HOST_NEEDS_MXCSR)
+    // check the *current thread's* MXCSR every call, never cache it across host
+    // libraries: require all traps masked, nearest rounding, FTZ=DAZ=0; ignore
+    // existing sticky host flags.
+    if((s.fpscr&0xfbu) || (FP_HOST_NEEDS_MXCSR && (_mm_getcsr()&0xffc0u)!=0x1f80u) ||
        (precision!=53 && precision!=24) || !fp_host_operand(a) ||
        !fp_host_operand(b) || !fp_host_operand(c))return false;
     double x,y,z;std::memcpy(&x,&a,8);std::memcpy(&y,&b,8);std::memcpy(&z,&c,8);
     double rounded,residual;
     switch(operation){
     case 0:{ // TwoSum: exact x+y = rounded+residual, including cancellation.
-        rounded=x+y;const double v=rounded-x;
-        residual=(x-(rounded-v))+(y-v);break;
+        rounded=fp_rn_add(x,y);const double v=fp_rn_sub(rounded,x);
+        residual=fp_rn_add(fp_rn_sub(x,fp_rn_sub(rounded,v)),fp_rn_sub(y,v));break;
     }
     case 1:
-        rounded=x*y;residual=std::fma(x,y,-rounded);break;
+        rounded=fp_rn_mul(x,y);residual=fp_rn_fma(x,y,-rounded);break;
     case 2:
         if(!y)return false;
-        rounded=x/y;residual=std::fma(-rounded,y,x);
+        rounded=fp_rn_div(x,y);residual=fp_rn_fma(-rounded,y,x);
         if(b>>63)residual=-residual; // sign of exact quotient - rounded
         break;
     case 3:
         if(x<0)return false;
-        rounded=std::sqrt(x);residual=std::fma(-rounded,rounded,x);break;
+        rounded=fp_rn_sqrt(x);residual=fp_rn_fma(-rounded,rounded,x);break;
     case 4:{
-        const double product=x*z,product_error=std::fma(x,z,-product);
-        const double sum=product+y,v=sum-product;
-        const double sum_error=(product-(sum-v))+(y-v);
-        rounded=std::fma(x,z,y);
+        const double product=fp_rn_mul(x,z),product_error=fp_rn_fma(x,z,-product);
+        const double sum=fp_rn_add(product,y),v=fp_rn_sub(sum,product);
+        const double sum_error=fp_rn_add(fp_rn_sub(product,fp_rn_sub(sum,v)),fp_rn_sub(y,v));
+        rounded=fp_rn_fma(x,z,y);
         // When the rounded unfused and fused sums agree, the exact residual
         // is product_error+sum_error. Only its sign/zero is needed; the range
         // bound above makes that addition safe even after cancellation.
         // Otherwise an expansion is needed: keep the proven integer path.
         if(sum!=rounded)return false;
-        residual=product_error+sum_error;break;
+        residual=fp_rn_add(product_error,sum_error);break;
     }
     default:return false;
     }
@@ -193,10 +227,10 @@ static bool fp_host_arithmetic(PpuState& s,std::uint64_t a,std::uint64_t b,
         // The sole double-rounding hazard: binary64 landed on a binary32
         // midpoint. Fall back even if the double residual happens to be zero.
         if((bits&UINT64_C(0x1fffffff))==UINT64_C(0x10000000))return false;
-        const double single=static_cast<double>(static_cast<float>(rounded));
+        const double single=fp_rn_single(rounded);
         // A distinct binary64 value and widened binary32 differ by >=1 double
         // ulp; the <=half-ulp double rounding error cannot reverse that sign.
-        if(single!=rounded)residual=rounded-single;
+        if(single!=rounded)residual=fp_rn_sub(rounded,single);
         rounded=single;std::memcpy(&bits,&rounded,8);
     }
     const bool inexact=residual!=0;
@@ -482,7 +516,7 @@ static std::uint64_t fp_fused_sum(PpuState& s, std::uint64_t a, std::uint64_t c,
     fp_inexact(s, inexact, up); // FPRF is undefined for integer conversions; preserve it.
     return p.sign ? UINT64_C(0) - magnitude : magnitude;
 }
-[[maybe_unused]] static std::uint64_t fp_widen(std::uint32_t value) {
+[[maybe_unused,gnu::noinline,gnu::cold]] static std::uint64_t fp_widen_special(std::uint32_t value) {
     const auto sign = std::uint64_t(value >> 31) << 63;
     const unsigned exp = (value >> 23) & 255;
     std::uint64_t fraction = value & 0x7fffff;
@@ -494,6 +528,15 @@ static std::uint64_t fp_fused_sum(PpuState& s, std::uint64_t a, std::uint64_t c,
         return sign | (std::uint64_t(e + 1023) << 52) | ((fraction & 0x7fffff) << 29);
     }
     return sign | (std::uint64_t(exp + 896) << 52) | (fraction << 29);
+}
+// lfs/lfsx (Power ISA DOUBLE, bit-exact widening). Inlined common cases: a normal binary32 (biased exponent 1..254) keeps sign and
+// fraction and is rebiased by 896 (the exponent field cannot carry into the sign: 254+896 < 2048); +-0 keeps only the sign.
+// Denormals, infinities and NaNs (no quieting) take the out-of-line helper.
+[[maybe_unused,gnu::always_inline]] static inline std::uint64_t fp_widen(std::uint32_t value) {
+    if (__builtin_expect(((value >> 23) & 255) - 1u < 254u, 1))
+        return (std::uint64_t(value & 0x80000000u) << 32) | ((std::uint64_t(value & 0x7fffffffu) << 29) + (UINT64_C(896) << 52));
+    if (!(value & 0x7fffffffu)) return std::uint64_t(value) << 32;
+    return fp_widen_special(value);
 }
 [[maybe_unused]] static std::uint32_t fp_narrow_exact(std::uint64_t value) {
     const auto sign = static_cast<std::uint32_t>(value >> 32) & 0x80000000;
@@ -507,14 +550,18 @@ static std::uint64_t fp_fused_sum(PpuState& s, std::uint64_t a, std::uint64_t c,
         throw std::runtime_error("stfs requires a single-precision-representable value in this prototype");
     return out;
 }
-[[maybe_unused]] static std::uint32_t fp_store_single(std::uint64_t value) {
-    // Power ISA SINGLE (store conversion): bit selection without rounding.
+[[maybe_unused,gnu::noinline,gnu::cold]] static std::uint32_t fp_store_single_tiny(std::uint64_t value) {
     const unsigned exp = (value >> 52) & 2047;
-    if (exp > 896 || !(value & UINT64_C(0x7fffffffffffffff)))
-        return static_cast<std::uint32_t>(((value >> 62) << 30) | ((value >> 29) & 0x3fffffff));
     if (exp < 874) throw std::runtime_error("stfs of a value below single denormal range is architecturally undefined");
     const auto fraction = (value & UINT64_C(0xfffffffffffff)) | (UINT64_C(1) << 52);
     return static_cast<std::uint32_t>(((value >> 63) << 31) | (fraction >> (926 - exp)));
+}
+[[maybe_unused,gnu::always_inline]] static inline std::uint32_t fp_store_single(std::uint64_t value) {
+    // Power ISA SINGLE (store conversion): bit selection without rounding; operands below the binary32 normal range out of line.
+    const unsigned exp = (value >> 52) & 2047;
+    if (__builtin_expect(exp > 896 || !(value & UINT64_C(0x7fffffffffffffff)), 1))
+        return static_cast<std::uint32_t>(((value >> 62) << 30) | ((value >> 29) & 0x3fffffff));
+    return fp_store_single_tiny(value);
 }
 static void fp_nan_flag(PpuState& s, std::uint32_t flag) {
     if (~s.fpscr & flag) s.fpscr |= UINT32_C(0x80000000); // FX on a new exception bit.
@@ -579,22 +626,22 @@ static inline void fp_materialize(PpuState& s){if(__builtin_expect(s.fp_lazy_op!
 #pragma clang fp contract(off)
 #endif
     if((s.fpscr&UINT32_C(0x020000fb))!=UINT32_C(0x02000000) || (precision!=53 && precision!=24) || !fp_host_operand(a) ||
-       (op!=4 && !fp_host_operand(b)) || (op>=5 && !fp_host_operand(c)) || (_mm_getcsr()&0xffc0u)!=0x1f80u)return false;
+       (op!=4 && !fp_host_operand(b)) || (op>=5 && !fp_host_operand(c)) || (FP_HOST_NEEDS_MXCSR && (_mm_getcsr()&0xffc0u)!=0x1f80u))return false;
     double x,y,z;std::memcpy(&x,&a,8);std::memcpy(&y,&b,8);std::memcpy(&z,&c,8);
     double rounded;
     switch(op){
-    case 1:rounded=x+y;break;
-    case 2:rounded=x*y;break;
-    case 3:if(!y)return false;rounded=x/y;break;
-    case 4:if(x<0)return false;rounded=std::sqrt(x);break;
-    default:rounded=std::fma(x,z,y);break;
+    case 1:rounded=fp_rn_add(x,y);break;
+    case 2:rounded=fp_rn_mul(x,y);break;
+    case 3:if(!y)return false;rounded=fp_rn_div(x,y);break;
+    case 4:if(x<0)return false;rounded=fp_rn_sqrt(x);break;
+    default:rounded=fp_rn_fma(x,z,y);break;
     }
     std::uint64_t bits;std::memcpy(&bits,&rounded,8);
     if(precision==24){
         const unsigned exponent=(bits>>52)&2047;
         if((bits&UINT64_C(0x7fffffffffffffff)) && (exponent<898 || exponent>1149))return false;
         if((bits&UINT64_C(0x1fffffff))==UINT64_C(0x10000000))return false;
-        const double single=static_cast<double>(static_cast<float>(rounded));std::memcpy(&bits,&single,8);
+        const double single=fp_rn_single(rounded);std::memcpy(&bits,&single,8);
     }
     // fnmadd/fnmsub negate after rounding (never a NaN here).
     if(op==6)bits^=UINT64_C(0x8000000000000000);

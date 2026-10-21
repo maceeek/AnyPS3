@@ -6,6 +6,7 @@ import hashlib
 import json
 
 from .sample_profile import TYPES as SAMPLE_PROFILE_TYPES
+from .frametime import CPP as FRAMETIME_CPP
 from .analysis import imports
 from .elf import ElfImage
 from .errors import AnyPS3Error
@@ -169,7 +170,7 @@ class Program:
                  MMAPPER_TYPES, SYNC_TYPES, EVENT_TYPES, SYSUTIL_TYPES, FS_TYPES, PAD_TYPES, HID_TYPES, AUDIO_TYPES, PRESENT_TYPES, EXECUTION_TYPES, instrument_gpu_waits(VULKAN_CPP), RSX_TYPES, SPU_TYPES, THREAD_TYPES, FS_EXT_TYPES, SYNC_EXT_TYPES, SPU_EXT_TYPES, RSX_NET_EXT_TYPES,
                  WORKER_TYPES, EXECUTION_STATE_CPP, "bool spu_owner_call(PpuState&,NativeSpu::Thread&,const std::function<void()>&);", FLOW_CPP, FLOAT_CPP, VECTOR_CPP, FS_CPP]
         spu_helpers = (TLS_CPP + MMAPPER_CPP + spu_core) if self.process_entry else ""
-        runtime = "\n".join([(WORKER_CPP + compose_execution(EXECUTION_CPP) + adapt_engines(spu_dispatch + RSX_CPP.replace("m.regions.erase(it);","m.regions.erase(it);m.mapping_changed();")) + RSX_GAME_CPP + THREAD_CPP + SYSUTIL_CPP + SYNC_CPP + EVENT_CPP + SPU_CPP + PAD_CPP + adapt_engines(AUDIO_CPP.replace("m.regions.erase(it);","m.regions.erase(it);m.mapping_changed();")) + SERVICES_CPP + module_lookup(self.native_modules)) if self.process_entry else "",
+        runtime = "\n".join([(FRAMETIME_CPP + WORKER_CPP + compose_execution(EXECUTION_CPP) + adapt_engines(spu_dispatch + RSX_CPP.replace("m.regions.erase(it);","m.regions.erase(it);m.mapping_changed();")) + RSX_GAME_CPP + THREAD_CPP + SYSUTIL_CPP + SYNC_CPP + EVENT_CPP + SPU_CPP + PAD_CPP + adapt_engines(AUDIO_CPP.replace("m.regions.erase(it);","m.regions.erase(it);m.mapping_changed();")) + SERVICES_CPP + module_lookup(self.native_modules)) if self.process_entry else "",
                               module_runtime(self.image,self.native_modules) if self.native_modules else ""])
         declarations, operations = [], []
         # Page-local basic blocks keep compiler functions bounded to 4 KiB of
@@ -328,6 +329,7 @@ class Program:
                       process_setup(self.image) if self.process_entry else "",
                       resident_startup(self.image,self.native_modules),
                       "    anyps3_entry(state, trace);",
+                      "    rsx_finalize(state);" if self.process_entry else "",
                       "    anyps3_trace_dump();",
                       '    std::printf("returned r3=%" PRIu64 " steps=%" PRIu64 "\\n", state.r[3], state.steps); return 0;',
                       "    } catch (const std::exception& error) {",

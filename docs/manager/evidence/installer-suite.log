@@ -1,0 +1,9 @@
+test_conflicting_launcher_is_preserved (tests.manager.test_installer.InstallerTests.test_conflicting_launcher_is_preserved) ... ok
+test_install_update_failure_and_development_isolation (tests.manager.test_installer.InstallerTests.test_install_update_failure_and_development_isolation) ... ok
+test_missing_ref_does_not_publish (tests.manager.test_installer.InstallerTests.test_missing_ref_does_not_publish) ... ok
+test_truncated_download_does_not_start_installing (tests.manager.test_installer.InstallerTests.test_truncated_download_does_not_start_installing) ... ok
+
+----------------------------------------------------------------------
+Ran 4 tests in 26.448s
+
+OK

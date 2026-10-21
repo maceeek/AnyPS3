@@ -1,5 +1,40 @@
 # Current state and goal
 
+## Wave 6 result — 2026-10-21 ~17:10 (Opus 5.5 coordinator; Opus 5.5 medium agents; gpt-6.1-sol / gpt-6-astra)
+
+**State: the original level holds the 60 Hz VSYNC cap with ~3–4 ms headroom per frame; the strict acceptance is met on the
+per-frame criteria, not on the two-second minimum.** Branch `claude/wave6-60fps` = `main` + integration `fast2/integ473` 5c266e2
++ GUI branch `feat/gui-pad` (audio toggle, SIXAXIS/rumble/PS button). Its exact runtime is **build 706** (snapshot verified equal to
+the branch's `anyps3/` and profile).
+
+| runs (QUIET, original level great_clock_a) | FPS mean | worst 2 s | flips in one vblank | main_ppu / rsx_worker ms/frame |
+| --- | --- | --- | --- | --- |
+| 706a / 706b (branch build) | 59.71 / 59.69 | 57.43 / 55.42 | — | 11.0 / 12.2 |
+| 706c / 706d (branch build, ring) | 59.51 / 56.79 | 55.49 / 32.95 | 99.5 / 95.7 % | 11.0–11.9 / 12.4–13.1 |
+| 705a–d (integration 5c266e2 = 706 without the GUI/pad branch) | 59.77 / 58.39 / 59.91 / 59.89 | 58.4 / 42.0 / 59.0 / 58.0 | 99.8 / 98.6 / 99.9 / 99.9 % | 10.6–11.1 / 11.8–12.5 |
+| 703c / 703d (reference) | — / 59.94 | — / 59.49 | 99.6 / 100.0 % | 11.1 / 12.2 |
+| 472a (main before this branch) | 46.68 | 32.0 | — | 14.0 / 13.4 |
+
+706d: the first 16 s of its window were RSX-worker-bound bursts (worker busy 20–38 ms/frame, misses.py `work/integ473/i6/miss-706d.txt`),
+then a steady 60; 705b had a similar burst at the end of its window → occasional worker bursts in some runs, not specific to the GUI/pad
+branch; cause open (next step: ring + RSX stage profile of such a burst). Work span p50 12.6–12.9 ms, p99 15.6–16.5 ms (706c/d).
+Acceptance (AGENTS.md): mean >= 59.7, >= 99 % one-vblank flips, main thread and RSX worker <= ~13 ms — met in most runs; the worst
+two-second interval (>= 59.5) is not met consistently (single dips, partly from desktop use during the runs). **Headroom measured with
+`ANYPS3_VBLANK_HZ` (671b/c): 75 Hz is not held (55.9 % one-vblank), 90 Hz runs at half rate** — frame cost ~12.3–13.5 ms.
+Pipeline-cache persistence: run-wide pipeline creation 184–241 ms vs ~800 ms before.
+
+**Tests:** full suite on 5c266e2: 185 modules, 877 tests, 0 failures, 0 skips (the 25 `tests/manager` tests are not part of the
+partitioned run: 38 run separately on the branch, OK, 4 opt-in installer skips); native pad tests 8/8 OK on the branch.
+**Reviews:** gpt-6-astra reviews spuput-1, rsxhead-1, fpspu-2, rsxw4-1, warmup-blit-4 — every finding fixed with a test and a
+mutation check (`local/ratchet/work/_reviews/`). Open, documented: FIFO window ships OFF (`ANYPS3_RSX_FIFO_WINDOW=1`; a drain-bound test
+failed 4/6 with it, cause unknown); the FP fast path 559472e has no demonstrated gain (kept: exact per review, 703/705 measured best with it).
+**Not verified:** physical gamepad (DualSense) and GUI build/play with the real game — the user tests next; audible audio (never on this PC
+by agents). **Hardware:** RAM bit flips on this PC (verified, see the wave record).
+
+Next candidates (unverified ideas): chain SPU native functions without the dispatcher, SPU FP slow path, 16-byte `atomic_read`, the FIFO
+window bracket failure, then render resolution scaling (`local/ratchet/work/_tasks/RESSCALE.md`). Record:
+[FAST2 record, wave 6](experiments/2026-10-20-fast2-wave.md#wave-6-results-2026-10-21).
+
 ## FAST2 wave 4 handoff — 2026-10-20 ~22:25 (ended on user instruction; Claude Opus 5.5 + Sonnet 5.5 agents, gpt-6-astra reviews)
 
 **Goal (60 FPS with headroom) not reached.** Best measured steady run: **`660a` 55.96 FPS mean** (median 58.5, two-second min 47.5,
@@ -73,6 +108,15 @@ Runtime/profile unchanged by this round; documentation and offline analysis arti
 Full findings, source locations, fixes, verification contracts and commands:
 [sandbox analysis](experiments/2026-10-20-sandbox-analysis.md).
 Evidence: [analysis JSON](../../local/ratchet/analysis-2026-10-20-sandbox/evidence.json).
+
+## Desktop installer — 2026-10-21
+
+**Verified in an isolated test home:** the GUI-first README and per-user installer (`scripts/install.sh`) were prepared on
+branch `feat/gui-installer` (base `3e0f5f9`) and merged into `main` on the user's instruction (worktree removed).
+Four real installer integration tests pass: install/update, failure preservation, development isolation,
+launcher conflicts and truncated downloads. The app uses private source/venv snapshots, a separate
+`anyps3-library` and separate preferences. Runtime/profile are unchanged; no new game or controller acceptance.
+Merged locally, not pushed: the README's curl command works only after `main` is published. [Commands, evidence and limits](experiments/2026-10-21-gui-installer.md).
 
 ## Manager worktree — 2026-10-20
 

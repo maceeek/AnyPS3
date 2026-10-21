@@ -1,0 +1,6 @@
+test_capabilities_emit_actual_runtime_worker_default (tests.manager.test_manager.ManagerTests.test_capabilities_emit_actual_runtime_worker_default) ... ok
+
+----------------------------------------------------------------------
+Ran 1 test in 0.490s
+
+OK

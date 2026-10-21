@@ -9,8 +9,14 @@ from .rsx_vk_compute import HEADERS as COMPUTE_HEADERS, MEMBERS as COMPUTE_MEMBE
 from .rsx_vk_graphics import MEMBERS as GRAPHICS_MEMBERS
 from .rsx_vk_present import MEMBERS as PRESENT_MEMBERS
 from .rsx_vk_conditional import MEMBERS as CONDITIONAL_MEMBERS
+from .rsx_vblank import VBLANK_CPP
 
 CPP = r'''
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <string>
+''' + VBLANK_CPP + r'''
 #ifndef ANYPS3_RSX_PERF_COUNTERS
 #define ANYPS3_RSX_PERF_COUNTERS 1
 #include <atomic>
@@ -22,14 +28,24 @@ struct RsxPerfCounters {
     enum Id : unsigned {draws,gpu_draws,fifo_runs,packets,leave_fifo,guard_rearm,submits,submit_draw_prefix,submit_labels,submit_other,
         finish_waits,collect_waits,wait_ns,readback_flushes,readback_surfaces,host_access,label_syncs,alias_flushes,
         descriptor_allocs,descriptor_writes,pipeline_misses,framebuffer_misses,render_passes,upload_bytes,state_uploads,
-        surface_binds_new,clears,mprotect,vertex_bytes,blob_bytes,draw_layers,history_copies,pass_ends,alias_merges,fp_hits,fp_misses,timeline_polls,fence_polls,mprotect_arm,mprotect_labels,vk_memory_allocs,vk_memory_frees,vk_buffers,vk_images,vk_framebuffers,merge_rej_new,merge_rej_old,merge_rej_capacity,merge_rej_overlap,vk_memory_reuses,count};
+        surface_binds_new,clears,mprotect,vertex_bytes,blob_bytes,draw_layers,history_copies,pass_ends,alias_merges,fp_hits,fp_misses,timeline_polls,fence_polls,mprotect_arm,mprotect_labels,vk_memory_allocs,vk_memory_frees,vk_buffers,vk_images,vk_framebuffers,merge_rej_new,merge_rej_old,merge_rej_capacity,merge_rej_overlap,vk_memory_reuses,blit_calls,blit_pixels,blit_gpu,blit_rows,blit_batch,blit_pixel,blit_rows_ns,blit_batch_ns,blit_pixel_ns,m2mf_calls,m2mf_bytes,m2mf_ns,src_fs_hits,src_fs_misses,src_vs_hits,src_vs_misses,src_evictions,count};
     static constexpr const char* names[count]={"draws","gpu_draws","fifo_runs","packets","leave_fifo","guard_rearm","submits","submit_draw_prefix","submit_labels","submit_other",
         "finish_waits","collect_waits","wait_ns","readback_flushes","readback_surfaces","host_access","label_syncs","alias_flushes",
         "descriptor_allocs","descriptor_writes","pipeline_misses","framebuffer_misses","render_passes","upload_bytes","state_uploads",
-        "surface_binds_new","clears","mprotect","vertex_bytes","blob_bytes","draw_layers","history_copies","pass_ends","alias_merges","fp_hits","fp_misses","timeline_polls","fence_polls","mprotect_arm","mprotect_labels","vk_memory_allocs","vk_memory_frees","vk_buffers","vk_images","vk_framebuffers","merge_rej_new","merge_rej_old","merge_rej_capacity","merge_rej_overlap","vk_memory_reuses"};
+        "surface_binds_new","clears","mprotect","vertex_bytes","blob_bytes","draw_layers","history_copies","pass_ends","alias_merges","fp_hits","fp_misses","timeline_polls","fence_polls","mprotect_arm","mprotect_labels","vk_memory_allocs","vk_memory_frees","vk_buffers","vk_images","vk_framebuffers","merge_rej_new","merge_rej_old","merge_rej_capacity","merge_rej_overlap","vk_memory_reuses","blit_calls","blit_pixels","blit_gpu","blit_rows","blit_batch","blit_pixel","blit_rows_ns","blit_batch_ns","blit_pixel_ns","m2mf_calls","m2mf_bytes","m2mf_ns","src_fs_hits","src_fs_misses","src_vs_hits","src_vs_misses","src_evictions"};
     static inline std::array<std::atomic<std::uint64_t>,count> values{};
     static void add(Id id,std::uint64_t n=1){auto& v=values[id];v.store(v.load(std::memory_order_relaxed)+n,std::memory_order_relaxed);}
 };
+#include <cstdlib>
+#include <cstring>
+#include <stdexcept>
+// Diagnostic switches of the render path. ANYPS3_PERF_REPORT=1 (set by every measurement run): wall-clock reads that only feed PERF
+// lines (service ticks, per-draw recording time) are taken only then. ANYPS3_RSX_POLL=adaptive: flight submit timestamps and the
+// latency EWMA exist only for the adaptive completion poll (default and "fixed": a fixed 100 us poll, no timestamps).
+inline bool anyps3_perf_report(){static const bool value=[]{const char* v=std::getenv("ANYPS3_PERF_REPORT");return v && v[0]=='1' && !v[1];}();return value;}
+inline bool rsx_poll_adaptive(){static const bool value=[]{const char* v=std::getenv("ANYPS3_RSX_POLL");
+    if(v && std::strcmp(v,"adaptive") && std::strcmp(v,"fixed")){throw std::runtime_error("invalid ANYPS3_RSX_POLL");}
+    return v && !std::strcmp(v,"adaptive");}();return value;}
 #endif
 #ifdef ANYPS3_VULKAN
 #include <vulkan/vulkan.h>
@@ -42,6 +58,9 @@ inline std::atomic<bool>& rsx_multiview_shaders(){static std::atomic<bool> value
 #include <cstring>
 #include <dlfcn.h>
 #include <thread>
+#include <condition_variable>
+#include <optional>
+#include <deque>
 #include <mutex>
 #include <functional>
 #include <exception>
@@ -112,6 +131,7 @@ class NativeVulkan {
     }
     void destroy()noexcept{
 #ifdef ANYPS3_RSX_VK
+        completion_stop();recorder_stop();
         graphics_wsi.reset();
 #endif
         if(device){
@@ -302,6 +322,9 @@ public:
             VkCommandPoolCreateInfo pi{};pi.sType=VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
             pi.queueFamilyIndex=family;pi.flags=VK_COMMAND_POOL_CREATE_TRANSIENT_BIT|VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
             check(vkCreateCommandPool(device,&pi,nullptr,&pool),"vkCreateCommandPool");
+#ifdef ANYPS3_RSX_VK
+            recorder_start();completion_start();
+#endif
             std::fprintf(stderr,"native Vulkan device=%s type=%u\n",device_name.c_str(),device_type);
         }catch(...){destroy();throw;}
     }

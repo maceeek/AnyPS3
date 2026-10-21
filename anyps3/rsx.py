@@ -48,7 +48,7 @@ struct NativeRsx {
     void* graphics_session=nullptr; // owned by the synchronous FIFO scope
 #endif
 #endif
-    std::uint64_t cpu_clears=0,rendered_clears=0,captured_frames=0,flips=0,diag_skipped=0;
+    std::uint64_t cpu_clears=0,rendered_clears=0,captured_frames=0,async_captures=0,flips=0,diag_skipped=0;
     NativeRsx(){io.fill(UINT32_MAX);}
 };
 '''
@@ -67,10 +67,23 @@ static void rsx_graphics_reset_conditional(PpuState& s);
 static bool rsx_graphics_resolve_conditional(PpuState& s);
 static bool rsx_graphics_conditional_fault(PpuState& s);
 static bool rsx_graphics_flip_async(PpuState&,unsigned,std::uint64_t,std::uint64_t,unsigned,std::uint64_t);
+static void rsx_graphics_flip_prepare(PpuState&);
+static bool rsx_graphics_poll(PpuState&);
 static bool rsx_graphics_defer_label(PpuState&,std::uint64_t,unsigned);
 static bool rsx_graphics_defer_report(PpuState&,std::uint64_t,unsigned,bool,bool);
 [[maybe_unused]] static bool rsx_graphics_scanout(PpuState& s,unsigned id,std::vector<std::uint8_t>* capture,bool present);
 #endif
+// FRAMETIME wave: page-synchronisation requests of other threads (SPU lanes, PPU faults) used to wait for the owner's whole FIFO run or
+// vsync wait (measured: mean 1.7 ms behind a run, 9 ms behind a vsync wait, 9.8 ms/frame summed over the lanes). The game worker installs a
+// hook that serves such requests (RsxOwnerQueue::Request::put_generation == 1, kind HostAccess) at FIFO packet boundaries and inside the
+// vsync wait; requesters count themselves in rsx_host_waiters so that the check is one relaxed load per packet.
+// ANYPS3_RSX_HOST_DRAIN=0 and ANYPS3_RSX_FLIP_EARLY=0 restore the previous behaviour (A/B switches).
+static std::atomic<unsigned> rsx_host_waiters{0};
+static std::function<void()>& rsx_owner_hook(){static thread_local std::function<void()> hook;return hook;}
+[[maybe_unused]] static inline void rsx_owner_poll(){
+    if(__builtin_expect(rsx_host_waiters.load(std::memory_order_relaxed)!=0,0)){auto& hook=rsx_owner_hook();if(hook)hook();}
+}
+[[maybe_unused]] static bool rsx_flip_early_enabled(){static const bool on=[]{const char* v=std::getenv("ANYPS3_RSX_FLIP_EARLY");return !v || std::string(v)!="0";}();return on;}
 ''' + CAPTURE_CPP + SURFACE_CPP + DISPLAY_CPP + r'''
 [[maybe_unused]] static void rsx_set_flip_mode(PpuState& s,unsigned head){
     std::unique_ptr<GuestMemory::ConfigurationPermit> configuration;
@@ -200,6 +213,7 @@ static RsxEventTicket rsx_event_ticket(PpuState& s,std::uint64_t flags,const cha
 }
 static void rsx_event_publish(PpuState& s,unsigned id,std::uint64_t name,std::uint64_t flags,const char* error,bool wake=true){
     if(!flags)return;
+    anyps3_ft::mark(anyps3_ft::EventPub,id,name,flags);
     // A raw fault may block the coordinator in its signal frame. Publish
     // memory on the owner and queue only the immutable LV2 event there; the
     // next coordinator safe point delivers it or poisons with the same error.
@@ -256,20 +270,47 @@ static bool rsx_tick_vblank(PpuState& s,std::uint64_t now_ns){
     // Native virtual 720p output advertises 60000/1001 Hz. Derive deadlines
     // from the epoch rather than repeatedly adding a rounded frame duration.
     const auto elapsed=now_ns-gpu.vblank_epoch_ns;
-    const auto ticks=(elapsed/1001000000)*60+(elapsed%1001000000)*60/1001000000;
+    const auto& rate=rsx_vblank_rate();const auto ticks=rate.ticks(elapsed);
     if(ticks==gpu.vblank_ticks)return false;
     const auto flags=m.load(std::uint64_t(gpu.driver)+0x12c0,4)&0x802;
     const auto event=rsx_event_ticket(s,flags,"RSX vblank event port is disconnected",true);
     if(flags && !event.pending && event.full)return false;
     const auto head=std::uint64_t(gpu.driver)+0x10f8;
     m.range(head,0x40,true);
-    const auto tick_ns=gpu.vblank_epoch_ns+(ticks/60)*1001000000+(ticks%60)*1001000000/60;
+    const auto tick_ns=gpu.vblank_epoch_ns+rate.tick_ns(ticks);
     const auto timebase=(tick_ns/1000000000)*79800000+(tick_ns%1000000000)*79800000/1000000000;
     m.store(head+0x1c,4,timebase);m.store(head+0x3c,4,timebase>>32);
     m.store(head+0x20,8,tick_ns/1000);m.store(head+0x30,8,ticks);
     gpu.vblank_ticks=ticks;
+    anyps3_ft::mark(anyps3_ft::Vblank,ticks,now_ns-tick_ns,flags);
     if(flags && !event.pending)rsx_event_publish(s,gpu.event_queue,event.name,flags,"RSX vblank event port is disconnected");
     return true;
+}
+// Wait for the emulated vblank deadline `until` (the flip blocks the owner, which keeps the display ordering of later commands).
+// On the RSX owner the wait is not idle time: everything recorded before the flip command is independent of the display, so it is
+// submitted at once (the GPU finishes it, and the report/label writes that precede the flip become visible, before the vblank
+// instead of after it), completed GPU prefixes are published while waiting, and page-synchronisation requests of other threads
+// are served (rsx_owner_poll) instead of waiting for the end of the vblank.
+static void rsx_wait_vblank(PpuState& s,std::chrono::steady_clock::time_point until){
+#ifdef ANYPS3_RSX_VK
+    // A flip that is already late has no wait to hide the GPU time in: its own submission follows at once.
+    if(rsx_flip_early_enabled() && s.process.rsx_worker.on_owner() && std::chrono::steady_clock::now()<until)rsx_graphics_flip_prepare(s);
+#endif
+    // SPUs keep running while the PPU waits for vblank; sleep only when idle.
+    while(std::chrono::steady_clock::now()<until){
+        if(s.process.rsx_worker.on_owner()){
+            auto& q=*s.process.rsx_worker.queue;
+            std::unique_lock<std::mutex> lock(q.mutex);const auto seen=q.generation;lock.unlock();   // before serving: a later post wakes the wait
+            bool pending=false;
+#ifdef ANYPS3_RSX_VK
+            if(rsx_flip_early_enabled())pending=rsx_graphics_poll(s);
+#endif
+            rsx_owner_poll();
+            const auto step=std::chrono::steady_clock::now()+std::chrono::microseconds(pending?100:500);
+            lock.lock();
+            q.changed.wait_until(lock,std::min(until,step),[&]{return q.closing || q.generation!=seen;});
+        }else if(!spu_run(s,65536))std::this_thread::sleep_until(std::min(until,std::chrono::steady_clock::now()+std::chrono::microseconds(500)));
+    }
 }
 static void rsx_flip_display(PpuState& s,unsigned head,std::uint32_t value){
     auto& gpu=s.rsx;auto& m=s.memory;
@@ -286,21 +327,31 @@ static void rsx_flip_display(PpuState& s,unsigned head,std::uint32_t value){
     const auto flags=(UINT64_C(8)<<head)&m.load(std::uint64_t(gpu.driver)+0x12c0,4);
     const auto event=rsx_event_ticket(s,flags,"RSX flip event cannot be delivered");
     m.range(address,0x18,true);m.range(std::uint64_t(gpu.reports)+0x10,16,true);
+    anyps3_ft::mark(anyps3_ft::FlipReq,id,gpu.flip_modes[head],gpu.vblank_ticks);
+    {   // Diagnostic (ANYPS3_FRAMETIME_FLIPDUMP=N): the FIFO words around the first N flips, to see what the game queues next to a flip.
+        static const unsigned dump=[]{const char* v=std::getenv("ANYPS3_FRAMETIME_FLIPDUMP");return v?unsigned(std::strtoul(v,nullptr,10)):0u;}();
+        static unsigned dumped=0;
+        if(dump && dumped<dump && gpu.flips>=100){++dumped;
+            const auto get=static_cast<std::uint32_t>(m.load(gpu.dma+0x44,4)),put=static_cast<std::uint32_t>(m.load(gpu.dma+0x40,4));
+            std::fprintf(stderr,"FLIPDUMP flip=%llu get=%08x put=%08x:",(unsigned long long)gpu.flips,get,put);
+            for(int i=-24;i<48;++i){const auto at=std::int64_t(get)+4*i;if(at<0)continue;
+                try{std::fprintf(stderr," %s%08x",i==0?"|":"",unsigned(m.load(rsx_address(gpu,std::uint32_t(at)),4)));}catch(...){std::fprintf(stderr," ????????");}}
+            std::fprintf(stderr,"\n");}
+    }
     if(gpu.flip_modes[head]==2 && gpu.vblank_epoch_ns){
         const auto next=gpu.vblank_ticks+1;
-        const auto deadline=gpu.vblank_epoch_ns+(next/60)*1001000000+(next%60)*1001000000/60;
-        // SPUs keep running while the PPU waits for vblank; sleep only when idle.
-        const auto until=std::chrono::steady_clock::time_point(std::chrono::nanoseconds(deadline));
-        while(std::chrono::steady_clock::now()<until){
-            if(s.process.rsx_worker.on_owner() || !spu_run(s,65536))std::this_thread::sleep_until(std::min(until,std::chrono::steady_clock::now()+std::chrono::microseconds(500)));
-        }
+        const auto deadline=gpu.vblank_epoch_ns+rsx_vblank_rate().tick_ns(next);
+        anyps3_ft::Span ft_vsync(anyps3_ft::FlipVsync,deadline,next);
+        rsx_wait_vblank(s,std::chrono::steady_clock::time_point(std::chrono::nanoseconds(deadline)));
     }
 #ifdef ANYPS3_RSX_VK
     // Unsaved frames may remain in flight. Guest completion fields and the
     // event are published only when that frame's timeline value completes.
     if(!gpu.perf_capture.replay && rsx_graphics_flip_async(s,id,address,std::uint64_t(gpu.reports)+0x10,gpu.event_queue,flags?event.name:0)){
+        anyps3_ft::mark(anyps3_ft::FlipAsync,1,0,id);
         rsx_capture_flip(s);return;
     }
+    anyps3_ft::mark(anyps3_ft::FlipAsync,0,0,id);
 #endif
     // Saved captures keep their durable-to-stdio completion contract.
     if(gpu.perf_capture.replay){
@@ -316,28 +367,68 @@ static void rsx_flip_display(PpuState& s,unsigned head,std::uint32_t value){
 }
 ''' + DRAW_CPP + r'''
 #ifdef ANYPS3_RSX_VK
+static void rsx_graphics_flip_prepare(PpuState& s){
+    auto* session=static_cast<rsxgraphics::Session*>(s.rsx.graphics_session?s.rsx.graphics_session:s.rsx.graphics_owner.get());
+    if(!session || !session->observer_installed || session->previous_observer || session->failed)return;
+    session->submit_async("flip_early");
+    if(!s.rsx.graphics_session)session->leave_fifo();
+}
+// Publish completed GPU prefixes; returns whether work is still in flight (the caller then polls again soon).
+static bool rsx_graphics_poll(PpuState& s){
+    auto* session=static_cast<rsxgraphics::Session*>(s.rsx.graphics_session?s.rsx.graphics_session:s.rsx.graphics_owner.get());
+    if(!session || session->failed || session->flights.empty())return false;
+    session->retire(false);
+    if(!s.rsx.graphics_session)session->leave_fifo();
+    return !session->flights.empty();
+}
 static bool rsx_graphics_flip_async(PpuState& s,unsigned id,std::uint64_t address,std::uint64_t reports,unsigned queue,std::uint64_t event_name){
+    anyps3_ft::Span ft_total(anyps3_ft::Mark,0xa0);
     auto* session=static_cast<rsxgraphics::Session*>(s.rsx.graphics_session?s.rsx.graphics_session:s.rsx.graphics_owner.get());
     if(!session || !session->observer_installed || session->previous_observer || id>=s.rsx.display_buffers.size() || s.video.format!=0)return false;
     const char* directory=std::getenv("ANYPS3_FRAME_DIR");const bool files=directory && *directory;
     if(!files && !s.present.enabled)return false;
-    if(files){const auto root=std::filesystem::canonical(directory);if(!std::filesystem::is_directory(root))throw std::runtime_error("RSX frame output is not a directory");
-        const auto next=s.rsx.flips+1;const auto stride=rsx_frame_stride();if(next<=8 || next%stride==0 || rsx_frame_trigger(false))return false;}
+    // The first eight flips and operator requests (ANYPS3_FRAME_TRIGGER) keep the synchronous capture path (file written before the
+    // flip completes). A stride capture rides on this deferred flip: the scanout image is copied on the flip's GPU timeline and the
+    // file is written in the background (rsx_capture_write_async), so a measurement capture never stalls the RSX owner.
+    std::filesystem::path root;bool capture=false;
+    if(files){root=std::filesystem::canonical(directory);if(!std::filesystem::is_directory(root))throw std::runtime_error("RSX frame output is not a directory");
+        const auto next=s.rsx.flips+1;const auto stride=rsx_frame_stride();if(next<=8 || rsx_frame_trigger(false))return false;
+        capture=next%stride==0;}
     const auto& buffer=s.rsx.display_buffers[id];if(!buffer.width || !buffer.height)return false;
     const auto target=rsxdraw::bind_target(s,0xfeed0000,buffer.offset,buffer.pitch,buffer.width,buffer.height);
     std::shared_ptr<NativeVulkan::GraphicsImage> image;
     for(const auto& surface:session->surfaces)if(!surface.partial && surface.same(target,buffer.width,buffer.height,1,8,false)){image=surface.image;break;}
     if(!image || image->format==VK_FORMAT_R32_UINT)return false;
+    if(capture && (image->width!=buffer.width || image->height!=buffer.height || image->layers!=1))return false;
+    if(capture && s.rsx.captured_frames>=256)throw std::runtime_error("headless RSX capture budget exhausted (256 frames)");
+    // The capture copy needs width*height*4 bytes of this batch's staging. Decide before defer_flip attaches the flip labels: submit
+    // the preceding work and record the flip into a fresh batch, or take the synchronous capture path when even an empty batch is
+    // too small (never "staging exhausted" in the middle of a deferred flip).
+    if(capture){const auto bytes=std::uint64_t(buffer.width)*buffer.height*4;
+        if(!session->vk.graphics_space_fits(*session->batch,bytes)){session->submit_async("capture_space");
+            if(!session->vk.graphics_space_fits(*session->batch,bytes))return false;}}
     const unsigned head=unsigned((address-(std::uint64_t(s.rsx.driver)+0x10b8))/0x40);
     const auto flags=(UINT64_C(8)<<head)&s.memory.load(std::uint64_t(s.rsx.driver)+0x12c0,4);
     if(!session->defer_flip(address,reports,id,queue,event_name,flags))return false;
     try{
         ++session->batch->frames;
+        if(capture){
+            // Same bytes as the synchronous scanout capture (rsx_graphics_scanout): the display image copied after every command
+            // of this frame, alpha forced opaque (X8R8G8B8 scanout). Recorded before the present: an asynchronous present
+            // submits the batch (GraphicsWsi::display), after which nothing more can be recorded into it.
+            const auto at=session->vk.graphics_transfer(*session->batch,image,VK_IMAGE_ASPECT_COLOR_BIT,4);
+            const auto number=++s.rsx.captured_frames;++s.rsx.async_captures;
+            session->completions.push_back([at,number,id,width=buffer.width,height=buffer.height,path=root/rsx_capture_name(number)](const NativeVulkan::GraphicsBatch& b){
+                std::vector<std::uint8_t> rgba(std::size_t(width)*height*4);std::memcpy(rgba.data(),static_cast<const char*>(b.map)+at,rgba.size());
+                for(std::size_t i=3;i<rgba.size();i+=4)rgba[i]=255;
+                rsx_capture_write_async(path,std::move(rgba),id,width,height,number);});
+        }
         if(s.present.enabled){
             if(image->format==VK_FORMAT_R8G8B8A8_SRGB){auto raw=session->vk.graphics_image(*session->batch,VK_FORMAT_R8G8B8A8_UNORM,buffer.width,buffer.height,1);session->vk.graphics_copy(*session->batch,image,raw);image=std::move(raw);}
+            anyps3_ft::Span ft_present(anyps3_ft::Mark,0xa2);
             session->vk.graphics_present(*session->batch,image,buffer.width,buffer.height,s.rsx.vsync,true);++s.present.presented_frames;
         }
-        session->submit_async("flip");++s.rsx.flips;
+        {anyps3_ft::Span ft_submit(anyps3_ft::Mark,0xa3);session->submit_async("flip");}++s.rsx.flips;
     }catch(...){session->failed=true;throw;}
     if(!s.rsx.graphics_session)session->leave_fifo();
     return true;
@@ -505,6 +596,24 @@ static unsigned rsx_method_class(std::uint32_t reg){
     static const auto table=[]{std::array<std::uint8_t,0x4000> t{};for(std::uint32_t r=0;r<0x10000;r+=4)t[r/4]=!rsx_method_supported(r)?0:rsx_method_action(r)?2:1;return t;}();
     return reg<0x10000 && !(reg&3)?table[reg/4]:(rsx_method_supported(reg)?(rsx_method_action(reg)?2u:1u):0u);
 }
+// Registers whose method only stores its value (class 1 and none of the special cases of the execution chain in rsx_run_impl: channel/copy
+// objects, clear, zcull, vertex data and inline-array registers, begin/end/draw, program and constant uploads, flips, reports, blits,
+// semaphores, ...). The consumer takes a table lookup for them instead of walking the chain. The list below must name every register that
+// the chain treats individually; tests/test_rsx_fifo_plain.py compares both paths for every register.
+static bool rsx_plain_register(std::uint32_t reg){
+    switch(reg){case 0:case 0x50:case 0x68:case 0x6c:case 0x100:case 0x110:case 0x234:case 0x2000:case 0x6000:case 0x8000:case 0xa000:case 0xc000:case 0xe000:
+    case 0x1d94:case 0xa1c:case 0x1fd8:case 0x1710:case 0x1714:case 0x1800:case 0x1808:case 0x180c:case 0x1810:case 0x1814:case 0x1818:case 0x1824:
+    case 0x1e98:case 0x17c8:case 0x1438:case 0x2328:case 0xc40c:case 0x1d70:case 0x1d74:case 0xe920:case 0xe924:case 0xe940:case 0xe944:return false;
+    default:break;}
+    if((reg>=0xb80 && reg<=0xbfc) || (reg>=0x1f00 && reg<=0x1f7c) || (reg>=0xa400 && reg<0xc000))return false;
+    if((reg>=0xa80 && reg<0xb00) || (reg>=0x1900 && reg<0x1a00) || (reg>=0x1e40 && reg<0x1e80) || (reg>=0x1880 && reg<0x1900) || (reg>=0x1500 && reg<0x1600) || (reg>=0x1c00 && reg<0x1d00))return false;
+    return true;
+}
+static bool rsx_fifo_plain_fast=true;   // TEST HOOK: false walks the full chain for every method
+static const std::array<std::uint8_t,0x4000>& rsx_plain_table(){
+    static const auto table=[]{std::array<std::uint8_t,0x4000> t{};for(std::uint32_t r=0;r<0x10000;r+=4)t[r/4]=rsx_method_class(r)==1 && rsx_plain_register(r);return t;}();
+    return table;
+}
 // One admitted read per 1 MiB IO page for longer packets; any failure
 // repeats the original per-word loads, which raise the original error.
 static void rsx_fifo_values(NativeRsx& gpu,GuestMemory& m,std::uint32_t at,unsigned count,std::uint32_t* out){
@@ -519,6 +628,33 @@ static void rsx_fifo_values(NativeRsx& gpu,GuestMemory& m,std::uint32_t at,unsig
         }catch(const std::exception&){}
     }
     for(unsigned i=0;i<count;++i)out[i]=static_cast<std::uint32_t>(m.load(rsx_address(gpu,at+i*4),4));
+}
+// FIFO window (WARMUP4): command words are read in bulk, one admitted Range read of up to 4 KiB of the published region [GET,PUT)
+// inside one 1 MiB IO page, instead of a scalar load per header plus per-word loads or a transfer per packet (~23k packets/frame in
+// the level). Words are taken from the window only while every method executed since its read was a plain state store (the table
+// fast path: no guest memory access, no wait, no synchronization, no callback) and no owner request ran (rsx_owner_poll): the read
+// then only moved earlier within a stretch in which the consumer is unobservable, i.e. an equivalent consumer schedule. Any
+// non-plain method (semaphores, labels, draws, flips, uploads, blits...) or a pending owner request invalidates the window, so
+// commands written behind a semaphore/label wait or by the consumer itself (a release into the command buffer) are re-read.
+// Every other guest access of the loop (GET publication, PUT/GET loads, per-word fallback reads) may run an observer callback, so it
+// invalidates the window too (review-rsxw4-1 #2), as does the decision to run the owner hook (one load decides both).
+// A fill is admitted like the RSX blit fast paths (review-rsxw4-1 #3): translation only (GuestMemory::range(...,brokered=false)
+// under ObserverPause, the only code inside the catch), then the window is declined for the rest of the run when a byte is
+// observed (HostObserver / raw CPU-dirty interest), guarded (HostGuard on the primary mapping) or claimed (page broker), so the
+// read itself cannot run a callback, coherence service or fault; in concurrent memory the fill holds the metadata lock (try-lock,
+// busy = no window for this packet) that every watch/claim publisher takes, from admission through the read. The read is never
+// caught. A translation failure declines the window (the per-word path raises the original error at the original word).
+// OPT-IN (ANYPS3_RSX_FIFO_WINDOW=1; also a test hook): with the window, tests/test_rsx_drain_bound.py
+// test_guarded_read_is_materialised_between_packets failed 4 of 6 runs (a host-served guarded read saw one clear more than the
+// GET read after it implies), 0 of 5 without; not root-caused (WARMUP4, 2026-10-21), so the default stays the per-packet path.
+static bool rsx_fifo_window=[]{const char* v=std::getenv("ANYPS3_RSX_FIFO_WINDOW");return v && std::string(v)=="1";}();
+static std::uint64_t rsx_fifo_window_fills=0;   // test hook
+// Whether touching host bytes [data,data+size) could have an effect besides the bytes (same conditions as rsxblit::observable).
+static bool rsx_fifo_bytes_observable(GuestMemory& m,const std::uint8_t* data,unsigned size){
+    if(m.host_access_observer && (m.host_access_observer.interested(data,size) || m.raw_cpu_dirty_interested(data,size,false)))return true;
+    const bool alias_access=m.concurrent() && m.host_access_observer.supports_exact_bytes.load(std::memory_order_acquire);
+    if(!alias_access)for(const auto* guard=GuestMemory::HostGuard::head;guard;guard=guard->next)if(guard->touches_any(data,size))return true;
+    return m.concurrent() && m.page_broker.enabled.load(std::memory_order_acquire) && !m.page_broker.owner_unclaimed(data,size);
 }
 static bool rsx_run_impl(PpuState& s,unsigned budget,bool idle_poll=false){
     auto& gpu=s.rsx;auto& m=s.memory;if(!gpu.fifo_enabled)return false;
@@ -536,15 +672,40 @@ static bool rsx_run_impl(PpuState& s,unsigned budget,bool idle_poll=false){
     // when the cached value is reached. GET publication may lag behind pure
     // state methods only (rsx_method_class 1); it is stored before every
     // action method, before every return and on every exception.
+    rsxdraw::HostPhase fifo_phase(rsxdraw::HostStage::fifo);   // HOST_PROFILE: FIFO decode (draws switch to their own stages and return here)
     std::uint32_t put=0,get=0;bool cursor=false,pending=false;
-    auto publish=[&]{if(pending){m.store(gpu.dma+0x44,4,get);pending=false;}};
+    struct FifoWindow {std::uint32_t base=0,end=0;bool valid=false,off=false;std::uint32_t words[1024];} window;
+    auto publish=[&]{if(pending){window.valid=false;m.store(gpu.dma+0x44,4,get);pending=false;}};
+    auto window_fill=[&](std::uint32_t at){
+        window.valid=false;
+        if(!rsx_fifo_window || window.off || at>=put)return;
+        const auto end=std::uint32_t(std::min<std::uint64_t>({std::uint64_t(put),std::uint64_t(at)+sizeof(window.words),(std::uint64_t(at)|0xfffff)+1}));
+        const unsigned n=end-at;std::uint8_t bytes[sizeof(window.words)];
+        std::unique_lock<std::recursive_mutex> scope;
+        if(m.concurrent()){
+            if(m.renderer_enabled?!m.renderer_owner():!m.memory_owner()){window.off=true;return;}
+            scope=std::unique_lock<std::recursive_mutex>(m.metadata_mutex.value,std::try_to_lock);
+            if(!scope.owns_lock())return;
+        }
+        GuestMemory::Range range;
+        try{GuestMemory::ObserverPause pause(m);range=m.range(rsx_address(gpu,at),n,false,false);}
+        catch(const std::exception&){window.off=true;return;}
+        for(const auto& part:range.parts)if(rsx_fifo_bytes_observable(m,part.data,part.size)){window.off=true;return;}
+        range.read(0,bytes,n);
+        for(unsigned i=0;i<n/4;++i){const auto* b=bytes+4*i;window.words[i]=(std::uint32_t(b[0])<<24)|(std::uint32_t(b[1])<<16)|(std::uint32_t(b[2])<<8)|b[3];}
+        window.base=at;window.end=end;window.valid=true;++rsx_fifo_window_fills;
+    };
+    auto in_window=[&](std::uint32_t at,std::uint64_t n){return window.valid && at>=window.base && std::uint64_t(at)+n<=window.end;};
     try{
     for(unsigned step=0;step<budget;++step){
-        if(!cursor){put=static_cast<std::uint32_t>(m.load(gpu.dma+0x40,4));get=static_cast<std::uint32_t>(m.load(gpu.dma+0x44,4));cursor=true;}
-        else if(get==put)put=static_cast<std::uint32_t>(m.load(gpu.dma+0x40,4));
+        if(__builtin_expect(rsx_host_waiters.load(std::memory_order_relaxed)!=0,0)){   // = rsx_owner_poll(); the request may change memory
+            window.valid=false;auto& hook=rsx_owner_hook();if(hook)hook();}
+        if(!cursor){window.valid=false;put=static_cast<std::uint32_t>(m.load(gpu.dma+0x40,4));get=static_cast<std::uint32_t>(m.load(gpu.dma+0x44,4));cursor=true;}
+        else if(get==put){window.valid=false;put=static_cast<std::uint32_t>(m.load(gpu.dma+0x40,4));}
         if((get|put)&3)throw std::runtime_error("unaligned RSX FIFO position");
         if(get==put){publish();return progress;}
-        const auto header=static_cast<std::uint32_t>(m.load(rsx_address(gpu,get),4));
+        if(!in_window(get,4))window_fill(get);
+        const auto header=in_window(get,4)?window.words[(get-window.base)/4]:static_cast<std::uint32_t>(m.load(rsx_address(gpu,get),4));
         std::uint32_t next=get+4;
         if((header&0xe0000003)==0x20000000 || (header&0xe0000003)==1){
             next=header&((header&1)?0xfffffffc:0x1ffffffc);
@@ -561,7 +722,7 @@ static bool rsx_run_impl(PpuState& s,unsigned budget,bool idle_poll=false){
             const auto count=(header>>18)&0x7ff,method=header&0xfffc,increment=(header&0x40000000)?0u:4u;
             if(count){
                 if(get<put && count*4+4>put-get){
-                    put=static_cast<std::uint32_t>(m.load(gpu.dma+0x40,4));
+                    window.valid=false;put=static_cast<std::uint32_t>(m.load(gpu.dma+0x40,4));
                     if(put&3)throw std::runtime_error("unaligned RSX FIFO position");
                     if(get<put && count*4+4>put-get){publish();return progress;}
                 }
@@ -586,9 +747,13 @@ static bool rsx_run_impl(PpuState& s,unsigned budget,bool idle_poll=false){
                         ++gpu.diag_skipped;std::fprintf(stderr,"RSX DIAG SKIP method=%04x stored as raw state\n",unsigned(reg));
                     }
                 }
-                rsx_fifo_values(gpu,m,get+4,count,values);
+                if(in_window(get+4,std::uint64_t(count)*4))std::copy_n(window.words+(get+4-window.base)/4,count,values);
+                else{window.valid=false;rsx_fifo_values(gpu,m,get+4,count,values);}
+                const auto& plain=rsx_plain_table();
                 for(unsigned i=gpu.packet_index;i<count;++i){
                     const auto reg=method+i*increment,value=values[i];
+                    if(rsx_fifo_plain_fast && reg<0x10000 && !(reg&3) && plain[reg>>2]){rsx_capture_method(s,reg,value);gpu.registers.write(reg,value);continue;}
+                    window.valid=false;   // not a plain store: later command words are read again
                     if(rsx_method_class(reg)==2)publish();
                     if(reg!=0x68)rsx_capture_method(s,reg,value);
                     if(reg==0 && value!=0x31337000)throw std::runtime_error("unsupported RSX channel object");
@@ -678,11 +843,11 @@ static bool rsx_run_impl(PpuState& s,unsigned budget,bool idle_poll=false){
                         // No cached visibility results or pending draws exist yet.
                         if(value)++gpu.zcull_generation;
                     }else if(reg==0x2328){
-                        rsx_diag(s,"copy",reg,[&]{rsxblit::copy(s,value);});
+                        rsx_diag(s,"copy",reg,[&]{rsxdraw::HostPhase blit_phase(rsxdraw::HostStage::blit);rsxblit::copy(s,value);});
                     }else if(reg>=0xa400 && reg<0xc000){
-                        rsx_diag(s,"ifc",reg,[&]{rsxblit::cpu(s,reg,value);});
+                        rsx_diag(s,"ifc",reg,[&]{rsxdraw::HostPhase blit_phase(rsxdraw::HostStage::blit);rsxblit::cpu(s,reg,value);});
                     }else if(reg==0xc40c){
-                        rsx_diag(s,"blit",reg,[&]{rsxblit::scaled(s,value);});
+                        rsx_diag(s,"blit",reg,[&]{rsxdraw::HostPhase blit_phase(rsxdraw::HostStage::blit);rsxblit::scaled(s,value);});
                     }else if(reg==0x68 || reg==0x6c){
                         const auto address=rsx_semaphore_address(gpu,rsx_reg(gpu,0x60),rsx_reg(gpu,0x64));
                         // Offline replay omits CPU scheduling/wait latency; the
@@ -741,6 +906,8 @@ static bool rsx_run_impl(PpuState& s,unsigned budget,bool idle_poll=false){
             rsxgraphics::RendererContext context{s.memory,s.rsx,s.pc,s.thread_id,
                 [&s](unsigned id,std::uint64_t name,std::uint64_t flags){rsx_event_publish(s,id,name,flags,"RSX deferred flip event cannot be delivered");},s.memory.regions,false};
             s.rsx.graphics_owner=std::make_shared<rsxgraphics::Session>(*s.rsx.renderer,std::move(context));
+            // GPU completion events wake the owner (ANYPS3_RSX_COMPLETION=1) instead of a 100 us poll while flights are outstanding.
+            if(s.rsx.renderer->completion_notifier_enabled() && s.process.rsx_worker.queue){auto* queue=s.process.rsx_worker.queue.get();s.rsx.renderer->set_completion_hook([queue]{queue->poke();});}
         }else s.rsx.graphics_owner=std::make_shared<rsxgraphics::Session>(*s.rsx.renderer,s);
     }
     auto& session=*static_cast<rsxgraphics::Session*>(s.rsx.graphics_owner.get());
@@ -829,7 +996,7 @@ static std::uint32_t rsx_syscall(PpuState& s){
         fresh.host=gpu.host;
 #endif
         fresh.trace=gpu.trace;fresh.commands=gpu.commands;fresh.rendered_clears=gpu.rendered_clears;
-        fresh.captured_frames=gpu.captured_frames;fresh.flips=gpu.flips;
+        fresh.captured_frames=gpu.captured_frames;fresh.async_captures=gpu.async_captures;fresh.flips=gpu.flips;
         fresh.draw.draws=gpu.draw.draws;fresh.draw.triangles=gpu.draw.triangles;fresh.draw.pixels=gpu.draw.pixels;
         gpu=std::move(fresh);
         return 0;

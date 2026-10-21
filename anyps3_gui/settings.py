@@ -110,7 +110,7 @@ class Settings(QWidget):
                 description += "\nUnavailable in the active build."
             if not spec.get("editable", True):
                 description += "\nRead-only in the GUI."
-            label = QLabel(key+(" • override" if key in self.overrides else ""))
+            label = QLabel(spec.get("label", key)+(" • override" if key in self.overrides else ""))
             label.setToolTip(description)
             row.setToolTip(description)
             forms[group].addRow(label, row)

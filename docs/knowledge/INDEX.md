@@ -3,10 +3,14 @@
 [Manager and Qt wrapper implementation](experiments/2026-10-20-manager-gui.md)
 and [usage](../manager/README.md), isolated `fast2/manager-gui` worktree.
 Synthetic wrapper verification does not change original-game acceptance.
+[GUI-first quickstart and isolated desktop installer](experiments/2026-10-21-gui-installer.md)
+(2026-10-21; merged into main, not yet pushed).
 
 This is the version-controlled entry point for the next model, a new run and a human. Read the goal state and runtime evidence in [CURRENT.md](CURRENT.md), the writing rules in [WORKFLOW.md](WORKFLOW.md), the handoff in [HANDOFF.md](HANDOFF.md). A record in the documentation does not, by itself, verify the emulator's function.
 
 Latest state and handoff: [CURRENT.md](CURRENT.md) and [HANDOFF.md](HANDOFF.md)
+(2026-10-21: branch `claude/wave6-60fps`, build 706 holds the 60 Hz cap at ~59.7 FPS with ~3–4 ms headroom; GUI audio toggle,
+DualSense SIXAXIS/rumble; RAM bit flips verified on this PC).
 (2026-10-20 sandbox assessment: saved build 603a rechecked at 54.045 FPS in the original level;
 main = 472 + ZeroTable; combined 473 unbuilt; 60 FPS and physical gamepad remain unverified).
 [Current analysis, fixes and offline wait attribution](experiments/2026-10-20-sandbox-analysis.md).

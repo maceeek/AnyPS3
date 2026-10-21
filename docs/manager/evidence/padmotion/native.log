@@ -1,0 +1,29 @@
+test_asynchronous_rumble_error_is_not_hidden (tests.test_native_pad_motion.PadMotionTests.test_asynchronous_rumble_error_is_not_hidden) ... ok
+test_capabilities_and_reconnect (tests.test_native_pad_motion.PadMotionTests.test_capabilities_and_reconnect) ... ok
+test_motion_layout_scales_endianness_and_ps (tests.test_native_pad_motion.PadMotionTests.test_motion_layout_scales_endianness_and_ps) ... ok
+test_optional_symbols_and_rumble_policy (tests.test_native_pad_motion.PadMotionTests.test_optional_symbols_and_rumble_policy) ... ok
+test_rumble_values_latching_stops_and_errors (tests.test_native_pad_motion.PadMotionTests.test_rumble_values_latching_stops_and_errors) ... ok
+test_sensor_enable_read_errors_and_nonfinite_data (tests.test_native_pad_motion.PadMotionTests.test_sensor_enable_read_errors_and_nonfinite_data) ... ok
+test_shutdown_failure_is_not_reported_as_success (tests.test_native_pad_motion.PadMotionTests.test_shutdown_failure_is_not_reported_as_success) ... ok
+test_virtual_controller_input_hotplug_and_lifecycle (tests.test_native_pad.NativePadTests.test_virtual_controller_input_hotplug_and_lifecycle) ... ok
+test_game_imports_are_bound (tests.test_native_hid.NativeHidTests.test_game_imports_are_bound) ... ok
+test_keyboard_and_mouse_lifecycle_parameters_and_errors (tests.test_native_hid.NativeHidTests.test_keyboard_and_mouse_lifecycle_parameters_and_errors) ... ok
+test_set_act_direct_reports_no_device_or_missing_actuator (tests.test_native_hid.NativeHidTests.test_set_act_direct_reports_no_device_or_missing_actuator) ... ok
+test_input_edges_choices_cancel_policy_and_guest_pad_history (tests.test_vsh_ui.VshUiTests.test_input_edges_choices_cancel_policy_and_guest_pad_history) ... ok
+test_progress_wait_close_abort_and_exactly_once_events (tests.test_vsh_ui.VshUiTests.test_progress_wait_close_abort_and_exactly_once_events) ... ok
+test_real_sdl_virtual_controller_completion (tests.test_vsh_ui.VshUiTests.test_real_sdl_virtual_controller_completion) ... ok
+test_savedata_cancel_empty_list_and_raw_protocol_errors (tests.test_vsh_ui.VshUiTests.test_savedata_cancel_empty_list_and_raw_protocol_errors) ... ok
+test_savedata_error_dialog_waits_for_input_and_rolls_back (tests.test_vsh_ui.VshUiTests.test_savedata_error_dialog_waits_for_input_and_rolls_back) ... ok
+test_savedata_list_overwrite_confirmation_new_slot_and_real_write (tests.test_vsh_ui.VshUiTests.test_savedata_list_overwrite_confirmation_new_slot_and_real_write) ... ok
+test_transport_be_event_backpressure_and_malformed_requests (tests.test_vsh_ui.VshUiTests.test_transport_be_event_backpressure_and_malformed_requests) ... ok
+test_chunked_raw_write_and_large_reply_preserve_packet_end (tests.test_savedata_vsh.SaveDataVshTests.test_chunked_raw_write_and_large_reply_preserve_packet_end) ... ok
+test_first_run_empty_list_new_stat_and_both_callback_cleanup_branches (tests.test_savedata_vsh.SaveDataVshTests.test_first_run_empty_list_new_stat_and_both_callback_cleanup_branches) ... ok
+test_real_sfo_lists_metadata_file_read_and_missing_file_error (tests.test_savedata_vsh.SaveDataVshTests.test_real_sfo_lists_metadata_file_read_and_missing_file_error) ... ok
+test_rejects_bad_types_paths_duplicates_secure_and_interactive_ui (tests.test_savedata_vsh.SaveDataVshTests.test_rejects_bad_types_paths_duplicates_secure_and_interactive_ui) ... ok
+test_save_raw_handshake_truncate_notrunc_commit_and_rollback (tests.test_savedata_vsh.SaveDataVshTests.test_save_raw_handshake_truncate_notrunc_commit_and_rollback) ... ok
+test_two_real_directories_are_sorted_before_limiting (tests.test_savedata_vsh.SaveDataVshTests.test_two_real_directories_are_sorted_before_limiting) ... ok
+
+----------------------------------------------------------------------
+Ran 24 tests in 162.993s
+
+OK

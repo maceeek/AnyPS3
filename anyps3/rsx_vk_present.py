@@ -84,7 +84,11 @@ private:
             check(vkGetPhysicalDeviceSurfacePresentModesKHR(vk.physical,surface,&n,modes.data()),"present modes");
             auto has=[&](VkPresentModeKHR m){return std::find(modes.begin(),modes.end(),m)!=modes.end();};
             VkPresentModeKHR mode=VK_PRESENT_MODE_FIFO_KHR;
-            const std::vector<VkPresentModeKHR> preferred=sync?std::vector<VkPresentModeKHR>{VK_PRESENT_MODE_MAILBOX_KHR}:
+            // ANYPS3_VBLANK_HZ (emulated rate other than the default 60000/1001): the host monitor's FIFO refresh must not cap the
+            // emulated rate, so VSYNC flips fall back to IMMEDIATE rather than FIFO when MAILBOX is missing.
+            const bool custom_rate=rsx_vblank_rate().custom;   // the normalized rate (120000/2002 is the default)
+            const std::vector<VkPresentModeKHR> preferred=sync?(custom_rate?std::vector<VkPresentModeKHR>{VK_PRESENT_MODE_MAILBOX_KHR,VK_PRESENT_MODE_IMMEDIATE_KHR}:
+                std::vector<VkPresentModeKHR>{VK_PRESENT_MODE_MAILBOX_KHR}):
                 std::vector<VkPresentModeKHR>{VK_PRESENT_MODE_IMMEDIATE_KHR,VK_PRESENT_MODE_MAILBOX_KHR};
             for(auto m:preferred)if(has(m)){mode=m;break;}
             if(const char* forced=std::getenv("ANYPS3_PRESENT_MODE")){
@@ -111,7 +115,7 @@ private:
             VkSemaphoreCreateInfo sem{};sem.sType=VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
             for(auto& semaphore:present_ready)check(vkCreateSemaphore(vk.device,&sem,nullptr,&semaphore),"present image semaphore");
         }
-        void display(GraphicsBatch& b,const std::shared_ptr<GraphicsImage>& source,unsigned w,unsigned h,bool sync,bool async){
+        void display(GraphicsBatch& b,const std::shared_ptr<GraphicsImage>& source,unsigned w,unsigned h,bool sync,bool async){b.sync();
             configure(w,h,sync);poll();unsigned index=0;
             VkFormatProperties source_properties{};vkGetPhysicalDeviceFormatProperties(vk.physical,source->format,&source_properties);
             if(!(source_properties.optimalTilingFeatures&VK_FORMAT_FEATURE_BLIT_SRC_BIT))throw std::runtime_error("Vulkan scanout image does not support blit source");
@@ -166,7 +170,7 @@ private:
         graphics_wsi=std::make_unique<GraphicsWsi>(*this);return graphics_wsi->open();
     }
 public:
-    void graphics_present(GraphicsBatch& b,const std::shared_ptr<GraphicsImage>& image,unsigned w,unsigned h,bool vsync,bool async=false){
+    void graphics_present(GraphicsBatch& b,const std::shared_ptr<GraphicsImage>& image,unsigned w,unsigned h,bool vsync,bool async=false){b.sync();
         if(!graphics_wsi)throw std::runtime_error("Vulkan presentation was not initialized");
         graphics_wsi->display(b,image,w,h,vsync,async);
     }

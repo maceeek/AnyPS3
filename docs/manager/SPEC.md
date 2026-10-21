@@ -258,7 +258,7 @@ systemd-run --user --scope --unit=anyps3-<title>-<stamp> -p MemoryMax=<run.memor
 |---|---|
 | Storage | `ANYPS3_DISC_ROOT=<title>/disc`, `ANYPS3_DISC_CASEFOLD=1`, `ANYPS3_HDD_ROOT=<title>/userdata/hdd0`, `ANYPS3_CACHE_ROOT=<title>/cache` |
 | Presentation | `ANYPS3_PRESENT=sdl`, `ANYPS3_PRESENT_MODE=fifo\|mailbox\|immediate` (optional), `ANYPS3_VK_DEVICE=gpu`, `ANYPS3_RSX_BACKEND=gpu`, `VK_INSTANCE_LAYERS=` (empty for play; validation only in a diagnostic setting) |
-| Audio | `SDL_AUDIODRIVER=dummy`, `ANYPS3_AUDIO_SINK=null` unless the audible lock (section 9) is open |
+| Audio | `audio.enabled=true` (default): SDL sink + `ANYPS3_AUDIO_AUDIBLE=1`; false: `SDL_AUDIODRIVER=dummy ANYPS3_AUDIO_SINK=null` (section 9) |
 | Threads (current measured defaults) | `ANYPS3_RSX_WORKER=1`, `ANYPS3_SPU_THREADS=1` |
 | Input | `SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS=1`, plus section 8 |
 | Status | `ANYPS3_PERF_REPORT=1` (FPS lines `PERF interval … flips_per_s=…` in stderr, parsed for the run summary) |
@@ -381,12 +381,22 @@ Initial groups and keys (defaults in brackets are this PC's current practice, fo
 | **Performance (launch)** | game memory max [24G]; swap max [0]; game CPU set [all; this PC 0-5,12-17]; RSX worker [on]; SPU threads [on]; `ANYPS3_RSX_THREADS`; `ANYPS3_RSX_MEMORY_CACHE_MB`; timer slack (`ANYPS3_TIMER_SLACK_NS`); present mode; FPS overlay or log [on] |
 | **Experimental** | switches from current performance branches when present in the build: `ANYPS3_RSX_HOST_DRAIN`, `ANYPS3_RSX_FLIP_EARLY`, `ANYPS3_RSX_RECORDER` (asynchronous recorder: **off**, known teal-frame issue) |
 | **Video** | window mode and size (after the 6.3 runtime follow-up) |
-| **Audio** | sink [`null`]; **audible lock** [locked] |
+| **Audio** | Enable game audio (`audio.enabled`) [on], editable globally, per title and per launch |
 | **Input** | section 8 |
 | **Saves** | backup before run [on]; keep N [10]; include game data [off] |
 | **Diagnostics** (hidden by default) | Vulkan validation, frame capture stride (`ANYPS3_FRAME_DIR`, `ANYPS3_FRAME_STRIDE`), `ANYPS3_PAD_TRACE`, SPU/RSX trace switches |
 
-**Audible lock.** Global setting `audio.audible_allowed`, default **false**. It can only be changed with `settings set --global audio.audible_allowed true --i-understand` on the CLI and is not editable in the GUI. While it is false the manager always forces `SDL_AUDIODRIVER=dummy ANYPS3_AUDIO_SINK=null`. On the development PC it stays false.
+**Game audio (user decision 2026-10-21, supersedes the audible lock).**
+`audio.enabled` defaults to **true** and is a normal GUI Audio setting with global,
+per-title and one-off launch overrides. On Play, true selects the SDL sink, removes
+the forced dummy driver and sets `ANYPS3_AUDIO_AUDIBLE=1`; false forces
+`SDL_AUDIODRIVER=dummy ANYPS3_AUDIO_SINK=null` with no audible flag. Keep the runtime
+guard unchanged. Legacy `audio.audible_allowed` + `audio.sink` settings migrate on
+read with their old defaults and inheritance, preserving their effective silent
+or enabled state; explicit `audio.enabled` takes precedence in its layer. See the
+[migration details](README.md#game-audio). All non-Play subprocesses stay forced
+silent. The development-PC rule above still applies to actual processes: tests
+may inspect enabled environment dictionaries but must never launch them.
 
 The **memory settings** are the systemd `MemoryMax` values for translation, compile and game runs. The GUI shows host RAM next to them and warns when compile max plus game max exceeds it. An OOM-killed run is reported as such: detect it from the scope's result and the kernel `oom_kill` count of the cgroup.
 
@@ -450,7 +460,7 @@ It then verifies the hashes against the recorded manifests (`anyps3-extraction.j
 - **Settings tests:**
   - layering;
   - schema validation and rejection of out-of-range values;
-  - the audible lock: **no code path may produce an audible configuration while it is locked**. Test every command that launches anything.
+  - audio defaults on for Play; off forces dummy/null; test title/launch overrides and legacy migration by composition only. Every actual test subprocess and every non-Play command must stay silent.
 - **GUI tests:**
   - an import scan proving no `anyps3`/`anyps3_manager` imports;
   - an offscreen (`QT_QPA_PLATFORM=offscreen`) smoke test against a stub CLI that emits recorded JSON Lines.
@@ -468,7 +478,7 @@ It then verifies the hashes against the recorded manifests (`anyps3-extraction.j
 | WP | Content | Edits | Depends on |
 |---|---|---|---|
 | 1 | Manager core: library, locks, jobs, import, build/activate/prune, run/stop, run records, saves, `adopt-ratchet`, `doctor` | `anyps3_manager/`, `tests/manager/`, `pyproject.toml`, `anyps3/native_build.py` (`--extra-flags` only) | — |
-| 2 | Settings schema, env composition, switch availability per build, audible lock | `anyps3_manager/` | WP1 |
+| 2 | Settings schema, env composition, switch availability per build, game audio toggle | `anyps3_manager/` | WP1 |
 | 3 | Qt GUI | `anyps3_gui/`, `tests/gui/` | WP1–2 CLI contract (can start on stubs) |
 | 4 | Runtime player mode: caps "unlimited", window mode, graceful shutdown | `anyps3/` (runtime, own branch) | coordinate with performance branches |
 | 5 | Pad runtime P2–P7 plus native tests; `pads` manager commands | `anyps3/native_pad.py`, `anyps3_manager/` | WP1; physical controllers on the PC |

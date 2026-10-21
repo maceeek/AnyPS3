@@ -1,5 +1,15 @@
 # Progress toward the menu
 
+**2026-10-21 wave 6:** the original level holds the 60 Hz VSYNC cap (build 706: 59.71/59.69 FPS, ~99.8 % of flips in one vblank in
+the integration runs, main thread ~11 ms and RSX worker ~12 ms per frame; 472a on main was 46.68). 75 Hz emulated vblank not held.
+GUI: default-on audio toggle; runtime: DualSense SIXAXIS, rumble, PS button. Physical controller still unverified.
+See [CURRENT](knowledge/CURRENT.md).
+
+**2026-10-21 GUI installer:** README now leads with desktop installation and the GUI workflow.
+The `feat/gui-installer` branch (merged into main) adds per-user install/update, separate app/library/preferences,
+and four passing real installer integration tests. No runtime changes or game/controller run.
+See [installer record](knowledge/experiments/2026-10-21-gui-installer.md).
+
 **2026-10-20 manager worktree:** CLI-backed game library and PySide6 wrapper added
 on `fast2/manager-gui`, with scoped synthetic tests and a real-CLI offscreen
 preview. All 30 manager/GUI tests pass. GPT-6-Astra's five findings were fixed and

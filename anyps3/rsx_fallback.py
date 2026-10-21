@@ -5,7 +5,7 @@ struct FallbackStats {
     bool enabled=false;std::uint64_t draws=0,interval=4096,gpu_draws=0,cpu_fallback_draws=0;
     std::uint64_t gpu_attempt_ns=0,gpu_flush_ns=0,cpu_fallback_ns=0;
     std::string last_rejection;
-    std::map<std::string,std::uint64_t> reasons,paths,flush_calls,flush_submits,flush_readbacks,flush_time;
+    std::map<std::string,std::uint64_t> reasons,paths,flush_calls,flush_submits,flush_readbacks,flush_time,flush_retire_time;
     std::map<std::string,std::set<std::string>> details;
     FallbackStats(){
         const auto* e=std::getenv("ANYPS3_RSX_FALLBACK_STATS");enabled=e && std::string(e)=="1";
@@ -29,6 +29,7 @@ struct FallbackStats {
         for(const auto& p:flush_submits)std::fprintf(stderr," flush_%s_submits=%llu",p.first.c_str(),(unsigned long long)p.second);
         for(const auto& p:flush_readbacks)std::fprintf(stderr," flush_%s_readbacks=%llu",p.first.c_str(),(unsigned long long)p.second);
         for(const auto& p:flush_time)std::fprintf(stderr," flush_%s_ms=%.3f",p.first.c_str(),p.second/1.e6);
+        for(const auto& p:flush_retire_time)std::fprintf(stderr," flush_%s_retire_ms=%.3f",p.first.c_str(),p.second/1.e6);
         std::fprintf(stderr," gpu_draws=%llu cpu_fallback_draws=%llu gpu_attempt_host_ms=%.3f gpu_flush_host_ms=%.3f cpu_fallback_host_ms=%.3f\n",
             static_cast<unsigned long long>(gpu_draws),static_cast<unsigned long long>(cpu_fallback_draws),gpu_attempt_ns/1.e6,gpu_flush_ns/1.e6,cpu_fallback_ns/1.e6);
     }

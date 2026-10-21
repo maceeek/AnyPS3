@@ -43,7 +43,7 @@ template<class Key> struct SourceCache {
         constexpr std::uint64_t limit=16*1024*1024;
         if(value->size()>limit)return value;
         while(!entries.empty() && (entries.size()>=256 || bytes+value->size()>limit)){
-            auto old=std::min_element(entries.begin(),entries.end(),[](const auto& a,const auto& b){return a.second.used<b.second.used;});bytes-=old->second.source->size();entries.erase(old);}
+            auto old=std::min_element(entries.begin(),entries.end(),[](const auto& a,const auto& b){return a.second.used<b.second.used;});bytes-=old->second.source->size();entries.erase(old);::RsxPerfCounters::add(::RsxPerfCounters::src_evictions);}
         bytes+=value->size();entries.emplace(std::move(key),Entry{value,++clock});return value;
     }
 };
@@ -256,7 +256,8 @@ static std::shared_ptr<const std::string> fragment_source(const std::vector<FpIn
     for(const auto& t:textures)if(t.valid)key.insert(key.end(),{unsigned(bool(t.resident_image)),t.format,t.dimension,unsigned(t.dimension==3 && t.levels[0].depth>1),unsigned(t.cube),t.shadow,unsigned(t.alpha_kill),t.wrap_s,t.wrap_t,t.wrap_r,t.mip_count,unsigned(t.unnormalized),t.min,t.mag});
     for(const auto& i:fp)key.insert(key.end(),{i.d,i.s0,i.s1,i.s2,unsigned(i.has_constant),i.word_offset});
     static thread_local SourceCache<std::vector<unsigned>> cache;
-    if(auto hit=cache.find(key))return hit;
+    if(auto hit=cache.find(key)){::RsxPerfCounters::add(::RsxPerfCounters::src_fs_hits);return hit;}
+    ::RsxPerfCounters::add(::RsxPerfCounters::src_fs_misses);
     auto source=fragment_source_uncached(fp,r,count,textures,lines,failure);if(!source)return {};
     if(rsx_layered_shaders().load(std::memory_order_relaxed)){const auto main=source->find("void main(){");
         if(main==std::string::npos || source->find("void main(){",main+1)!=std::string::npos)throw std::runtime_error("RSX layered fragment shader template mismatch");
@@ -363,12 +364,14 @@ static std::shared_ptr<const std::string> hardware_vertex(const NativeRsx& gpu,b
     static thread_local std::string key;key.clear();
     auto append_key=[&](const void* p,std::size_t n){key.append(static_cast<const char*>(p),n);};
     const unsigned flags[]={start,unsigned(fetch),unsigned(immediate),unsigned(rsx_layered_shaders().load(std::memory_order_relaxed))};append_key(flags,sizeof(flags));
-    for(unsigned pc=start;pc<544;++pc){append_key(gpu.transform_program_written.data()+pc*4,4*sizeof(bool));append_key(gpu.transform_program.data()+pc*4,16);
-        if(gpu.transform_program[pc*4+3]&1)break;}
+    // Every instruction the translation can reach (branch targets included), by address.
+    rsxvk::VertexFlow flow;if(!rsxvk::vertex_program_flow(gpu,start,flow))return {};
+    for(unsigned pc=0;pc<544;++pc)if(flow.reach[pc]){append_key(&pc,sizeof(pc));append_key(gpu.transform_program_written.data()+pc*4,4*sizeof(bool));append_key(gpu.transform_program.data()+pc*4,16);}
     // Exact canonical bool bytes avoid rebuilding 1,872 mask bits per lookup.
     append_key(gpu.transform_constants_written.data(),468*4*sizeof(bool));
     static thread_local SourceCache<std::string> cache;
-    if(auto hit=cache.find(key))return hit;
+    if(auto hit=cache.find(key)){::RsxPerfCounters::add(::RsxPerfCounters::src_vs_hits);return hit;}
+    ::RsxPerfCounters::add(::RsxPerfCounters::src_vs_misses);
     auto source=hardware_vertex_uncached(gpu,fetch,immediate);if(!source)return {};
     return cache.put(std::move(key),std::move(*source));
 }
@@ -527,7 +530,13 @@ struct Session {
         std::unique_ptr<NativeVulkan::GraphicsBatch> batch;
         std::vector<Pending> pending;std::vector<Label> labels;
         std::shared_ptr<std::vector<std::uint64_t>> results;
+        std::chrono::steady_clock::time_point submitted{};
+        std::vector<std::function<void(const NativeVulkan::GraphicsBatch&)>> completions{};
     };
+    // Host-only consumers of bytes that the GPU writes into the current batch (asynchronous frame capture): run once that batch
+    // completed (retire, or the synchronous flush), before its staging memory is reset. They never touch guest state.
+    std::vector<std::function<void(const NativeVulkan::GraphicsBatch&)>> completions;
+    double flight_ns=300000;   // EWMA of submit -> retire latency of a flight; only maintained for ANYPS3_RSX_POLL=adaptive (rsx_poll_adaptive)
     // Three persistent mappings/command+descriptor pools; an arena cannot be
     // reused until its exact timeline value completed and results retired.
     std::deque<Flight> flights;
@@ -568,8 +577,13 @@ struct Session {
         HostPhase phase(HostStage::flush);PerfTimer timer(fallback_stats().enabled?&fallback_stats().gpu_flush_ns:nullptr);
         if(failed)throw std::runtime_error("RSX graphics session poisoned");
         try{while(!flights.empty() && flights.front().batch->completion<=through){auto& flight=flights.front();
-            if(!vk.graphics_collect(*flight.batch,wait))break;
+            {anyps3_ft::Span ft_wait(anyps3_ft::WorkerWait,flight.batch->completion,wait?1:0,wait?20000:~std::uint64_t(0));
+                if(!vk.graphics_collect(*flight.batch,wait))break;}
+            anyps3_ft::mark(anyps3_ft::GpuRetire,flight.batch->completion,flight.pending.size(),wait?1:0,flight.labels.size());
+            anyps3_ft::current_completion=flight.batch->completion;
             retire_work(*flight.batch,flight.pending,flight.results,flight.labels);
+            for(auto& completion:flight.completions)completion(*flight.batch);
+            if(rsx_poll_adaptive())flight_ns=0.8*flight_ns+0.2*double(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-flight.submitted).count());
             vk.graphics_reset(*flight.batch);vk.graphics_move_stats(*flight.batch,*batch);
             spare_batches.push_back(std::move(flight.batch));flights.pop_front();++async_retires;
         }}catch(...){failed=true;throw;}
@@ -582,7 +596,7 @@ struct Session {
         // No new GPU instruction means the last queued prefix is also this
         // completion point. Do not create an empty submission just for a
         // flip marker or another release/report at the same queue position.
-        if(!batch->recording && !batch->submitted && !batch->completion && !batch->used && pending.empty() && !flights.empty() && flights.back().labels.size()+labels.size()<=256){
+        if(!batch->recording && !batch->submitted && !batch->completion && !batch->used && pending.empty() && completions.empty() && !flights.empty() && flights.back().labels.size()+labels.size()<=256){
             auto& tail=flights.back();tail.batch->frames+=batch->frames;batch->frames=0;
             for(auto& label:labels)tail.labels.push_back(std::move(label));
             labels.clear();if(fallback_stats().enabled){++fallback_stats().flush_calls[reason];++fallback_stats().paths["completion_prefix_reuse"];}
@@ -593,14 +607,16 @@ struct Session {
         auto& stats=fallback_stats();if(stats.enabled){++stats.flush_calls[reason];++stats.flush_submits[reason];}
         ::RsxPerfCounters::add(!std::strcmp(reason,"draw_prefix")?::RsxPerfCounters::submit_draw_prefix:!std::strcmp(reason,"fifo_labels")?::RsxPerfCounters::submit_labels: ::RsxPerfCounters::submit_other);
         try{
-            vk.graphics_submit(*batch);
+            const auto ft_completion=vk.graphics_submit(*batch);
+            anyps3_ft::mark(anyps3_ft::GpuSubmit,ft_completion,pending.size(),labels.size(),anyps3_ft::pack(reason));
             std::unique_ptr<NativeVulkan::GraphicsBatch> next;
             if(!spare_batches.empty()){next=std::move(spare_batches.back());spare_batches.pop_back();}
             else if(flights.size()<2)next=vk.graphics_batch(batch->capacity);
-            else{retire(true,flights.front().batch->completion);next=std::move(spare_batches.back());spare_batches.pop_back();}
+            else{{PerfTimer arena_timer(fallback_stats().enabled?&fallback_stats().flush_retire_time["arena_rotation"]:nullptr);retire(true,flights.front().batch->completion);}
+                next=std::move(spare_batches.back());spare_batches.pop_back();}
             vk.graphics_move_stats(*batch,*next);
-            flights.push_back({std::move(batch),std::move(pending),std::move(labels),std::move(query_results)});
-            batch=std::move(next);pending.clear();labels.clear();query_results=std::make_shared<std::vector<std::uint64_t>>();++async_submits;
+            flights.push_back({std::move(batch),std::move(pending),std::move(labels),std::move(query_results),rsx_poll_adaptive()?std::chrono::steady_clock::now():std::chrono::steady_clock::time_point{},std::move(completions)});
+            batch=std::move(next);pending.clear();labels.clear();completions.clear();query_results=std::make_shared<std::vector<std::uint64_t>>();++async_submits;
         }catch(...){failed=true;throw;}
     }
     bool label_page_overlap(const Label& label,const void* pointer,std::uint64_t size)const{
@@ -698,24 +714,32 @@ struct Session {
             ::RsxPerfCounters::add(::RsxPerfCounters::mprotect_labels,guard.protection_calls-before);}
         // One GPU claim covers every label of this completion prefix (the same
         // exact-span validation as a per-label ClaimTransfer, one broker round).
+        // An event publication (flip event, kind 2) may wait for the RSX coordinator (owner_call), while the owner may itself wait in
+        // the page broker for these label pages: the claim never spans an event. Labels before the event are committed and the claim
+        // released, the event is published, and a new claim covers the rest (program order of the writes and the event is kept).
         std::unique_ptr<GuestMemory::GpuPages> claim;
-        if(state.memory.concurrent()){
+        auto open_claim=[&](std::size_t first){
+            if(!state.memory.concurrent())return;
             std::vector<GuestMemory::HostSpan> declared;
-            for(const auto& label:completed_labels)for(const auto& span:ClaimTransfer::spans(label.mapping,0,label.size)){
+            for(std::size_t i=first;i<completed_labels.size();++i)for(const auto& span:ClaimTransfer::spans(completed_labels[i].mapping,0,completed_labels[i].size)){
                 if(std::none_of(declared.begin(),declared.end(),[&](const auto& d){return d.pointer==span.pointer && d.size==span.size && d.pin==span.pin;}))declared.push_back(span);}
             auto& m=state.memory;
             if(m.renderer_enabled && !m.memory_owner() && !m.local_state().fault_claim){m.renderer_pin([&]{claim=std::make_unique<GuestMemory::GpuPages>(m,std::move(declared));});claim->adopt();}
             else{m.enable_page_broker();claim=std::make_unique<GuestMemory::GpuPages>(m,std::move(declared));}
-            for(const auto& label:completed_labels)claim->commit_spans(label.mapping,0,0,true);
-        }
-        for(const auto& label:completed_labels){invalidate_raw(label.identity(),label.size,"label_publish");
+            for(std::size_t i=first;i<completed_labels.size();++i)claim->commit_spans(completed_labels[i].mapping,0,0,true);
+        };
+        open_claim(0);
+        for(std::size_t index=0;index<completed_labels.size();++index){const auto& label=completed_labels[index];invalidate_raw(label.identity(),label.size,"label_publish");
+            anyps3_ft::mark(anyps3_ft::LabelPub,label.address,label.value,label.kind,anyps3_ft::current_completion);
             std::array<std::uint8_t,24> bytes{};
             if(label.kind==1){
                 if(claim)claim->snapshot_into(label.mapping,0,24,bytes.data());else label.mapping.read(0,bytes.data(),24);
                 write_be(bytes.data(),8,timebase_ticks());write_be(bytes.data()+16,4,label.value);write_be(bytes.data()+8,4,read_be(bytes.data()+8,4)|0x80000000u);
             }else if(label.kind==2){
                 if(label.event_flags){if(!state.event)throw std::runtime_error("RSX completion has no event transport");
-                    state.event(label.queue,label.event_name,label.event_flags);}
+                    const bool claimed=bool(claim);claim.reset();
+                    state.event(label.queue,label.event_name,label.event_flags);
+                    if(claimed)open_claim(index);}
             }else if(label.report){
                 auto count=label.base;for(const auto& p:label.queries)for(unsigned i=0;i<p.count;++i)count+=p.values->at(p.first+i);
                 unsigned value=unsigned(count);if(label.value>1)value=label.value==5?((value || !label.active || !label.stats)?0u:0xffffu):((label.active && label.stats)?0xffffffffu:0u);
@@ -868,6 +892,7 @@ struct Session {
     std::vector<SurfaceImage> surface_images;
     std::uint64_t surface_image_bytes=0,surface_image_hits=0,surface_image_misses=0;
     static void release_idle_framebuffers(NativeVulkan::GraphicsBatch& b,const std::shared_ptr<NativeVulkan::GraphicsImage>& image){
+        b.sync();   // framebuffers are recorder-owned
         for(auto it=b.framebuffers.begin();it!=b.framebuffers.end();){
             const auto& fb=it->second;
             if(fb.use_count()==1 && std::find(fb->images.begin(),fb->images.end(),image)!=fb->images.end())it=b.framebuffers.erase(it);
@@ -1052,10 +1077,11 @@ struct Session {
         HostPhase phase(HostStage::flush);
         if(failed)throw std::runtime_error("RSX graphics session poisoned");
         if(busy)return;
-        retire(true);
+        anyps3_ft::Span ft_flush(anyps3_ft::WorkerWait,anyps3_ft::pack(reason),download?2:3,100000);
+        {PerfTimer retire_timer(fallback_stats().enabled?&fallback_stats().flush_retire_time[reason]:nullptr);retire(true);}
         auto& stats=fallback_stats();if(stats.enabled)++stats.flush_calls[reason];
         bool dirty_read=false;if(download)for(const auto& surface:surfaces)if(surface.dirty && (!pointer || surface.overlaps(pointer,size))){dirty_read=true;break;}
-        if(!batch->recording && !dirty_read && pending.empty() && labels.empty()){
+        if(!batch->recording && !dirty_read && pending.empty() && labels.empty() && completions.empty()){
             // Scanout can finish a readback directly before releasing its
             // staging bytes. Its signalled fence/command pool still need reset.
             if(batch->used || batch->visibility_count || !batch->pins.empty() || !batch->buffer_pins.empty() || batch->signal)vk.graphics_reset(*batch);
@@ -1071,6 +1097,8 @@ struct Session {
             if(!reads.empty()){::RsxPerfCounters::add(::RsxPerfCounters::readback_flushes);::RsxPerfCounters::add(::RsxPerfCounters::readback_surfaces,reads.size());}
             vk.graphics_finish(*batch);
             retire_work(*batch,pending,query_results,labels);pending.clear();
+            for(auto& completion:completions)completion(*batch);
+            completions.clear();
             query_results=std::make_shared<std::vector<std::uint64_t>>();
             const auto commit_start=std::chrono::steady_clock::now();
             for(const auto& read:reads){auto& surface=*read.surface;
@@ -1108,12 +1136,31 @@ struct Session {
         finish_reads();
     }
     void host_access(const void* p,std::uint64_t size,bool write){
-        if(busy)return;
+        if(busy){if(anyps3_ft::on)anyps3_ft::exec_class|=4;return;}
+        // ANYPS3_SPUPUT_DUMP=N (diagnostic, default off): describe the first N foreign read requests: exact sync/poll bits of the
+        // span, overlapping labels, surfaces and raw texture spans (which watch made the requester synchronise?).
+        static const unsigned dump_limit=[]{const char* v=std::getenv("ANYPS3_SPUPUT_DUMP");return v?unsigned(std::strtoul(v,nullptr,0)):0u;}();
+        static unsigned dumped=0;
+        if(dump_limit && dumped<dump_limit && !write){const auto origin=HostAccessContext::sample();
+            if(origin.engine==HostAccessOrigin::Engine::Spu || origin.engine==HostAccessOrigin::Engine::Dma || origin.ea!=UINT64_MAX){++dumped;
+            auto& o=state.memory.host_access_observer;const auto at=reinterpret_cast<std::uintptr_t>(p);
+            std::fprintf(stderr,"SPUPUT DUMP host=0x%llx size=%llu engine=%s ea=0x%llx pc=0x%x id=0x%x sync_exact=%d all_exact=%d sync_page=%d\n",(unsigned long long)at,(unsigned long long)size,origin.name(),
+                (unsigned long long)origin.ea,origin.guest_pc,origin.guest_id,int(o.synchronous(p,size,true)),int(o.interested(p,size,true)),int(o.synchronous(p,size,false)));
+            each_label([&](const auto& label){const auto q=reinterpret_cast<std::uintptr_t>(label.identity());if(label_page_overlap(label,p,size))
+                std::fprintf(stderr,"SPUPUT DUMP  label address=0x%llx size=%u kind=%u value=0x%x exact=%d\n",(unsigned long long)label.address,label.size,unsigned(label.kind),label.value,int(at<q+label.size && q<at+size));});
+            for(const auto& surface:surfaces){bool page=false;for(const auto& span:surface.physical)if((span.begin>>12)<=((at+size-1)>>12) && (at>>12)<=((span.end-1)>>12))page=true;
+                if(page)std::fprintf(stderr,"SPUPUT DUMP  surface base=0x%llx pitch=%u %ux%u fmt=%u depth=%d dirty=%d exact=%d spans=%zu\n",(unsigned long long)reinterpret_cast<std::uintptr_t>(surface.target.base),surface.target.pitch,surface.width,surface.height,surface.format,int(surface.depth),int(surface.dirty),int(surface.overlaps(p,size)),surface.physical.size());}
+            for(const auto& entry:raw_textures){bool hit=false;raw_spans(entry,[&](const void* a,std::uint64_t n){const auto x=reinterpret_cast<std::uintptr_t>(a);if((x>>12)<=((at+size-1)>>12) && (at>>12)<=((x+n-1)>>12))hit=true;});
+                if(hit)std::fprintf(stderr,"SPUPUT DUMP  raw source=0x%llx size=%llu dirty_inputs=%d buffer=%d plan=%d\n",(unsigned long long)reinterpret_cast<std::uintptr_t>(entry.source),(unsigned long long)entry.size,int(bool(entry.dirty_inputs)),int(bool(entry.buffer)),int(bool(entry.plan)));}}}
+        const auto ft_invalidations=raw_invalidations;
+        struct FtClass {const decltype(raw_invalidations)& now;decltype(raw_invalidations) before;~FtClass(){if(anyps3_ft::on && now!=before)anyps3_ft::exec_class|=32;}} ft_class{raw_invalidations,ft_invalidations};
         ::RsxPerfCounters::add(::RsxPerfCounters::host_access);
         GuestMemory::RawYield payload(state.memory);
         if(!state.rsx.graphics_session)enter_fifo();
         const bool protected_access=!HostByteAccess::active() && (write?guard.touches_any(p,size):guard.touches(p,size));
+        if(anyps3_ft::on && protected_access)anyps3_ft::exec_class|=16;
         if(has_labels() && (label_overlap(p,size) || protected_access)){
+            if(anyps3_ft::on)anyps3_ft::exec_class|=8;
             if(fallback_stats().enabled){std::ostringstream detail;detail<<"write="<<write<<" pc=0x"<<std::hex<<state.pc;
                 detail<<" ppu_owner="<<std::dec<<state.thread_id<<" host=0x"<<std::hex<<reinterpret_cast<std::uintptr_t>(p)<<" bytes=0x"<<size;
                 for(const auto& region:state.maps){const auto base=reinterpret_cast<std::uintptr_t>(region.bytes->data()),at=reinterpret_cast<std::uintptr_t>(p);if(at>=base && at-base<region.bytes->size())detail<<" guest=0x"<<(region.base+at-base);}
@@ -1136,9 +1183,10 @@ struct Session {
         if(write || protected_access)invalidate_raw(p,size,write?"host_write":"protected_read");
         bool overlap=false;for(const auto& s:surfaces)if(s.overlaps(p,size)){overlap=true;break;}
         if(!overlap){
-            if(!HostByteAccess::active() && guard.touches_any(p,size)){guard.release(p,size);++ownership_revision;if(!state.rsx.graphics_session)leave_fifo();}
+            if(!HostByteAccess::active() && guard.touches_any(p,size)){if(anyps3_ft::on)anyps3_ft::exec_class|=256;guard.release(p,size);++ownership_revision;if(!state.rsx.graphics_session)leave_fifo();}
             return;
         }
+        if(anyps3_ft::on){anyps3_ft::exec_class|=64;for(const auto& s:surfaces)if(s.dirty && s.overlaps(p,size)){anyps3_ft::exec_class|=128;break;}}
         if(fallback_stats().enabled){std::ostringstream detail;detail<<"write="<<write<<" pc=0x"<<std::hex<<state.pc<<" host=0x"<<reinterpret_cast<std::uintptr_t>(p)<<" bytes=0x"<<size;
             for(const auto& region:state.maps){const auto base=reinterpret_cast<std::uintptr_t>(region.bytes->data()),at=reinterpret_cast<std::uintptr_t>(p);if(at>=base && at-base<region.bytes->size())detail<<" guest=0x"<<(region.base+at-base);}
             fallback_stats().detail("surface_host_access",detail.str());}
@@ -1632,6 +1680,7 @@ template<class Vertex> static bool prepared(Session& session,const std::vector<s
             vk.graphics_copy(*session.batch,texture.resident_image,snapshot);texture.resident_image=std::move(snapshot);attempt.path("rtt_feedback_snapshot");}
     }
     if(device && alias){materialize();device=nullptr;}
+    phase.next(HostStage::g_inputs);
     IndexBounds bounds(indices,device);
     // Vertex attributes frequently interleave one buffer: attributes whose spans overlap or touch
     // share one guest Range (one lease/claim, one copy) and index into it by byte offset.
@@ -1691,6 +1740,7 @@ template<class Vertex> static bool prepared(Session& session,const std::vector<s
     if(alias){for(auto& t:*owned_textures)materialize_texture(state,t);colors=supplied_colors;session.flush(true,nullptr,0,"attachment_alias");session.clear_surfaces();session.allow_resident_textures=false;
         try{for(unsigned unit=0;unit<16;++unit)if((*owned_textures)[unit].resident_image)(*owned_textures)[unit]=decode_texture(state,r,unit);}
         catch(...){session.allow_resident_textures=true;throw;}session.allow_resident_textures=true;}
+    phase.next(HostStage::g_state);
     const bool packed=packed_color(r),srgb=!packed && r(0x1fec);
     NativeVulkan::GraphicsState fixed;fixed.width=width;fixed.height=height;fixed.samples=samples;fixed.colors=count;fixed.color=packed?VK_FORMAT_R32_UINT:color_format(r(0x208)&31,srgb);
     if(!alias && (count && !vk.graphics_format(fixed.color)))return attempt.reject("device_color_format");
@@ -1729,6 +1779,7 @@ template<class Vertex> static bool prepared(Session& session,const std::vector<s
     if(!alias && (!vk.graphics_fragment_storage()))return attempt.reject("device_fragment_storage");
     if(!alias && (r(0x17cc) && !vk.graphics_precise_visibility()))return attempt.reject("device_precise_visibility");
     if(!alias && (count>1 && !vk.graphics_independent_blend()))return attempt.reject("device_independent_blend");
+    phase.next(HostStage::g_shaders);
     rsxvk::FragmentFailure failure;std::shared_ptr<const std::string> fs;
     if(alias){auto source=rsxvk::fragment(fp,true,false,&failure);if(source)fs=std::make_shared<const std::string>(std::move(*source));}
     else fs=fragment_source(fp,r,count,textures,lines!=nullptr,&failure);
@@ -1785,6 +1836,7 @@ template<class Vertex> static bool prepared(Session& session,const std::vector<s
     std::uint64_t tail_bytes=0;unsigned tail_attributes=0;std::array<unsigned,16> tail_rel{},group_rel{};std::array<bool,16> group_added{};
     struct TailPad {std::uint64_t at,n;};std::array<TailPad,16> tail_pads{};unsigned tail_pad_count=0;DrawReadBatch input_reads;
     std::vector<std::array<unsigned,3>> accepted;
+    phase.next(HostStage::g_data);
     unsigned vertices=0;
     if(!direct)for(const auto& tri:indices){std::array<const ShadedVertex*,3> v{&vertex(tri[0]),&vertex(tri[1]),&vertex(tri[2])};
         const auto polygon=clip_polygon(v,point?0:r(0x1478),r.get(0x1ff4,0x3fffff),sz,vz,bits_float(r.get(0x394,0)),bits_float(r.get(0x398,0x3f800000)));
@@ -1896,6 +1948,7 @@ template<class Vertex> static bool prepared(Session& session,const std::vector<s
     const unsigned line_base=data.size();if(lines){data[10]=line_base;data.insert(data.end(),line_data.begin(),line_data.end());}
     std::array<std::shared_ptr<NativeVulkan::GraphicsBuffer>,16> raw_buffers{};
     std::array<std::shared_ptr<NativeVulkan::GraphicsImage>,20> texture_images{};
+    phase.next(HostStage::g_tex);
     for(unsigned unit=0;unit<16;++unit){const auto& t=textures[unit];if(!t.valid)continue;
         texture_images[unit]=t.resident_image?t.resident_image:(!alias?session.texture_image(t):nullptr);
         const unsigned desc=(alias?2064:48)+unit*32;data[desc]=data.size();data[desc+1]=t.mip_count;data[desc+2]=t.unnormalized;data[desc+3]=t.wrap_s;data[desc+4]=t.wrap_t;
@@ -1916,6 +1969,7 @@ template<class Vertex> static bool prepared(Session& session,const std::vector<s
     attempt.path("scalar_fragment");
     if(session.batch->used+data.size()*4+32*1024*1024>session.batch->capacity || session.batch->visibility_count+samples>=1000 || session.batch->pipeline_pins.size()>=64)session.submit_async("batch_capacity");
     std::array<std::shared_ptr<NativeVulkan::GraphicsImage>,4> images{};std::shared_ptr<NativeVulkan::GraphicsImage> z;
+    phase.next(HostStage::g_bind);
     for(unsigned i=0;i<count;++i)images[i]=colors[i].base?session.bind(colors[i],width,height,samples,format,false,srgb,packed).image:session.history_image(fixed.color,width,height,samples,4+i);
     if(depth.base)z=session.bind(depth,width,height,samples,(r(0x208)>>5)&7,true).image;
     const std::array<std::array<float,2>,4> positions=aa==3?std::array<std::array<float,2>,4>{{{.75f,.75f},{.25f,.25f},{0,0},{0,0}}}:
@@ -1933,6 +1987,7 @@ template<class Vertex> static bool prepared(Session& session,const std::vector<s
     static thread_local std::shared_ptr<const std::string> pass_vertex;static thread_local bool pass_layered=false;
     if(!pass_vertex || pass_layered!=rsx_layered_shaders().load(std::memory_order_relaxed)){pass_layered=rsx_layered_shaders().load(std::memory_order_relaxed);pass_vertex=std::make_shared<const std::string>(vertex_source());}const auto& vertex_owner=raw_vertex?hw_vertex:pass_vertex;const auto& vertex_shader=*vertex_owner;
     session.bind_draw_blocks(data,direct);
+    phase.next(HostStage::tail);
     if(tail_bytes && reuse==UINT64_MAX){
         const auto tail_at=vk.graphics_reserve_upload(*session.batch,tail_bytes);if(tail_at+tail_bytes>UINT_MAX)throw std::runtime_error("RSX graphics vertex slice offset overflow");
         for(unsigned a=0;a<16;++a)if(tail_attributes&(1u<<a))data[data[12]+a*8+1]=unsigned(tail_at)+tail_rel[a];
@@ -1941,6 +1996,7 @@ template<class Vertex> static bool prepared(Session& session,const std::vector<s
         else{input_reads.read(out);for(unsigned i=0;i<tail_pad_count;++i)std::memset(out+tail_pads[i].at,0,tail_pads[i].n);}
     }
     ::RsxPerfCounters::add(::RsxPerfCounters::blob_bytes,data.size()*4);
+    phase.next(HostStage::draw);
     const auto actual=[&]{
         NativeVulkan::ConditionalScope condition(vk,*session.batch,session.conditional?session.conditional->buffer:nullptr,session.conditional?session.conditional->offset:0);
         return vk.graphics_draw(*session.batch,fixed,images,z,vertex_shader,*fs,data,sequential_packed?3:vertices,positions,bits_float(r(0xa7c)),bits_float(r(0xa78)),bits_float(r(0x384)),bits_float(r.get(0x388,0x3f800000)),texture_images,sequential_packed?primitive*3:0,reuse,raw_buffers,vertex_owner,fs,nullptr,0,true);
@@ -1951,7 +2007,7 @@ template<class Vertex> static bool prepared(Session& session,const std::vector<s
     for(auto& surface:session.surfaces){for(unsigned i=0;i<count;++i)if(surface.image==images[i])session.dirty_surface(surface);
         if(surface.image==z && ((r(0xa70)&1) || fixed.z.stencilTestEnable))session.dirty_surface(surface);}
     }
-    session.kick_draws();
+    phase.next(HostStage::kick);session.kick_draws();
     state.rsx.draw.triangles+=vertices/3;::RsxPerfCounters::add(::RsxPerfCounters::gpu_draws);return true;
 }
 

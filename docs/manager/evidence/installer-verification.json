@@ -1,0 +1,32 @@
+{
+  "base_commit": "3e0f5f998847a31385000ce99e707a713354257c",
+  "branch": "feat/gui-installer",
+  "state": "uncommitted-worktree",
+  "tests": {
+    "passed": 4,
+    "skipped": 0,
+    "memory_max": "4G",
+    "memory_swap_max": "0",
+    "allowed_cpus": "6-11,18-23",
+    "temporary_root": "/var/tmp",
+    "qt_platform": "offscreen"
+  },
+  "source_and_evidence_sha256": {
+    "scripts/install.sh": "5a4a51d04c55583bbca8a56f998023d03f4f9958d84f820ea409f10959983236",
+    "tests/manager/test_installer.py": "119127d30779d3b490109faaffd080bc544870479dbd214ffdf4ccbe91174b2b",
+    "README.md": "7cb36c0d890be860b76bbbb58d8739012e83931c94d4394734fe7061e7e13c02",
+    "docs/manager/README.md": "7863325ad6a9c6be46edc442a4f19ff362142c31a49bc0a14be47832a90cdddf",
+    "docs/knowledge/CURRENT.md": "802a7215bd6f25e2dab8aeea309413077df9590623fd77b7f1fae52b562615da",
+    "docs/knowledge/HANDOFF.md": "74a5a6866ae76e8ba19b9956b7530c0a69c40326c410cf41fc55e45e5f3f0b56",
+    "docs/knowledge/INDEX.md": "4e604dde5cd7c4561e7dab32e790d5a0d02e87a7a860d26913bebad8e484fe7e",
+    "docs/menu-progress.md": "d491ae8fcc211b36a40b42c52a234b45eead52fa731c478eccfc753c2b664771",
+    "docs/knowledge/experiments/2026-10-21-gui-installer.md": "7ee2e65b729ec8d83e06b42b326be61d8fcac9f3de4f90e8b991c8bfa19d3475",
+    "docs/manager/evidence/installer-suite.log": "ba7d530cd30abfe384791a966566976c1ce0e54399356c495b52dccbbc394c88"
+  },
+  "limitations": [
+    "No installation into the real user home",
+    "No visible desktop-session launch",
+    "No game runtime changes, game build/run or physical controller verification",
+    "Not merged or published"
+  ]
+}

@@ -5,16 +5,64 @@ in [SPEC.md](SPEC.md). The runtime remains a separate package and process.
 
 ## Install and start
 
-From this checkout:
+For the desktop application, use the [GUI quickstart](../../README.md#quickstart-install-the-desktop-app):
 
 ```bash
-python -m venv .venv
-.venv/bin/python -m pip install -e '.[gui,self]'
-.venv/bin/anyps3-gui
+curl -fsSL https://raw.githubusercontent.com/maceeek/AnyPS3/main/scripts/install.sh | bash
+~/.local/bin/anyps3-gui
 ```
 
-The default library is `$XDG_DATA_HOME/anyps3` or `~/.local/share/anyps3`.
-It must be outside both the worktree and the primary repository. To choose another:
+Rerun the installation command to update from `main`, then reopen the GUI. Installation is per-user;
+no sudo or virtual-environment activation is needed. The installer checks Python, Qt and game profiles
+before switching the app to a new source snapshot. Old snapshots remain available to existing jobs.
+App updates preserve game builds and saves; choose **Rebuild** to use a newer runtime for a title.
+
+The installed app uses `$XDG_DATA_HOME/anyps3-app` (default `~/.local/share/anyps3-app`),
+a separate library at `$XDG_DATA_HOME/anyps3-library`, and preferences under
+`${XDG_CONFIG_HOME:-~/.config}/anyps3-app`. Launchers use their recorded installation paths and clear
+development Python/Qt paths. They never import packages from the directory you launch them in.
+The installer refuses to replace an unrelated command or desktop entry with the same name.
+
+To inspect the installer before running it, download [scripts/install.sh](../../scripts/install.sh).
+From a checkout you can run `bash scripts/install.sh` directly. Advanced options:
+
+```bash
+bash scripts/install.sh --help
+bash scripts/install.sh --repo https://github.com/maceeek/AnyPS3.git --ref main --python python3
+```
+
+`--ref` selects a branch or tag. `--repo /path/to/checkout` installs a separate clone of its committed
+branch; uncommitted changes are excluded. Neither form modifies the original checkout. Use the same
+options on subsequent updates. Older releases are retained rather than automatically pruned.
+Pip's inherited environment and configuration are ignored so they cannot redirect installation into
+a development environment. `--wheelhouse /path/to/wheels` uses predownloaded dependency/build-backend
+wheels instead of PyPI. If an installation path contains `$`, choose an `XDG_DATA_HOME` without it;
+setuptools treats dollar signs as variable references during editable installation.
+
+If the GUI cannot load its X11/Wayland plugin, install the distribution's native Qt dependencies
+(including `xcb-cursor` for X11); see [Qt's Linux requirements](https://doc.qt.io/qt-6/linux-requirements.html).
+For build/run prerequisites and available resources:
+
+```bash
+~/.local/bin/anyps3-manager doctor --json
+```
+
+The doctor reports missing native dependencies; it does not install them.
+
+## Developing from a checkout
+
+Use a checkout-local environment and a development library outside all source checkouts:
+
+```bash
+python3 -m venv .venv
+.venv/bin/python -m pip install -e '.[gui,self]'
+.venv/bin/anyps3-gui --library ~/.local/share/anyps3-dev
+```
+
+Direct package entry points default to `$XDG_DATA_HOME/anyps3` or `~/.local/share/anyps3`;
+the installed app's launchers explicitly select `anyps3-library` instead. Use `.venv/bin/` for development
+commands so shell PATH lookup cannot select the installed app. Keep development data outside both the
+worktree and primary repository, and do not point tests at the installed app's library. To choose another:
 
 ```bash
 .venv/bin/anyps3-gui --library /path/outside/repository/library
@@ -89,10 +137,34 @@ values, per-title overrides, and one-off `run --set KEY=VALUE` values. The GUI
 renders this schema and disables switches absent from the active source snapshot.
 Advanced/diagnostic groups are hidden by default.
 
-The audible lock defaults to locked. Ambient `ANYPS3_*`, `SDL_*`, `VK_*` and
-`LD_PRELOAD` variables are removed before composing a launch. Locked launches and
-all build/import tools force `SDL_AUDIODRIVER=dummy ANYPS3_AUDIO_SINK=null`.
-On the development PC **keep the lock locked**. The GUI cannot unlock it.
+### Game audio
+
+**Game audio is on by default for Play.** In **Settings → Audio**, use **Enable
+game audio** (`audio.enabled`) globally or for a title. A title can inherit the
+global value; a one-off CLI override uses `run TITLE --set audio.enabled=false`.
+Enabled Play launches select `ANYPS3_AUDIO_SINK=sdl` and
+`ANYPS3_AUDIO_AUDIBLE=1`, allowing SDL to select its output driver. Disabled Play
+launches force `SDL_AUDIODRIVER=dummy ANYPS3_AUDIO_SINK=null` without an audible
+flag. The runtime's explicit audible-output guard remains in place.
+
+Legacy settings files still load. The old `audio.audible_allowed` and `audio.sink`
+are interpreted together using their old defaults (false and null), including
+global values inherited by a title: only an unlocked SDL choice becomes enabled.
+Thus a saved lock or null sink preserves silence; a file with no audio keys uses
+the new default. Explicit `audio.enabled` wins within its layer. Migration occurs
+on read without rewriting files; the next edit/reset of `audio.enabled` removes
+that scope's legacy audio keys. Unrelated edits retain them. The GUI reports
+migrated overrides so **Inherit**/**Reset** also works on legacy files. The retired
+keys and `--i-understand` are no longer settings commands; doctor reports
+`audio_enabled` instead of `audio_locked`.
+
+Ambient `ANYPS3_*`, `SDL_*`, `VK_*` and `LD_PRELOAD` variables are removed before
+composing a launch. Build/import tools, detached supervisors and other non-Play
+processes always force dummy/null audio, regardless of the Play setting.
+On the development PC, set `audio.enabled=false` before Play; inherited shell
+dummy/null variables do not override the player's saved audio choice. Development
+tests must compose enabled environments only, and force silence for every real
+subprocess. Never launch the game or GUI with audio enabled on this PC.
 
 Translation, compilation and game launches require systemd user scopes with
 `MemoryMax` and `MemorySwapMax=0`. On this PC the defaults are the specification's
@@ -106,17 +178,40 @@ Verified boot means observed flips, **not** a verified original menu or gameplay
 
 ## Runtime-dependent features
 
-This worktree does not implement SPEC WP4 or pad-runtime P2–P7. Current runtime
-window/fullscreen settings and custom pad configuration are therefore unavailable.
-Controller enumeration, live input and rumble diagnostics use lazy SDL2 ctypes,
-without initialising audio. The controller screen states the missing runtime
-capabilities; default SDL mapping remains in use.
+Runtime window/fullscreen settings and custom pad configuration remain unavailable.
+PADMOTION implements game-side SDL rumble and SIXAXIS motion, plus the existing
+PS bit through SDL GUIDE. `input.rumble` defaults on and can be disabled globally
+or per title; it is available only for builds containing `ANYPS3_PAD_RUMBLE`.
+The controller screen shows rumble and combined accelerometer/gyro capability.
+Basic DualSense input and motion require SDL >= 2.0.14; confirmed rumble capability
+requires SDL >= 2.0.18. Manager diagnostics require SDL >= 2.0.18 and report
+missing required symbols before initializing the controller subsystem. Diagnostics
+initialise no audio. Default SDL mapping remains in use. See
+[DualSense behavior, scales and limits](DUALSENSE.md)
+and [PADMOTION verification](evidence/padmotion/README.md). Existing game builds
+need rebuilding by their owner before they include this runtime change.
 
 Physical Xbox and DualSense gameplay acceptance, the original-game
 build → play → rebuild → reload-save acceptance, unlimited runtime budgets and
 graceful runtime shutdown remain separate work. No synthetic test claims those.
 
 ## Verification
+
+Installer regression checks use real Git clones, Python environments, dependency wheels and Qt,
+with temporary application/library directories. Predownload the dependencies first, then run from
+the checkout (choose a temporary directory outside any Git repository):
+
+```bash
+# WHEELS is an absolute path containing PySide6, cryptography, setuptools>=68
+# and their transitive wheels for this Python version and platform.
+systemd-run --user --scope -p MemoryMax=4G -p MemorySwapMax=0 \
+  env TMPDIR=/var/tmp ANYPS3_INSTALLER_WHEELS="$WHEELS" \
+  python3 -m unittest tests.manager.test_installer -v
+```
+
+These opt-in tests cover installation, update, failed-update preservation, GUI/CLI launch under a
+conflicting development environment, independent data, launcher collisions and truncated downloads.
+See the [installer evidence](../knowledge/experiments/2026-10-21-gui-installer.md).
 
 Run on the development PC:
 

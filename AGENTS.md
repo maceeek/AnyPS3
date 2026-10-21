@@ -2,10 +2,21 @@
 
 ## Project goal and boundaries
 
-The current goal is **to get the original Ratchet & Clank: A Crack in Time
-to its menu and make it navigable with a gamepad**. Preserve this goal
-also across handoffs between models and runs. An instruction count, a
-completed clear, a black flip or a synthetic test are not a reached menu.
+The original goal was **to get the original Ratchet & Clank: A Crack in Time
+to its menu and make it navigable with a gamepad**; the menu, LOAD and the first
+level are reached with the virtual pad. The current user goal is **the original
+level at 60 FPS with headroom, playable with a physical gamepad**. Preserve the
+goal across handoffs between models and runs. An instruction count, a completed
+clear, a black flip or a synthetic test are not a reached menu, and a build that
+only compiles is not an FPS result.
+
+Acceptance of "60 FPS with headroom" (2026-10-21): two alternating quiet runs of
+the same build, each with mean >= 59.7 FPS, >= 99 % of flips within one vblank
+(FRAMETIME ring), main thread and RSX worker each <= ~13 ms per frame, correct
+level image and no STOP. The emulated vblank rate `ANYPS3_VBLANK_HZ` (default
+59.94 Hz, bit-identical) measures headroom directly: the highest rate held with
+>= 99 % one-vblank frames. It is a measurement switch only; acceptance is at the
+default rate.
 
 The project uses its own static PPU/SPU translation and its own Vulkan
 runtime. Reference projects serve for researching interfaces and
@@ -103,6 +114,31 @@ before use. The standard SPU limit is 10 million instructions per thread;
 `ANYPS3_SPU_MAX_STEPS` explicitly sets a different positive uint64 budget.
 Changing the limit is neither a semantic fix nor evidence of the menu.
 
+**Measurements.** Single-run noise is about +-1.5 FPS and the user may be working
+on this PC; decide only on repeated, alternating runs and repeat an outlier once
+before investigating it. Decision-grade runs use `QUIET=1` with
+`local/ratchet/tools/measure_with_gpu.sh` / `ab_measure.sh` / `measure_level.sh`:
+the run takes the compile lock, publishes `local/ratchet/.quiet` and waits for a
+low load; every other heavy job (test batch, suite) first calls
+`local/ratchet/tools/quiet_wait.sh`. Do not queue a QUIET run behind your own
+build. Never edit a shell script that is currently running (write a new file and
+`mv` it), and never edit a work tree while a build of it is queued: the snapshot
+is taken when the compile lock is acquired.
+
+**Hardware.** This PC has shown RAM bit flips (2026-10-21: a page-cached GCC header
+was corrupted, builds and Python crashed). A compile failing with nonsense errors
+in a system header or an internal compiler error is first checked with
+`pacman -Qkk gcc`, the page cache is evicted (`posix_fadvise(DONTNEED)`) and the
+build is repeated under a new number; a one-off crash that does not reproduce is
+recorded as such, not explained by an invented cause.
+
+**Audio.** No process started by an agent may ever be audible on this PC (a baby
+sleeps here): every test, build, measurement and agent run forces
+`SDL_AUDIODRIVER=dummy ANYPS3_AUDIO_SINK=null`. The runtime additionally refuses a
+real output device without `ANYPS3_AUDIO_AUDIBLE=1`. The GUI's player setting
+"Enable game audio" defaults to on for the user's own Play launches; agents never
+launch the GUI or the game with it on.
+
 Run targeted tests before an expensive game build. Run the whole
 regression suite after a completed group of runtime changes; for RSX/Vulkan
 changes, the Vulkan test must actually run. Do not repeat already
@@ -138,8 +174,12 @@ conversion is not an exact reconstruction of diagrams/tables.
 
 ## Subagents and communication
 
-Isolated documentation research can be delegated to the GPT-6.1 Sol
-subagent, if available. Give it concrete outputs, files, rules and
+Isolated documentation research and self-contained features outside the
+runtime hot paths (manager/GUI, pad input) can be delegated to the GPT-6.1 Sol
+subagent (`local/ratchet/tools/sol_agent.sh NAME /abs/path/TASK.md`, git worktree
+on its own branch), and read-only reviews to gpt-6-astra
+(`local/ratchet/tools/astra_review.sh`); every reviewed finding is fixed with a
+test or explicitly rebutted before a merge reaches `main`. Give it concrete outputs, files, rules and
 ownership of paths. The runtime and the profile are managed by the main
 agent; the documentation agent must not edit the same files at the same
 time. Before handing over the work, wait for all assigned side tasks and

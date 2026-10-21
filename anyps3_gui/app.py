@@ -66,7 +66,7 @@ class Controllers(QDialog):
         note.setWordWrap(True)
         layout.addWidget(note)
         self.table = Table([("name", "Controller"), ("guid", "GUID"), ("serial", "Serial"),
-                            ("rumble", "Rumble"), ("battery", "Battery")])
+                            ("rumble", "Rumble"), ("motion", "Motion (accel + gyro)"), ("battery", "Battery")])
         layout.addWidget(self.table)
         actions = QHBoxLayout()
         layout.addLayout(actions)
@@ -78,7 +78,8 @@ class Controllers(QDialog):
         self.live.setReadOnly(True)
         self.live.setMaximumBlockCount(100)
         layout.addWidget(self.live)
-        self.config_note = QLabel("Port assignment, remapping, dead zones and in-game rumble require the separate pad-config runtime package.\n"
+        self.config_note = QLabel("Game rumble follows Input → Allow game controller vibration; motion requires both sensors.\n"
+                                 "Port assignment, remapping and dead zones require the separate pad-config runtime package.\n"
                                  "They are unavailable in the current runtime. Default SDL mapping remains active.")
         self.config_note.setWordWrap(True)
         layout.addWidget(self.config_note)

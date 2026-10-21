@@ -52,6 +52,14 @@ struct NativeSpuWorker {
     std::uint64_t observed_completed=0;
     std::atomic<std::uint64_t> pool_completed{0};
     bool enabled=false,active=false,last_progress=false;
+    unsigned owner_rpc_depth=0; // guarded by mutex: owner_call frames in flight (see owner_call)
+    // SPUPUT: one peer lane's LS read that this lane serves at its next quantum boundary (guarded by mutex; see
+    // spu_peer_ls_read_direct). The requester waits bounded and cancels under this mutex, so a served pointer is always live.
+    struct PeerRead {const std::uint8_t* source=nullptr;std::uint8_t* target=nullptr;unsigned size=0;bool done=false;};
+    PeerRead* peer_read=nullptr;
+    inline static std::atomic<std::uint64_t> peer_boundary_reads{0};
+    // SPUPUT: peer-LS GETs served without an owner RPC / fallen back to it (PERF SPU_PEER_LS).
+    inline static std::atomic<std::uint64_t> peer_direct_reads{0},peer_direct_fallbacks{0};
     bool pool_mode=false,refreshing=false;NativeSpuWorker* parent=nullptr;
     std::uint32_t group_id=0,lane_thread_id=0;
     std::atomic<bool> scheduled{true};
@@ -73,6 +81,7 @@ struct NativeSpuWorker {
                 (unsigned long long)(m.pause_ns-old.pause_ns),(unsigned long long)(m.service_ns-old.service_ns));old=m;}
         rpc_report_at=now;coordinator_clock.report("spu_coordinator");
         std::fprintf(stderr,"PERF SPU_REFRESH total=%llu\n",(unsigned long long)refresh_count);
+        std::fprintf(stderr,"PERF SPU_PEER_LS direct=%llu boundary=%llu fallback=%llu\n",(unsigned long long)peer_direct_reads.load(std::memory_order_relaxed),(unsigned long long)peer_boundary_reads.load(std::memory_order_relaxed),(unsigned long long)peer_direct_fallbacks.load(std::memory_order_relaxed));
     }
     struct OwnerRequest {bool refresh_needed=true,typed=false;std::function<void()> invoke;std::function<void(std::exception_ptr)> failed;bool done=false;std::exception_ptr error;std::condition_variable ready;};
     std::deque<std::shared_ptr<OwnerRequest>> owner_requests;
@@ -97,15 +106,18 @@ struct NativeSpuWorker {
         // Publish the request before acknowledging a safe point. Otherwise
         // group destruction could observe !active, miss the not-yet-enqueued
         // command, and join a worker waiting for an owner that already left.
+        // SPUPUT: while this lane waits here it is inactive but NOT at an instruction boundary (the owner may still write its LS for
+        // this very request), so peer lanes must not read its LS directly (spu_peer_ls_read_direct checks owner_rpc_depth).
+        struct RpcDepth {NativeSpuWorker& lane;bool armed=false;~RpcDepth(){if(armed){std::lock_guard<std::mutex> lock(lane.mutex);--lane.owner_rpc_depth;}}} rpc_depth{*this};
         std::unique_lock<std::mutex> execution_lock(mutex);
         if(stop)throw SpuControlEnd{};
         const auto context_generation=context?context->control_generation:0;
         std::unique_lock<std::mutex> queue_lock(parent->mutex);
         parent->owner_requests.push_back(request);parent->owner_pending.fetch_add(1,std::memory_order_release);parent->attention.store(true,std::memory_order_release);++parent->generation;parent->changed.notify_all();
-        active=false;++generation;changed.notify_all();signal_coordinator();execution_lock.unlock();
+        ++owner_rpc_depth;rpc_depth.armed=true;active=false;++generation;changed.notify_all();signal_coordinator();execution_lock.unlock();
         request->ready.wait(queue_lock,[&]{return request->done || parent->stop;});
         const auto e=request->error;const bool done=request->done;queue_lock.unlock();
-        {std::unique_lock<std::mutex> lock(mutex);changed.wait(lock,[&]{return stop || !pauses;});if(!stop)active=true;}
+        {std::unique_lock<std::mutex> lock(mutex);changed.wait(lock,[&]{return stop || !pauses;});if(!stop)active=true;--owner_rpc_depth;rpc_depth.armed=false;}
         // A parked RPC frame is a state handoff, not an instruction boundary.
         // A restarted/destroyed context must unwind before its old AOT suffix
         // can overwrite the new PC/registers or retire the old block prefix.
@@ -139,7 +151,31 @@ struct NativeSpuWorker {
     // exact for stepping tests; a request of at least the tick budget selects the standard lane slice.
     static constexpr unsigned pool_tick_budget=1024,pool_lane_quantum=4096;
     static unsigned lane_budget(unsigned requested){return requested<pool_tick_budget?requested:pool_lane_quantum;}
-    std::uint64_t generation=0,wake_generation=0;
+    // generation is atomic so that a parking lane can spin on it without the lock (every state change a parked lane could
+    // be waiting for increments it under the mutex before notifying; see the spin in launch()).
+    std::atomic<std::uint64_t> generation{0};std::uint64_t wake_generation=0;
+    // ANYPS3_SPU_STATS: wake latency = time from a wake() that finds the lane asleep to the moment its wait returns
+    // (stats[25] = summed microseconds, stats[27] = count, per lane thread; see spu_dynamic_perf_report).
+    std::atomic<bool> sleeping{false};std::atomic<std::uint64_t> wake_stamp_ns{0};
+    static std::uint64_t mono_ns(){return std::uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());}
+    void note_wake_latency(){
+        if(!spu_stats_on || !context)return;
+        const auto stamp=wake_stamp_ns.exchange(0,std::memory_order_acq_rel);
+        if(!stamp)return;
+        const auto now=mono_ns();if(now<=stamp)return;
+        auto& a=context->stats[25].value;a.store(a.load(std::memory_order_relaxed)+(now-stamp)/1000,std::memory_order_relaxed);
+        auto& n=context->stats[27].value;n.store(n.load(std::memory_order_relaxed)+1,std::memory_order_relaxed);
+    }
+    // ANYPS3_SPU_PARK_SPIN_US (default 0 = off): an event-driven lane that is about to sleep first spins this long on
+    // `generation`.  Only a latency/CPU trade: the predicate wait below still decides, so no wake-up can be lost.
+    static std::uint64_t park_spin_ns(){
+        static const std::uint64_t value=[]()->std::uint64_t{
+            const char* v=std::getenv("ANYPS3_SPU_PARK_SPIN_US");
+            if(!v || !*v)return 0;
+            char* end=nullptr;const std::uint64_t us=std::strtoull(v,&end,10);
+            return (*end || us>10000)?0:us*1000;}();
+        return value;
+    }
     std::atomic<std::uint64_t> completed{0},worker_ns{0};
     std::exception_ptr error;
     std::uint32_t guest_pc=0,guest_thread=0;
@@ -166,7 +202,10 @@ struct NativeSpuWorker {
         return {ns,quantums};
     }
     void service(){drain_owner();if(pump){const bool previous=servicing;servicing=true;try{pump();}catch(...){servicing=previous;throw;}servicing=previous;}if(pool_mode && refresh && refresh_pending){refresh_pending=false;refresh();}}
+    // Test-only fault injection for lane start-up (thread creation failure); unset in production.
+    static inline std::function<void(NativeSpuWorker&)> launch_fault;
     void launch(){
+        if(launch_fault)launch_fault(*this);
         enabled=true;
         thread=std::thread([this]{
             current=this;
@@ -183,19 +222,37 @@ struct NativeSpuWorker {
                     std::chrono::steady_clock::time_point start{};if(coordinator_clock.enabled)start=std::chrono::steady_clock::now();
                     const bool progress=step(quantum);
                     const auto ns=coordinator_clock.enabled?std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-start).count():0;
-                    lock.lock();worker_ns+=ns;last_progress=progress;++completed;if(parent && progress)parent->pool_completed.fetch_add(1,std::memory_order_relaxed);++generation;active=false;if(pauses)changed.notify_all();signal_coordinator();
+                    lock.lock();worker_ns+=ns;last_progress=progress;++completed;if(parent && progress)parent->pool_completed.fetch_add(1,std::memory_order_relaxed);++generation;active=false;
+                    if(peer_read){std::memmove(peer_read->target,peer_read->source,peer_read->size);peer_read->done=true;peer_read=nullptr;changed.notify_all();}
+                    if(pauses)changed.notify_all();
+                    signal_coordinator();
                     if(!progress && !tickets && !pauses){
                         const auto ready=[&]{return stop || pauses || tickets || wake_generation!=observed_wake;};
+                        if(spu_stats_on){wake_stamp_ns.store(0,std::memory_order_relaxed);sleeping.store(true,std::memory_order_release);}
                         if(event_driven){
+                            if(const auto spin=park_spin_ns()){
+                                const auto seen=generation.load(std::memory_order_relaxed);
+                                lock.unlock();
+                                const auto until=std::chrono::steady_clock::now()+std::chrono::nanoseconds(spin);
+                                while(generation.load(std::memory_order_acquire)==seen && std::chrono::steady_clock::now()<until)
+#if defined(__x86_64__) || defined(__i386__)
+                                    __builtin_ia32_pause();
+#else
+                                    std::this_thread::yield();
+#endif
+                                lock.lock();
+                            }
                             if(wait_deadline==std::chrono::steady_clock::time_point::max())changed.wait(lock,ready);
                             else changed.wait_until(lock,wait_deadline,ready);
                         }else changed.wait_for(lock,std::chrono::milliseconds(1),ready);
+                        if(spu_stats_on){sleeping.store(false,std::memory_order_release);note_wake_latency();}
                     }
                 }
             }catch(...){if(!lock.owns_lock())lock.lock();if(!error)error=std::current_exception();failed.store(true,std::memory_order_release);if(parent){parent->failed.store(true,std::memory_order_release);parent->attention.store(true,std::memory_order_release);}if(failure)failure(error,guest_pc,guest_thread);stop=true;active=false;tickets=0;++generation;changed.notify_all();signal_coordinator();}
         });
     }
-    void wake(){std::lock_guard<std::mutex> lock(mutex);++wake_generation;++generation;changed.notify_all();signal_coordinator();}
+    void wake(){if(spu_stats_on && sleeping.load(std::memory_order_acquire)){std::uint64_t zero=0;wake_stamp_ns.compare_exchange_strong(zero,mono_ns());}
+        std::lock_guard<std::mutex> lock(mutex);++wake_generation;++generation;changed.notify_all();signal_coordinator();}
     void wake_coordinator(){attention.store(true,std::memory_order_release);wake();if(auto* lane=current;lane && lane!=this)lane->wake();}
     void pause(){
         if(!enabled)return;
@@ -231,7 +288,7 @@ struct NativeSpuWorker {
         const bool progress=last_progress;lock.unlock();check();return {progress,true};
     }
     void idle_wait(){
-        std::unique_lock<std::mutex> lock(mutex);const auto seen=generation;
+        std::unique_lock<std::mutex> lock(mutex);const std::uint64_t seen=generation.load();
         lock.unlock();refresh_pending=true;service();lock.lock();
         changed.wait_for(lock,std::chrono::milliseconds(1),[&]{return stop || generation!=seen;});lock.unlock();check();
     }
@@ -240,6 +297,11 @@ struct NativeSpuWorker {
             if(stop && lanes.empty())return;
             try{pause();service();}catch(...){}
             for(auto& lane:lanes)lane->shutdown();
+            // Every lane is joined: unpublish it from its guest thread record before destroying it. The records (and their groups)
+            // can outlive this session, and a lane of the next session reads Thread::pool_lane on the peer-LS fast path
+            // (spu_peer_ls_read_direct) before any lane of it may have replaced the pointer.
+            for(auto& lane:lanes)if(lane->context){void* self=lane.get();
+                __atomic_compare_exchange_n(&lane->context->pool_lane,&self,static_cast<void*>(nullptr),false,__ATOMIC_RELEASE,__ATOMIC_RELAXED);}
             // Keep failed lane exception_ptrs available to the next entry.
             for(auto& lane:lanes){if(lane->error && !error){error=lane->error;failed.store(true,std::memory_order_release);}worker_ns+=lane->worker_ns;completed+=lane->completed;}
             if(detach)detach();
@@ -402,8 +464,14 @@ static void spu_pool_refresh(PpuState& s){
             auto lane=std::make_unique<NativeSpuWorker>();lane->parent=&w;lane->group_id=g.id;lane->guest_thread=t.id;lane->lane_thread_id=t.id;lane->scheduled=g.scheduled;lane->pauses=w.pauses;lane->budget=NativeSpuWorker::lane_budget(w.pool_budget);lane->context=&t;lane->group=&g;
             auto facade=std::make_shared<PpuState>(s.process);auto* group=&g;
             lane->step=[facade,group,i](unsigned budget){try{const auto progress=spu_run_thread(*facade,*group,i,budget);if(group->state!=6 || !NativeSpuWorker::current->scheduled.load())facade->memory.release_reader_slot();return progress;}catch(const SpuControlEnd&){return false;}catch(...){auto& t=group->threads[i];NativeSpuWorker::current->failed_context(t.pc,t.id);throw;}};
-            auto* wake_lane=lane.get();t.in_mailbox.set_wakeup([wake_lane]{wake_lane->wake();});for(auto& snr:t.snr)snr.set_wakeup([wake_lane]{wake_lane->wake();});
-            lane->pump=[&w]{w.service();};lane->failure=w.failure;lane->launch();w.lanes.push_back(std::move(lane));
+            lane->pump=[&w]{w.service();};lane->failure=w.failure;
+            // The pool owns the lane before it runs; a failed start rolls back its wake-ups and ownership, and only a running,
+            // pool-owned lane is published in Thread::pool_lane (read by other lanes on the peer-LS fast path), so no lane can
+            // see a worker that a later failure of this refresh destroys.
+            auto* raw=lane.get();w.lanes.push_back(std::move(lane));
+            try{t.in_mailbox.set_wakeup([raw]{raw->wake();});for(auto& snr:t.snr)snr.set_wakeup([raw]{raw->wake();});raw->launch();}
+            catch(...){t.in_mailbox.set_wakeup({});for(auto& snr:t.snr)snr.set_wakeup({});w.lanes.pop_back();throw;}
+            __atomic_store_n(&t.pool_lane,static_cast<void*>(raw),__ATOMIC_RELEASE);
         }
     }
 }

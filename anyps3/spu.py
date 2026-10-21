@@ -352,7 +352,6 @@ inline thread_local SpuProfile spu_profile;
 // Process-wide copies of the diagnostic switches: hot paths test a plain global,
 // never the dynamically initialized TLS profile (TLS wrapper call per access).
 inline bool spu_profile_on=[](){const char* v=std::getenv("ANYPS3_SPU_PROFILE");return v && v[0]=='1' && !v[1];}();
-inline const bool spu_stats_on=[](){const char* v=std::getenv("ANYPS3_SPU_STATS");return v && v[0]=='1' && !v[1];}();
 template<class T> [[gnu::always_inline]] static inline void spu_stat(T& t,unsigned i){
     if(__builtin_expect(spu_stats_on,0)){auto& c=t.stats[i].value;c.store(c.load(std::memory_order_relaxed)+1,std::memory_order_relaxed);}
 }
@@ -809,6 +808,11 @@ template<class Thread> static void spu_update_decrementer(Thread& t,std::uint64_
 // One effect of the compare is not a published change: a synchronous host-access observer (RSX/GPU
 // coherence) materializes deferred writes when a CPU access reaches its range, and that write is what loses
 // the reservation. A reservation line such an observer covers therefore always takes the full compare.
+// SPUPUT: "covers" is byte-exact (as for GETLLAR/PUTLLC, which read/write the same line under HostByteAccess) whenever the
+// observer supports exact bytes: only a synchronous watch on bytes of THIS line can materialise a write into it. Polling watches
+// (RSX labels/reports: a poll may see the old value; their publication bumps versions and notifies like any write) and watches
+// elsewhere on the same 4 KiB page do not. The page-granular test sent every check of a line sharing a page with RSX reports to
+// the RSX owner (710t: ~115 owner RPCs per frame from the ig lanes, 1.4 ms/frame of lane wait).
 static void spu_collect_events(PpuState& s,NativeSpu::Thread& t,bool full=false){
     spu_stat(t,12);
     unsigned produced=0;
@@ -822,7 +826,7 @@ static void spu_collect_events(PpuState& s,NativeSpu::Thread& t,bool full=false)
         if(__builtin_expect(concurrent && t.reservation_observed_valid && t.reservation_observed_pointer==t.reservation.first &&
             t.reservation_observed_memory==memory.parallel->identity &&
             memory.parallel->notifications->observe(t.reservation.first)==t.reservation_observed &&
-            (!memory.host_access_observer || !memory.host_access_observer.synchronous(reinterpret_cast<const void*>(t.reservation.first),128)),1))return;
+            (!memory.host_access_observer || !memory.host_access_observer.synchronous(reinterpret_cast<const void*>(t.reservation.first),128,true)),1))return;
         // The token compare reads guest memory; give observers the SPU origin (pc, retired steps).
         HostAccessContext event_origin(HostAccessOrigin::Engine::Spu,t.id,t.pc,&t.steps);
         // Sample first, compare second: a bump after the sample either shows in the compare (the version
@@ -858,7 +862,11 @@ inline std::atomic<bool> spu_poll_park_on{[]{const char* v=std::getenv("ANYPS3_S
 // A confirmed fixed point keeps polling for this long before the first park: a dependency that resolves
 // within one thread park/wake round trip is cheaper to keep polling than to sleep on (a park adds the host
 // wake latency to the poll). Mutable for tests.
-inline std::atomic<std::uint64_t> spu_poll_spin_ns{50000};
+inline std::atomic<std::uint64_t> spu_poll_spin_ns{[]()->std::uint64_t{
+    const char* v=std::getenv("ANYPS3_SPU_POLL_SPIN_US");
+    if(!v || !*v)return 50000;
+    char* end=nullptr;const std::uint64_t us=std::strtoull(v,&end,10);
+    return (*end || us>10000)?50000:us*1000;}()};
 // First park timeout and its cap; consecutive parks without a relevant change double the timeout. Writes to
 // the watched line, mailbox/signal pushes and owner scopes (LS writes, peer DMA, group control) wake a parked
 // lane at once; the timeout only bounds state that nothing signals. Mutable for tests.
@@ -1033,8 +1041,55 @@ static void spu_transfer_main(GuestMemory& memory,std::uint64_t address,std::uin
     memory.transfer(address,local,size,put);
 }
 static void spu_transfer(PpuState&,NativeSpu::Thread&,std::uint64_t,std::uint8_t*,std::uint32_t,bool);
+// SPUPUT: a pool lane's GET from a peer's LS (thread group EA window) without the owner RPC + owner-driven peer pause. The owner path
+// copies while the peer is stopped at a quantum boundary; this path copies the same boundary state:
+// - peer lane inactive (parked or between quanta: it only becomes active again under its mutex, which we hold), not paused by an
+//   owner scope (pauses == 0: an owner scope may be writing its LS) and not inside its own owner_call (owner_rpc_depth == 0: it is
+//   inactive mid-instruction and the owner may write its LS for that request): copy now;
+// - peer lane running (active): post the read into its single PeerRead slot; the peer copies it at its next quantum boundary under its
+//   mutex, before it parks or acknowledges any pause, so no owner LS write can interleave. The wait is bounded (mutual peer reads,
+//   a peer entering its own owner_call or stopping); on timeout the request is withdrawn under the peer mutex and the owner path runs.
+// Every lock is try_lock: contention, a self-LS access or an unexpected mapping falls back to the owner RPC.
+// ANYPS3_SPU_PEER_LS_DIRECT=0 disables both (A/B).
+static bool spu_peer_ls_read_direct(NativeSpu::Thread& t,std::uint64_t address,std::uint8_t* local,std::uint32_t size){
+    static const bool enabled=[]{const char* v=std::getenv("ANYPS3_SPU_PEER_LS_DIRECT");return !v || std::string(v)!="0";}();
+    auto* lane=NativeSpuWorker::current;
+    if(!enabled || address<0xf0000000u || address>UINT32_MAX || !lane || !lane->parent || lane->context!=&t || !lane->group)return false;
+    const auto index=static_cast<std::uint32_t>((address-0xf0000000u)/0x100000),offset=static_cast<std::uint32_t>((address-0xf0000000u)%0x100000);
+    if(offset>=0x40000 || size>0x40000-offset)return false;
+    auto& group=*lane->group;
+    if(!group.metadata_mutex)return false;
+    const auto fallback=[]{NativeSpuWorker::peer_direct_fallbacks.fetch_add(1,std::memory_order_relaxed);return false;};
+    std::unique_lock<std::recursive_mutex> metadata(*group.metadata_mutex,std::try_to_lock);
+    if(!metadata)return fallback();
+    NativeSpu::Thread* target=nullptr;std::size_t slot=0;
+    for(std::size_t j=0;j<group.threads.size();++j)if(group.threads[j].number==index){target=&group.threads[j];slot=j;break;}
+    if(!target || target==&t || group.context.size()<(slot+1)*0x40000)return false;
+    auto* peer=static_cast<NativeSpuWorker*>(__atomic_load_n(&target->pool_lane,__ATOMIC_ACQUIRE));
+    if(!peer || peer==lane)return false;
+    const std::uint8_t* source=group.context.data()+slot*0x40000+offset;
+    std::unique_lock<std::mutex> lock(peer->mutex,std::try_to_lock);
+    if(!lock || peer->owner_rpc_depth || peer->context!=target || peer->stop.load())return fallback();
+    if(!peer->active){
+        if(peer->pauses)return fallback();
+        std::memmove(local,source,size);
+        NativeSpuWorker::peer_direct_reads.fetch_add(1,std::memory_order_relaxed);
+        if(spu_profile_on){spu_profile.dma_bytes+=size;++spu_profile.dma_elements;}
+        return true;
+    }
+    if(peer->peer_read)return fallback();
+    metadata.unlock();
+    NativeSpuWorker::PeerRead request{source,local,size,false};peer->peer_read=&request;
+    peer->changed.wait_until(lock,std::chrono::steady_clock::now()+std::chrono::microseconds(200),
+        [&]{return request.done || peer->owner_rpc_depth || peer->stop.load();});
+    if(!request.done){if(peer->peer_read==&request)peer->peer_read=nullptr;return fallback();}
+    NativeSpuWorker::peer_boundary_reads.fetch_add(1,std::memory_order_relaxed);
+    if(spu_profile_on){spu_profile.dma_bytes+=size;++spu_profile.dma_elements;}
+    return true;
+}
 static void spu_transfer_impl(PpuState& s,NativeSpu::Thread& t,std::uint64_t address,std::uint8_t* local,std::uint32_t size,bool put){
     if(address>=0xe0000000u && NativeSpuWorker::current && NativeSpuWorker::current->parent){
+        if(!put && spu_peer_ls_read_direct(t,address,local,size))return;
         if(spu_owner_call(s,t,[&]{spu_transfer(s,t,address,local,size,put);},{SpuOwnerOperation::Transfer,address,size,put}))return;
     }
     if(address<0xe0000000u){spu_transfer_main(s.memory,address,local,size,put);if(spu_profile_on){spu_profile.dma_bytes+=size;++spu_profile.dma_elements;}return;}
@@ -1168,7 +1223,7 @@ static bool spu_list_run(PpuState& s,NativeSpu::Thread& t,std::uint8_t* ls,unsig
         local+=size;if(size<16)local=(local+15)&~15u; // short elements resume on a quadword
         if((lts&0x80000000u) && at+8<end){
             spu_capture_unsupported("DMA list stall-and-notify");
-            auto& stalled=t.stalled_lists[tag];stalled.active=true;stalled.put=list_put;stalled.high=high;
+            auto& stalled=t.stalled_lists[tag];stalled.active=true;t.stalled_active|=1u<<tag;stalled.put=list_put;stalled.high=high;
             stalled.next=at+8;stalled.end=end;stalled.local=local;
             t.stall_mask|=1u<<tag;
             if(!t.stall_stat_ready){t.event_status|=0x2;if(t.event_mask&0x2)t.event_ready=true;}
@@ -1176,10 +1231,10 @@ static bool spu_list_run(PpuState& s,NativeSpu::Thread& t,std::uint8_t* ls,unsig
             return false;
         }
     }
-    t.stalled_lists[tag].active=false;return true;
+    t.stalled_lists[tag].active=false;t.stalled_active&=~(1u<<tag);return true;
 }
 static std::uint32_t spu_incomplete_tags(const NativeSpu::Thread& t){
-    std::uint32_t mask=0;for(unsigned i=0;i<32;++i)if(t.stalled_lists[i].active)mask|=1u<<i;return mask;
+    return t.stalled_active;
 }
 // Tag update request (channel 23): 0 immediate, 1 ANY, 2 ALL. Only stalled lists are incomplete; other transfers
 // complete synchronously. An unsatisfied ANY/ALL stays pending until a stall is acknowledged and its list completes.

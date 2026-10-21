@@ -65,7 +65,8 @@ static std::uint64_t run(PpuState& s,unsigned op,std::uint64_t a,std::uint64_t b
     }
 }
 int main(){
-    unsigned lazy_hits=0;
+    unsigned lazy_hits=0;std::uint64_t digest=UINT64_C(1469598103934665603);
+    auto mix=[&](std::uint64_t v){digest=(digest^v)*UINT64_C(1099511628211);};
     for(unsigned n=0;n<300000;++n){
         PpuState lazy,eager;lazy.fpscr=eager.fpscr=fpscr_state();
         const unsigned length=1+unsigned(rng()%3);
@@ -73,22 +74,43 @@ int main(){
             const unsigned op=unsigned(rng()%6),precision=rng()&1?24:53;
             const auto a=operand(),b=operand(),c=operand();
             std::uint64_t x=0,y=0;bool lazy_error=false,eager_error=false;
+#if defined(HOSTILE_CSR)
+            // Both sides run under a non-default host MXCSR (directed rounding, FTZ, DAZ); the eager helpers then take
+            // their exact integer path, so the lazy result is checked against an MXCSR-independent expectation.
+            const unsigned saved=_mm_getcsr();_mm_setcsr(HOSTILE_CSR);
+#endif
             try{x=run(lazy,op,a,b,c,precision,true);}catch(const std::runtime_error&){lazy_error=true;}
             try{y=run(eager,op,a,b,c,precision,false);}catch(const std::runtime_error&){eager_error=true;}
+#if defined(HOSTILE_CSR)
+            _mm_setcsr(saved);
+#endif
             lazy_hits+=lazy.fp_lazy_op!=0;
             if(lazy_error!=eager_error || x!=y){std::fprintf(stderr,"op=%u p=%u a=%016llx b=%016llx c=%016llx lazy=%016llx eager=%016llx\n",op,precision,
                 (unsigned long long)a,(unsigned long long)b,(unsigned long long)c,(unsigned long long)x,(unsigned long long)y);std::abort();}
+            mix(lazy_error?UINT64_C(0xdead):x);
             if(lazy_error)break;
         }
-        fp_materialize(lazy);
+        fp_materialize(lazy);mix(lazy.fpscr);
         if(lazy.fpscr!=eager.fpscr || lazy.fp_lazy_op){std::fprintf(stderr,"fpscr lazy=%08x eager=%08x\n",lazy.fpscr,eager.fpscr);std::abort();}
     }
+#if !defined(ANYPS3_FP_FORCE_SOFT)
     // An observer that writes FPSCR first replays the pending update.
     {PpuState s;s.fpscr=0x02000000;const auto r=fp_add_lazy(s,UINT64_C(0x3ff0000000000000),UINT64_C(0x3c30000000000000));
      assert(r==UINT64_C(0x3ff0000000000000) && s.fp_lazy_op==1 && s.fpscr==0x02000000);
      fp_write_bit(s,31,true);assert(s.fp_lazy_op==0 && s.fpscr==0x02024001);}
-    std::printf("lazy_hits=%u\n",lazy_hits);
+#endif
+#if defined(HOSTILE_CSR)
+    // Inexact trap unmasked + round toward zero: the lazy fast path must neither trap nor round toward zero.
+    {PpuState s;s.fpscr=0x02000000;const unsigned saved=_mm_getcsr();_mm_setcsr((HOSTILE_CSR)&~0x1000u);
+     const auto sum=fp_add_lazy(s,UINT64_C(0x3ff0000000000000),UINT64_C(0x3ca8000000000000));       // 1 + 1.5*2^-53 -> RN up
+     const auto product=fp_multiply_lazy(s,UINT64_C(0x3ff5555555555555),UINT64_C(0x4008000000000000),24);  // 4/3*3 in single
+     _mm_setcsr(saved);
+     assert(sum==UINT64_C(0x3ff0000000000001) && product==UINT64_C(0x4010000000000000) && s.fp_lazy_op==2);}
+#endif
+    std::printf("lazy_hits=%u digest=%016llx\n",lazy_hits,(unsigned long long)digest);
+#if !defined(ANYPS3_FP_FORCE_SOFT)
     assert(lazy_hits>10000);
+#endif
     std::puts("ok");
 }
 '''
@@ -112,10 +134,35 @@ int main(){
 }
 '''
 
+# lfs/stfs conversions with inlined fast paths: every binary32 encoding. Expectation independent of fp_widen: the host's exact
+# float->double conversion for non-NaN values (denormals included, MXCSR default) and the Book I DOUBLE bit pattern for NaNs
+# (no quieting); stfs (SINGLE) must invert lfs bit for bit.
+CONVERT = r'''
+#include <cassert>
+int main(){
+    std::uint64_t checked=0;
+    for(std::uint64_t n=0;n<=UINT32_MAX;++n){
+        const auto v=static_cast<std::uint32_t>(n);
+        std::uint64_t expected;
+        if((v&0x7f800000u)==0x7f800000u && (v&0x7fffffu))
+            expected=(std::uint64_t(v>>31)<<63)|UINT64_C(0x7ff0000000000000)|(std::uint64_t(v&0x7fffffu)<<29);
+        else{float f;std::memcpy(&f,&v,4);const double d=f;std::memcpy(&expected,&d,8);}
+        const auto wide=fp_widen(v);
+        if(wide!=expected || fp_store_single(wide)!=v){
+            std::fprintf(stderr,"v=%08x widen=%016llx expected=%016llx store=%08x\n",v,(unsigned long long)wide,(unsigned long long)expected,
+                         fp_store_single(wide));std::abort();}
+        ++checked;
+    }
+    assert(checked==UINT64_C(0x100000000));
+    std::puts("ok");
+}
+'''
+
 
 @unittest.skipUnless(shutil.which('c++'), 'Requires native C++ compiler')
 class PpuFpLazy(unittest.TestCase):
     def build_and_run(self, source, flags=()):
+        """-> stdout of the built program (asserted to contain 'ok')."""
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             (root/'test.cpp').write_text(source)
@@ -126,6 +173,7 @@ class PpuFpLazy(unittest.TestCase):
                                  env={**os.environ, 'ANYPS3_PERF_REPORT': '0'})
             self.assertEqual(run.returncode, 0, run.stderr[-4000:] + run.stdout[-2000:])
             self.assertIn('ok', run.stdout)
+            return run.stdout
 
     def program(self, extra=()):
         payload = struct.pack('>' + 'I' * len(CODE), *CODE)
@@ -137,6 +185,26 @@ class PpuFpLazy(unittest.TestCase):
     def test_lazy_equals_eager(self):
         source, _ = self.program()
         self.build_and_run(source + DIFFERENTIAL)
+
+    def test_lazy_equals_eager_hostile_mxcsr(self):
+        # Built for the host ISA like the game (-march=native): with AVX-512 the lazy fast path must not depend on MXCSR,
+        # i.e. it still takes the fast path (lazy_hits) and rounds to nearest under RZ/FTZ/DAZ, and never traps.
+        probe = subprocess.run(['c++', '-march=native', '-dM', '-E', '-x', 'c++', os.devnull], capture_output=True, text=True)
+        if '__AVX512F__' not in probe.stdout:
+            self.skipTest('host compiler/CPU without AVX-512F')
+        # The eager helpers use the same host fast path, so the independent expectation is the digest of every result and
+        # final FPSCR from a build with host arithmetic disabled (exact integer path, checked against rationals in test_floating).
+        source, _ = self.program()
+        digest = lambda out: next(w for w in out.split() if w.startswith('digest='))
+        soft = digest(self.build_and_run(source + DIFFERENTIAL, ('-DANYPS3_FP_FORCE_SOFT',)))
+        hostile = self.build_and_run(source + DIFFERENTIAL, ('-march=native', '-ffp-contract=off', '-DHOSTILE_CSR=0xffc0u'))
+        native = self.build_and_run(source + DIFFERENTIAL, ('-march=native', '-ffp-contract=off'))
+        self.assertEqual(digest(hostile), soft)
+        self.assertEqual(digest(native), soft)
+
+    def test_widen_store_single_exhaustive(self):
+        source, _ = self.program()
+        self.build_and_run(source + CONVERT, ('-march=native', '-ffp-contract=off'))
 
     def test_translated_program_literal_fpscr(self):
         source, payload = self.program()
