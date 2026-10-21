@@ -32,7 +32,8 @@ Previous app versions stay on disk so an update does not remove files used by ru
 Building and playing also need GCC with C++17, SDL2, Vulkan and glslang development libraries,
 a Vulkan GPU driver and a working systemd user session. The installer handles Python dependencies;
 install these native dependencies through your distribution. Review **Settings → Build** for memory
-and parallelism appropriate to your machine. Audio is locked to silent by default.
+and parallelism appropriate to your machine. Game audio is on by default for Play;
+turn it off in **Settings → Audio → Enable game audio** globally or per title.
 
 **Experimental:** Ratchet & Clank: A Crack in Time (BCES00511, 01.00) is the only current target.
 The manager/GUI have synthetic integration coverage; a complete real-game import → build → play →

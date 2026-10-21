@@ -57,10 +57,16 @@ def iso_fixture(version="01.00"):
 
 class ManagerTests(unittest.TestCase):
     def setUp(self):
+        # Every real child in this suite must be silent, including Play fixtures.
+        silent = patch.dict(os.environ, SDL_AUDIODRIVER="dummy", ANYPS3_AUDIO_SINK="null")
+        silent.start()
+        self.addCleanup(silent.stop)
+        os.environ.pop("ANYPS3_AUDIO_AUDIBLE", None)
         self.temp = tempfile.TemporaryDirectory(prefix="anyps3-manager-test-")
         self.root = Path(self.temp.name)
         self.lib = Library(self.root/"library", SOURCE)
         self.lib.init()
+        settings.set_value(self.lib, "audio.enabled", False)
         self.iso = self.root/"disc.iso"
         self.iso.write_bytes(iso_fixture())
         self.key = self.root/"key.json"
@@ -130,7 +136,7 @@ class ManagerTests(unittest.TestCase):
         with self.assertRaisesRegex(ManagerError, "changed"):
             pipeline.key_path(self.lib, "app")
 
-    def test_settings_layers_validation_and_lock(self):
+    def test_settings_layers_validation_and_retired_lock(self):
         self.import_title()
         settings.set_value(self.lib, "build.jobs", 7)
         settings.set_value(self.lib, "build.jobs", 3, title="BCES00511")
@@ -148,7 +154,7 @@ class ManagerTests(unittest.TestCase):
         self.assertEqual(self.cli("settings", "set", "--title", "BCES00511", "build.jobs", "4")[0], 0)
         self.assertEqual(self.cli("settings", "get", "--title", "BCES00511")[1]["settings"]["build.jobs"], 4)
 
-    def test_all_process_environments_silent_and_unavailable_switch_omitted(self):
+    def test_disabled_play_and_tool_environments_silent_and_unavailable_switch_omitted(self):
         self.import_title()
         ambient = {"ANYPS3_AUDIO_AUDIBLE": "1", "SDL_AUDIODRIVER": "pulseaudio",
                    "ANYPS3_VIRTUAL_PAD_CONTROL": "/bad", "ANYPS3_RSX_RECORDER": "1"}
@@ -160,13 +166,115 @@ class ManagerTests(unittest.TestCase):
                 self.assertNotIn("ANYPS3_AUDIO_AUDIBLE", env)
                 self.assertNotIn("ANYPS3_VIRTUAL_PAD_CONTROL", env)
                 self.assertNotIn("ANYPS3_RSX_RECORDER", env)
-            self.pipeline().build("BCES00511")
-            with self.assertRaises(ManagerError) as caught:
-                runs.run(self.lib, "BCES00511", unscoped=True)
-            self.assertEqual(caught.exception.exit_code, 3)
-            run = runs.records(self.lib, "BCES00511")[0]
-            self.assertEqual(run["fps_mean"], 12.5)
-            self.assertIn("synthetic unsupported", run["stop"])
+        self.pipeline().build("BCES00511")
+        with self.assertRaises(ManagerError) as caught:
+            runs.run(self.lib, "BCES00511", unscoped=True)
+        self.assertEqual(caught.exception.exit_code, 3)
+        run = runs.records(self.lib, "BCES00511")[0]
+        self.assertEqual(run["fps_mean"], 12.5)
+        self.assertIn("synthetic unsupported", run["stop"])
+
+    def audio_environment(self, overrides=None):
+        return settings.run_environment(self.lib, "BCES00511",
+            settings.effective(self.lib, "BCES00511", overrides), [], self.root)
+
+    def assert_audio(self, enabled, overrides=None):
+        # Composition only: never pass an enabled environment to a process.
+        env = self.audio_environment(overrides)
+        if enabled:
+            self.assertEqual(env["ANYPS3_AUDIO_SINK"], "sdl")
+            self.assertEqual(env["ANYPS3_AUDIO_AUDIBLE"], "1")
+            self.assertNotIn("SDL_AUDIODRIVER", env)
+        else:
+            self.assertEqual(env["SDL_AUDIODRIVER"], "dummy")
+            self.assertEqual(env["ANYPS3_AUDIO_SINK"], "null")
+            self.assertNotIn("ANYPS3_AUDIO_AUDIBLE", env)
+
+    def test_audio_defaults_on_and_is_a_normal_gui_setting(self):
+        self.import_title()
+        settings.set_value(self.lib, "audio.enabled", None, reset=True)
+        self.assert_audio(True)
+        schema = self.cli("settings", "schema")[1]["settings"]
+        spec = schema["audio.enabled"]
+        self.assertIs(spec["default"], True)
+        self.assertEqual(spec["type"], "boolean")
+        self.assertEqual(spec["group"], "Audio")
+        self.assertFalse(spec["advanced"])
+        self.assertTrue(spec["available"])
+        self.assertTrue(spec.get("editable", True))
+        self.assertFalse(spec.get("global_only", False))
+        self.assertNotIn("audio.audible_allowed", schema)
+        self.assertNotIn("audio.sink", schema)
+        with self.assertRaises(ManagerError):
+            settings.set_value(self.lib, "audio.enabled", "true")
+
+    def test_audio_title_and_one_off_overrides_and_reset(self):
+        self.import_title()
+        self.assert_audio(False)
+        self.assertEqual(self.cli("settings", "set", "--title", "BCES00511", "audio.enabled", "true")[0], 0)
+        self.assert_audio(True)
+        before = tree_hashes(self.lib.root)
+        self.assert_audio(False, {"audio.enabled": False})
+        self.assertEqual(tree_hashes(self.lib.root), before)
+        self.assertEqual(self.cli("settings", "reset", "--title", "BCES00511", "audio.enabled")[0], 0)
+        self.assert_audio(False)
+        self.assert_audio(True, {"audio.enabled": True})
+        settings.set_value(self.lib, "audio.enabled", True)
+        settings.set_value(self.lib, "audio.enabled", False, title="BCES00511")
+        self.assert_audio(False)
+        self.assert_audio(True, {"audio.enabled": True})
+
+    def test_audio_migrates_old_files_without_rewriting_them(self):
+        root = self.import_title()
+        cases = [
+            ({"audio.audible_allowed": False}, {}, False),
+            ({"audio.audible_allowed": True}, {}, False),
+            ({"audio.audible_allowed": True, "audio.sink": "sdl"}, {}, True),
+            ({"audio.audible_allowed": False, "audio.sink": "sdl"}, {}, False),
+            ({"audio.sink": "sdl"}, {}, False),
+            ({"audio.audible_allowed": True}, {"audio.sink": "sdl"}, True),
+            ({"audio.audible_allowed": False}, {"audio.sink": "sdl"}, False),
+            ({"audio.audible_allowed": True, "audio.sink": "sdl"}, {"audio.sink": "null"}, False),
+            ({"audio.enabled": True, "audio.audible_allowed": False, "audio.sink": "null"}, {}, True),
+            ({"audio.enabled": False}, {"audio.enabled": True}, True),
+        ]
+        for global_values, title_values, enabled in cases:
+            with self.subTest(global_values=global_values, title_values=title_values):
+                atomic_json(self.lib.root/"settings.json", global_values)
+                atomic_json(root/"settings.json", title_values)
+                self.assert_audio(enabled)
+                self.assertEqual(read_json(self.lib.root/"settings.json"), global_values)
+                self.assertEqual(read_json(root/"settings.json"), title_values)
+                effective = self.cli("settings", "get", "--title", "BCES00511")[1]
+                self.assertEqual(effective["settings"]["audio.enabled"], enabled)
+                self.assertNotIn("audio.sink", effective["overrides"])
+                if "audio.sink" in title_values:
+                    self.assertEqual(effective["overrides"]["audio.enabled"], enabled)
+        atomic_json(self.lib.root/"settings.json", {"audio.audible_allowed": False, "audio.sink": "null"})
+        atomic_json(root/"settings.json", {})
+        self.assert_audio(True, {"audio.enabled": True})
+        settings.set_value(self.lib, "audio.enabled", True)
+        self.assertEqual(read_json(self.lib.root/"settings.json"), {"audio.enabled": True})
+        self.assert_audio(True)
+        atomic_json(root/"settings.json", {"audio.sink": "null"})
+        self.assert_audio(False)
+        settings.set_value(self.lib, "audio.enabled", None, title="BCES00511", reset=True)
+        self.assertEqual(read_json(root/"settings.json"), {})
+        self.assert_audio(True)
+
+    def test_audio_migration_rejects_invalid_legacy_values(self):
+        for legacy in ({"audio.audible_allowed": "false"}, {"audio.sink": "pulse"}):
+            atomic_json(self.lib.root/"settings.json", legacy)
+            with self.subTest(legacy=legacy), self.assertRaises(ManagerError):
+                settings.effective(self.lib)
+
+    def test_build_and_import_tools_stay_silent_with_audio_enabled(self):
+        settings.set_value(self.lib, "audio.enabled", True)
+        # The real import/translate/compile fixture processes assert dummy/null
+        # and the absence of ANYPS3_AUDIO_AUDIBLE before doing any work.
+        self.import_title()
+        self.pipeline().build("BCES00511")
+        self.assertTrue(settings.effective(self.lib)["audio.enabled"])
 
     def test_locks_and_stale_pid_do_not_signal_other_processes(self):
         from anyps3_manager.processes import identity, signal_process
