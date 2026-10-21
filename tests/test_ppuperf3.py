@@ -27,6 +27,9 @@ HEAD = r'''
 #if defined(__SSE2__)
 #include <xmmintrin.h>
 #endif
+#if defined(__AVX512F__)
+#include <immintrin.h>  // FLOAT_CPP's include sits inside the namespaces below
+#endif
 struct PpuState { std::uint32_t fpscr=0,cr=0; std::uint64_t fp_lazy_a=0,fp_lazy_b=0,fp_lazy_c=0;std::uint8_t fp_lazy_op=0,fp_lazy_precision=0; };
 '''
 
@@ -155,7 +158,11 @@ int main(){
                 self.assertIn('comparisons=24000000',output)
 
     def test_host_mode_changes_reject_without_guest_mutation(self):
-        self.native(r'''
+        # Without AVX-512F the host path must decline under a non-default MXCSR. With it (-march=native on an AVX-512 host:
+        # FP_HOST_NEEDS_MXCSR=0) the {rn-sae} path does not depend on MXCSR and must accept with the round-to-nearest result.
+        for flags in ((), ('-march=native',)):
+            with self.subTest(flags=flags):
+                self.native(r'''
 int main(){
 #if defined(__SSE2__) && FLT_EVAL_METHOD == 0 && !defined(__FAST_MATH__)
  const auto original=_mm_getcsr();
@@ -166,7 +173,7 @@ int main(){
   const bool accepted=fast::fp_host_arithmetic(s,0x3ff0000000000000,0x4000000000000000,0,53,0,out);
   const auto r=fast::fp_add(s,0x3ff0000000000000,0x4000000000000000);
   _mm_setcsr(original);
-  assert(!accepted && out==123 && r==0x4008000000000000 && s.fpscr==0x12304000);
+  assert((FP_HOST_NEEDS_MXCSR?(!accepted && out==123):(accepted && out==0x4008000000000000)) && r==0x4008000000000000 && s.fpscr==0x12304000);
  }
  _mm_setcsr(0x1fbf); // existing host sticky flags are harmless
  PpuState s;std::uint64_t out=0;
@@ -179,7 +186,7 @@ int main(){
  }
 #endif
 }
-''', extra=('-fsanitize=undefined','-fno-sanitize-recover=all'))
+''', extra=('-fsanitize=undefined','-fno-sanitize-recover=all',*flags))
 
     def test_fast_math_build_disables_host_path(self):
         self.native(r'''
