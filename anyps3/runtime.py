@@ -74,6 +74,7 @@ MEMORY_CPP = FRAMETIME_CPP + r'''
 #include <atomic>
 #include <condition_variable>
 #include <thread>
+#include <future>
 #include <deque>
 #include <exception>
 

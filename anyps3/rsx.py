@@ -48,7 +48,7 @@ struct NativeRsx {
     void* graphics_session=nullptr; // owned by the synchronous FIFO scope
 #endif
 #endif
-    std::uint64_t cpu_clears=0,rendered_clears=0,captured_frames=0,flips=0,diag_skipped=0;
+    std::uint64_t cpu_clears=0,rendered_clears=0,captured_frames=0,async_captures=0,flips=0,diag_skipped=0;
     NativeRsx(){io.fill(UINT32_MAX);}
 };
 '''
@@ -387,18 +387,36 @@ static bool rsx_graphics_flip_async(PpuState& s,unsigned id,std::uint64_t addres
     if(!session || !session->observer_installed || session->previous_observer || id>=s.rsx.display_buffers.size() || s.video.format!=0)return false;
     const char* directory=std::getenv("ANYPS3_FRAME_DIR");const bool files=directory && *directory;
     if(!files && !s.present.enabled)return false;
-    if(files){const auto root=std::filesystem::canonical(directory);if(!std::filesystem::is_directory(root))throw std::runtime_error("RSX frame output is not a directory");
-        const auto next=s.rsx.flips+1;const auto stride=rsx_frame_stride();if(next<=8 || next%stride==0 || rsx_frame_trigger(false))return false;}
+    // The first eight flips and operator requests (ANYPS3_FRAME_TRIGGER) keep the synchronous capture path (file written before the
+    // flip completes). A stride capture rides on this deferred flip: the scanout image is copied on the flip's GPU timeline and the
+    // file is written in the background (rsx_capture_write_async), so a measurement capture never stalls the RSX owner.
+    std::filesystem::path root;bool capture=false;
+    if(files){root=std::filesystem::canonical(directory);if(!std::filesystem::is_directory(root))throw std::runtime_error("RSX frame output is not a directory");
+        const auto next=s.rsx.flips+1;const auto stride=rsx_frame_stride();if(next<=8 || rsx_frame_trigger(false))return false;
+        capture=next%stride==0;}
     const auto& buffer=s.rsx.display_buffers[id];if(!buffer.width || !buffer.height)return false;
     const auto target=rsxdraw::bind_target(s,0xfeed0000,buffer.offset,buffer.pitch,buffer.width,buffer.height);
     std::shared_ptr<NativeVulkan::GraphicsImage> image;
     for(const auto& surface:session->surfaces)if(!surface.partial && surface.same(target,buffer.width,buffer.height,1,8,false)){image=surface.image;break;}
     if(!image || image->format==VK_FORMAT_R32_UINT)return false;
+    if(capture && (image->width!=buffer.width || image->height!=buffer.height || image->layers!=1))return false;
+    if(capture && s.rsx.captured_frames>=256)throw std::runtime_error("headless RSX capture budget exhausted (256 frames)");
     const unsigned head=unsigned((address-(std::uint64_t(s.rsx.driver)+0x10b8))/0x40);
     const auto flags=(UINT64_C(8)<<head)&s.memory.load(std::uint64_t(s.rsx.driver)+0x12c0,4);
     if(!session->defer_flip(address,reports,id,queue,event_name,flags))return false;
     try{
         ++session->batch->frames;
+        if(capture){
+            // Same bytes as the synchronous scanout capture (rsx_graphics_scanout): the display image copied after every command
+            // of this frame, alpha forced opaque (X8R8G8B8 scanout). Recorded before the present: an asynchronous present
+            // submits the batch (GraphicsWsi::display), after which nothing more can be recorded into it.
+            const auto at=session->vk.graphics_transfer(*session->batch,image,VK_IMAGE_ASPECT_COLOR_BIT,4);
+            const auto number=++s.rsx.captured_frames;++s.rsx.async_captures;
+            session->completions.push_back([at,number,id,width=buffer.width,height=buffer.height,path=root/rsx_capture_name(number)](const NativeVulkan::GraphicsBatch& b){
+                std::vector<std::uint8_t> rgba(std::size_t(width)*height*4);std::memcpy(rgba.data(),static_cast<const char*>(b.map)+at,rgba.size());
+                for(std::size_t i=3;i<rgba.size();i+=4)rgba[i]=255;
+                rsx_capture_write_async(path,std::move(rgba),id,width,height,number);});
+        }
         if(s.present.enabled){
             if(image->format==VK_FORMAT_R8G8B8A8_SRGB){auto raw=session->vk.graphics_image(*session->batch,VK_FORMAT_R8G8B8A8_UNORM,buffer.width,buffer.height,1);session->vk.graphics_copy(*session->batch,image,raw);image=std::move(raw);}
             anyps3_ft::Span ft_present(anyps3_ft::Mark,0xa2);
@@ -920,7 +938,7 @@ static std::uint32_t rsx_syscall(PpuState& s){
         fresh.host=gpu.host;
 #endif
         fresh.trace=gpu.trace;fresh.commands=gpu.commands;fresh.rendered_clears=gpu.rendered_clears;
-        fresh.captured_frames=gpu.captured_frames;fresh.flips=gpu.flips;
+        fresh.captured_frames=gpu.captured_frames;fresh.async_captures=gpu.async_captures;fresh.flips=gpu.flips;
         fresh.draw.draws=gpu.draw.draws;fresh.draw.triangles=gpu.draw.triangles;fresh.draw.pixels=gpu.draw.pixels;
         gpu=std::move(fresh);
         return 0;

@@ -69,7 +69,7 @@ private:
     // filename-hash collisions. These files are local compiler artifacts.
     std::vector<char> cache_read(const std::filesystem::path& path){
         std::ifstream in(path,std::ios::binary|std::ios::ate);if(!in)return {};
-        const auto n=in.tellg();if(n<16 || n>64*1024*1024){++compile_stats.cache_rejected;return {};}
+        const auto n=in.tellg();if(n<16 || std::uint64_t(n)>16+pipeline_cache_max_bytes){++compile_stats.cache_rejected;return {};}
         std::vector<char> blob(static_cast<std::size_t>(n));in.seekg(0);
         if(!in.read(blob.data(),blob.size())){cache_io_error();return {};}
         std::uint64_t sum=0;std::memcpy(&sum,blob.data()+8,8);
@@ -90,18 +90,23 @@ private:
         std::size_t left=entries.size();for(const auto& entry:entries){if(left<1024 && bytes+incoming<=256*1024*1024)break;
             if(std::filesystem::remove(entry.path,ec)){bytes-=entry.size;--left;}if(ec){cache_io_error();break;}}
     }
-    void cache_write(const std::filesystem::path& path,const std::vector<char>& payload)noexcept{
+    // One checksummed file, replaced atomically (temporary + rename). No member state: also runs on the pipeline-cache saver task.
+    static bool cache_file_write(const std::filesystem::path& path,const std::vector<char>& payload)noexcept{
         try{
-            if(payload.size()>32*1024*1024)return;
-            trim_disk_cache(payload.size()+16);
             std::vector<char> blob(16);std::memcpy(blob.data(),"ANYVK008",8);
             const auto sum=cache_hash(payload.data(),payload.size());std::memcpy(blob.data()+8,&sum,8);blob.insert(blob.end(),payload.begin(),payload.end());
             std::string name=path.string()+".tmp-XXXXXX";std::vector<char> temp(name.begin(),name.end());temp.push_back(0);
-            const int fd=mkstemp(temp.data());if(fd<0){cache_io_error();return;}
+            const int fd=mkstemp(temp.data());if(fd<0)return false;
             std::size_t done=0;while(done<blob.size()){const auto n=::write(fd,blob.data()+done,blob.size()-done);if(n<=0)break;done+=n;}
             const bool closed=::close(fd)==0;
-            if(done!=blob.size() || !closed || ::rename(temp.data(),path.c_str())!=0){::unlink(temp.data());cache_io_error();}
-        }catch(...){cache_io_error();}
+            if(done!=blob.size() || !closed || ::rename(temp.data(),path.c_str())!=0){::unlink(temp.data());return false;}
+            return true;
+        }catch(...){return false;}
+    }
+    void cache_write(const std::filesystem::path& path,const std::vector<char>& payload)noexcept{
+        if(payload.size()>32*1024*1024)return;
+        trim_disk_cache(payload.size()+16);
+        if(!cache_file_write(path,payload))cache_io_error();
     }
     static std::string spirv_key(const std::string& source,glslang_stage_t stage,bool optimize){
         // Include compiler version/flavor, target environment, every option and
@@ -152,37 +157,66 @@ private:
         else check(result,"vkCreatePipelineCache");
         compile_stats.pipeline_cache_load_bytes=data.size();cache_saved_at=std::chrono::steady_clock::now();
     }
+    // The VkPipelineCache holds every pipeline of the session plus what earlier sessions persisted. It used to be replaced by an
+    // empty cache after every 128 creations (and the file overwritten with only that segment), so the file kept <= 128 pipelines
+    // and most first uses in a later session compiled cold (733h1: 13 new pipelines in one 2-s interval, 20.4 ms; hits 0.03 ms).
+    // Memory stays bounded by a size rotation far above one game session's working set.
+    static constexpr std::size_t pipeline_cache_max_bytes=std::size_t(128)<<20,pipeline_cache_rotate_bytes=std::size_t(96)<<20;
     unsigned pipeline_cache_creations=0;
     void pipeline_cache_created(){
         pipeline_cache_dirty=true;
         ++pipeline_cache_creations;std::size_t bytes=0;
-        if(pipeline_cache_creations%16==0)check(vkGetPipelineCacheData(device,pipeline_cache,&bytes,nullptr),"pipeline cache size");
-        if(pipeline_cache_creations>=128 || bytes>32*1024*1024){
+        if(pipeline_cache_creations%64==0)check(vkGetPipelineCacheData(device,pipeline_cache,&bytes,nullptr),"pipeline cache size");
+        if(bytes>pipeline_cache_rotate_bytes){
             save_pipeline_cache(true);vkDestroyPipelineCache(device,pipeline_cache,nullptr);pipeline_cache=VK_NULL_HANDLE;
             VkPipelineCacheCreateInfo ci{};ci.sType=VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO;
             check(vkCreatePipelineCache(device,&ci,nullptr,&pipeline_cache),"rotate VkPipelineCache");
             pipeline_cache_creations=0;++compile_stats.pipeline_cache_rotations;
         }
     }
-    void save_pipeline_cache(bool force=false)noexcept{
-        if(!pipeline_cache || !pipeline_cache_dirty || pipeline_cache_path.empty())return;
-        if(!force && elapsed_ns(cache_saved_at)<UINT64_C(2000000000))return;
+    struct PipelineCacheSave {int status=0;bool fixup=false;};   // status 1 written, -1 driver/I/O failure
+    static PipelineCacheSave write_pipeline_cache(VkDevice device,VkPhysicalDevice physical,VkPipelineCache cache,const std::filesystem::path& path)noexcept{
+        PipelineCacheSave out;
         try{
-            std::size_t n=0;auto result=vkGetPipelineCacheData(device,pipeline_cache,&n,nullptr);
-            if(result!=VK_SUCCESS || n>64*1024*1024){cache_io_error();return;}
-            std::vector<char> data(n);result=vkGetPipelineCacheData(device,pipeline_cache,&n,data.data());
-            if(result!=VK_SUCCESS){cache_io_error();return;}
+            std::size_t n=0;auto result=vkGetPipelineCacheData(device,cache,&n,nullptr);
+            if(result!=VK_SUCCESS || n>pipeline_cache_max_bytes){out.status=-1;return out;}
+            std::vector<char> data(n);result=vkGetPipelineCacheData(device,cache,&n,data.data());
+            if(result!=VK_SUCCESS){out.status=-1;return out;}
             // Mesa 26.2 Lavapipe reports 20 after writing its complete 32-byte
             // empty header (the size-only query returns 32). Accept only that
             // verified header, never guess the length of opaque cache payload.
             if(n==20 && data.size()==sizeof(VkPipelineCacheHeaderVersionOne)){
                 VkPhysicalDeviceProperties p{};vkGetPhysicalDeviceProperties(physical,&p);VkPipelineCacheHeaderVersionOne h{};std::memcpy(&h,data.data(),sizeof(h));
                 if(p.vendorID==0x10005u && p.deviceType==VK_PHYSICAL_DEVICE_TYPE_CPU && h.headerSize==data.size() && h.headerVersion==VK_PIPELINE_CACHE_HEADER_VERSION_ONE &&
-                   h.vendorID==p.vendorID && h.deviceID==p.deviceID && !std::memcmp(h.pipelineCacheUUID,p.pipelineCacheUUID,VK_UUID_SIZE)){n=data.size();++compile_stats.cache_driver_size_fixups;}
+                   h.vendorID==p.vendorID && h.deviceID==p.deviceID && !std::memcmp(h.pipelineCacheUUID,p.pipelineCacheUUID,VK_UUID_SIZE)){n=data.size();out.fixup=true;}
             }
-            data.resize(n);cache_write(pipeline_cache_path,data);
-            ++compile_stats.pipeline_cache_saves;pipeline_cache_dirty=false;cache_saved_at=std::chrono::steady_clock::now();
-        }catch(...){cache_io_error();}
+            data.resize(n);out.status=cache_file_write(path,data)?1:-1;
+        }catch(...){out.status=-1;}
+        return out;
+    }
+    // Periodic saves run on one background task (VkPipelineCache is internally synchronized; vkGetPipelineCacheData of a full
+    // session cache and the file write take milliseconds that must not stall the RSX owner). A forced save (shutdown, rotation)
+    // joins the task first and writes synchronously; the cache is never destroyed while the task may use it.
+    std::future<PipelineCacheSave> pipeline_cache_saving;
+    void pipeline_cache_saved(const PipelineCacheSave& r)noexcept{
+        if(r.fixup)++compile_stats.cache_driver_size_fixups;
+        if(r.status>0){++compile_stats.pipeline_cache_saves;try{trim_disk_cache(0);}catch(...){cache_io_error();}}
+        else if(r.status<0)cache_io_error();
+    }
+    void collect_pipeline_cache_save(bool wait)noexcept{
+        if(!pipeline_cache_saving.valid())return;
+        if(!wait && pipeline_cache_saving.wait_for(std::chrono::seconds(0))!=std::future_status::ready)return;
+        pipeline_cache_saved(pipeline_cache_saving.get());
+    }
+    void save_pipeline_cache(bool force=false)noexcept{
+        collect_pipeline_cache_save(force);
+        if(!pipeline_cache || !pipeline_cache_dirty || pipeline_cache_path.empty())return;
+        if(!force && (elapsed_ns(cache_saved_at)<UINT64_C(2000000000) || pipeline_cache_saving.valid()))return;
+        pipeline_cache_dirty=false;cache_saved_at=std::chrono::steady_clock::now();
+        if(force){pipeline_cache_saved(write_pipeline_cache(device,physical,pipeline_cache,pipeline_cache_path));return;}
+        try{pipeline_cache_saving=std::async(std::launch::async,[device=device,physical=physical,cache=pipeline_cache,path=pipeline_cache_path]{
+                return write_pipeline_cache(device,physical,cache,path);});}
+        catch(...){pipeline_cache_dirty=true;cache_io_error();}
     }
 public:
     void compile_stats_print(bool force=false){
