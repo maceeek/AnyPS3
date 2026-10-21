@@ -43,7 +43,11 @@ class Pads:
             "SDL_JoystickCurrentPowerLevel": (C.c_int, [C.c_void_p]),
         }
         for name, (result, args) in signatures.items():
-            function = getattr(self.sdl, name)
+            try:
+                function = getattr(self.sdl, name)
+            except AttributeError as exc:
+                raise ManagerError("incompatible-sdl",
+                    f"Controller diagnostics require SDL 2.0.18 or newer; missing {name}.", 6) from exc
             function.restype, function.argtypes = result, args
         # SDL_INIT_GAMECONTROLLER includes joystick support, not audio.
         if self.sdl.SDL_InitSubSystem(0x2000):

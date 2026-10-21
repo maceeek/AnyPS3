@@ -183,6 +183,8 @@ window/fullscreen settings and custom pad configuration are therefore unavailabl
 Controller enumeration, live input and rumble diagnostics use lazy SDL2 ctypes,
 without initialising audio. The controller screen states the missing runtime
 capabilities; default SDL mapping remains in use.
+The [DualSense source inspection](DUALSENSE.md) records SDL version requirements,
+Linux hidraw permissions, the PS3 button/axis mapping and missing PS/Guide input.
 
 Physical Xbox and DualSense gameplay acceptance, the original-game
 build → play → rebuild → reload-save acceptance, unlimited runtime budgets and
