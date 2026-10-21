@@ -202,7 +202,10 @@ struct NativeSpuWorker {
         return {ns,quantums};
     }
     void service(){drain_owner();if(pump){const bool previous=servicing;servicing=true;try{pump();}catch(...){servicing=previous;throw;}servicing=previous;}if(pool_mode && refresh && refresh_pending){refresh_pending=false;refresh();}}
+    // Test-only fault injection for lane start-up (thread creation failure); unset in production.
+    static inline std::function<void(NativeSpuWorker&)> launch_fault;
     void launch(){
+        if(launch_fault)launch_fault(*this);
         enabled=true;
         thread=std::thread([this]{
             current=this;
@@ -459,11 +462,16 @@ static void spu_pool_refresh(PpuState& s){
         for(unsigned i=0;i<g.threads.size();++i){auto& t=g.threads[i];
             if(std::any_of(w.lanes.begin(),w.lanes.end(),[&](const auto& lane){return lane->lane_thread_id==t.id;}))continue;
             auto lane=std::make_unique<NativeSpuWorker>();lane->parent=&w;lane->group_id=g.id;lane->guest_thread=t.id;lane->lane_thread_id=t.id;lane->scheduled=g.scheduled;lane->pauses=w.pauses;lane->budget=NativeSpuWorker::lane_budget(w.pool_budget);lane->context=&t;lane->group=&g;
-            __atomic_store_n(&t.pool_lane,static_cast<void*>(lane.get()),__ATOMIC_RELEASE);
             auto facade=std::make_shared<PpuState>(s.process);auto* group=&g;
             lane->step=[facade,group,i](unsigned budget){try{const auto progress=spu_run_thread(*facade,*group,i,budget);if(group->state!=6 || !NativeSpuWorker::current->scheduled.load())facade->memory.release_reader_slot();return progress;}catch(const SpuControlEnd&){return false;}catch(...){auto& t=group->threads[i];NativeSpuWorker::current->failed_context(t.pc,t.id);throw;}};
-            auto* wake_lane=lane.get();t.in_mailbox.set_wakeup([wake_lane]{wake_lane->wake();});for(auto& snr:t.snr)snr.set_wakeup([wake_lane]{wake_lane->wake();});
-            lane->pump=[&w]{w.service();};lane->failure=w.failure;lane->launch();w.lanes.push_back(std::move(lane));
+            lane->pump=[&w]{w.service();};lane->failure=w.failure;
+            // The pool owns the lane before it runs; a failed start rolls back its wake-ups and ownership, and only a running,
+            // pool-owned lane is published in Thread::pool_lane (read by other lanes on the peer-LS fast path), so no lane can
+            // see a worker that a later failure of this refresh destroys.
+            auto* raw=lane.get();w.lanes.push_back(std::move(lane));
+            try{t.in_mailbox.set_wakeup([raw]{raw->wake();});for(auto& snr:t.snr)snr.set_wakeup([raw]{raw->wake();});raw->launch();}
+            catch(...){t.in_mailbox.set_wakeup({});for(auto& snr:t.snr)snr.set_wakeup({});w.lanes.pop_back();throw;}
+            __atomic_store_n(&t.pool_lane,static_cast<void*>(raw),__ATOMIC_RELEASE);
         }
     }
 }

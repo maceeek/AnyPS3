@@ -157,8 +157,37 @@ RESTART = COMMON + r'''
  std::puts("PASS pool shutdown unpublishes destroyed lanes from surviving thread records");
 '''
 
+# spu_pool_refresh: the second lane's start fails (injected thread-creation error) while the first lane already runs. No thread record may
+# name a worker the pool does not own (the failed one is destroyed), the failed thread's wake-ups must not reach it, and a retry
+# completes the pool. Only pool-owned, launched lanes are ever published.
+REFRESH_FAILURE = r'''
+ PpuState s;auto& pool=s.process.spu_worker;pool.enabled=true;pool.pool_mode=true;
+ pool.coordinator_clock.enabled=true;pool.refresh_pending=false;pool.pauses=1;   // lanes park (acknowledged) without stepping
+ NativeSpu::Group initial;initial.id=7;initial.state=6;initial.threads.resize(3);initial.context.resize(3*0x40000);
+ for(unsigned i=0;i<3;++i){initial.threads[i].id=17+i;initial.threads[i].number=i;}
+ s.spu.groups.push_back(std::move(initial));auto& g=s.spu.groups.back();
+ unsigned launches=0;
+ NativeSpuWorker::launch_fault=[&](NativeSpuWorker&){if(++launches==2)throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again));};
+ bool failed=false;
+ try{spu_pool_refresh(s);}catch(const std::system_error&){failed=true;}
+ assert(failed && launches==2 && pool.lanes.size()==1 && pool.lanes[0]->lane_thread_id==17);
+ for(unsigned i=0;i<3;++i){void* p=g.threads[i].pool_lane;bool owned=!p;for(auto& lane:pool.lanes)owned=owned || p==lane.get();assert(owned);}
+ assert(g.threads[0].pool_lane==pool.lanes[0].get() && !g.threads[1].pool_lane && !g.threads[2].pool_lane);
+ g.threads[1].in_mailbox.push_back(5);g.threads[1].snr[0].push(6,false);    // wake-ups of the failed lane were withdrawn
+ NativeSpuWorker::launch_fault=nullptr;
+ spu_pool_refresh(s);
+ assert(pool.lanes.size()==3);
+ for(unsigned i=0;i<3;++i){bool found=false;for(auto& lane:pool.lanes)found=found || (g.threads[i].pool_lane==lane.get() && lane->context==&g.threads[i]);assert(found);}
+ pool.shutdown();
+ for(unsigned i=0;i<3;++i)assert(!g.threads[i].pool_lane);
+ std::puts("PASS a failed lane start publishes nothing, withdraws its wake-ups, and a retry completes the pool");
+'''
+
 
 class SpuPutPeerLs(par15.Par15RpcContracts):
+    def test_refresh_launch_failure_publishes_nothing(self):
+        self.native('spuput-peer-refresh-failure', REFRESH_FAILURE)
+
     def test_shutdown_unpublishes_lanes(self):
         self.native('spuput-peer-restart', RESTART)
 
