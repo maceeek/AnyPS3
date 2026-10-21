@@ -40,7 +40,17 @@ MAINSLACK2's untracked scripts in `work/spuput/untracked/`). Manifest: `local/ra
 `local/ratchet/tools/cleanup_2026_10_21.py`. Game inputs, source snapshots, `codex/` captures, suites and docs untouched. Older run/build
 numbers cited in records may therefore lack their binaries; rebuild from `source-snapshot-N` if needed.
 
-Open GUI item (user test 2026-10-21): ISO import stops at "missing-key: Set the user-supplied pup key file first" without saying what the
+**GUI follow-up (branch `claude/gui-keys-fix`, 2026-10-21):** key setup explained in the wizard and CLI errors (JSON format, purpose,
+sources), private hex entry, validation against the selected PUP/EBOOT, opt-in "Download from RPCS3" (pinned commit ffba2bf, SHA-256
+verified, confirmation dialog; no keys in the repository); recovery from failed imports (Resume/Remove unfinished titles, adoption may
+replace an unfinished title without userdata/builds), job removal/clear, explanations for disabled actions (Build before Play), ISO-step
+layout and many state-refresh fixes. Tests: 132 manager + 11 GUI pass (4 opt-in installer skips). Real-game acceptance in a temporary
+library: adopt-ratchet OK, all 193 native units built in 22 min, run rendered the original intro (897 flips, 15 captures, audio off).
+Reviews: gpt-6-astra on GUIFIX (findings fixed by the agent) and on the keys commit (review-guikeys-1: 2 Medium + 1 Low, fixed with
+mutation-checked tests). Not verified: live HTTPS download, the exact compositor paint artifact the user saw (not reproduced offscreen),
+physical controller. Evidence: `docs/manager/evidence/guifix/`, `docs/manager/evidence/guikeys.md`.
+
+Open GUI item (user test 2026-10-21, addressed by the follow-up above): ISO import stops at "missing-key: Set the user-supplied pup key file first" without saying what the
 file is; on this PC use **Adopt Ratchet** (reuses `local/ratchet/firmware-keys.json`, `app-key.json` and the decrypted
 `firmware-verified/`) or set the PUP key to `local/ratchet/firmware-keys.json`. The message/wizard should explain the PUP key file.
 
