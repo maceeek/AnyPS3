@@ -92,6 +92,8 @@ static void rsx_worker_pump(PpuState& s){
 [[maybe_unused]] static void rsx_finalize(PpuState& s){
 #ifdef ANYPS3_RSX_VK
     if(s.rsx.graphics_owner && !s.process.rsx_worker.enabled)rsx_worker_release(s);
+#else
+    (void)s;
 #endif
     rsx_capture_writer_join();
 }
