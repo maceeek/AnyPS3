@@ -53,6 +53,11 @@ struct NativeSpuWorker {
     std::atomic<std::uint64_t> pool_completed{0};
     bool enabled=false,active=false,last_progress=false;
     unsigned owner_rpc_depth=0; // guarded by mutex: owner_call frames in flight (see owner_call)
+    // SPUPUT: one peer lane's LS read that this lane serves at its next quantum boundary (guarded by mutex; see
+    // spu_peer_ls_read_direct). The requester waits bounded and cancels under this mutex, so a served pointer is always live.
+    struct PeerRead {const std::uint8_t* source=nullptr;std::uint8_t* target=nullptr;unsigned size=0;bool done=false;};
+    PeerRead* peer_read=nullptr;
+    inline static std::atomic<std::uint64_t> peer_boundary_reads{0};
     // SPUPUT: peer-LS GETs served without an owner RPC / fallen back to it (PERF SPU_PEER_LS).
     inline static std::atomic<std::uint64_t> peer_direct_reads{0},peer_direct_fallbacks{0};
     bool pool_mode=false,refreshing=false;NativeSpuWorker* parent=nullptr;
@@ -76,7 +81,7 @@ struct NativeSpuWorker {
                 (unsigned long long)(m.pause_ns-old.pause_ns),(unsigned long long)(m.service_ns-old.service_ns));old=m;}
         rpc_report_at=now;coordinator_clock.report("spu_coordinator");
         std::fprintf(stderr,"PERF SPU_REFRESH total=%llu\n",(unsigned long long)refresh_count);
-        std::fprintf(stderr,"PERF SPU_PEER_LS direct=%llu fallback=%llu\n",(unsigned long long)peer_direct_reads.load(std::memory_order_relaxed),(unsigned long long)peer_direct_fallbacks.load(std::memory_order_relaxed));
+        std::fprintf(stderr,"PERF SPU_PEER_LS direct=%llu boundary=%llu fallback=%llu\n",(unsigned long long)peer_direct_reads.load(std::memory_order_relaxed),(unsigned long long)peer_boundary_reads.load(std::memory_order_relaxed),(unsigned long long)peer_direct_fallbacks.load(std::memory_order_relaxed));
     }
     struct OwnerRequest {bool refresh_needed=true,typed=false;std::function<void()> invoke;std::function<void(std::exception_ptr)> failed;bool done=false;std::exception_ptr error;std::condition_variable ready;};
     std::deque<std::shared_ptr<OwnerRequest>> owner_requests;
@@ -214,7 +219,10 @@ struct NativeSpuWorker {
                     std::chrono::steady_clock::time_point start{};if(coordinator_clock.enabled)start=std::chrono::steady_clock::now();
                     const bool progress=step(quantum);
                     const auto ns=coordinator_clock.enabled?std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-start).count():0;
-                    lock.lock();worker_ns+=ns;last_progress=progress;++completed;if(parent && progress)parent->pool_completed.fetch_add(1,std::memory_order_relaxed);++generation;active=false;if(pauses)changed.notify_all();signal_coordinator();
+                    lock.lock();worker_ns+=ns;last_progress=progress;++completed;if(parent && progress)parent->pool_completed.fetch_add(1,std::memory_order_relaxed);++generation;active=false;
+                    if(peer_read){std::memmove(peer_read->target,peer_read->source,peer_read->size);peer_read->done=true;peer_read=nullptr;changed.notify_all();}
+                    if(pauses)changed.notify_all();
+                    signal_coordinator();
                     if(!progress && !tickets && !pauses){
                         const auto ready=[&]{return stop || pauses || tickets || wake_generation!=observed_wake;};
                         if(spu_stats_on){wake_stamp_ns.store(0,std::memory_order_relaxed);sleeping.store(true,std::memory_order_release);}

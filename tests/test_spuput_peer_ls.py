@@ -1,6 +1,7 @@
 """SPUPUT: a pool lane's GET from a peer's LS (thread group EA window 0xf0000000 + n*0x100000) skips the owner RPC + peer pause
-only while the peer is provably quiescent (parked or paused at a quantum boundary, not paused by an owner scope, not inside its
-own owner_call). Every other state must keep the owner path, whose result reflects the peer LS at a quantum boundary.
+only while the peer is provably quiescent (parked or between quanta, not paused by an owner scope, not inside its own owner_call),
+or lets a running peer copy the bytes itself at its next quantum boundary. Every other state keeps the owner path; every result
+reflects the peer LS at a quantum boundary.
 
 Independent expectations: fixed big-endian patterns written by the test (not by the code under test); owner-side LS writes that
 happen while the peer is paused/inside its owner call must be visible to the reader (they would be missed by an unsynchronised
@@ -61,9 +62,9 @@ ACTIVE = COMMON + r'''
  peer.launch();unrelated.launch();caller.launch();
  while(!done.load()){pool.drain_owner();std::this_thread::yield();}
  release=true;pool.shutdown();
- assert(metric()+NativeSpuWorker::peer_direct_reads.load()==200);
- assert(metric()>0);
- std::puts("PASS running peer: quantum-boundary snapshots only");
+ assert(metric()+NativeSpuWorker::peer_direct_reads.load()+NativeSpuWorker::peer_boundary_reads.load()==200);
+ assert(NativeSpuWorker::peer_boundary_reads.load()>0);
+ std::puts("PASS running peer: quantum-boundary snapshots only (served by the peer at its boundary)");
 '''
 
 # The peer waits inside its own owner_call (queued, not yet served: the owner has not taken any lock for it); serving it writes the
@@ -117,7 +118,35 @@ OWNER_PAUSE = COMMON + r'''
 '''
 
 
+# Two running lanes read each other's LS: neither may wait forever for the other's quantum boundary (bounded wait, owner fallback).
+MUTUAL = COMMON + r'''
+ auto* caller_ls=g.context.data();
+ fill(caller_ls+0x1000,16,0x0a0a0a00);fill(peer_ls+0x1000,16,0x0b0b0b00);
+ std::atomic<unsigned> finished{0};
+ auto body=[&](NativeSpuWorker& self,unsigned me,std::uint32_t other_ea,std::uint32_t expect){
+  return [&,me,other_ea,expect](unsigned){self.event_driven=true;
+   if(release.load())return false;
+   static thread_local unsigned k=0;
+   if(k>=300)return false;
+   auto& t=g.threads[me];auto* ls=g.context.data()+me*0x40000;
+   spu_transfer(s,t,other_ea,ls+0x2000,16,false);assert(same(ls+0x2000,16,expect));
+   if(++k==300)++finished;
+   return true;};};
+ caller.step=body(caller,0,0xf0101000,0x0b0b0b00);
+ peer.step=body(peer,1,0xf0001000,0x0a0a0a00);
+ peer.launch();unrelated.launch();caller.launch();
+ const auto limit=std::chrono::steady_clock::now()+std::chrono::seconds(10);
+ while(finished.load()<2){assert(std::chrono::steady_clock::now()<limit);pool.drain_owner();std::this_thread::yield();}
+ done=true;release=true;pool.shutdown();
+ assert(metric()+NativeSpuWorker::peer_direct_reads.load()+NativeSpuWorker::peer_boundary_reads.load()==600);
+ std::puts("PASS mutual running peers complete through bounded waits");
+'''
+
+
 class SpuPutPeerLs(par15.Par15RpcContracts):
+    def test_mutual_running_peers_terminate(self):
+        self.native('spuput-peer-mutual', MUTUAL)
+
     def test_parked_peer_direct(self):
         self.native('spuput-peer-parked', PARKED)
 
