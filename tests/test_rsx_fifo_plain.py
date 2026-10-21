@@ -64,7 +64,11 @@ static Result run(bool fast){
  rsx_fifo_plain_fast=true;return out;
 }
 static void equal_paths(){
- const auto fast=run(true),slow=run(false);
+ rsx_fifo_window=false;const auto unwindowed=run(true);rsx_fifo_window=true;
+ const auto fills=rsx_fifo_window_fills;const auto fast=run(true),slow=run(false);
+ if(rsx_fifo_window_fills==fills)throw std::runtime_error("the FIFO window was never filled");
+ if(fast.registers!=unwindowed.registers || fast.program!=unwindowed.program || fast.constants!=unwindowed.constants || fast.commands!=unwindowed.commands)
+  throw std::runtime_error("the FIFO window changes the executed stream");
  if(fast.registers!=slow.registers)throw std::runtime_error("register bank differs between the fast path and the chain");
  if(fast.program!=slow.program || fast.constants!=slow.constants)throw std::runtime_error("transform program/constants differ");
  if(fast.commands!=slow.commands || fast.zcull!=slow.zcull || fast.vertex_cache!=slow.vertex_cache)throw std::runtime_error("counters differ");
@@ -95,7 +99,33 @@ static void extracted_are_special(){
  if(n<300)throw std::runtime_error("too few extracted registers");
  std::printf("PASS every register named by the chain, the vertex-data handler and the action table (%u addresses) walks the chain\n",n);
 }
-int main(){try{extracted_are_special();plain_set();equal_paths();}catch(const std::exception& e){std::fprintf(stderr,"FAIL %s\n",e.what());return 1;}}
+// FIFO window: a front-end semaphore release (0x6c, device context) stores into the command buffer AHEAD of GET, over the value of a
+// later plain packet that the window has already read. The consumer must execute the stored value (independent expectation: the
+// released value, not the original word), with the window on and off, and with plain packets (window hits) before the release.
+static void window_release_into_fifo(){
+ for(bool windowed:{false,true}){
+  rsx_fifo_window=windowed;
+  PpuState s;setup_fifo(s);auto& gpu=s.rsx;gpu.device=0x70000000;
+  Stream st;for(unsigned i=0;i<8;++i)st.method(0x300+4*i,{0x100+i});   // plain packets read through the window
+  st.method(0x60,{0x56616660});
+  const std::uint32_t patch_at=BASE+std::uint32_t(st.words.size()+4)*4+4;   // value word of the packet after 0x64 and 0x6c
+  st.method(0x64,{patch_at});st.method(0x6c,{0xdeadbeef});st.method(0x340,{0x12345678});
+  for(unsigned i=0;i<4;++i)st.method(0x344+4*i,{0x200+i});
+  std::uint32_t at=BASE;for(auto w:st.words){put(s,at,w);at+=4;}
+  if(s.memory.load(0x70000000+patch_at,4)!=0x12345678)throw std::runtime_error("test: patch position does not hold the 0x340 value");
+  s.memory.store(gpu.dma+0x44,4,BASE);s.memory.store(gpu.dma+0x40,4,at);
+  const auto fills=rsx_fifo_window_fills;
+  for(unsigned n=0;n<64 && s.memory.load(gpu.dma+0x44,4)!=at;++n)(void)rsx_run_impl(s,1000000);
+  if(s.memory.load(gpu.dma+0x44,4)!=at)throw std::runtime_error("consumer did not reach PUT");
+  if(s.memory.load(0x70000000+patch_at,4)!=0xdeadbeef)throw std::runtime_error("the release did not store into the command buffer");
+  if(rsx_reg(gpu,0x340)!=0xdeadbeef)throw std::runtime_error(std::string(windowed?"windowed":"unwindowed")+": register 0x340 = "+std::to_string(rsx_reg(gpu,0x340))+", expected the released value");
+  if(rsx_reg(gpu,0x31c)!=0x107 || rsx_reg(gpu,0x350)!=0x203)throw std::runtime_error("plain packets around the release were not executed");
+  if(windowed && rsx_fifo_window_fills<fills+2)throw std::runtime_error("the window was not refilled after the release");
+ }
+ rsx_fifo_window=true;
+ std::puts("PASS a release into the command buffer ahead of GET is executed (FIFO window invalidated by non-plain methods)");
+}
+int main(){try{extracted_are_special();plain_set();equal_paths();window_release_into_fifo();}catch(const std::exception& e){std::fprintf(stderr,"FAIL %s\n",e.what());return 1;}}
 '''
 
 
@@ -141,7 +171,7 @@ class RsxFifoPlainTests(unittest.TestCase):
             env = dict(os.environ, ANYPS3_VK_DEVICE='lavapipe', VK_DRIVER_FILES='/usr/share/vulkan/icd.d/lvp_icd.json')
             result = subprocess.run([str(root / 'test')], env=env, capture_output=True, text=True, timeout=300)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            self.assertEqual(result.stdout.count('PASS '), 3, result.stdout)
+            self.assertEqual(result.stdout.count('PASS '), 4, result.stdout)
 
 
 if __name__ == '__main__':
