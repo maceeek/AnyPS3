@@ -7,6 +7,47 @@ from .rsx_draw import CPP as DRAW_CPP, TYPES as DRAW_TYPES
 from .rsx_blit import CPP as BLIT_CPP
 from .rsx_registers import TYPES as REGISTER_TYPES
 
+# Emulated vblank rate (VBLANKHZ task, headroom instrument). Self-contained so tests/test_rsx_vblank_hz.py compiles it alone.
+VBLANK_CPP = r'''
+// ANYPS3_VBLANK_HZ: the emulated display rate as a positive integer "N" or rational "N/M" Hz (digits only, no sign/blank, no
+// overflow; reduced N and M <= 1000000, N*M <= 9000000000 so the split arithmetic below cannot overflow; 1 <= rate <= 1000 Hz).
+// Unset = 60000/1001, whose tick numbers and tick times are bit-identical to the former 60/1.001 arithmetic: both compute the
+// exact floors of elapsed*60/1.001e9 and N*1.001e9/60 (same rationals, exact integer splits). A MEASUREMENT INSTRUMENT only:
+// guest-visible refresh information (cellVideoOut state, 59.94 Hz) is not changed; GCM vblank count/time follow the ticks.
+struct RsxVblankRate {
+    std::uint64_t num=60000,den=1001;bool custom=false;
+    std::uint64_t span()const{return den*UINT64_C(1000000000);}   // nanoseconds per `num` ticks
+    std::uint64_t ticks(std::uint64_t elapsed_ns)const{return (elapsed_ns/span())*num+(elapsed_ns%span())*num/span();}   // floor(elapsed*rate)
+    std::uint64_t tick_ns(std::uint64_t n)const{return (n/num)*span()+(n%num)*span()/num;}   // floor(n/rate), relative to the epoch
+};
+// Returns an empty string and sets `out`, or the grammar/range error.
+static std::string rsx_parse_vblank_hz(const char* text,RsxVblankRate& out){
+    auto number=[](const char*& p,std::uint64_t& value)->bool{
+        if(*p<'0' || *p>'9')return false;
+        value=0;
+        for(;*p>='0' && *p<='9';++p){if(value>(UINT64_MAX-9)/10)return false;value=value*10+unsigned(*p-'0');}
+        return true;};
+    const char* p=text;std::uint64_t num=0,den=1;
+    if(!number(p,num))return "expected digits";
+    if(*p=='/'){++p;if(!number(p,den))return "expected digits after '/'";}
+    if(*p)return "unexpected character";
+    if(!num || !den)return "zero numerator or denominator";
+    std::uint64_t a=num,b=den;while(b){const auto t=a%b;a=b;b=t;}num/=a;den/=a;
+    if(num>1000000 || den>1000000 || num*den>UINT64_C(9000000000))return "numerator/denominator too large";
+    if(num<den || num>1000*den)return "rate outside 1..1000 Hz";
+    out.num=num;out.den=den;out.custom=!(num==60000 && den==1001);return "";
+}
+[[maybe_unused]] static const RsxVblankRate& rsx_vblank_rate(){
+    static const RsxVblankRate rate=[]{RsxVblankRate r;const char* v=std::getenv("ANYPS3_VBLANK_HZ");if(!v)return r;
+        const auto error=rsx_parse_vblank_hz(v,r);
+        if(!error.empty()){std::fprintf(stderr,"invalid ANYPS3_VBLANK_HZ=%s: %s (expected N or N/M Hz, e.g. 90 or 120000/1001)\n",v,error.c_str());std::_Exit(2);}
+        if(r.custom)std::fprintf(stderr,"ANYPS3_VBLANK_HZ=%llu/%llu: emulated vblank %.3f Hz (measurement instrument; default 60000/1001)\n",
+            (unsigned long long)r.num,(unsigned long long)r.den,double(r.num)/double(r.den));
+        return r;}();
+    return rate;
+}
+'''
+
 TYPES = CAPTURE_TYPES + DRAW_TYPES + REGISTER_TYPES + r'''
 struct NativeRsx {
     RsxPerfCapture perf_capture;
@@ -53,7 +94,7 @@ struct NativeRsx {
 };
 '''
 
-CPP = r'''
+CPP = VBLANK_CPP + r'''
 static void rsx_worker_events(PpuState&,const std::function<void()>&);
 static std::uint32_t rsx_worker_display_call(PpuState&);
 static void rsx_worker_release(PpuState&);
@@ -270,14 +311,14 @@ static bool rsx_tick_vblank(PpuState& s,std::uint64_t now_ns){
     // Native virtual 720p output advertises 60000/1001 Hz. Derive deadlines
     // from the epoch rather than repeatedly adding a rounded frame duration.
     const auto elapsed=now_ns-gpu.vblank_epoch_ns;
-    const auto ticks=(elapsed/1001000000)*60+(elapsed%1001000000)*60/1001000000;
+    const auto& rate=rsx_vblank_rate();const auto ticks=rate.ticks(elapsed);
     if(ticks==gpu.vblank_ticks)return false;
     const auto flags=m.load(std::uint64_t(gpu.driver)+0x12c0,4)&0x802;
     const auto event=rsx_event_ticket(s,flags,"RSX vblank event port is disconnected",true);
     if(flags && !event.pending && event.full)return false;
     const auto head=std::uint64_t(gpu.driver)+0x10f8;
     m.range(head,0x40,true);
-    const auto tick_ns=gpu.vblank_epoch_ns+(ticks/60)*1001000000+(ticks%60)*1001000000/60;
+    const auto tick_ns=gpu.vblank_epoch_ns+rate.tick_ns(ticks);
     const auto timebase=(tick_ns/1000000000)*79800000+(tick_ns%1000000000)*79800000/1000000000;
     m.store(head+0x1c,4,timebase);m.store(head+0x3c,4,timebase>>32);
     m.store(head+0x20,8,tick_ns/1000);m.store(head+0x30,8,ticks);
@@ -340,7 +381,7 @@ static void rsx_flip_display(PpuState& s,unsigned head,std::uint32_t value){
     }
     if(gpu.flip_modes[head]==2 && gpu.vblank_epoch_ns){
         const auto next=gpu.vblank_ticks+1;
-        const auto deadline=gpu.vblank_epoch_ns+(next/60)*1001000000+(next%60)*1001000000/60;
+        const auto deadline=gpu.vblank_epoch_ns+rsx_vblank_rate().tick_ns(next);
         anyps3_ft::Span ft_vsync(anyps3_ft::FlipVsync,deadline,next);
         rsx_wait_vblank(s,std::chrono::steady_clock::time_point(std::chrono::nanoseconds(deadline)));
     }

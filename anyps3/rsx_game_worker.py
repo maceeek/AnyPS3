@@ -249,9 +249,9 @@ static void rsx_worker_start(PpuState& s){
         if(!f->rsx.context || !f->rsx.fifo_enabled || !f->rsx.vblank_epoch_ns)return due;
         const auto now=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
         const auto elapsed=std::uint64_t(now)-f->rsx.vblank_epoch_ns;
-        const auto ticks=(elapsed/1001000000)*60+(elapsed%1001000000)*60/1001000000;
+        const auto& rate=rsx_vblank_rate();const auto ticks=rate.ticks(elapsed);
         const auto next=std::max(f->rsx.vblank_ticks,ticks)+1;
-        return std::min(due,std::chrono::steady_clock::time_point(std::chrono::nanoseconds(f->rsx.vblank_epoch_ns+(next/60)*1001000000+(next%60)*1001000000/60)));
+        return std::min(due,std::chrono::steady_clock::time_point(std::chrono::nanoseconds(f->rsx.vblank_epoch_ns+rate.tick_ns(next))));
     };
     q.idle_teardown=[&w,f]{try{rsx_worker_release(*f);}catch(...){
 #ifdef ANYPS3_RSX_VK

@@ -84,7 +84,11 @@ private:
             check(vkGetPhysicalDeviceSurfacePresentModesKHR(vk.physical,surface,&n,modes.data()),"present modes");
             auto has=[&](VkPresentModeKHR m){return std::find(modes.begin(),modes.end(),m)!=modes.end();};
             VkPresentModeKHR mode=VK_PRESENT_MODE_FIFO_KHR;
-            const std::vector<VkPresentModeKHR> preferred=sync?std::vector<VkPresentModeKHR>{VK_PRESENT_MODE_MAILBOX_KHR}:
+            // ANYPS3_VBLANK_HZ (emulated rate other than the default 60000/1001): the host monitor's FIFO refresh must not cap the
+            // emulated rate, so VSYNC flips fall back to IMMEDIATE rather than FIFO when MAILBOX is missing.
+            const char* vblank_hz=std::getenv("ANYPS3_VBLANK_HZ");const bool custom_rate=vblank_hz && std::string(vblank_hz)!="60000/1001";
+            const std::vector<VkPresentModeKHR> preferred=sync?(custom_rate?std::vector<VkPresentModeKHR>{VK_PRESENT_MODE_MAILBOX_KHR,VK_PRESENT_MODE_IMMEDIATE_KHR}:
+                std::vector<VkPresentModeKHR>{VK_PRESENT_MODE_MAILBOX_KHR}):
                 std::vector<VkPresentModeKHR>{VK_PRESENT_MODE_IMMEDIATE_KHR,VK_PRESENT_MODE_MAILBOX_KHR};
             for(auto m:preferred)if(has(m)){mode=m;break;}
             if(const char* forced=std::getenv("ANYPS3_PRESENT_MODE")){
