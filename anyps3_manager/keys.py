@@ -59,16 +59,21 @@ def format_key(kind, spec):
     return result
 
 
-def load_key(kind, path):
+def read_key(kind, path):
+    """Return (raw bytes, formatted key); callers that register a file hash these exact bytes."""
     try:
         with Path(path).expanduser().open("rb") as stream:
             data = stream.read(16385)
         if len(data) > 16384:
             raise ValueError()
-        return format_key(kind, json.loads(data))
+        return data, format_key(kind, json.loads(data))
     except (OSError, ValueError, UnicodeError):
         # JSONDecodeError includes input fragments. Never surface those.
         raise invalid(kind, "Cannot read key JSON; choose a readable UTF-8 JSON object.") from None
+
+
+def load_key(kind, path):
+    return read_key(kind, path)[1]
 
 
 def read_target(path):
@@ -217,19 +222,27 @@ def store(lib, specs, checks, sources):
                 records[kind] = dict(path=str(path), sha256=sha256(path), source=sources[kind], validation=checks[kind])
             atomic_json(lib.root/"keys.json", records)
     except BaseException:
+        # The registry may already be published (e.g. a directory fsync failed after os.replace); keep every file it
+        # references and remove only unreferenced new files.
+        referenced = {record.get("path") for record in read_json(lib.root/"keys.json", {}).values() if isinstance(record, dict)}
         for path in written:
-            path.unlink(missing_ok=True)
+            if str(path) not in referenced:
+                path.unlink(missing_ok=True)
         raise
     return dict(keys={kind: dict(validation=checks[kind], source=sources[kind]) for kind in specs})
 
 
 def set_key(lib, kind, path, *, selected=None):
     path = Path(path).expanduser().resolve()
-    spec = load_key(kind, path)
+    raw, spec = read_key(kind, path)
     check = validate(kind, spec, selected or {})
+    digest = hashlib.sha256(raw).hexdigest()
     with lib.metadata():
+        # Register the digest of the bytes that were validated; a file replaced meanwhile is rejected.
+        if read_key(kind, path)[0] != raw:
+            raise ManagerError("key-changed", f"The {kind.upper()} key file changed during validation; register it again. {guidance(kind)}", 6)
         records = read_json(lib.root/"keys.json", {})
-        records[kind] = dict(path=str(path), sha256=sha256(path), source="user-supplied", validation=check)
+        records[kind] = dict(path=str(path), sha256=digest, source="user-supplied", validation=check)
         atomic_json(lib.root/"keys.json", records)
     return dict(kind=kind, path=str(path), sha256=records[kind]["sha256"], validation=check)
 

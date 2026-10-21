@@ -222,6 +222,20 @@ class ImportWizard(QWizard):
 
         self.client.call(["keys", "fetch-rpcs3", *self.target_args()], self.keys_saved, error=failed)
 
+    def reject(self):
+        # A running key download/validation would otherwise finish unseen and replace configured keys.
+        if self.key_busy:
+            self.key_status.setText("Key download/validation is still running; wait for its result before closing.")
+            return
+        super().reject()
+
+    def closeEvent(self, event):
+        if self.key_busy:
+            self.key_status.setText("Key download/validation is still running; wait for its result before closing.")
+            event.ignore()
+            return
+        super().closeEvent(event)
+
     def accept(self):
         if self.key_busy or self.import_busy:
             return

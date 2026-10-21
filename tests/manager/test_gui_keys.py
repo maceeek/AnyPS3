@@ -53,6 +53,21 @@ class GuiKeyTests(unittest.TestCase):
         self.assertIn("Format only", wizard.key_status.text())
         self.assertTrue(wizard.scan["keys"]["app"])
 
+    def test_wizard_cannot_close_while_a_key_download_runs(self):
+        # review-guikeys-1 #3: closing would hide the result of a download that still replaces keys.
+        wizard, client = self.wizard()
+        wizard.show()
+        with patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.Yes):
+            wizard.fetch_keys()
+        wizard.reject()
+        self.assertTrue(wizard.isVisible())
+        self.assertIn("still running", wizard.key_status.text())
+        wizard.close()
+        self.assertTrue(wizard.isVisible())
+        client.calls[0][2]["error"]({"code": "key-source-network", "message": "Network error; nothing saved."})
+        wizard.reject()
+        self.assertFalse(wizard.isVisible())
+
     def test_download_error_is_actionable_and_allows_retry(self):
         wizard, client = self.wizard()
         with patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.Yes):

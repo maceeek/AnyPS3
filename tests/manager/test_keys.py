@@ -184,6 +184,51 @@ class KeyTests(unittest.TestCase):
         with self.assertRaisesRegex(ManagerError, "register it again"):
             keys.key_path(self.lib, "app")
 
+    def test_set_file_rejects_replacement_during_validation(self):
+        # review-guikeys-1 #1: the registered digest must belong to the validated bytes.
+        path = self.root/"app.json"
+        atomic_json(path, self.app)
+        wrong = dict(self.app, erk="00" * 32)
+        real = keys.validate
+
+        def swap(kind, spec, selected):
+            result = real(kind, spec, selected)
+            atomic_json(path, wrong)
+            return result
+
+        with patch.object(keys, "validate", side_effect=swap), self.assertRaisesRegex(ManagerError, "changed during validation"):
+            keys.set_key(self.lib, "app", path, selected=self.selected)
+        self.assertFalse((self.lib.root/"keys.json").exists())
+        atomic_json(path, self.app)
+        result = keys.set_key(self.lib, "app", path, selected=self.selected)
+        self.assertEqual(result["sha256"], hashlib.sha256(path.read_bytes()).hexdigest())
+
+    def test_store_rollback_keeps_files_of_a_published_registry(self):
+        # review-guikeys-1 #2: a failure after keys.json was replaced must not delete the files it references.
+        real = keys.atomic_json
+
+        def after_publish(path, value):
+            real(path, value)
+            if Path(path).name == "keys.json":
+                raise OSError("directory fsync failed")
+
+        with patch.object(keys, "atomic_json", side_effect=after_publish), self.assertRaises(OSError):
+            keys.enter_key(self.lib, "app", self.app, self.selected)
+        record = read_json(self.lib.root/"keys.json")["app"]
+        self.assertTrue(Path(record["path"]).is_file())
+        self.assertEqual(keys.key_path(self.lib, "app"), record["path"])
+
+        def before_publish(path, value):
+            if Path(path).name == "keys.json":
+                raise OSError("registry write failed")
+            real(path, value)
+
+        before = sorted(p.name for p in (self.lib.root/"private-keys").iterdir())
+        with patch.object(keys, "atomic_json", side_effect=before_publish), self.assertRaises(OSError):
+            keys.enter_key(self.lib, "pup", self.pup, self.selected)
+        self.assertEqual(sorted(p.name for p in (self.lib.root/"private-keys").iterdir()), before)
+        self.assertNotIn("pup", read_json(self.lib.root/"keys.json"))
+
     def test_targets_from_iso_and_pup_override(self):
         from tests.test_ingest import record
         iso = bytearray(iso_fixture())
