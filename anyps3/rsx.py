@@ -67,7 +67,7 @@ static void rsx_graphics_reset_conditional(PpuState& s);
 static bool rsx_graphics_resolve_conditional(PpuState& s);
 static bool rsx_graphics_conditional_fault(PpuState& s);
 static bool rsx_graphics_flip_async(PpuState&,unsigned,std::uint64_t,std::uint64_t,unsigned,std::uint64_t);
-static void rsx_graphics_flip_prepare(PpuState&);
+static void rsx_graphics_flip_prepare(PpuState&,unsigned);
 static bool rsx_graphics_poll(PpuState&);
 static bool rsx_graphics_defer_label(PpuState&,std::uint64_t,unsigned);
 static bool rsx_graphics_defer_report(PpuState&,std::uint64_t,unsigned,bool,bool);
@@ -83,6 +83,8 @@ static std::function<void()>& rsx_owner_hook(){static thread_local std::function
 [[maybe_unused]] static inline void rsx_owner_poll(){
     if(__builtin_expect(rsx_host_waiters.load(std::memory_order_relaxed)!=0,0)){auto& hook=rsx_owner_hook();if(hook)hook();}
 }
+// ANYPS3_RSX_PRESENT_EARLY=1 (experiment, default off): record the host presentation of a vsync flip before its vblank wait.
+[[maybe_unused]] static bool rsx_present_early_enabled(){static const bool on=[]{const char* v=std::getenv("ANYPS3_RSX_PRESENT_EARLY");return v && std::string(v)=="1";}();return on;}
 [[maybe_unused]] static bool rsx_flip_early_enabled(){static const bool on=[]{const char* v=std::getenv("ANYPS3_RSX_FLIP_EARLY");return !v || std::string(v)!="0";}();return on;}
 ''' + CAPTURE_CPP + SURFACE_CPP + DISPLAY_CPP + r'''
 [[maybe_unused]] static void rsx_set_flip_mode(PpuState& s,unsigned head){
@@ -291,10 +293,12 @@ static bool rsx_tick_vblank(PpuState& s,std::uint64_t now_ns){
 // submitted at once (the GPU finishes it, and the report/label writes that precede the flip become visible, before the vblank
 // instead of after it), completed GPU prefixes are published while waiting, and page-synchronisation requests of other threads
 // are served (rsx_owner_poll) instead of waiting for the end of the vblank.
-static void rsx_wait_vblank(PpuState& s,std::chrono::steady_clock::time_point until){
+static void rsx_wait_vblank(PpuState& s,std::chrono::steady_clock::time_point until,unsigned display=UINT_MAX){
 #ifdef ANYPS3_RSX_VK
     // A flip that is already late has no wait to hide the GPU time in: its own submission follows at once.
-    if(rsx_flip_early_enabled() && s.process.rsx_worker.on_owner() && std::chrono::steady_clock::now()<until)rsx_graphics_flip_prepare(s);
+    if(rsx_flip_early_enabled() && s.process.rsx_worker.on_owner() && std::chrono::steady_clock::now()<until)rsx_graphics_flip_prepare(s,display);
+#else
+    (void)display;
 #endif
     // SPUs keep running while the PPU waits for vblank; sleep only when idle.
     while(std::chrono::steady_clock::now()<until){
@@ -342,7 +346,7 @@ static void rsx_flip_display(PpuState& s,unsigned head,std::uint32_t value){
         const auto next=gpu.vblank_ticks+1;
         const auto deadline=gpu.vblank_epoch_ns+(next/60)*1001000000+(next%60)*1001000000/60;
         anyps3_ft::Span ft_vsync(anyps3_ft::FlipVsync,deadline,next);
-        rsx_wait_vblank(s,std::chrono::steady_clock::time_point(std::chrono::nanoseconds(deadline)));
+        rsx_wait_vblank(s,std::chrono::steady_clock::time_point(std::chrono::nanoseconds(deadline)),id);
     }
 #ifdef ANYPS3_RSX_VK
     // Unsaved frames may remain in flight. Guest completion fields and the
@@ -367,9 +371,35 @@ static void rsx_flip_display(PpuState& s,unsigned head,std::uint32_t value){
 }
 ''' + DRAW_CPP + r'''
 #ifdef ANYPS3_RSX_VK
-static void rsx_graphics_flip_prepare(PpuState& s){
+// Host scanout image of display buffer `id` for the deferred flip path, or null when that flip takes the synchronous path.
+static std::shared_ptr<NativeVulkan::GraphicsImage> rsx_flip_scanout_image(PpuState& s,rsxgraphics::Session& session,unsigned id){
+    const auto& buffer=s.rsx.display_buffers[id];if(!buffer.width || !buffer.height)return nullptr;
+    const auto target=rsxdraw::bind_target(s,0xfeed0000,buffer.offset,buffer.pitch,buffer.width,buffer.height);
+    std::shared_ptr<NativeVulkan::GraphicsImage> image;
+    for(const auto& surface:session.surfaces)if(!surface.partial && surface.same(target,buffer.width,buffer.height,1,8,false)){image=surface.image;break;}
+    if(!image || image->format==VK_FORMAT_R32_UINT)return nullptr;
+    return image;
+}
+static void rsx_graphics_present_scanout(PpuState& s,rsxgraphics::Session& session,std::shared_ptr<NativeVulkan::GraphicsImage> image,unsigned id){
+    const auto& buffer=s.rsx.display_buffers[id];
+    if(image->format==VK_FORMAT_R8G8B8A8_SRGB){auto raw=session.vk.graphics_image(*session.batch,VK_FORMAT_R8G8B8A8_UNORM,buffer.width,buffer.height,1);session.vk.graphics_copy(*session.batch,image,raw);image=std::move(raw);}
+    anyps3_ft::Span ft_present(anyps3_ft::Mark,0xa2);
+    session.vk.graphics_present(*session.batch,image,buffer.width,buffer.height,s.rsx.vsync,true);++s.present.presented_frames;
+    session.presented_flip=s.rsx.flips+1;
+}
+static void rsx_graphics_flip_prepare(PpuState& s,unsigned display){
     auto* session=static_cast<rsxgraphics::Session*>(s.rsx.graphics_session?s.rsx.graphics_session:s.rsx.graphics_owner.get());
     if(!session || !session->observer_installed || session->previous_observer || session->failed)return;
+    // Every command before the flip is recorded, so the display image is final: its host presentation (swapchain acquire, blit,
+    // queue present; ~0.3 ms) can go with this prefix instead of after the vblank. Host-only: the guest-visible completion of the
+    // flip stays deferred behind the vblank (rsx_graphics_flip_async / defer_flip). Flips that take the synchronous capture path
+    // (first eight, ANYPS3_FRAME_TRIGGER) present there as before.
+    if(rsx_present_early_enabled() && s.present.enabled && display<s.rsx.display_buffers.size() && s.video.format==0 && session->presented_flip!=s.rsx.flips+1){
+        const char* directory=std::getenv("ANYPS3_FRAME_DIR");const auto next=s.rsx.flips+1;
+        const bool synchronous=directory && *directory && (next<=8 || rsx_frame_trigger(false));
+        if(!synchronous)if(auto image=rsx_flip_scanout_image(s,*session,display)){
+            try{rsx_graphics_present_scanout(s,*session,std::move(image),display);}catch(...){session->failed=true;throw;}}
+    }
     session->submit_async("flip_early");
     if(!s.rsx.graphics_session)session->leave_fifo();
 }
@@ -394,11 +424,9 @@ static bool rsx_graphics_flip_async(PpuState& s,unsigned id,std::uint64_t addres
     if(files){root=std::filesystem::canonical(directory);if(!std::filesystem::is_directory(root))throw std::runtime_error("RSX frame output is not a directory");
         const auto next=s.rsx.flips+1;const auto stride=rsx_frame_stride();if(next<=8 || rsx_frame_trigger(false))return false;
         capture=next%stride==0;}
-    const auto& buffer=s.rsx.display_buffers[id];if(!buffer.width || !buffer.height)return false;
-    const auto target=rsxdraw::bind_target(s,0xfeed0000,buffer.offset,buffer.pitch,buffer.width,buffer.height);
-    std::shared_ptr<NativeVulkan::GraphicsImage> image;
-    for(const auto& surface:session->surfaces)if(!surface.partial && surface.same(target,buffer.width,buffer.height,1,8,false)){image=surface.image;break;}
-    if(!image || image->format==VK_FORMAT_R32_UINT)return false;
+    const auto& buffer=s.rsx.display_buffers[id];
+    auto image=rsx_flip_scanout_image(s,*session,id);
+    if(!image)return false;
     if(capture && (image->width!=buffer.width || image->height!=buffer.height || image->layers!=1))return false;
     if(capture && s.rsx.captured_frames>=256)throw std::runtime_error("headless RSX capture budget exhausted (256 frames)");
     const unsigned head=unsigned((address-(std::uint64_t(s.rsx.driver)+0x10b8))/0x40);
@@ -406,11 +434,7 @@ static bool rsx_graphics_flip_async(PpuState& s,unsigned id,std::uint64_t addres
     if(!session->defer_flip(address,reports,id,queue,event_name,flags))return false;
     try{
         ++session->batch->frames;
-        if(s.present.enabled){
-            if(image->format==VK_FORMAT_R8G8B8A8_SRGB){auto raw=session->vk.graphics_image(*session->batch,VK_FORMAT_R8G8B8A8_UNORM,buffer.width,buffer.height,1);session->vk.graphics_copy(*session->batch,image,raw);image=std::move(raw);}
-            anyps3_ft::Span ft_present(anyps3_ft::Mark,0xa2);
-            session->vk.graphics_present(*session->batch,image,buffer.width,buffer.height,s.rsx.vsync,true);++s.present.presented_frames;
-        }
+        if(s.present.enabled && session->presented_flip!=s.rsx.flips+1)rsx_graphics_present_scanout(s,*session,image,id);
         if(capture){
             // Same bytes as the synchronous scanout capture (rsx_graphics_scanout): the display image copied after every command
             // of this frame, alpha forced opaque (X8R8G8B8 scanout).
