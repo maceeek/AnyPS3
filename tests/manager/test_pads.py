@@ -3,6 +3,7 @@
 import os
 import unittest
 from unittest.mock import Mock, patch
+from types import SimpleNamespace
 
 from anyps3_manager.pads import Pads
 from anyps3_manager.storage import ManagerError
@@ -37,3 +38,29 @@ class PadLibraryTests(unittest.TestCase):
         self.assertEqual(os.environ["SDL_JOYSTICK_HIDAPI_PS5"], "1")
         self.assertEqual(os.environ["SDL_AUDIODRIVER"], "dummy")
         self.assertEqual(os.environ["ANYPS3_AUDIO_SINK"], "null")
+
+
+class PadDiagnosticsTests(unittest.TestCase):
+    def test_rumble_detection_requires_support_query(self):
+        pads = Pads.__new__(Pads)
+        calls = []
+        def rumble(*args):
+            calls.append(args)
+            return 0
+        pads.sdl = SimpleNamespace(SDL_GameControllerRumble=rumble)
+        self.assertFalse(pads.has_rumble(123))
+        self.assertEqual(calls, [])
+        pads.sdl.SDL_GameControllerHasRumble = lambda _: 1
+        self.assertTrue(pads.has_rumble(123))
+        pads.sdl.SDL_GameControllerHasRumble = lambda _: 0
+        self.assertFalse(pads.has_rumble(123))
+        self.assertEqual(calls, [])
+        pads.sdl = SimpleNamespace()
+        self.assertFalse(pads.has_rumble(123))
+        self.assertFalse(pads.has_sensor(123, 1))
+
+    def test_sensor_capabilities_are_independent(self):
+        pads = Pads.__new__(Pads)
+        pads.sdl = SimpleNamespace(SDL_GameControllerHasSensor=lambda _, kind: kind == 1)
+        self.assertTrue(pads.has_sensor(123, 1))
+        self.assertFalse(pads.has_sensor(123, 2))

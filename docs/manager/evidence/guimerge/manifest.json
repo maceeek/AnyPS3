@@ -1,0 +1,69 @@
+{
+  "verified_at_utc": "2026-10-21T10:51:36.506862+00:00",
+  "branch": "feat/gui-pad",
+  "merge_parents": [
+    "6bc7ff0c6a4df017751e2f4b0e95ce71ea656366",
+    "ebced7e9b7f50b012a8dec8a00334a7837ff57fa"
+  ],
+  "source_sha256": {
+    "anyps3/native_pad.py": "6bade70751be2fa667580db2cf7300d98971e4a3a94ccd73873b4c9f4255b690",
+    "anyps3_manager/pads.py": "dfa9b5a62b1d412dc14316dea9df4a18f5d72429736fc7a9a2a709e6f9e6145e",
+    "anyps3_manager/settings.py": "dd2f394f6b16b392fa39dd66f746f406466c7cc3cf9cf0faa8e53cd50f1a3b97",
+    "anyps3_gui/app.py": "434db7049caf33aa1fec5ca62981606bbd9ad8bf4b9a0f7471af0ea0ad329fff",
+    "tests/manager/test_manager.py": "8a6f83d80d28cc5f9a96abc41d90dfba08a22b3e095526266580f77fbb5f5a62",
+    "tests/manager/test_native_flags.py": "74191fae33dcddcca328fe4b22ad57a460a211d6071d162fa25da858d8db5f98",
+    "tests/manager/test_pads.py": "db2ba672686c15cc3468a10f18c823bb3c8028e9feeeb639b31de098c053a59c",
+    "tests/gui/test_gui.py": "e79c10e84c76efc23107fde9275f1d2690f454cd6e3e6df6a611b7b35db9b25a",
+    "tests/test_native_pad_motion.py": "b3742588b79f83cbf5cdc1cd910534c0bd1b2ef88a66f0a2db2ec0ae581394b0",
+    "tests/test_native_pad.py": "264f329556871d90dadb4d3220d9e293ce51b116cbe88bed4040a974c7a761cd",
+    "tests/test_native_hid.py": "c9d36f75970b1ea067801ad55e272f5a069680d81584ac4ceed2666a3ab10452",
+    "tests/test_vsh_ui.py": "93193e79b14fad4f7e352bf8dced30a25f9ac05d3aa49cbb05d26440f661eef5",
+    "tests/test_savedata_vsh.py": "79fed50e403d10431bbd7d7f5fa40e9e749ff854afd3c01b0ab6edd57160133f",
+    "profiles/ratchet-acit.json": "acb245fa3294234cc5305a4b564ceeba33a8470c7e977ee692867427685275a3",
+    "docs/manager/DUALSENSE.md": "3708c99293d57572f02fd083cbb34753efb03054152fe1b4e9593825d7a58603",
+    "docs/manager/README.md": "c224d8f7d647ab16e5e0434f364d65b4ce06af74980c7dcd98b4a92188ba2066",
+    "docs/manager/evidence/guimerge/README.md": "6a5cdf0e430bc1bb325a00ee5c5e4265d3319461e66c5a4ef74ceb29cee19e6b"
+  },
+  "logs_sha256": {
+    "manager-gui.log": "7b19ca688cd63eda50561d1f7cd359e6c5b9d4e01a50a0f3645d72e7db09c29b",
+    "native.log": "1d694e3fe2b525973791d8f748ec53f66f4472e79c01c39c25e2b82ad7540f90"
+  },
+  "results": {
+    "manager-gui": {
+      "tests": 41,
+      "seconds": 19.975,
+      "returncode": 0,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    "native": {
+      "tests": 24,
+      "seconds": 166.483,
+      "returncode": 0,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    }
+  },
+  "scope": {
+    "MemoryMax": "8G",
+    "MemorySwapMax": 0,
+    "SDL_AUDIODRIVER": "dummy",
+    "ANYPS3_AUDIO_SINK": "null",
+    "QT_QPA_PLATFORM": "offscreen"
+  },
+  "manager_python": "/home/martink/AnyPS3/local/ratchet/work/manager-gui/tree/.venv/bin/python3",
+  "native_python": "/usr/bin/python3",
+  "limits": {
+    "game_build": false,
+    "game_run": false,
+    "audible_output": false,
+    "physical_controller_verified": false,
+    "full_suite": false,
+    "installer_suite": false,
+    "mutations_rerun": false,
+    "knowledge_edited": false,
+    "push": false
+  }
+}

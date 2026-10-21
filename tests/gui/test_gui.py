@@ -93,6 +93,21 @@ class GuiTests(unittest.TestCase):
         self.assertIsNotNone(window.preferences.value("geometry"))
         self.app.processEvents()
 
+    def test_controllers_show_motion_and_rumble_capabilities(self):
+        from anyps3_gui.app import Controllers
+        class Client:
+            def call(self, args, result):
+                result({"pads": [{"id": "1", "name": "Fixture", "rumble": True, "motion": False}]})
+        dialog = Controllers(Client())
+        try:
+            columns = [dialog.table.horizontalHeaderItem(i).text() for i in range(dialog.table.columnCount())]
+            self.assertIn("Rumble", columns)
+            self.assertIn("Motion (accel + gyro)", columns)
+            self.assertEqual(dialog.table.item(0, columns.index("Rumble")).text(), "True")
+            self.assertEqual(dialog.table.item(0, columns.index("Motion (accel + gyro)")).text(), "False")
+        finally:
+            dialog.deleteLater()
+
     def test_firmware_terminal_result_advances_to_disc_import_once(self):
         class PendingClient:
             def __init__(self):
