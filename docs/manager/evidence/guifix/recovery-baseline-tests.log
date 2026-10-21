@@ -1,0 +1,8 @@
+test_adoption_missing_key_is_retryable_without_published_data (tests.manager.test_manager.ManagerTests.test_adoption_missing_key_is_retryable_without_published_data) ... ok
+test_adoption_publication_resumes_after_interrupted_rename (tests.manager.test_manager.ManagerTests.test_adoption_publication_resumes_after_interrupted_rename) ... ok
+test_resume_keeps_verified_extraction_and_userdata (tests.manager.test_manager.ManagerTests.test_resume_keeps_verified_extraction_and_userdata) ... ok
+
+----------------------------------------------------------------------
+Ran 3 tests in 1.230s
+
+OK

@@ -1,0 +1,22 @@
+======================================================================
+FAIL: test_pending_settings_replies_disconnect_when_widget_is_deleted (tests.gui.test_gui.GuiTests.test_pending_settings_replies_disconnect_when_widget_is_deleted)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/martink/AnyPS3/local/ratchet/work/guifix/tree/tests/gui/test_gui.py", line 127, in test_pending_settings_replies_disconnect_when_widget_is_deleted
+    self.assertEqual(exceptions, [])
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^
+AssertionError: Lists differ: [(<class 'RuntimeError'>, RuntimeError('li[115 chars]00>)] != []
+
+First list contains 1 additional elements.
+First extra element 0:
+(<class 'RuntimeError'>, RuntimeError('libshiboken: Internal C++ object (PySide6.QtWidgets.QTabWidget) already deleted.'), <traceback object at 0x7feaf0c2cc00>)
+
++ []
+- [(<class 'RuntimeError'>,
+-   RuntimeError('libshiboken: Internal C++ object (PySide6.QtWidgets.QTabWidget) already deleted.'),
+-   <traceback object at 0x7feaf0c2cc00>)]
+
+----------------------------------------------------------------------
+Ran 1 test in 0.169s
+
+FAILED (failures=1)

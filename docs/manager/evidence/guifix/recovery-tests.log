@@ -1,0 +1,19 @@
+test_title_removal_preserves_userdata_and_last_backup (tests.manager.test_manager.ManagerTests.test_title_removal_preserves_userdata_and_last_backup) ... ok
+test_cleanup_obeys_worker_lifetime_lock (tests.manager.test_guifix_recovery.JobRemovalTests.test_cleanup_obeys_worker_lifetime_lock) ... ok
+test_clear_retains_active_jobs_and_live_terminal_worker (tests.manager.test_guifix_recovery.JobRemovalTests.test_clear_retains_active_jobs_and_live_terminal_worker) ... ok
+test_job_command_arity_and_id_validation (tests.manager.test_guifix_recovery.JobRemovalTests.test_job_command_arity_and_id_validation) ... ok
+test_mixed_selection_is_atomic_and_rejects_running_or_queued (tests.manager.test_guifix_recovery.JobRemovalTests.test_mixed_selection_is_atomic_and_rejects_running_or_queued) ... ok
+test_multiremove_deletes_only_terminal_history_never_title (tests.manager.test_guifix_recovery.JobRemovalTests.test_multiremove_deletes_only_terminal_history_never_title) ... ok
+test_orphan_worker_is_failed_and_removable (tests.manager.test_guifix_recovery.JobRemovalTests.test_orphan_worker_is_failed_and_removable) ... ok
+test_adoption_replaces_failed_import_and_cleans_staging (tests.manager.test_guifix_recovery.RecoveryTests.test_adoption_replaces_failed_import_and_cleans_staging) ... ok
+test_different_iso_may_replace_only_disposable_incomplete_title (tests.manager.test_guifix_recovery.RecoveryTests.test_different_iso_may_replace_only_disposable_incomplete_title) ... ok
+test_failed_adoption_can_be_replaced_by_import_without_published_userdata (tests.manager.test_guifix_recovery.RecoveryTests.test_failed_adoption_can_be_replaced_by_import_without_published_userdata) ... ok
+test_failed_import_is_resumable_and_keeps_verified_extraction (tests.manager.test_guifix_recovery.RecoveryTests.test_failed_import_is_resumable_and_keeps_verified_extraction) ... ok
+test_legacy_incomplete_import_recovers_source_from_job (tests.manager.test_guifix_recovery.RecoveryTests.test_legacy_incomplete_import_recovers_source_from_job) ... ok
+test_replacement_refuses_userdata_builds_and_live_job (tests.manager.test_guifix_recovery.RecoveryTests.test_replacement_refuses_userdata_builds_and_live_job) ... ok
+test_resume_cli_replays_source_and_options (tests.manager.test_guifix_recovery.RecoveryTests.test_resume_cli_replays_source_and_options) ... ok
+
+----------------------------------------------------------------------
+Ran 14 tests in 2.884s
+
+OK

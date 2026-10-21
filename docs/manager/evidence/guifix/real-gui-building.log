@@ -1,0 +1,9 @@
+test_observe_temporary_library (real_gui.RealLibraryObservation.test_observe_temporary_library) ... This plugin does not support propagateSizeHints()
+This plugin does not support propagateSizeHints()
+This plugin does not support propagateSizeHints()
+ok
+
+----------------------------------------------------------------------
+Ran 1 test in 0.304s
+
+OK

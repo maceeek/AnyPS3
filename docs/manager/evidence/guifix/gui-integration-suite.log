@@ -1,0 +1,27 @@
+test_controllers_show_motion_and_rumble_capabilities (tests.gui.test_gui.GuiTests.test_controllers_show_motion_and_rumble_capabilities) ... ok
+test_errors_preserve_code_message_and_detail (tests.gui.test_gui.GuiTests.test_errors_preserve_code_message_and_detail) ... ok
+test_firmware_terminal_result_advances_to_disc_import_once (tests.gui.test_gui.GuiTests.test_firmware_terminal_result_advances_to_disc_import_once) ... ok
+test_gui_has_no_runtime_or_manager_imports (tests.gui.test_gui.GuiTests.test_gui_has_no_runtime_or_manager_imports) ... ok
+test_malformed_protocol_is_visible (tests.gui.test_gui.GuiTests.test_malformed_protocol_is_visible) ... ok
+test_pending_setting_writes_disconnect_after_widget_deletion (tests.gui.test_gui.GuiTests.test_pending_setting_writes_disconnect_after_widget_deletion) ... ok
+test_pending_settings_replies_disconnect_when_widget_is_deleted (tests.gui.test_gui.GuiTests.test_pending_settings_replies_disconnect_when_widget_is_deleted) ... ok
+test_streaming_events_and_unknown_fields (tests.gui.test_gui.GuiTests.test_streaming_events_and_unknown_fields) ... ok
+test_window_close_reaps_followers_without_new_manager_requests (tests.gui.test_gui.GuiTests.test_window_close_reaps_followers_without_new_manager_requests) ... This plugin does not support propagateSizeHints()
+This plugin does not support propagateSizeHints()
+ok
+test_window_smoke_and_geometry (tests.gui.test_gui.GuiTests.test_window_smoke_and_geometry) ... This plugin does not support propagateSizeHints()
+This plugin does not support propagateSizeHints()
+ok
+test_failed_import_resume_build_play_and_save_actions_over_real_protocol (tests.gui.test_guifix_integration.RealProtocolWalkthrough.test_failed_import_resume_build_play_and_save_actions_over_real_protocol) ... This plugin does not support propagateSizeHints()
+This plugin does not support propagateSizeHints()
+This plugin does not support propagateSizeHints()
+This plugin does not support propagateSizeHints()
+This plugin does not support propagateSizeHints()
+This plugin does not support propagateSizeHints()
+This plugin does not support propagateSizeHints()
+ok
+
+----------------------------------------------------------------------
+Ran 11 tests in 4.283s
+
+OK

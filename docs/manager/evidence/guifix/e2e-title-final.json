@@ -1,0 +1,17 @@
+{
+  "id": "BCES00511",
+  "title": "Ratchet & Clank: A Crack in Time",
+  "version": "01.00",
+  "status": "verified-boot",
+  "active_build": "0001-20261021T153750378281Z-aa77a141",
+  "pinned_builds": [],
+  "play_seconds": 48.464580306987045,
+  "firmware": "3.01-508129a1",
+  "profile_path": "/home/martink/AnyPS3/local/ratchet/work/guifix/tree/profiles/ratchet-acit.json",
+  "elf_sha256": "6debdca0f181f35d98ebe23faabe2531b697c558b4e3384b06630173400674c1",
+  "disc_manifest_sha256": "7ec38548f8d4524f071c24474220a42ef6d5a0443878b914fba4fa39cddda84e",
+  "compatibility": "native-startup-with-verified-spu-decompression-and-black-flips",
+  "adopted_from": "/home/martink/AnyPS3/local/ratchet",
+  "adopted_at": "2026-10-21T15:35:39.649566+00:00",
+  "last_played": "2026-10-21T16:01:55.088921+00:00"
+}

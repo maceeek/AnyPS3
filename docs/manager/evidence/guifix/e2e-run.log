@@ -1,0 +1,1 @@
+{"schema": "anyps3.manager/1", "event": "error", "code": "cancelled", "message": "Run stopped by the user.", "detail": {}}

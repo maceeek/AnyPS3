@@ -1,0 +1,18 @@
+test_title_switch_clears_actions_before_delayed_cli_replies (tests.manager.test_guifix_gui.GuiFixTests.test_title_switch_clears_actions_before_delayed_cli_replies) ... This plugin does not support propagateSizeHints()
+This plugin does not support propagateSizeHints()
+This plugin does not support propagateSizeHints()
+FAIL
+
+======================================================================
+FAIL: test_title_switch_clears_actions_before_delayed_cli_replies (tests.manager.test_guifix_gui.GuiFixTests.test_title_switch_clears_actions_before_delayed_cli_replies)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/martink/AnyPS3/local/ratchet/work/guifix/tree/tests/manager/test_guifix_gui.py", line 119, in test_title_switch_clears_actions_before_delayed_cli_replies
+    self.assertEqual(table.rowCount(), 0)
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^
+AssertionError: 1 != 0
+
+----------------------------------------------------------------------
+Ran 1 test in 0.024s
+
+FAILED (failures=1)

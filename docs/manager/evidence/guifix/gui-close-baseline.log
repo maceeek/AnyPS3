@@ -1,0 +1,16 @@
+This plugin does not support propagateSizeHints()
+This plugin does not support propagateSizeHints()
+======================================================================
+FAIL: test_window_close_reaps_followers_without_new_manager_requests (tests.gui.test_gui.GuiTests.test_window_close_reaps_followers_without_new_manager_requests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/martink/AnyPS3/local/ratchet/work/guifix/tree/tests/gui/test_gui.py", line 109, in test_window_close_reaps_followers_without_new_manager_requests
+    self.assertEqual(process.state(), QProcess.ProcessState.NotRunning)
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: <ProcessState.Running: 2> != <ProcessState.NotRunning: 0>
+
+----------------------------------------------------------------------
+Ran 1 test in 0.050s
+
+FAILED (failures=1)
+QProcess: Destroyed while process ("/var/tmp/anyps3-guifix-venv/bin/python3") is still running.

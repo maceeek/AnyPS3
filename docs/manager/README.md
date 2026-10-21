@@ -183,6 +183,53 @@ Detached workers use the selected `--source` checkout for profiles and source
 snapshots. Tool/game processes inherit their operation locks; a killed supervisor
 cannot make a still-running game available for restore, prune or another launch.
 
+## Recovering imports and cleaning job history
+
+An unfinished title shows **Resume import** and **Remove incomplete title**.
+Resume repeats its recorded source/options and reuses verified extraction. For
+older records, the manager recovers the source from import-job history when
+possible; otherwise **Choose ISO to resume…** opens the wizard. Adoption is also
+resumed from its recorded source, including interrupted publication journals.
+
+A new import or adoption may replace an incomplete entry only when it has **no
+userdata, no builds and no active title job/game**. Complete titles still require
+explicit disc replacement; adoption refuses to overwrite them. If an incomplete
+entry already has userdata, resume its original operation, or remove its entry
+while preserving userdata and then import the ISO. Adoption never overwrites
+retained userdata. Title removal preserves saves and backups by default.
+
+```bash
+anyps3-manager titles resume BCES00511 --events
+anyps3-manager titles remove BCES00511
+anyps3-manager jobs remove JOB_ID [OTHER_JOB_ID ...]
+anyps3-manager jobs clear
+```
+
+Select several completed, failed or cancelled jobs and choose **Remove selected**,
+or use **Clear finished**. Removal affects only job history and logs. An explicit
+selection containing any active job is rejected without removing the others.
+Active jobs offer **Cancel**, including a surviving recorded tool after supervisor
+failure. Inherited lifecycle locks protect both startup and tool/game execution;
+an unidentified surviving child keeps its job history and produces an actionable
+`orphan-active` error rather than pretending cancellation succeeded.
+
+After import/adoption, **Build** is the next step. Disabled Play explains that a
+native build is required; active operations show progress in Jobs. Title controls
+refresh after success, errors, cancellation and foreground-game exit. Switching
+titles clears selected rows immediately so delayed replies cannot act on another
+title. Changing the active build reloads setting availability.
+
+Run records update observed flips, capture counts and FPS while running, and retain them after Stop,
+including recovery after supervisor loss. `verified-boot` requires observed flips;
+it does not establish an original menu, gameplay or physical-controller input.
+Stopped runs obey the completed-run retention setting. Save exports preserve empty
+directories and reject symlinks. ZIP publication uses an atomic hard link when
+supported; FAT/exFAT-style filesystems use exclusive copying with cleanup on
+failure (the destination is visible during that fallback copy).
+
+The [GUIFIX report and screenshots](evidence/guifix/README.md) record the defects,
+regressions, original-game acceptance and remaining visual-platform limits.
+
 ## Builds and saves
 
 Every build gets its own source/profile snapshot, bundle, executable, verification
