@@ -201,7 +201,9 @@ private:
     void pipeline_cache_saved(const PipelineCacheSave& r)noexcept{
         if(r.fixup)++compile_stats.cache_driver_size_fixups;
         if(r.status>0){++compile_stats.pipeline_cache_saves;try{trim_disk_cache(0);}catch(...){cache_io_error();}}
-        else if(r.status<0)cache_io_error();
+        // A failed snapshot (driver query, allocation, file write) leaves the cache unsaved: it stays dirty, so the next periodic
+        // save (still throttled by cache_saved_at) or the forced save at shutdown retries. Creations during the save set dirty anyway.
+        else if(r.status<0){pipeline_cache_dirty=true;cache_io_error();}
     }
     void collect_pipeline_cache_save(bool wait)noexcept{
         if(!pipeline_cache_saving.valid())return;

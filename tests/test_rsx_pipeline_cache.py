@@ -124,7 +124,27 @@ static void persist(unsigned keys){
   std::vector<unsigned> data(16);vk.graphics_draw(*b,s,images,{},*vs,*fs,data,3,sample_positions,0,0,0,1,{},0,UINT64_MAX,{},vs,fs);
   if(key%16==15){vk.graphics_finish(*b);vk.graphics_reset(*b);}}
  vk.graphics_finish(*b);vk.graphics_reset(*b);assert(vk.compile_stats.graphics_pipelines==keys);
- std::printf("PASS persist %u pipelines\n",keys);
+ std::printf("PASS persist %u pipelines rotations=%llu load_bytes=%llu\n",keys,(unsigned long long)vk.compile_stats.pipeline_cache_rotations,(unsigned long long)vk.compile_stats.pipeline_cache_load_bytes);
+}
+// A periodic background snapshot that fails (cache directory read-only) must leave the cache dirty, so the forced save at shutdown
+// (directory writable again) still writes it. Pipelines are created within the 2 s throttle, the only periodic save is launched by
+// the explicit compile_stats_print after it, and the directory is restored once that save has long finished.
+static void save_retry(){
+ setenv("ANYPS3_RSX_HOST_PROFILE","1",1);const std::filesystem::path dir=std::filesystem::path(std::getenv("ANYPS3_CACHE_ROOT"))/"vk";
+ {NativeVulkan vk;assert(std::filesystem::is_directory(dir));
+  std::filesystem::permissions(dir,std::filesystem::perms::owner_read|std::filesystem::perms::owner_exec);
+  auto b=vk.graphics_batch(1024*1024);auto s=simple_state();
+  for(unsigned key=0;key<8;++key){auto image=vk.graphics_image(*b,s.color,4,4,1);std::array<std::shared_ptr<NativeVulkan::GraphicsImage>,4> images{};images[0]=image;
+   auto text=simple_fs;text.insert(text.rfind('}'),"color.b=(("+std::to_string(key)+"u>>(uint(gl_FragCoord.x)+4u*uint(gl_FragCoord.y)))&1u)!=0u?1:0;");
+   auto fs=std::make_shared<const std::string>(std::move(text)),vs=std::make_shared<const std::string>(simple_vs);
+   std::vector<unsigned> data(16);vk.graphics_draw(*b,s,images,{},*vs,*fs,data,3,sample_positions,0,0,0,1,{},0,UINT64_MAX,{},vs,fs);}
+  vk.graphics_finish(*b);vk.graphics_reset(*b);
+  std::this_thread::sleep_for(std::chrono::milliseconds(2100));vk.compile_stats_print();   // launches the background save; it fails
+  std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+  std::filesystem::permissions(dir,std::filesystem::perms::owner_all);
+  for(const auto& entry:std::filesystem::directory_iterator(dir))if(entry.path().filename().string().rfind("pipeline-",0)==0)throw std::runtime_error("pipeline cache written while read-only");
+ }
+ std::printf("PASS save retry\n");
 }
 static void compute_lru(unsigned keys){
  setenv("ANYPS3_RSX_COMPUTE_LIMIT","4",1);NativeVulkan vk;std::vector<unsigned> words(1);
@@ -158,6 +178,7 @@ static void raw_lru(unsigned keys){
 }
 int main(int argc,char** argv){try{
  if(argc>1 && std::string(argv[1])=="persist")persist(std::stoul(argv[2]));
+ else if(argc>1 && std::string(argv[1])=="save_retry")save_retry();
  else if(argc>1 && std::string(argv[1])=="working_set")default_working_set(argc>2?std::stoul(argv[2]):300);
  else if(argc>1 && std::string(argv[1])=="stress"){bounded(argc>2?std::stoul(argv[2]):1100);raw_lru(1100);compute_lru(1100);resident_working_set();}
  else if(argc>1 && std::string(argv[1])=="stencil")stencil_oracle();
@@ -210,19 +231,28 @@ class PipelineCacheTests(unittest.TestCase):
             self.assertIn('1100 raw texture keys', run('stress'))
             self.assertLessEqual(len(list((root / 'cache/vk').glob('*.bin'))), 1024)
             self.assertIn('retain a 300 pipeline working set', run('working_set', '300'))
-            # The persisted VkPipelineCache must cover the whole session: twice the distinct pipelines -> clearly more cache bytes
-            # (a cache replaced every 128 creations kept only the last segment: 200 pipelines persisted fewer bytes than 100).
-            # Lavapipe keeps no pipelines in a VkPipelineCache (header only), so this check needs the hardware device.
-            sizes, gpu_env = {}, {k: v for k, v in os.environ.items() if k not in ('VK_DRIVER_FILES', 'VK_ICD_FILENAMES', 'VK_INSTANCE_LAYERS')}
+            # Lifecycle of the persisted VkPipelineCache, independent of how a driver serializes it: a session creating 200 distinct
+            # pipelines keeps one cache (no rotation; the old code replaced it after every 128 creations and persisted only the last
+            # segment), saves it at shutdown, and the next session loads exactly the saved payload (file = 16-byte envelope + payload).
+            persist_root = root / 'persist'
+            env['ANYPS3_CACHE_ROOT'] = str(persist_root)
+            self.assertIn('PASS persist 200 pipelines rotations=0 load_bytes=0', run('persist', '200'))
+            saved = next((persist_root / 'vk').glob('pipeline-*.bin')).stat().st_size - 16
+            self.assertIn(f'PASS persist 20 pipelines rotations=0 load_bytes={saved}', run('persist', '20'))
+            # A failed background save stays dirty and is retried by the forced save at shutdown.
+            retry_root = root / 'retry'
+            env['ANYPS3_CACHE_ROOT'] = str(retry_root)
+            out = run('save_retry')
+            self.assertIn('PASS save retry', out)
+            self.assertEqual(len(list((retry_root / 'vk').glob('pipeline-*.bin'))), 1)
+            # Driver-specific measurement only (not asserted: a driver may deduplicate or keep a header-only cache): bytes persisted
+            # for 100 vs 200 distinct pipelines on the hardware device.
+            gpu_env = {k: v for k, v in os.environ.items() if k not in ('VK_DRIVER_FILES', 'VK_ICD_FILENAMES', 'VK_INSTANCE_LAYERS')}
             for keys in (100, 200):
                 gpu_env.update(ANYPS3_CACHE_ROOT=str(root / f'persist-{keys}'), ANYPS3_VK_DEVICE='gpu')
                 result = subprocess.run([str(root / 'test'), 'persist', str(keys)], env=gpu_env, capture_output=True, text=True, timeout=300)
-                if result.returncode and 'gpu' in result.stderr and keys == 100 and not os.environ.get('ANYPS3_REQUIRE_VULKAN'):
-                    self.skipTest('no hardware Vulkan device: ' + result.stderr[-300:])
-                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-                self.assertIn(f'persist {keys} pipelines', result.stdout)
-                sizes[keys] = next((root / f'persist-{keys}' / 'vk').glob('pipeline-*.bin')).stat().st_size
-            self.assertGreater(sizes[200], 1.5 * sizes[100], sizes)
+                files = list((root / f'persist-{keys}' / 'vk').glob('pipeline-*.bin'))
+                print(f'pipeline cache bytes for {keys} pipelines on the hardware device: {files[0].stat().st_size if files else None} (rc {result.returncode})')
             cache_root = env['ANYPS3_CACHE_ROOT']
             blocked = root / 'not-a-directory'
             blocked.write_text('cache is optional')
