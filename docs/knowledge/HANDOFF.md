@@ -1,5 +1,12 @@
 # Handoff to the next instance
 
+## Wave 6 — 2026-10-21 (in progress)
+
+Read the top of [CURRENT.md](CURRENT.md). Best: build 478 at 59.74/59.80 FPS (integration branch `fast2/integ473`, not on main).
+The machine has RAM bit flips (verified); the previous coordinator crashed without a handoff — wave 5 was reconstructed from the agents'
+STATUS files. Agent state: `local/ratchet/work/{integ473,spuput,warmup}/STATUS.md`; rules `local/ratchet/work/COMMON-FAST2.md` "Wave 6";
+measurement tools now in `local/ratchet/tools/` (`measure_with_gpu.sh`, `ab_measure.sh`, `i5sum.py`, `ivals.py`, `gpu_busy.py`).
+
 ## FAST2 wave 4 handoff — 2026-10-20 ~22:25
 
 Read the top of [CURRENT.md](CURRENT.md) first. Best measured: 660a 55.96 FPS (integration + blit batch, without SPU work);

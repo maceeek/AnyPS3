@@ -1,5 +1,21 @@
 # Current state and goal
 
+## Wave 5 overnight results + wave 6 start — 2026-10-21 ~08:50 (Opus 5.5 coordinator, Opus 5.5 medium agents)
+
+**Goal (60 FPS with headroom): close, not accepted yet.** Integration build **478** (`fast2/integ473` 941d668) runs the original level
+at the VSYNC cap: **478a 59.74 / 478b 59.80 FPS mean** (median 59.94/59.97, min two-second interval 58.45/59.0, main_ppu ~12.1 ms,
+rsx_worker ~12 ms per frame); 476h2 had 99.7 % of flips within one vblank. Remaining misses are main-thread-bound (0.1–2 ms overshoot).
+**main runtime is still 472 + ZeroTable (46.7 FPS class) — no promotion yet.** Details and how it got there:
+[FAST2 record, wave 5/6](experiments/2026-10-20-fast2-wave.md#wave-5-results-overnight-2026-10-20-2250--2026-10-21-0451-reconstructed-from-agent-status-files-after-the-coordinator-crashed).
+
+**Crash cause (verified): this PC flips bits in RAM** — the page-cached copy of a GCC header was corrupted (disk copy clean), builds
+479/734/700 failed and the coordinator session died ~04:51. Treat one-off failures as possibly hardware; the user chose to continue.
+
+**Wave 6 in progress:** INTEG6 (build integ HEAD 95d3169, fold in HEADROOM 5560a95/baf857b/7dc72a3, per-flip acceptance, full suite,
+promotion prep), MAINSLACK2 (−1 ms/frame on the main thread), WARMUP4 (blit review 4: 2 Medium + 1 Low, then RSX worker cost).
+Acceptance criterion: `local/ratchet/work/COMMON-FAST2.md` "Wave 6". Agent state: `local/ratchet/work/{integ473,spuput,warmup}/STATUS.md`.
+Physical gamepad: not verified in these waves (virtual pad drives menu → LOAD in every measurement).
+
 ## FAST2 wave 4 handoff — 2026-10-20 ~22:25 (ended on user instruction; Claude Opus 5.5 + Sonnet 5.5 agents, gpt-6-astra reviews)
 
 **Goal (60 FPS with headroom) not reached.** Best measured steady run: **`660a` 55.96 FPS mean** (median 58.5, two-second min 47.5,
