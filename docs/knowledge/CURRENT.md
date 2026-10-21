@@ -14,6 +14,10 @@ rsx_worker ~12 ms per frame); 476h2 had 99.7 % of flips within one vblank. Remai
 **Wave 6 in progress:** INTEG6 (build integ HEAD 95d3169, fold in HEADROOM 5560a95/baf857b/7dc72a3, per-flip acceptance, full suite,
 promotion prep), MAINSLACK2 (−1 ms/frame on the main thread), WARMUP4 (blit review 4: 2 Medium + 1 Low, then RSX worker cost).
 Acceptance criterion: `local/ratchet/work/COMMON-FAST2.md` "Wave 6". Agent state: `local/ratchet/work/{integ473,spuput,warmup}/STATUS.md`.
+User requests 2026-10-21: (1) **virtual vblank rate** `ANYPS3_VBLANK_HZ` as a headroom instrument (measure the rate a build holds at
+75/90 Hz instead of counting rare misses at 60 Hz) — task `local/ratchet/work/_tasks/VBLANKHZ.md`, owner WARMUP4; (2) **render resolution
+scaling** — planned as a future feature after the 60 FPS acceptance, plan `local/ratchet/work/_tasks/RESSCALE.md` (guest-visible readbacks
+must stay byte-identical). Decision-grade runs now use `QUIET=1` (load 14–20 from parallel compiles cost ~5 FPS: 478c/d 53.5/54.3).
 Physical gamepad: not verified in these waves (virtual pad drives menu → LOAD in every measurement).
 
 ## FAST2 wave 4 handoff — 2026-10-20 ~22:25 (ended on user instruction; Claude Opus 5.5 + Sonnet 5.5 agents, gpt-6-astra reviews)
