@@ -86,6 +86,9 @@ static void copy(PpuState& s,unsigned notify){
         for(unsigned x=0;x<cols;++x)dst[y].write(x*out_step,snapshot.data()+std::size_t(y)*cols+x,1);
     }
 }
+// Image::locate evaluations (test hook of the bounded-work test; counted inside locate itself, every caller included).
+// Transfers run on one thread (the RSX command thread), so a plain counter suffices.
+static std::uint64_t locate_calls=0;
 struct Image {
     unsigned context=0,offset=0,pitch=0,bpp=0,width=0,height=0,log_w=0,log_h=0;
     bool swizzled=false;
@@ -134,6 +137,7 @@ struct Image {
         return unsigned(std::max<std::uint64_t>(pixels,1));
     }
     std::uint64_t locate(const NativeRsx& gpu,unsigned x,unsigned y,Memo* memo)const{
+        ++locate_calls;
         const auto at=logical(x,y);
         // Byte lanes inside a word are preserved by rsx_tiled_offset. Tile
         // pitch describes the memory permutation, not necessarily this subimage's
@@ -289,7 +293,6 @@ static bool force_pixel_path=[]{const char* v=std::getenv("ANYPS3_RSX_BLIT_PIXEL
 static std::uint64_t batch_executed=0;        // transfers completed by a batch path (diagnostics / differential test)
 static std::uint64_t batch_copy_executed=0;   // ... of which by the run-wise identity copy
 static std::uint64_t batch_tap_work=0;        // source taps / pixel runs enumerated by batch planning (bounded-work test)
-static std::uint64_t locate_calls=0;          // Image::locate evaluations by batch planning (test hook: bounded-work test)
 static bool force_no_batch=[]{const char* v=std::getenv("ANYPS3_RSX_BLIT_BATCH");return v && std::string(v)=="0";}();
 // Diagnostic (ANYPS3_RSX_BLIT_TRACE=3): the first 200 fast-path declines with their reason (and exception text).
 static bool blit_decline(const char* why,const char* detail=""){
@@ -476,9 +479,8 @@ static bool scaled_copy(PpuState& s,const Image& src,const Image& dst,unsigned s
             for(unsigned x=x0;x<x1;){
                 const unsigned left=x1-x,source_x=unsigned(std::int64_t(x)+sx),source_y=unsigned(std::int64_t(y)+sy);
                 const unsigned n=std::min(src.run(s.rsx,source_x,source_y,left),dst.run(s.rsx,x,y,left));
-                const auto from=src.locate(s.rsx,source_x,source_y,&from_memo),to=dst.locate(s.rsx,x,y,&to_memo);locate_calls+=2;
+                const auto from=src.locate(s.rsx,source_x,source_y,&from_memo),to=dst.locate(s.rsx,x,y,&to_memo);
                 if(n>1){   // the last pixel of the run must validate too and sit exactly (n-1) pixels further on both sides
-                    locate_calls+=2;
                     if(src.locate(s.rsx,source_x+n-1,source_y,&from_memo)!=from+std::uint64_t(n-1)*src.bpp ||
                        dst.locate(s.rsx,x+n-1,y,&to_memo)!=to+std::uint64_t(n-1)*dst.bpp)return blit_decline("copy run");
                 }
@@ -510,7 +512,7 @@ static bool scaled_batch(PpuState& s,const Image& src,const Image& dst,unsigned 
         tap_at.reserve(out_pixels*per_pixel);dst_at.reserve(out_pixels);dest.reserve(out_pixels);
         Image::Memo source_memo,dest_memo;
         auto tap=[&](std::int64_t x,std::int64_t y){
-            const auto at=src.locate(s.rsx,unsigned(clamp_to(x,src.width-1)),unsigned(clamp_to(y,src.height-1)),&source_memo);++locate_calls;
+            const auto at=src.locate(s.rsx,unsigned(clamp_to(x,src.width-1)),unsigned(clamp_to(y,src.height-1)),&source_memo);
             if(at>UINT32_MAX-4)throw std::runtime_error("RSX blit batch source offset");
             tap_at.push_back(std::uint32_t(at));add_span(spans,at,src.bpp,source_slack);++batch_tap_work;};
         for(unsigned y=y0;y<y1;++y)for(unsigned x=x0;x<x1;++x){
@@ -518,7 +520,7 @@ static bool scaled_batch(PpuState& s,const Image& src,const Image& dst,unsigned 
             const auto ix=floor_fixed(fx),iy=floor_fixed(fy);
             tap(ix,iy);
             if(filter){tap(ix+1,iy);tap(ix,iy+1);tap(ix+1,iy+1);}
-            const auto at=dst.locate(s.rsx,x,y,&dest_memo);++locate_calls;
+            const auto at=dst.locate(s.rsx,x,y,&dest_memo);
             if(at>UINT32_MAX-4)return blit_decline("dst offset");
             dst_at.push_back(std::uint32_t(at));dest.push_back({at,at+dst.bpp});
         }

@@ -453,7 +453,7 @@ static void analytic_guard(){
  std::puts("PASS guarded source/destination pages: remainder batch or reference, equal to the frozen reference");
 }
 // (4) A 2x2 nearest downscale of a 2048x2048 source taps four pixels: the planner must evaluate those addresses (and the four
-// destination pixels), not the 4 Mi pixel rectangle. rsxblit::locate_calls counts every Image::locate evaluation of planning.
+// destination pixels), not the 4 Mi pixel rectangle. rsxblit::locate_calls counts every Image::locate evaluation (inside the function).
 static void analytic_sparse(){
  PpuState a,b;setup(a,0x1100000);setup(b,0x1100000);
  const unsigned taps[4][2]={{0,0},{2047,0},{0,2047},{2047,2047}};
@@ -464,8 +464,8 @@ static void analytic_sparse(){
  c.dx=c.dy=0x7ff00000;c.src_io=false;c.src_offset=0x2000;c.dst_io=false;c.dst_offset=0x1000;
  const auto before=rsxblit::locate_calls,batches=rsxblit::batch_executed;
  const auto e=run(a,c);if(!e.empty())throw std::runtime_error("sparse downscale failed: "+e);
- const auto work=rsxblit::locate_calls-before;
- if(rsxblit::batch_executed!=batches+1 || work>8)throw std::runtime_error("sparse downscale evaluated "+std::to_string(work)+" addresses (batch path executed "+std::to_string(rsxblit::batch_executed-batches)+" times)");
+ const auto work=rsxblit::locate_calls-before;   // counted inside Image::locate: at least the 4 taps + 4 destination pixels
+ if(rsxblit::batch_executed!=batches+1 || work<8 || work>16)throw std::runtime_error("sparse downscale evaluated "+std::to_string(work)+" addresses (batch path executed "+std::to_string(rsxblit::batch_executed-batches)+" times)");
  const auto er=run_ref(b,c);if(!er.empty())throw std::runtime_error("reference failed: "+er);
  for(unsigned i=0;i<4;++i)for(unsigned k=0;k<4;++k){
   const unsigned want=k==0?0xffu:0x10*(i+1)+k;const std::uint64_t at=0xc0001000+(i/2)*8+(i%2)*4+k;
