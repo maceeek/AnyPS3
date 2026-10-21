@@ -282,6 +282,7 @@ static void event_claim(){
  if(!probes)throw std::runtime_error("no flip event was published from a completion label");
  life.finish();
  std::printf("PASS event claim: %u deferred flip events, the owner read the label page during each publication\n",probes);
+}
 // Serial RSX (ANYPS3_RSX_WORKER=0): the FIFO runs on this thread through rsx_run; stride captures still ride on deferred flips.
 // rsx_finalize (the generated main calls it after anyps3_entry) must drain the session and collect the last capture write.
 static void serial_capture(){
