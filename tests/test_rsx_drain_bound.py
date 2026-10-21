@@ -254,10 +254,14 @@ static void event_claim(){
  setenv("ANYPS3_RSX_BACKEND","gpu",1);setenv("ANYPS3_RSX_WORKER","0",1);setenv("ANYPS3_SPU_THREADS","0",1);
  PpuState s;const auto put=setup_flips(s);s.memory.regions.push_back({0x71000000,6,s.memory.regions[0].bytes});
  setenv("ANYPS3_RSX_WORKER","1",1);
+ // Exception safety: the hook's state outlives the worker (declared before `life`); on unwinding `abandon` is set first (the hook then
+ // returns at once instead of waiting for a server that stopped), `life` stops and joins the worker, and only then is the hook cleared.
+ std::atomic<unsigned> asked{0},served{0};std::atomic<bool> abandon{false};
+ struct ClearHook {~ClearHook(){rsx_label_event_test_hook={};}} clear_hook;
  SpuWorkerSession life(s);auto& w=s.process.rsx_worker;assert(w.enabled);auto& m=s.memory;
- std::atomic<unsigned> asked{0},served{0};
+ struct Abandon {std::atomic<bool>& flag;~Abandon(){flag=true;}} abandon_on_exit{abandon};
  rsx_label_event_test_hook=[&]{const unsigned n=asked.fetch_add(1)+1;const auto deadline=now_ms()+10000;
-  while(served.load()<n){if(now_ms()>deadline){std::fprintf(stderr,"FAIL owner read of the label page did not return while flip event %u was being published\n",n);std::fflush(stderr);std::_Exit(4);}
+  while(served.load()<n && !abandon.load()){if(now_ms()>deadline){std::fprintf(stderr,"FAIL owner read of the label page did not return while flip event %u was being published\n",n);std::fflush(stderr);std::_Exit(4);}
    std::this_thread::yield();}};
  s.rsx.vblank_epoch_ns=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
  assert(!rsx_worker_request(s,12).completed);
