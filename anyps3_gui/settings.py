@@ -66,7 +66,7 @@ class Settings(QWidget):
             widget.deleteLater()
         forms = {}
         for key, spec in self.schema.items():
-            if spec.get("advanced") and not self.advanced.isChecked():
+            if spec.get("advanced") and not self.advanced.isChecked() or spec.get("applies") is False:
                 continue
             group = spec["group"]
             if group not in forms:

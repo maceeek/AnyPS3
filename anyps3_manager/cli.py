@@ -294,7 +294,7 @@ def dispatch(args, lib):
         return {"restore": saves.restore, "export": saves.export_save, "import": saves.import_save}[args.action](lib, args.title, *args.values)
     if cmd == "settings":
         if args.action == "schema":
-            return dict(settings=settings.schema(available(lib, args.title)))
+            return dict(settings=settings.schema(available(lib, args.title), args.title))
         if args.action == "get":
             return dict(settings=settings.effective(lib, args.title),
                         overrides=settings.stored_values(lib, args.title))

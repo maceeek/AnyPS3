@@ -8,6 +8,7 @@ import statistics
 import subprocess
 import time
 
+from .intro_skip import IntroSkip, recipe
 from .processes import alive, identity, scope_command, scope_info, stop_tree
 from .saves import backup
 from .settings import effective, run_environment
@@ -50,8 +51,11 @@ class RunSummary:
         self.stop_line = self.error = None
         self.flips = self.captured_frames = 0
         self.pending = b""
+        self.listeners = []
 
     def line(self, line):
+        for listener in self.listeners:
+            listener(line)
         if "STOP pc=" in line:
             self.stop_line = line.rstrip()
         if "error" in line.lower() or "terminate called" in line:
@@ -149,6 +153,11 @@ def run(lib, title, build=None, overrides=None, unscoped=False, job=None):
                       program_process=None, launcher_process=None, command=command)
         live_summary = RunSummary()
         record.update(live_summary.result())
+        skip = None
+        if "ANYPS3_PAD_INJECT" in env:
+            skip = IntroSkip(env["ANYPS3_PAD_INJECT"], recipe(title))
+            live_summary.listeners.append(skip.line)
+            record["intro_skip"] = skip.summary()
         atomic_json(run_dir/"run.json", record)
         if job:
             job.emit("stage", stage="run", index=1, count=1)
@@ -182,9 +191,15 @@ def run(lib, title, build=None, overrides=None, unscoped=False, job=None):
                                     record["program_process"] = identity(pid)
                             except OSError:
                                 pass
+                    # The intro-skip driver reacts to each fresh report promptly.
+                    if skip and skip.active:
+                        live_summary.read_new(evidence)
+                        skip.tick()
                     if time.monotonic() >= next_evidence:
                         live_summary.read_new(evidence)
                         record.update(live_summary.result())
+                        if skip:
+                            record["intro_skip"] = skip.summary()
                         atomic_json(run_dir/"run.json", record)
                         next_evidence = time.monotonic()+1
                     time.sleep(.25)
@@ -195,6 +210,9 @@ def run(lib, title, build=None, overrides=None, unscoped=False, job=None):
             raise
         finally:
             exited = process is None or process.poll() is not None
+            if skip:
+                skip.finish("run-ended")
+                record["intro_skip"] = skip.summary()
             record.update(ended=now() if exited else None, state="finished" if exited else "running",
                           exit_code=process.poll() if process else None,
                           play_seconds=time.monotonic()-started, scope_result=info,

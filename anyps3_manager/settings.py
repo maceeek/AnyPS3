@@ -45,6 +45,10 @@ FIELDS = {
     "input.sdl_mappings": field("", "SDL GameController mapping database entries.", "Input", env="SDL_GAMECONTROLLERCONFIG"),
     "input.ps5_hidapi": field(True, "Enable SDL DualSense HIDAPI support.", "Input", env="SDL_JOYSTICK_HIDAPI_PS5"),
     "input.pad_config": field('{"ports":[]}', "Port assignments and mappings (requires pad-config runtime).", "Input", env="ANYPS3_PAD_CONFIG", format="pad-config"),
+    "input.skip_intro": field(False, "Press START automatically through the startup notices, logos and title screen until the main menu appears. "
+                              "Stops at the menu, after 3 minutes, or as soon as you press a controller button. "
+                              "Only for titles with an intro-skip recipe.", "Input", env="ANYPS3_PAD_INJECT",
+                              label="Skip intro", requires_recipe=True),
     "saves.backup_before_run": field(True, "Back up saves before launching.", "Saves"),
     "saves.keep": field(10, "Automatic backups to retain; manual backups are kept.", "Saves", minimum=1, maximum=1000),
     "saves.backup_game_data": field(False, "Include installed game data in backups.", "Saves"),
@@ -176,10 +180,17 @@ def set_value(lib, key, value, title=None, reset=False):
     return dict(key=key, value=effective(lib, title)[key])
 
 
-def schema(available=None):
-    return {key: dict(spec, available=(available is None or not spec["env"] or
-                                      not spec["env"].startswith("ANYPS3_") or spec["env"] in available))
-            for key, spec in FIELDS.items()}
+def schema(available=None, title=None):
+    result = {key: dict(spec, available=(available is None or not spec["env"] or
+                                        not spec["env"].startswith("ANYPS3_") or spec["env"] in available))
+              for key, spec in FIELDS.items()}
+    # Title-scoped options that need per-title data (e.g. an intro-skip recipe)
+    # do not apply to other titles; the GUI hides them there.
+    from .intro_skip import recipe
+    for spec in result.values():
+        if spec.get("requires_recipe") and title and not recipe(title):
+            spec.update(available=False, applies=False)
+    return result
 
 
 def clean_environment():
@@ -200,7 +211,7 @@ def run_environment(lib, title, settings, available, run_dir):
                SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS="1", VK_INSTANCE_LAYERS="")
     for key, spec in FIELDS.items():
         variable = spec["env"]
-        if not variable or variable == "ANYPS3_PAD_CONFIG":
+        if not variable or variable in ("ANYPS3_PAD_CONFIG", "ANYPS3_PAD_INJECT"):
             continue
         if variable.startswith("ANYPS3_") and variable not in available:
             continue
@@ -211,6 +222,11 @@ def run_environment(lib, title, settings, available, run_dir):
     if "ANYPS3_PAD_CONFIG" in available:
         atomic_json(run_dir/"pads.json", json.loads(settings["input.pad_config"]))
         env["ANYPS3_PAD_CONFIG"] = str(run_dir/"pads.json")
+    from .intro_skip import recipe, write_state
+    if settings["input.skip_intro"] and "ANYPS3_PAD_INJECT" in available and recipe(title):
+        # The driver (runs.py) classifies PERF reports, so they are required.
+        write_state(run_dir/"pad-inject.txt", True)
+        env.update(ANYPS3_PAD_INJECT=str(run_dir/"pad-inject.txt"), ANYPS3_PERF_REPORT="1")
     if settings["diagnostics.vulkan_validation"]:
         env["VK_INSTANCE_LAYERS"] = "VK_LAYER_KHRONOS_validation"
     if settings["diagnostics.capture_stride"]:
