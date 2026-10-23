@@ -123,6 +123,7 @@ struct PpuDeferredScope {
         if(state.ppu_block_pending){state.pc=pc;state.r[3]=argument;}}
     PpuDeferredScope(const PpuDeferredScope&)=delete;
 };
+template<class State> static void sysutil_park_service(State& s); // sysutil_transport.py
 [[maybe_unused]] static void ppu_schedule(PpuState& s,bool mandatory=false) {
     // Scheduler predicates use validated scalar memory only. Each nested
     // RSX/audio engine takes its own compatibility scope; do not exclude SPU
@@ -136,6 +137,7 @@ struct PpuDeferredScope {
     else *active=static_cast<PpuContext&>(s);
     for(;;){
     audio_run(s);
+    sysutil_park_service(s);
     std::uint64_t cached_now=0; // host clock, read at most once per pass
     const auto clock_now=[&]{if(!cached_now)cached_now=sync_ext_now();return cached_now;};
     sync_ext_poll(s,cached_now);
@@ -193,7 +195,9 @@ struct PpuDeferredScope {
             for(const auto& pair:s.sync_ext.waits)if(!pair.second.done && pair.second.deadline)earliest=std::min(earliest,pair.second.deadline);
             for(const auto& thread:s.ppu_threads)if(thread.wait_kind && thread.wait_deadline)earliest=std::min(earliest,thread.wait_deadline);
             const bool audio_pending=s.audio.maximum && (s.audio.running || !s.audio.notifications.empty());
-            if(earliest!=UINT64_MAX || audio_pending){const auto now=sync_ext_now();
+            // A PacketRead parked on an open SAVE UI waits for host input (sysutil_park_service polls it every 1 ms).
+            const bool ui_pending=!s.settings.vsh_ui.parked.empty();
+            if(earliest!=UINT64_MAX || audio_pending || ui_pending){const auto now=sync_ext_now();
                 const std::uint64_t ceiling=audio_pending?100:1000;
                 const auto delay=earliest==UINT64_MAX?ceiling:earliest>now?std::min(earliest-now,ceiling):0;
                 if(delay){ExecutionScope idle(s.execution,ExecutionPhase::Idle);ANYPS3_FT_SPAN(ft_idle,Idle,1,delay);GuestMemory::RawYield yield(s.memory);std::this_thread::sleep_for(std::chrono::microseconds(delay));}

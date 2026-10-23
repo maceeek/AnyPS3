@@ -239,6 +239,51 @@ class VshUiTests(unittest.TestCase):
  std::filesystem::remove_all(hdd);
 ''')
 
+    def test_open_save_list_parks_packet_read_until_host_input_produces_reply(self):
+        # FIX7 (run 805au1): PacketRead on channel 1 must block while the SAVE list waits for the user, as VSH
+        # signals the condition only when it writes a reply; the former immediate return spun the reader and starved
+        # the game (60 -> 7 FPS, most cellAudio blocks unmixed). Expectations from the protocol: the reader blocks
+        # on condition 0x86000400 and releases mutex 0x85000100; another thread runs; with no input it stays
+        # blocked; CIRCLE (cancel) queues resOpenSaveList(elmResult=1), the reader is woken through its condition
+        # (resume_cond), reacquires the mutex, and its next wait publishes that reply in the ring.
+        row = b'BCES00511_SLOT1'.ljust(32, b'\0') + b'SLOT1\0\0\0' + bytes(8)
+        self.run_native(INPUT + r'''
+ char hdd[]="/tmp/anyps3-vsh-park-XXXXXX";assert(::mkdtemp(hdd));s.fs.configure_hdd(hdd);
+ auto& d=s.settings.savedata;d.owner=1;d.modules=true;d.mode=4;
+ s.sysutil_connections.insert(UINT64_C(1)<<32);
+ s.events.queues.push_back({0x900,16,UINT64_C(0x8006010000000100),{}});
+ const auto original=std::filesystem::path(hdd)/"home/00000001/savedata/BCES00511_SLOT1";std::filesystem::create_directories(original);
+ {std::ofstream f(original/"PARAM.SFO",std::ios::binary);''' + 'const B sfo=' + vector(fixture_sfo()) + r''';
+  f.write(reinterpret_cast<const char*>(sfo.data()),sfo.size());assert(f.good());}
+''' + 'savedata_vsh::request(s,' + vector(save_list(fresh=False)) + ');d.replies.clear();' +
+            'B rows=' + vector(row) + ';vsh_ui::save_raw(s,rows,true);' + r'''
+ assert(u.open && u.kind==NativeVshUi::SaveList && u.choices.size()==1 && d.replies.empty());
+ auto& raw=*s.mmapper.objects.front().bytes;const unsigned base=0x8000,cap=0x7c00;
+ auto word=[&](unsigned a){return(unsigned(raw[a])<<24)|(unsigned(raw[a+1])<<16)|(unsigned(raw[a+2])<<8)|raw[a+3];};
+ auto put=[&](unsigned a,unsigned v){for(unsigned j=0;j<4;++j)raw[a+j]=v>>(24-8*j);};
+ put(base,1024);put(base+4,cap);
+ const std::uint64_t cond=0x86000400,mutex_id=0x85000100;
+ auto mutex=[&]()->KernelSync::Mutex&{for(auto& m:s.kernel.mutexes)if(m.id==mutex_id)return m;assert(false);std::abort();};
+ for(auto& c:s.kernel.conditions)if(c.id==cond)c.handles=1;
+ s.ppu_threads.push_back(static_cast<PpuContext&>(s));PpuContext peer;peer.thread_id=2;s.ppu_threads.push_back(peer);
+ mutex().owner=1;
+ bool blocked=false;try{call(107,cond);}catch(const PpuBlocked&){blocked=true;}
+ assert(blocked && s.wait_kind==4 && s.wait_id==cond && mutex().owner==0);
+ assert(u.parked.size()==1 && u.parked[0].first==1 && u.parked[0].second==cond);
+ ppu_schedule(s,true);assert(s.thread_id==2);
+ u.park_poll={};ppu_schedule(s);assert(s.thread_id==2 && u.open && d.replies.empty() && u.parked.size()==1);
+ digital[0]=2;u.park_poll={};ppu_schedule(s); // the scheduler polls the open UI; CIRCLE cancels the list
+ assert(!u.open && d.replies.size()==1 && u.parked.empty());
+ const auto& reader=s.thread_id==1?static_cast<PpuContext&>(s):s.ppu_threads[0];
+ assert(reader.wait_kind==0 && reader.resume_cond==cond);
+ if(s.thread_id!=1){ppu_schedule(s);assert(s.thread_id==1);}
+ assert(call(107,cond)==0 && mutex().owner==1 && s.resume_cond==0);   // woken wait returns, mutex reacquired
+ assert(call(107,cond)==0 && word(base+16)>0 && word(base+24)==2);  // next wait publishes the reply
+ B reply;for(unsigned i=0;i<word(base+16);++i)reply.push_back(raw[base+1024+(word(base+12)+i)%cap]);
+ savedata_vsh::Document done(reply);assert(done.name=="resOpenSaveList" && done.integer("elmResult")==1);
+ digital[0]=0;std::filesystem::remove_all(hdd);
+''')
+
     @unittest.skipUnless(ctypes.util.find_library('SDL2'), 'Requires SDL2')
     def test_real_sdl_virtual_controller_completion(self):
         self.run_native(r'''

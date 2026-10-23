@@ -135,6 +135,27 @@ class AudioFullTests(unittest.TestCase):
 ''', null=False)
 
     @unittest.skipUnless(ctypes.util.find_library('SDL2'), 'Requires SDL2')
+    def test_stalled_service_catches_up_guest_periods_but_queues_only_current_host_audio(self):
+        # FIX7: a 2.5 s stall of the audio service (no audio_run) used to queue all 469 caught-up periods at once and
+        # stop with "SDL2 audio output queue exceeds two seconds". Independent expectation (period 256/48000 s, late
+        # limit 50 ms): periods k=0..468 end at k*period <= 2.5 s; only k with 2.5 s - k*period <= 50 ms (k=460..468,
+        # nine periods) are still current. Every period keeps its guest effects (block, index, tag, counter).
+        self.run_native(r'''
+ setenv("ANYPS3_AUDIO_SINK","sdl",1);setenv("SDL_AUDIODRIVER","dummy",1);setenv("ANYPS3_AUDIO_HOST_CHANNELS","2",1);
+ assert(audio(0)==0);auto& a=s.audio;assert(!a.null_sink && a.device && a.host_channels==2);a.pause(a.device,1);
+ param(2,8);assert(audio(2,0x10100,0x10180)==0 && audio(4,0)==0);
+ auto& p=a.ports[0];for(unsigned i=0;i<8;++i)mem.store(p.address+i*2048,4,0x3e800000);
+ const std::uint64_t start=UINT64_MAX/4;a.next_tick=start;
+ audio_advance(s,start+199500000); // 2.5 s at 79.8 MHz
+ assert(a.counter==469 && p.tag==469 && mem.load(p.index,8)==469%8);
+ for(unsigned i=0;i<p.size;++i)assert(mem.load(p.address+i,1)==0);
+ assert(a.late_dropped_frames==460*256 && a.submitted_frames==9*256 && a.queued(a.device)==9*2048);
+ audio_advance(s,a.next_tick); // back on time: the next period is queued normally
+ assert(a.counter==470 && a.late_dropped_frames==460*256 && a.submitted_frames==10*256 && a.queued(a.device)==10*2048);
+ a.next_tick=UINT64_MAX/2;assert(audio(1)==0);
+''', null=False)
+
+    @unittest.skipUnless(ctypes.util.find_library('SDL2'), 'Requires SDL2')
     def test_absent_host_device_is_zero_and_cannot_configure(self):
         stderr=self.run_native(r'''
  setenv("ANYPS3_AUDIO_SINK","sdl",1);setenv("SDL_AUDIODRIVER","dummy",1);

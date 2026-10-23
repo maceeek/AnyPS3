@@ -25,6 +25,29 @@ struct NativeSystemSettings {
 };
 '''
 CPP = SAVE_CPP + TROPHY_CPP + VSH_UI_CPP + NPCU_CPP + GAMEDATA_CPP + r'''
+// True while a channel-1 PacketRead would park: the SAVE UI is open and neither a reply nor guest data is pending.
+template<class State> static bool sysutil_save_ui_waiting(State& s) {
+    const auto& u=s.settings.vsh_ui;
+    if(!u.open || u.kind==NativeVshUi::Message || !s.settings.savedata.replies.empty())return false;
+    const auto& bytes=*s.mmapper.objects.front().bytes;const unsigned size=0x8000+16;
+    return !((std::uint32_t(bytes[size])<<24)|(std::uint32_t(bytes[size+1])<<16)|(std::uint32_t(bytes[size+2])<<8)|bytes[size+3]);
+}
+// Scheduler hook: poll host input for an open SAVE UI while its PacketRead waiter is parked (at most every 1 ms), and
+// wake the parked waiters as VSH would signal their condition once a reply, a closed UI or guest ring data exists.
+// Template: SAVE-only harnesses compile this transport against a PpuState without PPU contexts.
+template<class State> [[maybe_unused]] static void sysutil_park_service(State& s) {
+    auto& u=s.settings.vsh_ui;
+    if(u.parked.empty())return;
+    const auto now=std::chrono::steady_clock::now();
+    if(now<u.park_poll)return;
+    u.park_poll=now+std::chrono::milliseconds(1);
+    GuestMemory::RawPermit legacy_transport(s.memory);
+    vsh_ui_poll(s);
+    if(sysutil_save_ui_waiting(s))return;
+    for(const auto& [thread,cond]:u.parked)for(auto& t:s.ppu_threads)
+        if(t.thread_id==thread && t.wait_kind==4 && t.wait_id==cond){t.wait_kind=0;t.resume_cond=cond;s.reschedule=true;}
+    u.parked.clear();
+}
 static bool service_sysutil_connect(PpuState& s, std::uint64_t cond_id) {
     vsh_ui_poll(s);
     // Each channel owns four system conditions 0x86000000+(channel*4+c)*0x100
@@ -67,9 +90,15 @@ static bool service_sysutil_connect(PpuState& s, std::uint64_t cond_id) {
         s.memory.mark_write(bytes.data()+base,0x8000);
         const auto next=(start+size)%capacity;put(base+12,next);put(base+8,next);put(base+16,0);put(base+20,0);put(base+24,0);return true;
     }
-    // A guest cond_wait may wake spuriously. Keep PacketRead polling an open
-    // SAVE UI without inventing a reply or blocking host input/scheduling.
-    if(channel==1 && !size && s.settings.vsh_ui.open && s.settings.vsh_ui.kind!=NativeVshUi::Message)return true;
+    // An open SAVE UI has no reply until the host user acts. Real VSH signals the PacketRead condition only when it
+    // writes one, so the waiter parks (kernel_sync 107 blocks it on the condition) and sysutil_park_service wakes it.
+    // Returning "serviced" here made PacketRead spin and starve every other PPU thread (run 805au1: menu 60 -> 7 FPS,
+    // 65-75 % of the cellAudio blocks left unmixed while the list was open). A non-empty reply queue whose final
+    // packet is still unconsumed keeps the immediate re-poll.
+    if(channel==1 && !size && s.settings.vsh_ui.open && s.settings.vsh_ui.kind!=NativeVshUi::Message){
+        if(!save.replies.empty())return true;
+        s.settings.vsh_ui.park_pending=true;return false;
+    }
     if (word(base+20)!=2 || word(base+24)!=1 || !size) return false;
     if (offset!=0x400 || capacity!=0x7c00 || start>=capacity || size>capacity)
         throw std::runtime_error("invalid sysutil request ring");
