@@ -603,9 +603,109 @@ static bool scaled_copy(PpuState& s,const Image& src,const Image& dst,unsigned s
     for(const auto& segment:segments)out.chunks.push_back({segment.to,out.snapshot.data()+pieces.find(segment.from),segment.bytes});
     return true;
 }
+// Run-wise batch planning (fix7-stutter): the original level's 960x704 tiled colour buffer -> 512x352 nearest downscales cost
+// ~15 ms each on the per-tap planner below (one Image::locate, span, snapshot lookup and destination chunk per tap/pixel).
+// The tap set of a scaled transfer is a product: tapped source columns (clamped ix, and ix+1 when filtered) x tapped source rows,
+// independent of each other. This planner addresses every tapped row once per Image::run (first and last pixel of the run
+// locate()d, like scaled_copy) instead of once per tap, and the destination once per run, then computes the same colours in
+// the same raster order with the same arithmetic. Spans and destination runs equal the per-tap planner's after its own merging
+// (Pieces/DestPlan sort and join with the same slack), so admission, snapshot, commit and the deferred fallback are unchanged.
+// unsupported: planning hit a case it does not prove (swizzled destination, a run whose last pixel is not where the run says, any
+// addressing error, oversized tables) -> the per-tap planner below decides, including its declines and errors.
+// ANYPS3_RSX_BLIT_RUNS=0 disables it (A/B).
+enum class RunsResult {done,declined,unsupported};
+static bool runs_enabled=[]{const char* v=std::getenv("ANYPS3_RSX_BLIT_RUNS");return !v || std::string(v)!="0";}();
+static std::uint64_t runs_executed=0;   // transfers planned by scaled_runs (test hook)
+static RunsResult scaled_runs(PpuState& s,const Image& src,const Image& dst,unsigned src_format,unsigned dst_format,bool raw_copy,unsigned operation,unsigned filter,
+    std::int64_t dx,std::int64_t dy,std::int64_t u,std::int64_t v,unsigned ox,unsigned oy,unsigned x0,unsigned y0,unsigned x1,unsigned y1,Prepared& out){
+    if(!runs_enabled || src.swizzled || dst.swizzled || x0>=x1 || y0>=y1)return RunsResult::unsupported;
+    const unsigned per_pixel=filter?4:1;const std::uint64_t out_pixels=std::uint64_t(x1-x0)*(y1-y0);
+    if(out_pixels*per_pixel>(UINT64_C(1)<<22))return RunsResult::unsupported;   // the per-tap planner declines ("tap budget")
+    if(dst.bpp!=dest_bpp(dst_format))return RunsResult::unsupported;
+    const unsigned W=x1-x0,H=y1-y0;
+    auto clamp_to=[](std::int64_t value,std::int64_t last){return std::clamp<std::int64_t>(value,0,last);};
+    // Per output column / row: tap indices into the tapped column / row lists and the filter weights.
+    std::vector<unsigned> cols,rows,kx(W),kx1(W),ky(H),ky1(H);std::vector<std::uint64_t> wa(W),wb(H);
+    std::vector<std::uint32_t> col_value(W),col_value1(W),row_value(H),row_value1(H);
+    for(unsigned i=0;i<W;++i){const auto fx=u+std::int64_t(x0+i-ox)*dx,ix=floor_fixed(fx);
+        col_value[i]=unsigned(clamp_to(ix,src.width-1));col_value1[i]=unsigned(clamp_to(ix+1,src.width-1));wa[i]=std::uint64_t(fx-ix*1048576);
+        cols.push_back(col_value[i]);if(filter)cols.push_back(col_value1[i]);}
+    for(unsigned j=0;j<H;++j){const auto fy=v+std::int64_t(y0+j-oy)*dy,iy=floor_fixed(fy);
+        row_value[j]=unsigned(clamp_to(iy,src.height-1));row_value1[j]=unsigned(clamp_to(iy+1,src.height-1));wb[j]=std::uint64_t(fy-iy*1048576);
+        rows.push_back(row_value[j]);if(filter)rows.push_back(row_value1[j]);}
+    for(auto* list:{&cols,&rows}){std::sort(list->begin(),list->end());list->erase(std::unique(list->begin(),list->end()),list->end());}
+    const std::size_t C=cols.size(),R=rows.size();
+    if(C*R>(std::size_t(1)<<22))return RunsResult::unsupported;
+    auto index=[](const std::vector<unsigned>& list,unsigned value){return unsigned(std::lower_bound(list.begin(),list.end(),value)-list.begin());};
+    for(unsigned i=0;i<W;++i){kx[i]=index(cols,col_value[i]);kx1[i]=index(cols,col_value1[i]);}
+    for(unsigned j=0;j<H;++j){ky[j]=index(rows,row_value[j]);ky1[j]=index(rows,row_value1[j]);}
+    std::vector<std::uint32_t> tap_at(C*R);std::vector<Span> spans,dest;Pieces pieces;DestPlan plan;
+    struct DestRun {std::uint64_t at;unsigned x,y,n;};std::vector<DestRun> dest_runs;   // raster order
+    try{   // planning: no guest access
+        Image::Memo source_memo,dest_memo;
+        for(std::size_t r=0;r<R;++r){const unsigned y=rows[r];
+            for(std::size_t k=0;k<C;){const unsigned c=cols[k];
+                const unsigned n=src.run(s.rsx,c,y,cols.back()-c+1);
+                const auto base=src.locate(s.rsx,c,y,&source_memo);
+                if(n>1 && src.locate(s.rsx,c+n-1,y,&source_memo)!=base+std::uint64_t(n-1)*src.bpp)return RunsResult::unsupported;
+                for(;k<C && cols[k]<c+n;++k){const auto at=base+std::uint64_t(cols[k]-c)*src.bpp;
+                    if(at>UINT32_MAX-4)return RunsResult::unsupported;
+                    tap_at[r*C+k]=std::uint32_t(at);add_span(spans,at,src.bpp,source_slack);++batch_tap_work;}
+            }
+        }
+        for(unsigned y=y0;y<y1;++y)for(unsigned x=x0;x<x1;){
+            const unsigned n=dst.run(s.rsx,x,y,x1-x);const auto at=dst.locate(s.rsx,x,y,&dest_memo);
+            if(n>1 && dst.locate(s.rsx,x+n-1,y,&dest_memo)!=at+std::uint64_t(n-1)*dst.bpp)return RunsResult::unsupported;
+            if(at+std::uint64_t(n-1)*dst.bpp>UINT32_MAX-4)return RunsResult::unsupported;
+            dest_runs.push_back({at,x,y,n});dest.push_back({at,at+std::uint64_t(n)*dst.bpp});x+=n;
+        }
+        if(!pieces.build(spans,source_slack) || !plan.build(std::move(dest)))return RunsResult::declined;
+    }catch(const std::exception&){return RunsResult::unsupported;}
+    out=Prepared{};std::vector<GuestMemory::Range> sources;
+    if(!admit(s,src.context,pieces.intervals(),false,false,&sources) || !admit(s,dst.context,plan.runs,true,true,&out.targets))return RunsResult::declined;
+    if(stability_probe)stability_probe(0);
+    out.runs=plan.runs;auto& snapshot=out.snapshot;auto& bytes=out.bytes;read_pieces(pieces,sources,snapshot);
+    // Snapshot offset of every tap (pieces.find, with the last piece as a cursor).
+    std::vector<std::uint32_t> tap_off(C*R);std::size_t item=0;
+    for(std::size_t t=0;t<tap_off.size();++t){const auto at=tap_at[t];
+        if(item<pieces.items.size() && at>=pieces.items[item].at && at+src.bpp<=pieces.items[item].end){tap_off[t]=std::uint32_t(pieces.items[item].offset+(at-pieces.items[item].at));continue;}
+        tap_off[t]=std::uint32_t(pieces.find(at));
+        item=std::size_t(std::upper_bound(pieces.items.begin(),pieces.items.end(),std::uint64_t(at),[](std::uint64_t value,const Pieces::Item& i){return value<i.at;})-pieces.items.begin())-1;
+    }
+    bytes.resize(out_pixels*dst.bpp);std::size_t used=0;
+    struct Pending {std::uint64_t at;std::size_t offset,size;};std::vector<Pending> pending;pending.reserve(dest_runs.size());
+    {   // colours in raster order (the reference's order); zero-alpha pixels of SRCCOPY_AND are not written
+        auto sample=[&](unsigned r,unsigned k){const auto* p=snapshot.data()+tap_off[std::size_t(r)*C+k];
+            if(raw_copy)return Color{p[0],p[1],p[2],p[3]};
+            return read(p,src_format);};
+        for(const auto& run:dest_runs){const unsigned j=run.y-y0;bool open=false;
+            for(unsigned i=0;i<run.n;++i){const unsigned col=run.x+i-x0;
+                Color c=sample(ky[j],kx[col]);
+                if(filter){
+                    const std::uint64_t a=wa[col],b=wb[j];
+                    const auto c10=sample(ky[j],kx1[col]),c01=sample(ky1[j],kx[col]),c11=sample(ky1[j],kx1[col]);
+                    for(unsigned q=0;q<4;++q)c[q]=(std::uint64_t(c[q])*(1048576-a)*(1048576-b)+std::uint64_t(c10[q])*a*(1048576-b)+
+                        std::uint64_t(c01[q])*(1048576-a)*b+std::uint64_t(c11[q])*a*b+(UINT64_C(1)<<39))>>40;
+                }
+                if(operation==0 && !c[0]){open=false;continue;}
+                const auto packed_color=packed(dst_format,c);std::copy_n(packed_color.data(),dst.bpp,bytes.data()+used);
+                if(open)pending.back().size+=dst.bpp;else{pending.push_back({run.at+std::uint64_t(i)*dst.bpp,used,dst.bpp});open=true;}
+                used+=dst.bpp;
+            }
+        }
+    }
+    out.chunks.reserve(pending.size());
+    for(const auto& p:pending)out.chunks.push_back({p.at,bytes.data()+p.offset,p.size});
+    ++runs_executed;return RunsResult::done;
+}
 static bool scaled_batch(PpuState& s,const Image& src,const Image& dst,unsigned src_format,unsigned dst_format,bool raw_copy,unsigned operation,unsigned filter,
     std::int64_t dx,std::int64_t dy,std::int64_t u,std::int64_t v,unsigned ox,unsigned oy,unsigned x0,unsigned y0,unsigned x1,unsigned y1,Prepared& out){
     if(scaled_copy(s,src,dst,src_format,dst_format,raw_copy,operation,filter,dx,dy,u,v,ox,oy,x0,y0,x1,y1,out))return true;
+    switch(scaled_runs(s,src,dst,src_format,dst_format,raw_copy,operation,filter,dx,dy,u,v,ox,oy,x0,y0,x1,y1,out)){
+        case RunsResult::done:return true;
+        case RunsResult::declined:return false;
+        case RunsResult::unsupported:break;
+    }
     if(x0>=x1 || y0>=y1)return false;
     const unsigned per_pixel=filter?4:1;const std::uint64_t out_pixels=std::uint64_t(x1-x0)*(y1-y0);
     if(out_pixels*per_pixel>(UINT64_C(1)<<22))return blit_decline("tap budget");   // planning tables are bounded by the taps used

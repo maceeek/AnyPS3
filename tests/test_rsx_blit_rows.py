@@ -147,7 +147,7 @@ static void differential(bool concurrent){
  PpuState fast,slow;setup(fast);setup(slow);
  if(concurrent){fast.memory.enable_concurrency();slow.memory.enable_concurrency();}
  std::uint32_t r=concurrent?0x1234567u:0x7654321u;unsigned ok=0,failed=0,tiled=0;std::map<std::string,unsigned> errors;
- const auto start=rsxblit::rows_executed,start_batch=rsxblit::batch_executed,start_copy=rsxblit::batch_copy_executed;
+ const auto start=rsxblit::rows_executed,start_batch=rsxblit::batch_executed,start_copy=rsxblit::batch_copy_executed,start_runs=rsxblit::runs_executed;
  for(unsigned n=0;n<1400;++n){
   const auto c=random_case(r);fill(fast,slow,r+n);
   rsxblit::force_pixel_path=false;const auto e_fast=run(fast,c);
@@ -162,7 +162,48 @@ static void differential(bool concurrent){
  for(const auto& [text,count]:errors)std::printf("INFO   %u x %s\n",count,text.c_str());
  std::fflush(stdout);
  assert(ok>900 && failed>5 && taken>80 && batched>150 && copies>100);
+ const auto planned=rsxblit::runs_executed-start_runs;std::printf("INFO   run-wise planner %llu times\n",(unsigned long long)planned);
+ if(planned<40)throw std::runtime_error("the run-wise batch planner ran only "+std::to_string(planned)+" times");
  rsxblit::force_pixel_path=false;
+}
+// fix7-stutter: the run-wise batch planner (scaled_runs) against the per-tap batch planner it replaces (runs_enabled=false) on the
+// same random transfers: identical errors, identical bytes in every observed window (destination and neighbours).
+static void differential_runs(bool concurrent){
+ PpuState fast,slow;setup(fast);setup(slow);
+ if(concurrent){fast.memory.enable_concurrency();slow.memory.enable_concurrency();}
+ std::uint32_t r=concurrent?0x2468ace1u:0x13579bdfu;unsigned ok=0;const auto start=rsxblit::runs_executed;
+ for(unsigned n=0;n<1400;++n){
+  const auto c=random_case(r);fill(fast,slow,r+n);
+  rsxblit::runs_enabled=true;const auto e_fast=run(fast,c);
+  rsxblit::runs_enabled=false;const auto e_slow=run(slow,c);rsxblit::runs_enabled=true;
+  if(e_fast!=e_slow)throw std::runtime_error("runs case "+std::to_string(n)+": run-wise error '"+e_fast+"' per-tap '"+e_slow+"'");
+  const auto a=dump(fast),b=dump(slow);
+  if(a!=b){unsigned at=0;while(a[at]==b[at])++at;throw std::runtime_error("runs case "+std::to_string(n)+": destination differs at byte "+std::to_string(at));}
+  ok+=e_fast.empty();
+ }
+ const auto planned=rsxblit::runs_executed-start;
+ if(ok<900 || planned<40)throw std::runtime_error("runs differential coverage: ok="+std::to_string(ok)+" planned="+std::to_string(planned));
+ std::printf("PASS run-wise planner equals the per-tap planner (%s, %u transfers, run-wise %llu)\n",concurrent?"concurrent":"serial",ok,(unsigned long long)planned);
+}
+// fix7-stutter: the transfer shapes of the original level (BLIT_TRACE run 805sc): a 960x704 A8R8G8B8 colour buffer inside a bound
+// tile (pitch 4096) downscaled 1.875 x 2 nearest into a 512x352 linear destination, and a filtered 2x downscale with SRCCOPY_AND
+// into a destination inside a second bound tile; the run-wise planner must run and equal the frozen per-pixel reference.
+static void analytic_level_shapes(){
+ for(unsigned shape=0;shape<2;++shape){
+  PpuState a,b;setup(a,0x800000);setup(b,0x800000);
+  std::vector<std::uint8_t> bytes(0x800000);std::uint32_t r=0x5eed+shape;for(auto& x:bytes)x=std::uint8_t(lcg(r));
+  for(auto* s:{&a,&b})s->memory.transfer(0xc0000000,bytes.data(),bytes.size(),true);
+  Case c{};c.src_format=3;c.dst_format=10;c.origin=1;c.op=shape?0:3;c.src_offset=0;c.src_tile=true;c.src_tile_bank=0;c.src_tile_size=0x300000;c.io1=0;
+  if(!shape){c.w=960;c.h=704;c.src_pitch=4096;c.src_tile_pitch=4096;c.ow=c.cw=512;c.oh=c.ch=352;c.dst_pitch=2048;c.dx=1966080;c.dy=2097152;c.dst_offset=0x400000;}
+  else {c.filter=1;c.w=500;c.h=300;c.src_pitch=2048;c.src_tile_pitch=2048;c.ow=c.cw=250;c.oh=c.ch=150;c.dst_pitch=1024;c.dx=c.dy=2097151;c.point=(1<<16)|3;
+   c.dst_offset=0x400100;c.tile=true;c.tile_pitch=1024;c.tile_bank=2;c.tile_size=0x40000;}
+  const auto before=rsxblit::runs_executed;const auto e=run(a,c),er=run_ref(b,c);
+  if(!e.empty() || !er.empty())throw std::runtime_error("level shape "+std::to_string(shape)+" failed: '"+e+"' / '"+er+"'");
+  if(rsxblit::runs_executed!=before+1)throw std::runtime_error("level shape "+std::to_string(shape)+": the run-wise planner did not run");
+  std::vector<std::uint8_t> x(0x800000),y(0x800000);a.memory.transfer(0xc0000000,x.data(),x.size(),false);b.memory.transfer(0xc0000000,y.data(),y.size(),false);
+  if(x!=y){std::size_t at=0;while(x[at]==y[at])++at;throw std::runtime_error("level shape "+std::to_string(shape)+" differs at byte "+std::to_string(at));}
+ }
+ std::puts("PASS level transfer shapes (tiled 960x704 -> 512x352 nearest, filtered SRCCOPY_AND into a tile) equal the frozen reference");
 }
 static void analytic(){
  for(bool concurrent:{false,true}){
@@ -690,7 +731,7 @@ static void analytic_two_claims(){
  std::puts("PASS a deferred fallback waiting for a claim does not hold the metadata lock (second claim proceeds)");
 }
 int main(){
- try{analytic();analytic_layouts();analytic_alias();analytic_alias_raster();analytic_observer();analytic_growing_interest();analytic_broker();analytic_guard();analytic_sparse();analytic_remap();analytic_stability();analytic_two_claims();differential(false);std::puts("PASS row-wise equals per-pixel (serial)");differential(true);std::puts("PASS row-wise equals per-pixel (concurrent)");}
+ try{analytic();analytic_layouts();analytic_alias();analytic_alias_raster();analytic_observer();analytic_growing_interest();analytic_broker();analytic_guard();analytic_sparse();analytic_remap();analytic_stability();analytic_two_claims();analytic_level_shapes();differential_runs(false);differential_runs(true);differential(false);std::puts("PASS row-wise equals per-pixel (serial)");differential(true);std::puts("PASS row-wise equals per-pixel (concurrent)");}
  catch(const std::exception& e){std::fprintf(stderr,"FAIL %s\n",e.what());return 1;}
 }
 '''
@@ -715,7 +756,7 @@ class RsxBlitRowsTests(unittest.TestCase):
                 env['VK_DRIVER_FILES'] = str(lavapipe)
             run = subprocess.run([str(root / 'blit')], capture_output=True, text=True, env=env, timeout=300)
             self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
-            self.assertEqual(run.stdout.count('PASS '), 14, run.stdout)
+            self.assertEqual(run.stdout.count('PASS '), 17, run.stdout)
 
 
 if __name__ == '__main__':
