@@ -52,6 +52,22 @@ class GuiKeyTests(unittest.TestCase):
         self.assertFalse(wizard.key_busy)
         self.assertIn("Format only", wizard.key_status.text())
         self.assertTrue(wizard.scan["keys"]["app"])
+        # The outcome is stated separately from the details: format-only is not "verified".
+        self.assertFalse(wizard.key_result.isHidden())
+        self.assertIn("downloaded from RPCS3", wizard.key_result.text())
+        self.assertIn("format-checked", wizard.key_result.text())
+        self.assertNotIn("verified", wizard.key_result.text())
+        popups = [box for box in wizard.findChildren(QMessageBox) if box.isVisible()]
+        self.assertEqual([box.text() for box in popups], [wizard.key_result.text()[2:]])
+
+    def test_download_success_states_verification(self):
+        wizard, client = self.wizard()
+        with patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.Yes):
+            wizard.fetch_keys()
+        client.calls[0][1]({"keys": {"app": {"validation": "EBOOT.BIN SELF metadata decrypted"},
+                                     "pup": {"validation": "PUP entry HMACs validated"}}})
+        self.assertTrue(wizard.key_result.text().startswith("✔"))
+        self.assertIn("verified", wizard.key_result.text())
 
     def test_wizard_cannot_close_while_a_key_download_runs(self):
         # review-guikeys-1 #3: closing would hide the result of a download that still replaces keys.
@@ -74,6 +90,8 @@ class GuiKeyTests(unittest.TestCase):
             wizard.fetch_keys()
         client.calls[0][2]["error"]({"code": "key-source-hash", "message": "Hash mismatch; nothing saved. Retry."})
         self.assertIn("Retry", wizard.key_status.text())
+        self.assertTrue(wizard.key_result.text().startswith("✖"))
+        self.assertIn("failed", wizard.key_result.text())
         self.assertFalse(wizard.key_busy)
         self.assertTrue(wizard.fetch_button.isEnabled())
 

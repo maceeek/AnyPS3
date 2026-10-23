@@ -546,11 +546,33 @@ class ManagerTests(unittest.TestCase):
         capabilities = available(self.lib, None)
         self.assertIn("ANYPS3_RSX_WORKER", capabilities)
         self.assertIn("ANYPS3_PAD_RUMBLE", capabilities)
-        self.assertTrue(settings.schema(capabilities)["performance.rsx_worker"]["available"])
+        self.assertTrue(settings.schema(capabilities)["input.rumble"]["available"])
         env = settings.run_environment(self.lib, "BCES00511", settings.effective(self.lib, "BCES00511"),
                                        capabilities, self.root)
         self.assertEqual(env["ANYPS3_RSX_WORKER"], "1")
+        self.assertEqual(env["ANYPS3_SPU_THREADS"], "1")
         self.assertNotIn("ANYPS3_NONEXISTENT_SETTING", capabilities)
+
+    def test_retired_toggles_are_ignored_and_runtime_defaults_apply(self):
+        # Older settings files disabled the workers or exported the default-on
+        # RSX A/B switches as 0; none of that may reach a launch any more.
+        from anyps3_manager.cli import available
+        self.import_title()
+        atomic_json(self.lib.root/"settings.json", {"performance.spu_threads": False, "experimental.flip_early": False})
+        atomic_json(self.lib.title_dir("BCES00511")/"settings.json",
+                   {"performance.rsx_worker": False, "experimental.host_drain": False, "input.rumble": False})
+        values = settings.effective(self.lib, "BCES00511")
+        self.assertFalse(values["input.rumble"])
+        for key in ("performance.rsx_worker", "performance.spu_threads", "experimental.host_drain", "experimental.flip_early"):
+            self.assertNotIn(key, values)
+            self.assertNotIn(key, settings.schema())
+        self.assertEqual(settings.stored_values(self.lib, "BCES00511"), {"input.rumble": False})
+        env = settings.run_environment(self.lib, "BCES00511", values, available(self.lib, None), self.root)
+        self.assertEqual((env["ANYPS3_RSX_WORKER"], env["ANYPS3_SPU_THREADS"], env["ANYPS3_PAD_RUMBLE"]), ("1", "1", "0"))
+        self.assertNotIn("ANYPS3_RSX_HOST_DRAIN", env)
+        self.assertNotIn("ANYPS3_RSX_FLIP_EARLY", env)
+        with self.assertRaises(ManagerError):
+            settings.set_value(self.lib, "performance.spu_threads", False)
 
     def test_detached_worker_builds_explicit_source_and_profile(self):
         alternate = self.root/"alternate-source"

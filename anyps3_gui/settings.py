@@ -12,7 +12,7 @@ class Settings(QWidget):
         self.client, self.title = client, title
         self.schema, self.values, self.overrides, self.editors = None, None, {}, {}
         layout = QVBoxLayout(self)
-        self.advanced = QCheckBox("Show diagnostics and experimental settings")
+        self.advanced = QCheckBox("Show advanced, diagnostic and unavailable settings")
         self.advanced.toggled.connect(self.render_fields)
         layout.addWidget(self.advanced)
         self.warning = QLabel()
@@ -66,7 +66,9 @@ class Settings(QWidget):
             widget.deleteLater()
         forms = {}
         for key, spec in self.schema.items():
-            if spec.get("advanced") and not self.advanced.isChecked():
+            # Settings this AnyPS3 version cannot honour at all stay out of the
+            # way unless advanced settings are shown (then they are disabled).
+            if (spec.get("advanced") or not spec.get("supported", True)) and not self.advanced.isChecked():
                 continue
             group = spec["group"]
             if group not in forms:
@@ -110,7 +112,8 @@ class Settings(QWidget):
             horizontal.addWidget(reset)
             description = spec["description"]
             if not spec.get("available", True):
-                description += "\nUnavailable in the active build."
+                description += ("\nUnavailable in the active build; rebuild the title to enable it." if spec.get("supported", True)
+                                else "\nUnavailable in the active build and not implemented by this AnyPS3 version.")
             if self.title and spec.get("global_only"):
                 description += "\nChange this setting in global Settings."
             if not spec.get("editable", True):

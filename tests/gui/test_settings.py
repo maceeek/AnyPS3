@@ -126,6 +126,18 @@ class SettingsGuiTests(unittest.TestCase):
         self.assertFalse(editor.isEnabled())
         self.assertFalse(self.button(editor, "Apply").isEnabled())
         self.assertIn("Unavailable in the active build", editor.parentWidget().toolTip())
+        self.assertIn("rebuild", editor.parentWidget().toolTip())
+
+    def test_unimplemented_settings_hidden_until_advanced(self):
+        # No AnyPS3 runtime reads ANYPS3_WINDOW_MODE: it is noise for a player.
+        widget = self.widget()
+        self.assertNotIn("video.window_mode", widget.editors)
+        self.assertNotIn("performance.timer_slack_ns", widget.editors)
+        self.assertIn("video.present_mode", widget.editors)
+        widget.advanced.setChecked(True)
+        self.assertFalse(widget.editors["video.window_mode"].isEnabled())
+        self.assertIn("not implemented", widget.editors["video.window_mode"].parentWidget().toolTip())
+        self.assertIn("performance.timer_slack_ns", widget.editors)
 
 
 if __name__ == "__main__":

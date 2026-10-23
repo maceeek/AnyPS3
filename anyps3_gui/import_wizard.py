@@ -1,6 +1,6 @@
 """Import preflight and key selection; the manager owns every write."""
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QFileDialog, QFormLayout, QHBoxLayout, QLabel, QLineEdit,
                               QMessageBox, QPushButton, QScrollArea, QVBoxLayout, QWidget, QWizard, QWizardPage)
 
@@ -73,6 +73,12 @@ class ImportWizard(QWizard):
         sources = QWizardPage()
         sources.setTitle("Firmware and keys")
         source_layout = QVBoxLayout(sources)
+        # Outcome of the last key download/entry, outside the scroll area so it
+        # is visible without scrolling: verified, format-only or failed.
+        self.key_result = QLabel()
+        self.key_result.setWordWrap(True)
+        self.key_result.setVisible(False)
+        source_layout.addWidget(self.key_result)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         content = QWidget()
@@ -161,13 +167,40 @@ class ImportWizard(QWizard):
         for role in (QWizard.WizardButton.NextButton, QWizard.WizardButton.BackButton, QWizard.WizardButton.FinishButton):
             self.button(role).setEnabled(not busy)
 
-    def keys_saved(self, result):
+    def show_key_result(self, state, headline, detail="", popup=False):
+        colors = {"verified": "#1b5e20", "format": "#8a5a00", "failed": "#b71c1c"}
+        marks = {"verified": "✔", "format": "⚠", "failed": "✖"}
+        self.key_result.setText(f"{marks[state]} {headline}")
+        self.key_result.setStyleSheet(f"QLabel {{ border: 2px solid {colors[state]}; color: {colors[state]};"
+                                      " border-radius: 4px; padding: 6px; font-weight: bold; }")
+        self.key_result.setVisible(True)
+        if popup:
+            # Non-blocking: the result stays on the page as well.
+            box = QMessageBox(QMessageBox.Icon.Information if state == "verified" else
+                              QMessageBox.Icon.Warning if state == "format" else QMessageBox.Icon.Critical,
+                              "RPCS3 key download", headline, QMessageBox.StandardButton.Ok, self)
+            box.setInformativeText(detail)
+            box.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+            box.open()
+
+    def keys_saved(self, result, downloaded=False):
         lines = []
+        format_only = []
         for kind, record in result["keys"].items():
             self.scan.setdefault("keys", {})[kind] = True
             self.paths[kind].clear()
             lines.append(kind.upper() + ": " + record["validation"])
-        self.key_status.setText("\n".join(lines))
+            if record["validation"].startswith("Format only"):
+                format_only.append(kind.upper())
+        detail = "\n".join(lines)
+        self.key_status.setText(detail)
+        kinds = " and ".join(kind.upper() for kind in result["keys"])
+        action = "downloaded from RPCS3 and saved" if downloaded else "saved"
+        if format_only:
+            self.show_key_result("format", f"{kinds} key {action}, but {', '.join(format_only)} could only be format-checked "
+                                 "(no matching PUP/EBOOT selected). Import validates it against the disc.", detail, downloaded)
+        else:
+            self.show_key_result("verified", f"{kinds} key {action} and verified against the selected files.", detail, downloaded)
         self.busy_keys(False)
 
     def enter_key(self, kind):
@@ -215,12 +248,16 @@ class ImportWizard(QWizard):
             return
         self.busy_keys(True)
         self.key_status.setText("Downloading pinned RPCS3 source and validating keys…")
+        self.key_result.setVisible(False)
 
         def failed(error):
             self.key_status.setText(error["code"] + ": " + error["message"])
+            self.show_key_result("failed", "Key download failed; no keys were changed.",
+                                 error["code"] + ": " + error["message"], True)
             self.busy_keys(False)
 
-        self.client.call(["keys", "fetch-rpcs3", *self.target_args()], self.keys_saved, error=failed)
+        self.client.call(["keys", "fetch-rpcs3", *self.target_args()],
+                         lambda result: self.keys_saved(result, downloaded=True), error=failed)
 
     def reject(self):
         # A running key download/validation would otherwise finish unseen and replace configured keys.
