@@ -1,0 +1,37 @@
+{
+  "native_extent": [
+    1280,
+    720
+  ],
+  "visual_extent": [
+    2560,
+    1440
+  ],
+  "pairs": [
+    {
+      "frame": 9,
+      "native_sha256": "d5f62adbfe3121d62c698462054fa94666cf5d44b93024a84c61d7914cd8e0d1",
+      "visual_sha256": "0c2a745d1f8d6fb7e3d7de5944d34f7030d61e97374fe57e89c18e5fdf4a98f0",
+      "mean_absolute_channel_difference": 2.5467334888599535,
+      "pixel_difference_fraction": 0.7328860134548612,
+      "uniform_2x2_cell_fraction": 0.1656759982638889
+    },
+    {
+      "frame": 10,
+      "native_sha256": "e870a03a80add27c0f6e36b20b5458ead3b1692563bb499b7af6c73c296c22da",
+      "visual_sha256": "d7839e19d0d58e210d2b6b2da3791f704ecacfc1a83809aa6e3d8b69f6fda215",
+      "mean_absolute_channel_difference": 3.777436252170139,
+      "pixel_difference_fraction": 0.8870201280381944,
+      "uniform_2x2_cell_fraction": 0.13691731770833335
+    },
+    {
+      "frame": 11,
+      "native_sha256": "3c5e7a75aeda07bedaa98d147eebb56541677596b04bce85abe9db71e5690a96",
+      "visual_sha256": "41f9b5194091cb4d77fd7ede51f24759030631cf7c8b62cd042091f3675cd4ff",
+      "mean_absolute_channel_difference": 3.872075104890046,
+      "pixel_difference_fraction": 0.8876605902777778,
+      "uniform_2x2_cell_fraction": 0.13665147569444444
+    }
+  ],
+  "interpretation": "Matched views show some sharper edges/detail, but much of world remains soft. Metrics do not prove retained full-scene high-resolution detail. No quality fix in804. GPU frame counters before805 double-count native pair readbacks; FPS acceptance excluded."
+}

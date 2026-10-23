@@ -1,5 +1,9 @@
 # AnyPS3 project knowledge base
 
+[2026-10-23 resolution scaling milestone](experiments/2026-10-23-render-scale.md):
+1440p45.52FPS, GUI resolution selection, batched visual draws and matched
+native/scaled captures. Quality-loss paths and stable60FPS remain open.
+
 [Manager and Qt wrapper implementation](experiments/2026-10-20-manager-gui.md)
 and [usage](../manager/README.md), isolated `fast2/manager-gui` worktree.
 Synthetic wrapper verification does not change original-game acceptance.

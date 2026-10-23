@@ -63,8 +63,8 @@ static std::optional<std::string> fragment_source_uncached(const std::vector<FpI
     std::string source="#version 450\n";
     if(shade->find("subgroupQuadBroadcast")!=std::string::npos)source+="#extension GL_KHR_shader_subgroup_quad : require\n";
     if(lines)source+="#extension GL_ARB_gpu_shader_fp64 : require\n";
-    if(rsx_layered_shaders().load(std::memory_order_relaxed))source+="layout(std430,binding=0) buffer Data {uint w[];};\nlayout(push_constant) uniform Params{vec2 extent;vec2 shift_push_;uint plane_push_;uint layers_;vec2 shifts_[4];};\nlayout(location=0) in vec4 varying_[16];\nlayout(location=16) flat in uint primitive_;\nlayout(location=17) flat in uint plane_in_;\nvec2 shift;uint plane;\n";
-    else source+="layout(std430,binding=0) buffer Data {uint w[];};\nlayout(push_constant) uniform Params{vec2 extent;vec2 shift;uint plane;};\nlayout(location=0) in vec4 varying_[16];\nlayout(location=16) flat in uint primitive_;\n";
+    if(rsx_layered_shaders().load(std::memory_order_relaxed))source+="layout(std430,binding=0) buffer Data {uint w[];};\nlayout(push_constant) uniform Params{vec2 extent;vec2 shift_push_;uint plane_push_;uint layers_;vec2 shifts_[4];layout(offset=56) vec2 raster_scale_;};\nlayout(location=0) in vec4 varying_[16];\nlayout(location=16) flat in uint primitive_;\nlayout(location=17) flat in uint plane_in_;\nvec2 shift;uint plane;\n";
+    else source+="layout(std430,binding=0) buffer Data {uint w[];};\nlayout(push_constant) uniform Params{vec2 extent;vec2 shift;uint plane;layout(offset=56) vec2 raster_scale_;};\nlayout(location=0) in vec4 varying_[16];\nlayout(location=16) flat in uint primitive_;\n";
     for(unsigned i=0;i<count;++i){source+="layout(location="+std::to_string(i)+") out "+(packed?"uint":"vec4")+" out"+std::to_string(i)+";\n";
         if(packed)source+="layout(binding="+std::to_string(17+i)+") uniform usampler2DArray previous"+std::to_string(i)+";\n";}
     std::string common=rsxvk::common_glsl;
@@ -100,6 +100,18 @@ vec4 filter_(uint unit,uint level,vec3 uv,bool linear_,uint face,float ref){
         replace_all(text," // Resident-image substitution is inserted here, before the linear fetch.","");
         replace_all(text," c=load4(texture_offset(w[l])+4u*((uint(z)*w[l+2u]+uint(y))*w[l+1u]+uint(x)));",
             " c=texelFetch(resident"+n+","+(t.resident_image?"ivec2(x,y),0":volume?"ivec3(x,y,z),int(level)":"ivec3(x,y,face),int(level)")+ ");");
+        if(t.resident_image){
+            // RTT coordinates and explicit gradients belong to the guest.
+            // Filtering/wrapping taps belong to the bound image, which may be
+            // the higher-resolution visual companion. Keep rect-coordinate
+            // normalization and LOD calculation below this prefix unchanged.
+            const auto end=text.find("float gradient(");
+            if(end==std::string::npos)throw std::runtime_error("RSX resident filter template mismatch");
+            auto taps=text.substr(0,end);
+            replace_all(taps,"w[l+1u]","uint(textureSize(resident"+n+",0).x)");
+            replace_all(taps,"w[l+2u]","uint(textureSize(resident"+n+",0).y)");
+            text.replace(0,end,taps);
+        }
         for(const auto* name:{"texel_","filter_","gradient","textureSample"}){
             const auto f=std::string(name);replace_all(text,f+"(uint unit,",f+"(");replace_all(text,f+"(unit,",f+"(");replace_all(text,f+"(",f+n+"(");}
         replace_all(text,"cube_(","cube_"+n+"(");replace_all(text,"unit",u);
@@ -156,7 +168,7 @@ void main(){C q[1];bool front=w[11]!=0u || gl_FrontFacing;
  q[0].cc[0]=q[0].cc[1]=vec4(0);q[0].killed=false;
  // Coverage/depth are per sample; RSX reference shades at pixel center.
  // Explicit interpolation restores the center after the coverage-plane shift.
- q[0].input_[0]=vec4(gl_FragCoord.xy,gl_FragCoord.zw-dFdx(gl_FragCoord.zw)*shift.x-dFdy(gl_FragCoord.zw)*shift.y);
+ q[0].input_[0]=vec4((gl_FragCoord.xy/raster_scale_),gl_FragCoord.zw-dFdx(gl_FragCoord.zw)*shift.x-dFdy(gl_FragCoord.zw)*shift.y);
 )GLSL";
     // Interpolate only inputs that some instruction reads (every source of an
     // FP instruction addresses the same input, d bits 13..16; the conservative
@@ -177,7 +189,7 @@ void main(){C q[1];bool front=w[11]!=0u || gl_FrontFacing;
     init+=" q[0].input_[14]=vec4(front?1:-1,0,0,0);\n";
     source+=init+scalar_locals();
     std::string line_init=R"GLSL(
- uint meta=w[10]+primitive_*208u;vec4 segment=load4(meta);vec2 center=gl_FragCoord.xy;
+ uint meta=w[10]+primitive_*208u;vec4 segment=load4(meta);vec2 center=(gl_FragCoord.xy/raster_scale_);
  float t=clamp(((center.x-segment.x)*segment.z+(center.y-segment.y)*segment.w)/(segment.z*segment.z+segment.w*segment.w),0,1);
  vec4 a=load4(meta+8u),b=load4(meta+76u);float iw=(1.0-t)*a.w+t*b.w;
  float z=(1.0-t)*a.z+t*b.z;float p0=(1.0-t)*a.w/iw,p1=t*b.w/iw;
@@ -204,7 +216,7 @@ void main(){C q[1];bool front=w[11]!=0u || gl_FrontFacing;
     source+=R"GLSL(
  // scalar output
  if(q[0].killed)discard;
- uvec2 pixel=uvec2(gl_FragCoord.xy);bool inside=false;
+ uvec2 pixel=uvec2((gl_FragCoord.xy/raster_scale_));bool inside=false;
  for(uint i=0u;i<8u;++i)if((w[8]&(1u<<i))!=0u){uint h=R(0x2c0u+8u*i),v=R(0x2c4u+8u*i);
   inside=inside || (pixel.x>=(h&65535u) && pixel.x<=(h>>16u) && pixel.y>=(v&65535u) && pixel.y<=(v>>16u));}
  if(w[8]!=0u && ((R(0x2bcu)&1u)!=0u?inside:!inside))discard;
@@ -240,7 +252,7 @@ void main(){C q[1];bool front=w[11]!=0u || gl_FrontFacing;
         // Alpha-to-one replaces the fragment alpha before blending (0x1d7c bit 8, read at run time).
         source+="{vec4 a2o_="+value+";if((R(0x1d7cu)&0x100u)!=0u)a2o_.a=1.0;\n";value="a2o_";
         if(!packed && !float_color(r(0x208)&31))value="cpu_clamp("+value+",vec4(0),vec4(1))";
-        if(packed)value="packed_finish("+value+",texelFetch(previous"+std::to_string(i)+",ivec3(pixel,plane),0).r,"+rsxvk::u(i)+")";
+        if(packed)value="packed_finish("+value+",texelFetch(previous"+std::to_string(i)+",ivec3(ivec2(gl_FragCoord.xy),plane),0).r,"+rsxvk::u(i)+")";
         source+="out"+std::to_string(i)+"="+value+";}\n";
     }
     replace_all(source,"rd(q[0],0u,(R(0x1d60u)&0x40u)==0u)",fp_read(0,(r(0x1d60)&0x40)==0));
@@ -266,21 +278,21 @@ static std::shared_ptr<const std::string> fragment_source(const std::vector<FpIn
 }
 // Layered MSAA planes (rsx_layered_shaders): instance n renders sample plane n
 // into layer n with its own sample shift; FS planes come from plane_out_.
-static const char* layered_vertex_glsl=R"GLSL(layout(push_constant) uniform Params{vec2 extent;vec2 shift_push_;uint plane_push_;uint layers_;vec2 shifts_[4];};
+static const char* layered_vertex_glsl=R"GLSL(layout(push_constant) uniform Params{vec2 extent;vec2 shift_push_;uint plane_push_;uint layers_;vec2 shifts_[4];layout(offset=56) vec2 raster_scale_;};
 layout(location=17) flat out uint plane_out_;
 vec2 shift;
 void layered_plane_(){shift=layers_>1u?shifts_[gl_InstanceIndex]:shift_push_;plane_out_=layers_>1u?uint(gl_InstanceIndex):plane_push_;gl_Layer=layers_>1u?gl_InstanceIndex:0;}
 )GLSL";
 // Multiview (VK_KHR_multiview): view n = sample plane n, one draw instance. Outside a multiview
 // render pass (single-plane passes) gl_ViewIndex is 0 and layers_ is 1.
-static const char* multiview_vertex_glsl=R"GLSL(layout(push_constant) uniform Params{vec2 extent;vec2 shift_push_;uint plane_push_;uint layers_;vec2 shifts_[4];};
+static const char* multiview_vertex_glsl=R"GLSL(layout(push_constant) uniform Params{vec2 extent;vec2 shift_push_;uint plane_push_;uint layers_;vec2 shifts_[4];layout(offset=56) vec2 raster_scale_;};
 layout(location=17) flat out uint plane_out_;
 vec2 shift;
 void layered_plane_(){shift=layers_>1u?shifts_[gl_ViewIndex]:shift_push_;plane_out_=layers_>1u?uint(gl_ViewIndex):plane_push_;}
 )GLSL";
 static std::string layered_vertex(std::string source){
     if(!rsx_layered_shaders().load(std::memory_order_relaxed))return source;
-    const std::string block="layout(push_constant) uniform Params{vec2 extent;vec2 shift;};\n";
+    const std::string block="layout(push_constant) uniform Params{vec2 extent;vec2 shift;layout(offset=56) vec2 raster_scale_;};\n";
     const auto at=source.find(block),main=source.find("void main(){");
     if(at==std::string::npos || main==std::string::npos)throw std::runtime_error("RSX layered vertex shader template mismatch");
     const bool multiview=rsx_multiview_shaders().load(std::memory_order_relaxed);
@@ -290,12 +302,12 @@ static std::string layered_vertex(std::string source){
 }
 static std::string vertex_source(){return layered_vertex(R"GLSL(#version 450
 layout(std430,binding=0) readonly buffer Data{uint w[];};
-layout(push_constant) uniform Params{vec2 extent;vec2 shift;};
+layout(push_constant) uniform Params{vec2 extent;vec2 shift;layout(offset=56) vec2 raster_scale_;};
 layout(location=0) out vec4 varying_[16];
 layout(location=16) flat out uint primitive_;
 vec4 load4(uint a){return uintBitsToFloat(uvec4(w[a],w[a+1u],w[a+2u],w[a+3u]));}
 void main(){primitive_=uint(gl_VertexIndex)/3u;uint at=w[3]+uint(gl_VertexIndex)*68u;vec4 p=load4(at);float cw=1.0/p.w;
- gl_Position=vec4(((p.xy-shift)/extent*2.0-1.0)*cw,p.z*cw,cw);
+ gl_Position=vec4(((p.xy-shift/raster_scale_)/extent*2.0-1.0)*cw,p.z*cw,cw);
  for(uint i=0u;i<16u;++i)varying_[i]=load4(at+4u+4u*i);}
 )GLSL");}
 static const char* raw_vertex_glsl=R"GLSL(
@@ -336,7 +348,7 @@ static std::optional<std::string> hardware_vertex_uncached(const NativeRsx& gpu,
     if(body.find(tail)==std::string::npos)return {};
     const std::string scale="vec3(F(0xa30u),F(0xa34u),F(0xa38u))";
     const std::string offset="vec3(F(0xa20u),F(0xa24u),F(0xa28u))";
-    replace_all(body,tail,"vec3 p=o[0].xyz/o[0].w*"+scale+"+"+offset+";gl_Position=vec4(((p.xy-shift)/extent*2.0-1.0)*o[0].w,p.z*o[0].w,o[0].w);for(uint n=0u;n<16u;++n)varying_[n]=o[n];}");
+    replace_all(body,tail,"vec3 p=o[0].xyz/o[0].w*"+scale+"+"+offset+";gl_Position=vec4(((p.xy-shift/raster_scale_)/extent*2.0-1.0)*o[0].w,p.z*o[0].w,o[0].w);for(uint n=0u;n<16u;++n)varying_[n]=o[n];}");
     replace_all(body,"uint id=uint(gl_VertexIndex);","uint id=uint(gl_VertexIndex);primitive_=id/3u;");
     if(fetch || immediate){
         if(fetch){replace_all(body,"input_[n]=load4(w[3]+id*64u+n*4u)","input_[n]=attribute_(n,id)");
@@ -352,7 +364,7 @@ static std::optional<std::string> hardware_vertex_uncached(const NativeRsx& gpu,
  for(uint n=0u;n<16u;++n)varying_[n]=o[n];}
 )GLSL");
     }
-    auto source=std::string("#version 450\nlayout(std430,binding=0) buffer Data{uint w[];};\nlayout(push_constant) uniform Params{vec2 extent;vec2 shift;};\nlayout(location=0) out vec4 varying_[16];\nlayout(location=16) flat out uint primitive_;\nvec4 load4(uint a){return uintBitsToFloat(uvec4(w[a],w[a+1u],w[a+2u],w[a+3u]));}\nfloat F(uint a){return uintBitsToFloat(w[16u+a/4u]);}\n")+((fetch || immediate)?std::string("out gl_PerVertex {vec4 gl_Position;float gl_PointSize;float gl_ClipDistance[8];};\n")+(fetch?raw_vertex_glsl:""):"")+body;
+    auto source=std::string("#version 450\nlayout(std430,binding=0) buffer Data{uint w[];};\nlayout(push_constant) uniform Params{vec2 extent;vec2 shift;layout(offset=56) vec2 raster_scale_;};\nlayout(location=0) out vec4 varying_[16];\nlayout(location=16) flat out uint primitive_;\nvec4 load4(uint a){return uintBitsToFloat(uvec4(w[a],w[a+1u],w[a+2u],w[a+3u]));}\nfloat F(uint a){return uintBitsToFloat(w[16u+a/4u]);}\n")+((fetch || immediate)?std::string("out gl_PerVertex {vec4 gl_Position;float gl_PointSize;float gl_ClipDistance[8];};\n")+(fetch?raw_vertex_glsl:""):"")+body;
     replace_all(source,"float F(uint a){return uintBitsToFloat(w[16u+a/4u]);}",std::string(state_glsl)+"\nfloat F(uint a){return uintBitsToFloat(R(a));}");
     for(const auto* address:{"0x1fc0u","0x1478u","0x1ff4u"})replace_all(source,std::string("w[16u+")+address+"/4u]",std::string("R(")+address+")");
     replace_all(source,"load4(w[2]+","cstate4(");
@@ -919,7 +931,7 @@ struct Session {
         ++surface_image_misses;auto image=vk.graphics_image(*batch,f,w,h,layers,depth);
         // The equal-footprint GPU path keeps ~67 MiB live in the measured
         // frame; retain a bounded working set instead of reallocating it.
-        constexpr std::uint64_t budget=96*1024*1024;
+        const std::uint64_t budget=96*1024*1024ull*(vk.graphics_render_scale==1?1:1+vk.graphics_render_scale*vk.graphics_render_scale);
         while(!surface_images.empty() && (surface_images.size()>=64 || surface_image_bytes+image->memory_bytes>budget)){
             auto old=std::min_element(surface_images.begin(),surface_images.end(),[](const auto& a,const auto& b){return a.use<b.use;});
             surface_image_bytes-=old->image->memory_bytes;surface_images.erase(old);
@@ -933,9 +945,9 @@ struct Session {
         for(auto& entry:history_images)if(entry.slot==slot && entry.format==format && entry.width==width && entry.height==height && entry.samples==samples){entry.last_use=++resource_clock;return entry.image;}
         auto image=vk.graphics_image(*batch,format,width,height,samples);
         auto bytes=[&]{std::uint64_t n=0;for(const auto& e:history_images)n+=e.image->memory_bytes;return n;};
-        while(!history_images.empty() && (history_images.size()>=8 || bytes()+image->memory_bytes>128*1024*1024)){
+        while(!history_images.empty() && (history_images.size()>=8 || bytes()+image->memory_bytes>(128*1024*1024ull*(vk.graphics_render_scale==1?1:1+vk.graphics_render_scale*vk.graphics_render_scale)))){
             auto old=std::min_element(history_images.begin(),history_images.end(),[](const auto& a,const auto& b){return a.last_use<b.last_use;});history_images.erase(old);}
-        if(image->memory_bytes<=128*1024*1024)history_images.push_back({format,slot,width,height,samples,++resource_clock,image});
+        if(image->memory_bytes<=(128*1024*1024ull*(vk.graphics_render_scale==1?1:1+vk.graphics_render_scale*vk.graphics_render_scale)))history_images.push_back({format,slot,width,height,samples,++resource_clock,image});
         return image;
     }
     std::vector<RawTexture> raw_textures;
@@ -1136,7 +1148,7 @@ struct Session {
         finish_reads();
     }
     void host_access(const void* p,std::uint64_t size,bool write){
-        if(busy){if(anyps3_ft::on)anyps3_ft::exec_class|=4;return;}
+        if(busy){if(anyps3_ft::enabled(anyps3_ft::HostExec))anyps3_ft::exec_class|=4;return;}
         // ANYPS3_SPUPUT_DUMP=N (diagnostic, default off): describe the first N foreign read requests: exact sync/poll bits of the
         // span, overlapping labels, surfaces and raw texture spans (which watch made the requester synchronise?).
         static const unsigned dump_limit=[]{const char* v=std::getenv("ANYPS3_SPUPUT_DUMP");return v?unsigned(std::strtoul(v,nullptr,0)):0u;}();
@@ -1153,14 +1165,14 @@ struct Session {
             for(const auto& entry:raw_textures){bool hit=false;raw_spans(entry,[&](const void* a,std::uint64_t n){const auto x=reinterpret_cast<std::uintptr_t>(a);if((x>>12)<=((at+size-1)>>12) && (at>>12)<=((x+n-1)>>12))hit=true;});
                 if(hit)std::fprintf(stderr,"SPUPUT DUMP  raw source=0x%llx size=%llu dirty_inputs=%d buffer=%d plan=%d\n",(unsigned long long)reinterpret_cast<std::uintptr_t>(entry.source),(unsigned long long)entry.size,int(bool(entry.dirty_inputs)),int(bool(entry.buffer)),int(bool(entry.plan)));}}}
         const auto ft_invalidations=raw_invalidations;
-        struct FtClass {const decltype(raw_invalidations)& now;decltype(raw_invalidations) before;~FtClass(){if(anyps3_ft::on && now!=before)anyps3_ft::exec_class|=32;}} ft_class{raw_invalidations,ft_invalidations};
+        struct FtClass {const decltype(raw_invalidations)& now;decltype(raw_invalidations) before;~FtClass(){if(anyps3_ft::enabled(anyps3_ft::HostExec) && now!=before)anyps3_ft::exec_class|=32;}} ft_class{raw_invalidations,ft_invalidations};
         ::RsxPerfCounters::add(::RsxPerfCounters::host_access);
         GuestMemory::RawYield payload(state.memory);
         if(!state.rsx.graphics_session)enter_fifo();
         const bool protected_access=!HostByteAccess::active() && (write?guard.touches_any(p,size):guard.touches(p,size));
-        if(anyps3_ft::on && protected_access)anyps3_ft::exec_class|=16;
+        if(anyps3_ft::enabled(anyps3_ft::HostExec) && protected_access)anyps3_ft::exec_class|=16;
         if(has_labels() && (label_overlap(p,size) || protected_access)){
-            if(anyps3_ft::on)anyps3_ft::exec_class|=8;
+            if(anyps3_ft::enabled(anyps3_ft::HostExec))anyps3_ft::exec_class|=8;
             if(fallback_stats().enabled){std::ostringstream detail;detail<<"write="<<write<<" pc=0x"<<std::hex<<state.pc;
                 detail<<" ppu_owner="<<std::dec<<state.thread_id<<" host=0x"<<std::hex<<reinterpret_cast<std::uintptr_t>(p)<<" bytes=0x"<<size;
                 for(const auto& region:state.maps){const auto base=reinterpret_cast<std::uintptr_t>(region.bytes->data()),at=reinterpret_cast<std::uintptr_t>(p);if(at>=base && at-base<region.bytes->size())detail<<" guest=0x"<<(region.base+at-base);}
@@ -1183,14 +1195,17 @@ struct Session {
         if(write || protected_access)invalidate_raw(p,size,write?"host_write":"protected_read");
         bool overlap=false;for(const auto& s:surfaces)if(s.overlaps(p,size)){overlap=true;break;}
         if(!overlap){
-            if(!HostByteAccess::active() && guard.touches_any(p,size)){if(anyps3_ft::on)anyps3_ft::exec_class|=256;guard.release(p,size);++ownership_revision;if(!state.rsx.graphics_session)leave_fifo();}
+            if(!HostByteAccess::active() && guard.touches_any(p,size)){if(anyps3_ft::enabled(anyps3_ft::HostExec))anyps3_ft::exec_class|=256;guard.release(p,size);++ownership_revision;if(!state.rsx.graphics_session)leave_fifo();}
             return;
         }
-        if(anyps3_ft::on){anyps3_ft::exec_class|=64;for(const auto& s:surfaces)if(s.dirty && s.overlaps(p,size)){anyps3_ft::exec_class|=128;break;}}
+        if(anyps3_ft::enabled(anyps3_ft::HostExec)){anyps3_ft::exec_class|=64;for(const auto& s:surfaces)if(s.dirty && s.overlaps(p,size)){anyps3_ft::exec_class|=128;break;}}
         if(fallback_stats().enabled){std::ostringstream detail;detail<<"write="<<write<<" pc=0x"<<std::hex<<state.pc<<" host=0x"<<reinterpret_cast<std::uintptr_t>(p)<<" bytes=0x"<<size;
             for(const auto& region:state.maps){const auto base=reinterpret_cast<std::uintptr_t>(region.bytes->data()),at=reinterpret_cast<std::uintptr_t>(p);if(at>=base && at-base<region.bytes->size())detail<<" guest=0x"<<(region.base+at-base);}
             fallback_stats().detail("surface_host_access",detail.str());}
         flush(true,p,size,write?"host_write":"host_read");
+        // Guest coherence remains authoritative. Until partial visual history
+        // restoration is implemented, count every loss of a visual companion.
+        for(const auto& surface:surfaces)if(surface.image->visual && surface.overlaps(p,size))++vk.graphics_visual_host_invalidations;
         surfaces.erase(std::remove_if(surfaces.begin(),surfaces.end(),[&](const auto& s){return s.overlaps(p,size);}),surfaces.end());refresh_surface_watches();
         if(!state.rsx.graphics_session)leave_fifo();
     }
@@ -1482,8 +1497,8 @@ struct Session {
         }
         if(!discard){
         const std::string vs="#version 450\nvoid main(){vec2 p=vec2((gl_VertexIndex<<1)&2,gl_VertexIndex&2);gl_Position=vec4(p*2.0-1.0,0,1);}";
-        const std::string fs="#version 450\nlayout(binding=17) uniform sampler2DArray src_;layout(location=0) out vec4 color_;layout(push_constant) uniform Params{vec2 extent;vec2 shift;uint plane_;};void main(){ivec2 p=ivec2(gl_FragCoord.xy);uint gx=uint(p.x)*"+std::to_string(surface.samples)+"u+plane_;if(gx>="+std::to_string(source->width*source_samples)+"u)discard;color_=texelFetch(src_,ivec3(gx/"+std::to_string(source_samples)+"u,p.y,gx%"+std::to_string(source_samples)+"u),0);}";
-        NativeVulkan::GraphicsState fixed{};fixed.width=surface.width;fixed.height=surface.height;fixed.colors=1;fixed.samples=surface.samples;fixed.color=VK_FORMAT_R8G8B8A8_UNORM;fixed.scissor={{0,0},{surface.width,surface.height}};fixed.blend[0].colorWriteMask=15;
+        const std::string fs="#version 450\nlayout(binding=17) uniform sampler2DArray src_;layout(location=0) out vec4 color_;layout(push_constant) uniform Params{vec2 extent;vec2 shift;uint plane_;layout(offset=56) vec2 raster_scale_;};void main(){vec2 u=gl_FragCoord.xy/raster_scale_;ivec2 p=ivec2(u);uint gx=uint(p.x)*"+std::to_string(surface.samples)+"u+plane_;if(gx>="+std::to_string(source->width*source_samples)+"u)discard;vec2 ratio=vec2(textureSize(src_,0).xy)/vec2("+std::to_string(source->width)+","+std::to_string(source->height)+");ivec2 q=ivec2((vec2(gx/"+std::to_string(source_samples)+"u,p.y)+fract(u))*ratio);color_=texelFetch(src_,ivec3(q,gx%"+std::to_string(source_samples)+"u),0);}";
+        NativeVulkan::GraphicsState fixed{};fixed.scale_visual=true;fixed.width=surface.width;fixed.height=surface.height;fixed.colors=1;fixed.samples=surface.samples;fixed.color=VK_FORMAT_R8G8B8A8_UNORM;fixed.scissor={{0,0},{surface.width,surface.height}};fixed.blend[0].colorWriteMask=15;
         std::array<std::shared_ptr<NativeVulkan::GraphicsImage>,4> colors{};colors[0]=surface.image;
         std::array<std::shared_ptr<NativeVulkan::GraphicsImage>,20> inputs{};inputs[16]=input;
         const std::array<std::array<float,2>,4> positions{{{.5f,.5f},{.5f,.5f},{.5f,.5f},{.5f,.5f}}};
@@ -1585,9 +1600,10 @@ struct Session {
             for(const auto& span:affected)flush(true,reinterpret_cast<const void*>(span.begin),span.end-span.begin,"surface_alias");
             surfaces.erase(std::remove_if(surfaces.begin(),surfaces.end(),aliases),surfaces.end());refresh_surface_watches();
         }
-        const auto bytes_required=std::uint64_t(width)*height*samples*image_bpp(f);
+        const auto image_factor=vk.graphics_render_scale==1?1:1+vk.graphics_render_scale*vk.graphics_render_scale;
+        const auto bytes_required=std::uint64_t(width)*height*samples*image_bpp(f)*image_factor;
         auto cached_bytes=[&]{std::uint64_t n=0;for(const auto& entry:surfaces)n+=entry.image->memory_bytes;return n;};
-        while(!surfaces.empty() && (surfaces.size()>=64 || cached_bytes()+bytes_required>256*1024*1024)){
+        while(!surfaces.empty() && (surfaces.size()>=64 || cached_bytes()+bytes_required>256*1024*1024ull*image_factor)){
             // Commit every dirty target before removing its physical ownership.
             flush(true,nullptr,0,"surface_eviction");auto old=std::min_element(surfaces.begin(),surfaces.end(),[](const auto& a,const auto& b){return a.last_use<b.last_use;});surfaces.erase(old);refresh_surface_watches();++surface_evictions;}
         surface.image=surface_image(f,width,height,samples,depth);
@@ -1742,7 +1758,7 @@ template<class Vertex> static bool prepared(Session& session,const std::vector<s
         catch(...){session.allow_resident_textures=true;throw;}session.allow_resident_textures=true;}
     phase.next(HostStage::g_state);
     const bool packed=packed_color(r),srgb=!packed && r(0x1fec);
-    NativeVulkan::GraphicsState fixed;fixed.width=width;fixed.height=height;fixed.samples=samples;fixed.colors=count;fixed.color=packed?VK_FORMAT_R32_UINT:color_format(r(0x208)&31,srgb);
+    NativeVulkan::GraphicsState fixed;fixed.scale_visual=true;fixed.width=width;fixed.height=height;fixed.samples=samples;fixed.colors=count;fixed.color=packed?VK_FORMAT_R32_UINT:color_format(r(0x208)&31,srgb);
     if(!alias && (count && !vk.graphics_format(fixed.color)))return attempt.reject("device_color_format");
     if(depth.base)fixed.depth=((r(0x208)>>5)&7)==1?VK_FORMAT_D16_UNORM:VK_FORMAT_D24_UNORM_S8_UINT;
     if(!alias && (fixed.depth!=VK_FORMAT_UNDEFINED && !vk.graphics_format(fixed.depth,true)))return attempt.reject("device_depth_format");
@@ -1967,7 +1983,9 @@ template<class Vertex> static bool prepared(Session& session,const std::vector<s
     if(alias){bool parallel_alias=false;if(!draw_alias(session,std::move(data),*fs,colors,depth,width,height,samples,count,vertices,x0,y0,x1,y1,parallel_alias))return attempt.reject("color_depth_alias_device_capacity");
         attempt.path(parallel_alias?"parallel_attachment_alias":"component_attachment_alias");return true;}
     attempt.path("scalar_fragment");
-    if(session.batch->used+data.size()*4+32*1024*1024>session.batch->capacity || session.batch->visibility_count+samples>=1000 || session.batch->pipeline_pins.size()>=64)session.submit_async("batch_capacity");
+    const auto visual_blob_bytes=vk.graphics_render_scale>1?std::uint64_t(data.size())*4:0;
+    if(visual_blob_bytes && !session.ensure_upload_capacity(data.size()*4+tail_bytes+visual_blob_bytes+128*1024))throw std::runtime_error("RSX paired draw exceeds staging capacity");
+    if(session.batch->used+data.size()*4+visual_blob_bytes+32*1024*1024>session.batch->capacity || session.batch->visibility_count+samples>=1000 || session.batch->pipeline_pins.size()>=64)session.submit_async("batch_capacity");
     std::array<std::shared_ptr<NativeVulkan::GraphicsImage>,4> images{};std::shared_ptr<NativeVulkan::GraphicsImage> z;
     phase.next(HostStage::g_bind);
     for(unsigned i=0;i<count;++i)images[i]=colors[i].base?session.bind(colors[i],width,height,samples,format,false,srgb,packed).image:session.history_image(fixed.color,width,height,samples,4+i);
@@ -1979,7 +1997,7 @@ template<class Vertex> static bool prepared(Session& session,const std::vector<s
     if(packed)for(unsigned i=0;i<count;++i)texture_images[16+i]=session.history_image(fixed.color,width,height,samples,i);
     std::uint64_t reuse=UINT64_MAX;
     for(unsigned primitive=0;primitive<(sequential_packed?vertices/3:1u);++primitive){
-    if(session.batch->used+(reuse==UINT64_MAX?data.size()*4+tail_bytes:0)+128*1024>session.batch->capacity || session.batch->visibility_count+samples>=1000 || session.batch->pipeline_pins.size()>=64){session.submit_async("batch_capacity");reuse=UINT64_MAX;}
+    if(session.batch->used+(reuse==UINT64_MAX?data.size()*4+tail_bytes:0)+visual_blob_bytes+128*1024>session.batch->capacity || session.batch->visibility_count+samples>=1000 || session.batch->pipeline_pins.size()>=64){session.submit_async("batch_capacity");reuse=UINT64_MAX;}
     if(packed)for(unsigned i=0;i<count;++i){vk.graphics_copy(*session.batch,images[i],texture_images[16+i]);::RsxPerfCounters::add(::RsxPerfCounters::history_copies);}
     const auto first=session.batch->visibility_count;
     // graphics_draw allocates the descriptor blob at aligned staging offset.
@@ -2073,7 +2091,7 @@ static bool clear(Session& session,unsigned mask){
     for(unsigned i=0;i<targets.size();++i){if(depth.base && targets[i].mapping->overlaps(*depth.mapping))throw std::runtime_error("overlapping RSX clear attachments");
         for(unsigned j=0;j<i;++j)if(targets[i].mapping->overlaps(*targets[j].mapping))throw std::runtime_error("overlapping RSX clear attachments");}
     if(targets.empty() && !depth.base)return true;
-    NativeVulkan::GraphicsState fixed;fixed.width=width;fixed.height=height;fixed.samples=samples;fixed.colors=targets.size();fixed.color=color_format(format);
+    NativeVulkan::GraphicsState fixed;fixed.scale_visual=true;fixed.width=width;fixed.height=height;fixed.samples=samples;fixed.colors=targets.size();fixed.color=color_format(format);
     fixed.depth=depth.base?(df==1?VK_FORMAT_D16_UNORM:VK_FORMAT_D24_UNORM_S8_UINT):VK_FORMAT_UNDEFINED;
     if(fixed.colors && !session.vk.graphics_format(fixed.color))return reject("device_color_format");
     if(depth.base && !session.vk.graphics_format(fixed.depth,true))return reject("device_depth_format");
@@ -2097,7 +2115,7 @@ static bool clear(Session& session,unsigned mask){
         if(fallback_stats().enabled)++fallback_stats().paths["clear_transfer"];
     }else{
         static const auto vs=std::make_shared<const std::string>("#version 450\nvoid main(){vec2 p=vec2((gl_VertexIndex<<1)&2,gl_VertexIndex&2);gl_Position=vec4(p*2-1,0,1);}");
-        std::string fs="#version 450\nlayout(std430,binding=0) readonly buffer Data{uint w[];};\nlayout(push_constant) uniform Params{vec2 extent;vec2 shift;uint plane;};\n";
+        std::string fs="#version 450\nlayout(std430,binding=0) readonly buffer Data{uint w[];};\nlayout(push_constant) uniform Params{vec2 extent;vec2 shift;uint plane;layout(offset=56) vec2 raster_scale_;};\n";
         std::array<std::shared_ptr<NativeVulkan::GraphicsImage>,20> inputs{};
         for(unsigned i=0;i<fixed.colors;++i){const auto n=std::to_string(i);fs+="layout(location="+n+") out "+(integer?"uint":"vec4")+" c"+n+";\n";
             if(integer && !full_color){inputs[16+i]=session.surface_image(VK_FORMAT_R32_UINT,width,height,samples);session.vk.graphics_copy(*session.batch,images[i],inputs[16+i]);

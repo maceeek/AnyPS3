@@ -1,5 +1,36 @@
 # Handoff to the next instance
 
+## Resolution-scaling milestone — 2026-10-23
+
+Implemented on `feat/render-scale`, based on current `origin/main`:
+
+- Native guest rendering plus visual companions at integer scales 1–4; typed
+  render-to-texture sampling, capture and presentation use the scaled images.
+- Visual draw batching reduces render-pass switching. Quiet original Great Clock
+  run803 at2560×1440 averaged **45.52FPS**, with recorder enabled. Stable60FPS
+  and full-scene high-resolution detail remain unverified.
+- GUI **Video → Internal rendering resolution** persists global/title overrides
+  and passes the typed value to supported builds. Installed release unchanged.
+- `scripts/ratchet_fast_menu.py` automates START through the original input path.
+  This accelerates boot navigation; a complete intro bypass is not implemented.
+- Same-flip native/visual captures confirm a modest visual improvement. Known
+  merge/rebind and unsupported RTT paths still reconstruct native detail. Their
+  exact contribution to the final world image remains untraced.
+
+Validation: complete802 runtime suite reconciled to925 passes+7 skips after one
+unchanged concurrency fixture passed its uncontended rerun; the original failed
+report is retained. Later changes have focused tests. After rebasing, all GUI and
+manager tests passed (146 passes,4 skips). Final review has no remaining confirmed
+blocker. Original game bytes are unchanged; physical gamepad was not tested.
+
+Final build805 reached the original Great Clock with matching native/scaled
+captures, exact original PT_LOAD bytes and no guest STOP. No runtime jobs remain
+active. User requested completion and branch publication of these milestones. Next
+rendering investigation: trace the final scene's image dependencies and preserve
+visual history through the implicated alias/conversion; then measure quiet FPS.
+[Evidence and exact scope](experiments/2026-10-23-render-scale.md).
+
+
 ## Wave 6 — 2026-10-21 (ended on user instruction ~17:15)
 
 Read the top of [CURRENT.md](CURRENT.md). Branch `claude/wave6-60fps` (pushed; the user merges it into main) = main + integration

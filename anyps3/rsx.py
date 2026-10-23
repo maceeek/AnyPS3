@@ -71,7 +71,7 @@ static void rsx_graphics_flip_prepare(PpuState&);
 static bool rsx_graphics_poll(PpuState&);
 static bool rsx_graphics_defer_label(PpuState&,std::uint64_t,unsigned);
 static bool rsx_graphics_defer_report(PpuState&,std::uint64_t,unsigned,bool,bool);
-[[maybe_unused]] static bool rsx_graphics_scanout(PpuState& s,unsigned id,std::vector<std::uint8_t>* capture,bool present);
+[[maybe_unused]] static bool rsx_graphics_scanout(PpuState& s,unsigned id,std::vector<std::uint8_t>* capture,bool present,unsigned* visual_width=nullptr,unsigned* visual_height=nullptr,bool count_frame=true);
 #endif
 // FRAMETIME wave: page-synchronisation requests of other threads (SPU lanes, PPU faults) used to wait for the owner's whole FIFO run or
 // vsync wait (measured: mean 1.7 ms behind a run, 9 ms behind a vsync wait, 9.8 ms/frame summed over the lanes). The game worker installs a
@@ -400,11 +400,12 @@ static bool rsx_graphics_flip_async(PpuState& s,unsigned id,std::uint64_t addres
     for(const auto& surface:session->surfaces)if(!surface.partial && surface.same(target,buffer.width,buffer.height,1,8,false)){image=surface.image;break;}
     if(!image || image->format==VK_FORMAT_R32_UINT)return false;
     if(capture && (image->width!=buffer.width || image->height!=buffer.height || image->layers!=1))return false;
+    const auto capture_image=image->visual?image->visual:image;
     if(capture && s.rsx.captured_frames>=256)throw std::runtime_error("headless RSX capture budget exhausted (256 frames)");
     // The capture copy needs width*height*4 bytes of this batch's staging. Decide before defer_flip attaches the flip labels: submit
     // the preceding work and record the flip into a fresh batch, or take the synchronous capture path when even an empty batch is
     // too small (never "staging exhausted" in the middle of a deferred flip).
-    if(capture){const auto bytes=std::uint64_t(buffer.width)*buffer.height*4;
+    if(capture){const auto bytes=std::uint64_t(capture_image->width)*capture_image->height*4;
         if(!session->vk.graphics_space_fits(*session->batch,bytes)){session->submit_async("capture_space");
             if(!session->vk.graphics_space_fits(*session->batch,bytes))return false;}}
     const unsigned head=unsigned((address-(std::uint64_t(s.rsx.driver)+0x10b8))/0x40);
@@ -413,12 +414,13 @@ static bool rsx_graphics_flip_async(PpuState& s,unsigned id,std::uint64_t addres
     try{
         ++session->batch->frames;
         if(capture){
-            // Same bytes as the synchronous scanout capture (rsx_graphics_scanout): the display image copied after every command
+            // Capture the selected visual companion when scaling is enabled; native guest storage remains unchanged. Copied after every command
             // of this frame, alpha forced opaque (X8R8G8B8 scanout). Recorded before the present: an asynchronous present
             // submits the batch (GraphicsWsi::display), after which nothing more can be recorded into it.
-            const auto at=session->vk.graphics_transfer(*session->batch,image,VK_IMAGE_ASPECT_COLOR_BIT,4);
+            session->batch->pins.push_back(image);
+            const auto at=session->vk.graphics_transfer(*session->batch,capture_image,VK_IMAGE_ASPECT_COLOR_BIT,4);
             const auto number=++s.rsx.captured_frames;++s.rsx.async_captures;
-            session->completions.push_back([at,number,id,width=buffer.width,height=buffer.height,path=root/rsx_capture_name(number)](const NativeVulkan::GraphicsBatch& b){
+            session->completions.push_back([at,number,id,width=capture_image->width,height=capture_image->height,path=root/rsx_capture_name(number)](const NativeVulkan::GraphicsBatch& b){
                 std::vector<std::uint8_t> rgba(std::size_t(width)*height*4);std::memcpy(rgba.data(),static_cast<const char*>(b.map)+at,rgba.size());
                 for(std::size_t i=3;i<rgba.size();i+=4)rgba[i]=255;
                 rsx_capture_write_async(path,std::move(rgba),id,width,height,number);});
@@ -433,7 +435,7 @@ static bool rsx_graphics_flip_async(PpuState& s,unsigned id,std::uint64_t addres
     if(!s.rsx.graphics_session)session->leave_fifo();
     return true;
 }
-[[maybe_unused]] static bool rsx_graphics_scanout(PpuState& s,unsigned id,std::vector<std::uint8_t>* capture,bool present){
+[[maybe_unused]] static bool rsx_graphics_scanout(PpuState& s,unsigned id,std::vector<std::uint8_t>* capture,bool present,unsigned* visual_width,unsigned* visual_height,bool count_frame){
     auto* session=static_cast<rsxgraphics::Session*>(s.rsx.graphics_session?s.rsx.graphics_session:s.rsx.graphics_owner.get());
     if(!session || id>=s.rsx.display_buffers.size() || s.video.format!=0)return false;
     if(!s.rsx.graphics_session)session->enter_fifo();
@@ -446,10 +448,10 @@ static bool rsx_graphics_flip_async(PpuState& s,unsigned id,std::uint64_t addres
     if(!image)return false;
     if(image->format==VK_FORMAT_R32_UINT)return false; // packed ARGB requires the coherent scanout codec
     // Complete/validate shaders and visibility, without guest readback.
-    if(!present && !capture){++session->batch->frames;session->submit_async("flip");
+    if(!present && !capture){if(count_frame)++session->batch->frames;session->submit_async("flip");
         if(!s.rsx.graphics_session)session->leave_fifo();
         return true;}
-    ++session->batch->frames;
+    if(count_frame)++session->batch->frames;
     session->flush(false,nullptr,0,"scanout");
     if(present){
         // Scanout presents stored sRGB bytes, without a second decode. A
@@ -460,8 +462,15 @@ static bool rsx_graphics_flip_async(PpuState& s,unsigned id,std::uint64_t addres
         session->flush(false,nullptr,0,"scanout");++s.present.presented_frames;
     }
     if(capture){
-        const auto at=session->vk.graphics_transfer(*session->batch,image,VK_IMAGE_ASPECT_COLOR_BIT,4);
-        session->vk.graphics_finish(*session->batch);capture->resize(std::size_t(b.width)*b.height*4);
+        const auto selected=visual_width && visual_height && image->visual?image->visual:image;
+        const auto bytes=std::uint64_t(selected->width)*selected->height*4;
+        if(selected!=image && !session->ensure_upload_capacity(bytes+65536))throw std::runtime_error("RSX visual capture exceeds staging capacity");
+        if(!session->vk.graphics_space_fits(*session->batch,bytes))session->submit_async("capture_space");
+        session->batch->pins.push_back(image);
+        const auto at=session->vk.graphics_transfer(*session->batch,selected,VK_IMAGE_ASPECT_COLOR_BIT,4);
+        session->vk.graphics_finish(*session->batch);capture->resize(bytes);
+        if(visual_width)*visual_width=selected->width;
+        if(visual_height)*visual_height=selected->height;
         std::memcpy(capture->data(),static_cast<const char*>(session->batch->map)+at,capture->size());
         for(std::size_t i=3;i<capture->size();i+=4)(*capture)[i]=255;
         session->flush(false,nullptr,0,"scanout");

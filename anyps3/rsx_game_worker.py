@@ -192,7 +192,7 @@ static void rsx_worker_start(PpuState& s){
         auto invoke=[&w,&m,p,n,write]{
             GuestMemory::ObserverPause pause(m);
             if(m.host_access_observer && (m.host_access_observer.interested(p,n) || m.raw_cpu_dirty_interested(p,n,write))){
-                if(anyps3_ft::on)anyps3_ft::exec_class|=(m.host_access_observer.interested(p,n)?1u:0u)|(m.raw_cpu_dirty_interested(p,n,write)?2u:0u);
+                if(anyps3_ft::enabled(anyps3_ft::HostExec))anyps3_ft::exec_class|=(m.host_access_observer.interested(p,n)?1u:0u)|(m.raw_cpu_dirty_interested(p,n,write)?2u:0u);
                 m.host_access_observer.callback(p,n,write);}
         };
         if(w.on_owner())invoke();else{ExecutionScope wait(ExecutionPhase::RsxWait);++w.host_requests;
@@ -216,7 +216,7 @@ static void rsx_worker_start(PpuState& s){
         ExecutionScope phase(w.timing,ExecutionPhase::Rsx);
         {static const bool drain=[]{const char* v=std::getenv("ANYPS3_RSX_HOST_DRAIN");return !v || std::string(v)!="0";}();
             auto& hook=rsx_owner_hook();if(drain && !hook)hook=[&w,f]{rsx_owner_drain(w,f);};}
-        anyps3_ft::Span ft_run(anyps3_ft::FifoRun,f->rsx.draw.draws,0,0,anyps3_ft::on?anyps3_ft::now()-anyps3_ft::last_post_ns.load(std::memory_order_relaxed):0);
+        anyps3_ft::Span ft_run(anyps3_ft::FifoRun,f->rsx.draw.draws,0,0,anyps3_ft::enabled(anyps3_ft::FifoRun)?anyps3_ft::now()-anyps3_ft::last_post_ns.load(std::memory_order_relaxed):0);
         w.progress.store(rsx_run_inline(*f,budget),std::memory_order_release);rsx_worker_publish(*f);
         ft_run.a=f->rsx.draw.draws-ft_run.a;ft_run.c=f->rsx.flips;
     };
@@ -411,7 +411,7 @@ static EngineStepReply rsx_worker_request(PpuState& s,unsigned budget){
     const auto put=s.memory.load(address,4);
     if(put==w.posted_put && !w.fifo_work.load(std::memory_order_acquire))return {progress(),false};
     const auto pc=s.pc,tid=s.thread_id;w.fifo_queued.store(true,std::memory_order_release);
-    if(anyps3_ft::on){anyps3_ft::last_post_ns.store(anyps3_ft::now(),std::memory_order_relaxed);anyps3_ft::mark(anyps3_ft::PostFifo,put,budget);}
+    if(anyps3_ft::enabled(anyps3_ft::PostFifo)){anyps3_ft::last_post_ns.store(anyps3_ft::now(),std::memory_order_relaxed);anyps3_ft::mark(anyps3_ft::PostFifo,put,budget);}
     try{w.queue->post(RsxOwnerQueue::Kind::RunFifo,[f=static_cast<PpuState*>(w.facade.get()),pc,tid]{f->pc=pc;f->thread_id=tid;},budget);w.posted_put=put;}
     catch(...){w.fifo_queued.store(false,std::memory_order_release);throw;}
     return {progress(),false};

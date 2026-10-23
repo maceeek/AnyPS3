@@ -1,0 +1,47 @@
+{
+  "verified_at_utc": "2026-10-23T12:16:33.434247+00:00",
+  "returncode": -9,
+  "stop": null,
+  "original_game_segments": [
+    {
+      "address": 65536,
+      "bytes": 12628704,
+      "exact_match": true,
+      "sha256": "d889c25fae01b1c865d5ed9355c22539780053e46f079ed294daa562bd7499c1"
+    },
+    {
+      "address": 12713984,
+      "bytes": 1856124,
+      "exact_match": true,
+      "sha256": "dc8eeea942d0d87a6afd78ff33a55954f77f0531ed23080bb17fefbd43d34cc0"
+    }
+  ],
+  "artifacts": {
+    "program": "1369b08451ce4dab220410f833854f109f0a0e65f55f73c1a2c645b8a41979de",
+    "program.cpp": "e68320e77a7a5d3a423830ac195ac7af63805319c306b6ce8c6ad898277da191",
+    "program.elf": "ad8405fb84a81c9e1ff5ea4cd0f9b72235bb2f69e1ddc5dc4875cfb49ec94e79",
+    "profile.json": "32516c6a142b3873165a344fecc3e72df4d27732310aaa7c3ff807e34cb8fa12",
+    "stdout.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "stderr.log": "7971142c5ba89671f7838278a9e18ba4c9d4f9ad9cd66e1d1d1a39972bbc715b"
+  },
+  "captures": [
+    {
+      "file": "comparison-frame-000009.ppm",
+      "width": 1280,
+      "height": 720,
+      "all_black": false,
+      "sha256": "99c33542d12c21800246bd52cfbd75159b8be74104212863d49a553ffcea1cb9"
+    },
+    {
+      "file": "frame-000009.ppm",
+      "width": 2560,
+      "height": 1440,
+      "all_black": false,
+      "sha256": "21d22e4bb31c6551d6cde9543cd6097a210eaf792cd9d23ffd447e752dfec6b9"
+    }
+  ],
+  "visual_inspection": "Original Great Clock and Clank visible in matching native720p and visual1440p captures. Shared native scene limitations remain; no claim of full-resolution detail.",
+  "termination": "Measurement harness deliberately killed verified game PID after capture; not a guest failure.",
+  "physical_gamepad_verified": false,
+  "fps_acceptance": false
+}

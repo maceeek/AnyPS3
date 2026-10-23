@@ -60,15 +60,23 @@ void main(){uint value=P(2u);for(uint i=0u;i<P(0u);++i)value+=w[P(1u)+i*2u];
         b.buffer_pins.push_back(output);++conditional_predicates;
     }
     struct ConditionalScope {
-        NativeVulkan& vk;GraphicsBatch& batch;bool active;
+        NativeVulkan& vk;GraphicsBatch& batch;bool active;int exceptions=std::uncaught_exceptions();
         ConditionalScope(NativeVulkan& v,GraphicsBatch& b,const std::shared_ptr<GraphicsBuffer>& buffer,unsigned offset):vk(v),batch(b),active(bool(buffer)){
             if(!active)return;
             if(!vk.graphics_conditional_rendering() || offset%4 || std::uint64_t(offset)+4>buffer->size)throw std::runtime_error("invalid RSX conditional draw");
-            batch.sync();batch.inline_draws=true;   // draws inside the scope are recorded inline, in order with the begin/end below
-            vk.graphics_begin(batch);vk.graphics_end_pass(batch);VkConditionalRenderingBeginInfoEXT info{};info.sType=VK_STRUCTURE_TYPE_CONDITIONAL_RENDERING_BEGIN_INFO_EXT;info.buffer=buffer->buffer;info.offset=offset;
+            batch.sync();vk.graphics_begin(batch);vk.graphics_end_pass(batch);
+            batch.inline_draws=true;   // draws inside the scope are recorded inline, in order with the begin/end below
+            VkConditionalRenderingBeginInfoEXT info{};info.sType=VK_STRUCTURE_TYPE_CONDITIONAL_RENDERING_BEGIN_INFO_EXT;info.buffer=buffer->buffer;info.offset=offset;
             vk.conditional_begin(batch.command,&info);batch.buffer_pins.push_back(buffer);++vk.conditional_draws;
         }
-        ~ConditionalScope(){if(active){vk.graphics_end_pass(batch);vk.conditional_end(batch.command);batch.inline_draws=false;}}
+        ~ConditionalScope() noexcept(false){
+            if(!active)return;
+            // Never replay deferred work while unwinding another failure. The
+            // poisoned command buffer is discarded rather than submitted.
+            if(std::uncaught_exceptions()>exceptions){batch.failed=true;batch.inline_draws=false;return;}
+            try{vk.graphics_end_pass(batch);vk.conditional_end(batch.command);batch.inline_draws=false;}
+            catch(...){batch.failed=true;batch.inline_draws=false;throw;}
+        }
     };
 #endif
 '''

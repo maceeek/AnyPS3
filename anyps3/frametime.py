@@ -2,6 +2,10 @@
 
 ANYPS3_FRAMETIME=/path/ring.bin enables a fixed-size ring of 64-byte events in a MAP_SHARED file (it survives SIGKILL; the
 header's head counter says how many events were ever reserved, the newest min(head, capacity) reservations are the window).
+ANYPS3_FRAMETIME_MODE=flips retains Vblank, FlipReq, FlipVsync, FlipAsync and
+LabelPub(c=1) only, gating before clocks, guest peeks and closure wrappers.
+The first reserved header u64 (offset40) records mode0=full or1=flips. Other
+header/event fields and the version2 publication protocol remain unchanged.
 Off by default: the only cost is one predictable branch on a plain bool. ANYPS3_FRAMETIME_EVENTS=N sets the ring capacity
 (power of two, default 2^23 = 512 MiB of sparse file), ANYPS3_FRAMETIME_PEEK_REG=N additionally records the big-endian word that guest register rN
 points to at every guest block (diagnostic: what does a polling loop wait for?); ANYPS3_FRAMETIME_PEEK_PC=0xADDR limits that
@@ -79,7 +83,10 @@ static_assert(sizeof(Header)==64,"frametime header ABI");
 inline Header* header=nullptr;
 inline Event* ring=nullptr;
 inline std::uint64_t ring_mask=0;
-inline bool on=false;
+inline bool on=false,flips_only=false;
+// The mode is immutable after startup. Gate before clocks, peeks and wrappers.
+inline bool enabled(std::uint32_t kind){return on && (!flips_only || (kind>=Vblank && kind<=FlipAsync) || kind==LabelPub);}
+inline bool enabled_fields(std::uint32_t kind,std::uint64_t c){return enabled(kind) && (!flips_only || kind!=LabelPub || c==1);}
 inline int peek_register=-1;
 inline std::uint32_t peek_pc=0;
 inline std::atomic<std::uint64_t> last_post_ns{0};
@@ -91,6 +98,10 @@ inline std::uint64_t now(){timespec t;clock_gettime(CLOCK_MONOTONIC,&t);return s
 inline std::uint32_t this_tid(){static thread_local const std::uint32_t tid=std::uint32_t(syscall(SYS_gettid));return tid;}
 inline bool open_ring(){
     const char* path=std::getenv("ANYPS3_FRAMETIME");if(!path || !*path)return false;
+    if(const char* mode=std::getenv("ANYPS3_FRAMETIME_MODE")){
+        if(std::strcmp(mode,"flips")==0)flips_only=true;
+        else if(std::strcmp(mode,"full")!=0){std::fprintf(stderr,"invalid ANYPS3_FRAMETIME_MODE\n");std::_Exit(2);}
+    }
     std::uint64_t capacity=std::uint64_t(1)<<23;
     if(const char* n=std::getenv("ANYPS3_FRAMETIME_EVENTS")){char* end=nullptr;const auto v=std::strtoull(n,&end,10);
         if(end==n || *end || v<1024 || (v&(v-1)) || v>(std::uint64_t(1)<<28)){std::fprintf(stderr,"invalid ANYPS3_FRAMETIME_EVENTS\n");std::_Exit(2);}capacity=v;}
@@ -106,6 +117,7 @@ inline bool open_ring(){
     if(map==MAP_FAILED){std::fprintf(stderr,"ANYPS3_FRAMETIME: mmap failed\n");std::_Exit(2);}
     header=static_cast<Header*>(map);std::memcpy(header->magic,"ANYPSFT1",8);header->capacity=capacity;header->version=2;
     header->head.store(0,std::memory_order_release);header->dropped.store(0,std::memory_order_release);
+    header->pad[0]=flips_only?1:0;header->pad[1]=header->pad[2]=0;
     ring=reinterpret_cast<Event*>(static_cast<char*>(map)+sizeof(Header));ring_mask=capacity-1;
     return true;
 }
@@ -123,24 +135,25 @@ inline Event* claim(std::uint64_t i){
 }
 inline void commit(Event* e,std::uint64_t i){e->seq.store(2*i+2,std::memory_order_release);}
 inline void put(std::uint64_t ns,std::uint32_t kind,std::uint64_t a,std::uint64_t b,std::uint64_t c,std::uint64_t d){
+    if(!enabled_fields(kind,c))return;
     const auto i=reserve();
     Event* e=claim(i);if(!e)return;
     e->ns=ns;e->kind=kind;e->tid=this_tid();e->a=a;e->b=b;e->c=c;e->d=d;
     commit(e,i);
 }
 [[gnu::always_inline]] inline void mark(std::uint32_t kind,std::uint64_t a=0,std::uint64_t b=0,std::uint64_t c=0,std::uint64_t d=0){
-    if(__builtin_expect(on,0))put(now(),kind,a,b,c,d);
+    if(__builtin_expect(enabled_fields(kind,c),0))put(now(),kind,a,b,c,d);
 }
 struct Span {
     std::uint32_t kind;std::uint64_t a,c,d,t0,min_ns;
     explicit Span(std::uint32_t k,std::uint64_t a_=0,std::uint64_t c_=0,std::uint64_t min=0,std::uint64_t d_=0):
-        kind(k),a(a_),c(c_),d(d_),t0(on?now():0),min_ns(min){}
+        kind(k),a(a_),c(c_),d(d_),t0(enabled_fields(k,c_)?now():0),min_ns(min){}
     ~Span(){if(!t0)return;const auto t1=now();if(t1-t0>=min_ns)put(t0,kind,a,t1-t0,c,d);}
     Span(const Span&)=delete;Span& operator=(const Span&)=delete;
 };
 // Wrap a closure that another thread executes: records the queue wait (post -> start) and the execution time.
 inline std::function<void()> wrap(std::uint32_t kind,std::uint64_t a,std::function<void()> f){
-    if(!on)return f;
+    if(!enabled(kind))return f;
     const auto posted=now();
     return [kind,a,posted,f=std::move(f)]{
         const auto t0=now();
@@ -150,7 +163,7 @@ inline std::function<void()> wrap(std::uint32_t kind,std::uint64_t a,std::functi
 }
 // Guest thread blocks (usleep, semaphore, event queue ...). `State` is PpuState: kept a template so tests can compile this alone.
 template<class State> inline void block(State& s,unsigned kind,std::uint64_t id){
-    if(__builtin_expect(!on,1))return;
+    if(__builtin_expect(!enabled(Block),1))return;
     std::uint64_t peek=0;
     if(peek_register>=0 && (!peek_pc || std::uint32_t(s.pc)==peek_pc || std::uint32_t(s.pc)==peek_pc+4)){const auto address=std::uint32_t(s.r[peek_register]);
         try{peek=(std::uint64_t(address)<<32)|std::uint32_t(s.memory.load(address,4));}catch(...){peek=(std::uint64_t(address)<<32)|0xdeadbeefu;}}

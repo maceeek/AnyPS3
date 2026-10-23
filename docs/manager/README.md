@@ -259,6 +259,20 @@ values, per-title overrides, and one-off `run --set KEY=VALUE` values. The GUI
 renders this schema and disables switches absent from the active source snapshot.
 Advanced/diagnostic groups are hidden by default.
 
+### Internal rendering resolution
+
+In **Settings → Video → Internal rendering resolution**, select Native (1×),
+2×, 3× or 4×. The value multiplies both dimensions: Ratchet's1280×720 becomes
+2560×1440 at2×. The setting is saved globally or per title and takes effect on
+the next launch. CLI: `run TITLE --set video.render_scale=2`.
+
+A build containing render-scale support is required; older builds disable this
+setting. Scaling preserves native guest readback and adds higher-resolution
+visual rendering. It does not replace original textures. Some surface aliases
+and unsupported texture conversions still reconstruct native detail, and GPU
+cost rises with resolution. The verified2× Great Clock run averaged45.52FPS;
+full-scene high-resolution detail and stable60FPS are not yet established.
+
 ### Game audio
 
 **Game audio is on by default for Play.** In **Settings → Audio**, use **Enable

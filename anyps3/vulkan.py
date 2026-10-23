@@ -201,6 +201,7 @@ public:
             app.pApplicationName="AnyPS3";app.apiVersion=VK_API_VERSION_1_0;
 #ifdef ANYPS3_RSX_VK
             app.apiVersion=VK_API_VERSION_1_2;
+            graphics_render_scale=graphics_read_render_scale();graphics_visual_batch=graphics_read_visual_batch();
 #endif
             VkInstanceCreateInfo info{};info.sType=VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;info.pApplicationInfo=&app;
 #ifdef ANYPS3_RSX_VK

@@ -14,6 +14,7 @@ the implementation:
 """
 from pathlib import Path
 import os
+import re
 import shutil
 import subprocess
 import unittest
@@ -323,7 +324,7 @@ class BoundedDrain(unittest.TestCase):
         cpp.with_suffix('.build.log').write_text(result.stdout + result.stderr)
         assert result.returncode == 0, result.stderr[-12000:]
 
-    def run_mode(self, mode, attempts=1, **extra):
+    def run_mode(self, mode, attempts=1, include_stderr=False, **extra):
         env = dict(os.environ, LP_NUM_THREADS='4', ANYPS3_VK_DEVICE='lavapipe', VK_DRIVER_FILES='/usr/share/vulkan/icd.d/lvp_icd.json',
                    ANYPS3_SPU_WORKER='0')
         env.pop('ANYPS3_RSX_HOST_DRAIN', None)
@@ -337,7 +338,7 @@ class BoundedDrain(unittest.TestCase):
             self.fail(f'{attempts} attempts were inconclusive (every read was served after the run): {result.stdout}')
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr[-6000:])
         self.assertIn('PASS ', result.stdout)
-        return result.stdout
+        return result.stdout + (result.stderr if include_stderr else "")
 
     def test_poll_serves_only_the_queued_prefix_and_respects_barriers(self):
         out = self.run_mode('prefix')
@@ -384,6 +385,38 @@ class BoundedDrain(unittest.TestCase):
             header = b'P6\n# AnyPS3 native display buffer 1\n32 16\n255\n'
             self.assertEqual(data[:len(header)], header, number)
             self.assertEqual(data[len(header):], bytes([flip, 2 * flip, 3 * flip]) * (32 * 16), f'frame {number} (flip {flip})')
+
+    def test_scaled_sync_and_async_captures_have_actual_extent(self):
+        directory = ARTIFACTS / 'flip-frames-scaled'
+        shutil.rmtree(directory, ignore_errors=True)
+        directory.mkdir(parents=True)
+        self.run_mode('flip_capture', ANYPS3_FRAME_DIR=str(directory.resolve()),
+                      ANYPS3_FRAME_STRIDE='4', ANYPS3_RENDER_SCALE='2')
+        for number, flip in enumerate(list(range(1, 9)) + [12, 16, 20, 24], 1):
+            data = (directory / f'frame-{number:06d}.ppm').read_bytes()
+            header = b'P6\n# AnyPS3 native display buffer 1\n64 32\n255\n'
+            self.assertEqual(data[:len(header)], header, number)
+            self.assertEqual(data[len(header):], bytes([flip, 2 * flip, 3 * flip]) * (64 * 32), number)
+
+    def test_native_pairs_match_the_same_scaled_flip(self):
+        directory = ARTIFACTS / 'flip-frames-paired'
+        shutil.rmtree(directory, ignore_errors=True)
+        directory.mkdir(parents=True)
+        output = self.run_mode('flip_capture', include_stderr=True, ANYPS3_FRAME_DIR=str(directory.resolve()),
+                      ANYPS3_FRAME_STRIDE='4', ANYPS3_RENDER_SCALE='2',
+                      ANYPS3_CAPTURE_NATIVE_PAIR='1', ANYPS3_PERF_REPORT='1')
+        counts = re.findall(r'PERF GPU busy_ns=\d+ frames=(\d+)', output)
+        self.assertTrue(counts, output)
+        self.assertEqual(int(counts[-1]), 24, 'paired readbacks must not add GPU frame markers')
+        self.assertEqual(len(list(directory.glob('*.ppm'))), 20)
+        for number, flip in enumerate(list(range(1, 9)) + [12, 16, 20, 24], 1):
+            for prefix, width, height in (('', 64, 32), ('comparison-', 32, 16)):
+                path = directory / f'{prefix}frame-{number:06d}.ppm'
+                if prefix and number > 8:
+                    self.assertFalse(path.exists())  # Async capture is unchanged.
+                    continue
+                header = f'P6\n# AnyPS3 native display buffer 1\n{width} {height}\n255\n'.encode()
+                self.assertEqual(path.read_bytes(), header + bytes([flip, 2 * flip, 3 * flip]) * (width * height))
 
     def test_stride_capture_with_occupied_staging(self):
         # Review-rsxhead-1 finding 1: a stride capture needs width*height*4 staging bytes in the flip's batch. This binary has

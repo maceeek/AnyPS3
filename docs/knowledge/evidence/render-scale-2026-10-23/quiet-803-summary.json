@@ -1,0 +1,23 @@
+{
+  "intervals": 30,
+  "seconds": 60.104,
+  "fps_mean": 45.519817316651135,
+  "fps_median": 44.99,
+  "fps_min": 40.67,
+  "fps_max": 49.5,
+  "draws_per_frame": 1006.099617200498,
+  "ms_per_frame": {
+    "main_ppu": 11.413409770545085,
+    "main_idle": 9.93377356987848,
+    "main_audio": 0.06657505468629583,
+    "main_coordinator": 0.5554033485078582,
+    "rsx_worker": 13.666570970141668,
+    "rsx_gpu_wait": 0.2470675846115704,
+    "rsx_flip_wait": 5.814305773433471,
+    "thread1_ppu": 10.838830351262432
+  },
+  "thread1_instructions_per_frame": 7320338.875752758,
+  "spu_instructions_per_frame": 17630955.084196992,
+  "thread1_ns_per_instruction": 1.480645983092943,
+  "note": "2 s PERF intervals after warm-up in the original level great_clock_a; stationary start position"
+}

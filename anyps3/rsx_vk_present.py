@@ -172,7 +172,9 @@ private:
 public:
     void graphics_present(GraphicsBatch& b,const std::shared_ptr<GraphicsImage>& image,unsigned w,unsigned h,bool vsync,bool async=false){b.sync();
         if(!graphics_wsi)throw std::runtime_error("Vulkan presentation was not initialized");
-        graphics_wsi->display(b,image,w,h,vsync,async);
+        b.pins.push_back(image);
+        if(image->visual)graphics_wsi->display(b,image->visual,image->visual->width,image->visual->height,vsync,async);
+        else graphics_wsi->display(b,image,w,h,vsync,async);
     }
 private:
 #endif
