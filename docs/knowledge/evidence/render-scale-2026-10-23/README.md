@@ -23,3 +23,8 @@ are not represented as a full-suite run of the final branch.
 
 Large binaries, original game bytes, saves and local-only logs are excluded.
 Source and full local evidence paths are in the linked experiment record.
+
+Final build805 reached the original level with matching native/scaled captures,
+original PT_LOAD identity and no guest STOP; see final-805-verification.json.
+The source hash comparison and rebased validation scope are in
+source-validation.json. GUI14 and manager132 checks passed, with4 manager skips.

@@ -1,21 +1,34 @@
 # Handoff to the next instance
 
-## Higher-resolution rendering — 2026-10-23, active
+## Resolution-scaling milestone — 2026-10-23
 
-Verified quiet build803 result: 45.5198 FPS over60.104s, min2s40.67,
-main11.413ms/frame and RSX13.667ms/frame. Original Great Clock capture inspected,
-PT_LOAD exact, no STOP; harness deliberately terminated the run (-9).
-No game/build is live. GUI source integrated,28 combined targeted tests passed;
-not installed or promoted. Suite802 reconciles to925 passes+7 skips after the
-unchanged five-second concurrency fixture passed an uncontended rerun; original
-red report is preserved. Higher-resolution stable60 remains unfinished.
+Implemented on `feat/render-scale`, based on current `origin/main`:
 
-Current blocker: image detail. General alias merge/equal-footprint rebind and
-unsupported RTT rebuild visual companions from native pixels (verified source);
-their contribution to final world quality is still a hypothesis. See
-`local/ratchet/work/resscale-quality-loss.md`. A same-flip native/visual capture
-diagnostic is being tested before a new build804; this is not a quality fix.
-[Evidence, commands and next action](experiments/2026-10-23-render-scale.md).
+- Native guest rendering plus visual companions at integer scales 1–4; typed
+  render-to-texture sampling, capture and presentation use the scaled images.
+- Visual draw batching reduces render-pass switching. Quiet original Great Clock
+  run803 at2560×1440 averaged **45.52FPS**, with recorder enabled. Stable60FPS
+  and full-scene high-resolution detail remain unverified.
+- GUI **Video → Internal rendering resolution** persists global/title overrides
+  and passes the typed value to supported builds. Installed release unchanged.
+- `scripts/ratchet_fast_menu.py` automates START through the original input path.
+  This accelerates boot navigation; a complete intro bypass is not implemented.
+- Same-flip native/visual captures confirm a modest visual improvement. Known
+  merge/rebind and unsupported RTT paths still reconstruct native detail. Their
+  exact contribution to the final world image remains untraced.
+
+Validation: complete802 runtime suite reconciled to925 passes+7 skips after one
+unchanged concurrency fixture passed its uncontended rerun; the original failed
+report is retained. Later changes have focused tests. After rebasing, all GUI and
+manager tests passed (146 passes,4 skips). Final review has no remaining confirmed
+blocker. Original game bytes are unchanged; physical gamepad was not tested.
+
+Final build805 reached the original Great Clock with matching native/scaled
+captures, exact original PT_LOAD bytes and no guest STOP. No runtime jobs remain
+active. User requested completion and branch publication of these milestones. Next
+rendering investigation: trace the final scene's image dependencies and preserve
+visual history through the implicated alias/conversion; then measure quiet FPS.
+[Evidence and exact scope](experiments/2026-10-23-render-scale.md).
 
 
 ## Wave 6 — 2026-10-21 (ended on user instruction ~17:15)

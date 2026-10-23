@@ -2,6 +2,11 @@
 
 **Milestone branch:** original rendering above720p, visual draw batching, GUI configuration and quality diagnostics. Stable60FPS and full-scene high-resolution detail remain unverified. User requested completion, commit and branch publication of the current milestones.
 
+**Final evidence bundle:** [checks, matched crops and source hashes](../evidence/render-scale-2026-10-23/README.md).
+The entries below are chronological snapshots; later entries supersede their
+pending/live status. The final branch is rebased onto `origin/main`54cea81.
+
+
 **Verified baseline:** retained branch `claude/wave6-60fps` at 33030a9 contains
 build 706 runtime; top-level main still contains older runtime. New isolated
 implementation is `feat/render-scale` in `local/ratchet/work/render-scale/tree`.
@@ -309,3 +314,53 @@ requests; asynchronous stride captures remain unchanged. Use a large
 blocks for readback and is a diagnostic, not an FPS acceptance configuration.
 The native buffer remains authoritative. Two Vulkan regression tests passed,
 including exact per-flip colors and dimensions for both files.
+
+## Final milestone verification and publication preparation
+
+The branch is based on current upstream `54cea81`; runtime source hashes match
+build805 exactly after rebase. Build805 completed successfully in a fresh
+snapshot, with the profile and source manifest retained. The original game
+reached Great Clock through the versioned START helper and LOAD path. Frame9
+contains matching1280×720 native and2560×1440 visual captures; both were
+visually inspected. Original PT_LOAD bytes are exact, no guest STOP occurred,
+and the harness deliberately terminated the completed run with SIGKILL.
+This short paired diagnostic is not a performance acceptance run.
+
+Final integration review: no remaining confirmed blocker. The paired readback
+no longer adds a GPU frame marker; its independent fixture expects24 frames
+for24 flips. Two capture tests passed in24.223s. A previous test-only attempt
+read a renderer after teardown and was replaced with the final PERF counter
+assertion; the failed test log is retained locally. Portable startup:8 passed.
+After rebasing, GUI14 passed and manager132 passed with4 skips. Earlier runtime
+suite802 remains925 passes+7 skips after the documented unchanged fixture rerun;
+no claim of a new complete runtime-suite run on the final commit is made.
+
+Commands and local evidence:
+
+```bash
+# Source manifest and immutable executable
+cat local/ratchet/compile-805.log
+cat local/ratchet/native-virtual-805pairfinal/verification.json
+# GUI and manager checks, with the existing PySide6 environment
+QT_QPA_PLATFORM=offscreen python -m unittest discover -s tests/gui -q
+QT_QPA_PLATFORM=offscreen python -m unittest discover -s tests/manager -q
+python -m unittest tests.test_fast_menu tests.test_frametime -q
+ANYPS3_REQUIRE_VULKAN=1 python -m unittest \
+  tests.test_rsx_drain_bound.BoundedDrain.test_native_pairs_match_the_same_scaled_flip \
+  tests.test_rsx_drain_bound.BoundedDrain.test_scaled_sync_and_async_captures_have_actual_extent -v
+```
+
+The final run used build805, scale2, recorder1, null audio,
+`ANYPS3_CAPTURE_NATIVE_PAIR=1`, stride1000000 and an operator trigger after
+level detection. Logs: `local/ratchet/measure-805pairfinal.log`,
+`local/ratchet/native-virtual-805pairfinal/{stderr.log,frames,verification.json}`.
+The final source/evidence bundle is versioned beside this record. No game,
+compile, test or assigned subagent job remains active at publication.
+
+Remaining work: trace final-image dependencies before fixing visual-history
+loss, then obtain two quiet stable60FPS runs. General merge/equal-footprint and
+unsupported RTT fallbacks remain native reconstruction. RENDER_SCALE per-batch
+queue/drain counters can still print0 after submission resets; independent
+render-pass/GPU-busy evidence establishes batching, not those counters. Full
+intro bypass, physical-controller acceptance and installed GUI release update
+are outside this completed milestone.
