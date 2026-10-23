@@ -182,15 +182,52 @@ static void graphics_vertex_feedback_fallback(){
  std::puts("PASS vertex/output alias keeps sequential primitive feedback and exact CPU committed prefix/stop");
 }
 
-static void graphics_fragment_feedback_fallback(){
- PpuState cpu,gpu;
- for(auto* s:{&cpu,&gpu}){setup_draw(*s,32,16,128,false);texture_fp(*s);
-  std::array<std::uint8_t,16> pixels{};s->memory.transfer(0xc0002000,pixels.data(),pixels.size(),false);
-  s->memory.transfer(0xc0100000,pixels.data(),pixels.size(),true);s->rsx.registers[0x1a00]=0x100000;}
- setenv("ANYPS3_RSX_BACKEND","cpu",1);rsx_execute_draw(cpu);setenv("ANYPS3_RSX_BACKEND","gpu",1);rsx_execute_draw(gpu);
- assert(gpu.rsx.renderer && gpu.rsx.renderer->graphics_draws==0);
- assert(*cpu.memory.regions[1].bytes==*gpu.memory.regions[1].bytes);assert(cpu.rsx.draw.pixels==gpu.rsx.draw.pixels);
- std::puts("PASS fragment/output alias keeps sequential texture feedback and exact CPU bytes");
+// Oracle: a fragment texture that aliases the color target samples the target's
+// pre-draw bytes, so the result must equal the same draw sampling an identical,
+// non-aliased copy of those bytes (CPU reference, no feedback involved).
+static void graphics_fragment_feedback_snapshot(){
+ for(unsigned mode=0;mode<2;++mode){ // 1: two overlapping additive quads
+  PpuState ref,cpu,gpu;
+  for(auto* s:{&ref,&cpu,&gpu}){setup_draw(*s,32,16,128,false);texture_fp(*s);auto& R=s->rsx.registers;
+   std::array<std::uint8_t,16> pixels{};s->memory.transfer(0xc0002000,pixels.data(),pixels.size(),false);
+   s->memory.transfer(0xc0100000,pixels.data(),pixels.size(),true);if(s!=&ref)R[0x1a00]=0x100000;
+   if(mode==1){R[0x310]=1;R[0x314]=0x00010001;R[0x318]=0x00010001;R[0x320]=0x80068006;s->rsx.draw.ranges={{0,4},{0,4}};}}
+  setenv("ANYPS3_RSX_BACKEND","cpu",1);rsx_execute_draw(ref);rsx_execute_draw(cpu);
+  setenv("ANYPS3_RSX_BACKEND","gpu",1);rsx_execute_draw(gpu);
+  if(!gpu.rsx.renderer || gpu.rsx.renderer->graphics_draws!=1)throw std::runtime_error("feedback snapshot did not draw on GPU mode="+std::to_string(mode));
+  assert(*ref.memory.regions[1].bytes==*cpu.memory.regions[1].bytes);assert(ref.rsx.draw.pixels==cpu.rsx.draw.pixels);
+  for(unsigned y=0;y<16;++y)for(unsigned x=0;x<32;++x){const auto at=0xc0100000+y*128+x*4;
+   // Each blended primitive may round its UNORM contribution by one step.
+   if(!near_argb(gpu.memory.load(at,4),std::uint32_t(ref.memory.load(at,4)),mode?2:1)){char m[160];std::snprintf(m,sizeof m,"feedback snapshot mode=%u x=%u y=%u gpu=%08x ref=%08x",mode,x,y,unsigned(gpu.memory.load(at,4)),unsigned(ref.memory.load(at,4)));throw std::runtime_error(m);}}
+  assert(ref.rsx.draw.pixels==gpu.rsx.draw.pixels);
+ }
+ std::puts("PASS fragment/output alias samples the pre-draw snapshot on CPU and GPU (incl. overlapping blended primitives)");
+}
+// The sampled texture is the very surface image this draw writes (GPU-resident,
+// produced by an earlier GPU draw): it must be copied before the draw. Oracle:
+// the CPU reference sampling a non-aliased copy of the CPU first-pass image.
+static void graphics_fragment_feedback_resident(){
+ PpuState ref,s;
+ for(auto* p:{&ref,&s}){setup_draw(*p,32,16,128,false);texture_fp(*p);}
+ s.rsx.renderer=std::make_unique<NativeVulkan>();rsxgraphics::Session session(*s.rsx.renderer,s);s.rsx.graphics_session=&session;
+ s.memory.host_access_observer=[&](const void* p,std::uint64_t n,bool write){session.host_access(p,n,write);};
+ setenv("ANYPS3_RSX_BACKEND","cpu",1);rsx_execute_draw(ref);
+ setenv("ANYPS3_RSX_BACKEND","gpu",1);rsx_execute_draw(s);
+ for(unsigned y=0;y<16;++y)for(unsigned x=0;x<32;++x)ref.memory.store(0xc0300000+y*128+x*4,4,ref.memory.load(0xc0100000+y*128+x*4,4));
+ for(auto* p:{&ref,&s}){auto& R=p->rsx.registers;R[0x1a00]=p==&ref?0x300000:0x100000;R[0x1a04]=0x00010029|(0xa5u<<8);R[0x1a18]=(32u<<16)|16;R[0x1840]=128;
+  R[0x1a14]=0x01010000;p->rsx.draw.primitive=8;p->rsx.draw.ranges={{0,4}};}
+ const auto texture=rsxdraw::decode_texture(s,rsxdraw::Reg{s.rsx},0);assert(texture.resident_image);
+ setenv("ANYPS3_RSX_BACKEND","cpu",1);rsx_execute_draw(ref);
+ setenv("ANYPS3_RSX_BACKEND","gpu",1);const auto draws=s.rsx.renderer->graphics_draws;rsx_execute_draw(s);
+ if(s.rsx.renderer->graphics_draws!=draws+1)throw std::runtime_error("resident feedback did not draw on GPU");
+ session.flush();
+ unsigned distinct=0;
+ for(unsigned y=0;y<16;++y)for(unsigned x=0;x<32;++x){const auto at=0xc0100000+y*128+x*4;const auto e=std::uint32_t(ref.memory.load(at,4));
+  if(e!=std::uint32_t(ref.memory.load(0xc0300000+y*128+x*4,4)))++distinct;
+  if(!near_argb(s.memory.load(at,4),e))throw std::runtime_error("resident feedback x="+std::to_string(x)+" y="+std::to_string(y));}
+ assert(distinct>100); // the second pass really moves texels, so in-draw feedback would be visible
+ s.memory.host_access_observer={};s.rsx.graphics_session=nullptr;
+ std::puts("PASS fragment texture resolved to the bound surface image samples a pre-draw GPU copy");
 }
 static void graphics_dynamic_constants(){
  PpuState cpu,gpu;
@@ -346,7 +383,7 @@ static void graphics_fifo(){
 int main(int argc,char** argv){try{
  setenv("ANYPS3_RSX_GPU_FALLBACK","1",1);
  if(argc>1 && std::string(argv[1])=="probe"){NativeVulkan vk;return 0;}
- graphics_differential();graphics_formats();graphics_fallback();graphics_coherence();graphics_sample_edges();graphics_mrt();graphics_fifo();graphics_depth_compare();graphics_texture_layout_reinterpret();graphics_dynamic_constants();graphics_vertex_feedback_fallback();graphics_fragment_feedback_fallback();graphics_descriptor_budget();graphics_aa_control();graphics_null_texture();graphics_nonfinite_position();
+ graphics_differential();graphics_formats();graphics_fallback();graphics_coherence();graphics_sample_edges();graphics_mrt();graphics_fifo();graphics_depth_compare();graphics_texture_layout_reinterpret();graphics_dynamic_constants();graphics_vertex_feedback_fallback();graphics_fragment_feedback_snapshot();graphics_fragment_feedback_resident();graphics_descriptor_budget();graphics_aa_control();graphics_null_texture();graphics_nonfinite_position();
 }catch(const std::exception& e){std::fprintf(stderr,"FAIL %s\n",e.what());return 1;}}
 '''
 

@@ -108,7 +108,7 @@ class ResidencyTests(unittest.TestCase):
             root=Path(directory)
             # Other graphics probes are also called to retain -Werror coverage.
             source=native_source().replace('(void)argc;(void)argv;graphics_fifo_residency();',
-                '(void)argc;(void)argv;graphics_fifo_residency();graphics_differential();graphics_formats();graphics_fallback();graphics_coherence();graphics_sample_edges();graphics_mrt();graphics_fifo();graphics_depth_compare();graphics_texture_layout_reinterpret();graphics_dynamic_constants();graphics_vertex_feedback_fallback();graphics_fragment_feedback_fallback();graphics_aa_control();graphics_null_texture();graphics_nonfinite_position();')
+                '(void)argc;(void)argv;graphics_fifo_residency();graphics_differential();graphics_formats();graphics_fallback();graphics_coherence();graphics_sample_edges();graphics_mrt();graphics_fifo();graphics_depth_compare();graphics_texture_layout_reinterpret();graphics_dynamic_constants();graphics_vertex_feedback_fallback();graphics_fragment_feedback_snapshot();graphics_fragment_feedback_resident();graphics_aa_control();graphics_null_texture();graphics_nonfinite_position();')
             (root/'test.cpp').write_text(source)
             build=subprocess.run(['c++','-std=c++17','-O2','-Wall','-Wextra','-Werror','-pthread','-DANYPS3_VULKAN','-DANYPS3_RSX_VK',str(root/'test.cpp'),*LIBRARIES,'-o',str(root/'test')],capture_output=True,text=True,timeout=180)
             self.assertEqual(build.returncode,0,build.stderr)

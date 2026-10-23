@@ -1780,8 +1780,62 @@ static void rsx_execute_draw(PpuState& s){
     // Only the Vulkan graphics fragment path models 0x1d7c (sample mask, alpha-to-coverage/one).
     if(reg.get(0x1d7c,0xffff0000)!=0xffff0000)throw std::runtime_error("unsupported RSX multisample coverage/alpha control on the CPU renderer");
     for(auto& t:textures)materialize_texture(s,t);
-    // Cache only stable texture bytes: feedback without a snapshot must see
-    // earlier primitive writes in the sequential traversal.
+    // Diagnostic only (ANYPS3_RSX_FEEDBACK_TRACE=1): describe draws whose contiguous texture bytes alias a bound
+    // target: texture/target layout, primitive coverage overlap and the last NV4097_INVALIDATE_L2.
+    static const bool feedback_trace=[]{const auto* v=std::getenv("ANYPS3_RSX_FEEDBACK_TRACE");return v && std::string(v)=="1";}();
+    static unsigned feedback_lines=0;
+    if(feedback_trace && feedback_lines<600){
+        bool any=false;for(const auto& t:textures)if(t.valid && !t.untiled && aliases_target(t.storage,t.storage_size))any=true;
+        if(any){++feedback_lines;std::ostringstream out;
+            out<<"RSX FEEDBACK TRACE draw="<<draw.draws<<" pc=0x"<<std::hex<<s.pc<<std::dec<<" primitive="<<draw.primitive<<" triangles="<<triangles.size()
+               <<" surface=0x"<<std::hex<<reg(0x208)<<" clip_h=0x"<<reg(0x200)<<" clip_v=0x"<<reg(0x204)<<std::dec<<" scissor=["<<x0<<","<<y0<<","<<x1<<","<<y1<<"]"
+               <<" blend="<<(reg(0x310)&1)<<" depth_test="<<(reg(0xa74)&1)<<" fp="<<fp.size()<<" samples="<<samples_x*samples_y
+               <<" l2_invalidations="<<gpu.texture_invalidations<<" draws_since_l2="<<(draw.draws-gpu.texture_invalidation_draw)<<" l2_value=0x"<<std::hex<<gpu.texture_invalidation_value<<std::dec;
+            for(unsigned i=0;i<color_count;++i)if(colors[i].base)out<<" color"<<i<<"={off:0x"<<std::hex<<colors[i].offset<<",pitch:0x"<<colors[i].pitch<<std::dec<<",bpp:"<<colors[i].bpp<<",tile:"<<bool(colors[i].tile)<<",swz:"<<colors[i].swizzle_width<<",span:0x"<<std::hex<<target_span(colors[i],width*samples_x,height*samples_y)<<std::dec<<"}";
+            if(depth.base)out<<" depth={off:0x"<<std::hex<<depth.offset<<",pitch:0x"<<depth.pitch<<std::dec<<",tile:"<<bool(depth.tile)<<"}";
+            for(unsigned u=0;u<16;++u){const auto& t=textures[u];if(!t.valid)continue;
+                const auto base=0x1a00+0x20*u;
+                out<<" tex"<<u<<"={off:0x"<<std::hex<<reg(base)<<",fmt:0x"<<reg(base+4)<<",ctl0:0x"<<reg(base+0xc)<<",filter:0x"<<reg(base+0x14)<<",rect:0x"<<reg(base+0x18)<<std::dec<<",w:"<<t.levels[0].width<<",h:"<<t.levels[0].height<<",pitch:"<<t.levels[0].pitch<<",levels:"<<t.levels.size()
+                   <<",untiled:"<<bool(t.untiled)<<",alias:"<<(!t.untiled && aliases_target(t.storage,t.storage_size));
+                if(color_count && colors[0].base && !colors[0].mapping)out<<",rel0:"<<(std::int64_t(reinterpret_cast<std::uintptr_t>(t.storage))-std::int64_t(reinterpret_cast<std::uintptr_t>(colors[0].base)))<<",size:"<<t.storage_size;
+                out<<"}";}
+            // Pixel-center coverage (strict edges, so a shared edge never counts twice).
+            if(!point_draw && !line_draw && x1>x0 && y1>y0){
+                std::vector<std::uint8_t> hits(std::size_t(x1-x0)*(y1-y0));std::uint64_t covered=0,multi=0;
+                for(const auto& tri:triangles){std::array<float,3> X{},Y{};bool ok=true;
+                    for(unsigned k=0;k<3;++k){const auto& v=vertex(tri[k]);if(!(v.clip[3]>0)){ok=false;break;}const float iw=1.f/v.clip[3];X[k]=v.clip[0]*iw*sx+vx;Y[k]=v.clip[1]*iw*sy+vy;}
+                    if(!ok){out<<" eye_crossing=1";continue;}
+                    const float area=(X[1]-X[0])*(Y[2]-Y[0])-(X[2]-X[0])*(Y[1]-Y[0]);if(area==0)continue;
+                    const int l=std::max<int>(x0,int(std::floor(std::min({X[0],X[1],X[2]})))),rr=std::min<int>(x1,int(std::ceil(std::max({X[0],X[1],X[2]})))+1);
+                    const int t=std::max<int>(y0,int(std::floor(std::min({Y[0],Y[1],Y[2]})))),b=std::min<int>(y1,int(std::ceil(std::max({Y[0],Y[1],Y[2]})))+1);
+                    if(feedback_lines<=40 && &tri-triangles.data()<8)out<<" tri=["<<X[0]<<","<<Y[0]<<" "<<X[1]<<","<<Y[1]<<" "<<X[2]<<","<<Y[2]<<"]";
+                    for(int y=t;y<b;++y)for(int x=l;x<rr;++x){const float px=x+.5f,py=y+.5f;bool in=true;
+                        for(unsigned k=0;k<3 && in;++k){const unsigned n=(k+1)%3;const float e=(X[n]-X[k])*(py-Y[k])-(Y[n]-Y[k])*(px-X[k]);in=area>0?e>0:e<0;}
+                        if(in){auto& h=hits[std::size_t(y-y0)*(x1-x0)+(x-x0)];if(h==1)++multi;if(!h)++covered;if(h<255)++h;}}
+                }
+                out<<" covered="<<covered<<" overlap_pixels="<<multi;
+            }
+            std::fprintf(stderr,"%s\n",out.str().c_str());
+        }
+    }
+    // Fragment textures whose contiguous bytes alias a bound target sample a
+    // pre-draw snapshot, like gathered textures (untiled backing above): the
+    // RSX texture cache is not coherent with ROP writes within a draw (games
+    // invalidate it with NV4097_INVALIDATE_L2 0x1fd8 between passes), and
+    // RPCS3 ffba2bf0 samples a bound target through a pre-draw copy
+    // (texture_cache_helpers.h:750-779). The Vulkan path copies the same bytes.
+    for(auto& t:textures)if(t.valid && !t.untiled && aliases_target(t.storage,t.storage_size)){
+        const auto* first=t.levels[0].data-t.levels[0].offset;
+        const auto* end=t.storage+t.storage_size;
+        if(first<t.storage || first>=end)throw std::runtime_error("RSX feedback texture outside its storage envelope");
+        const auto size=std::uint64_t(end-first);if(size>UINT_MAX)throw std::runtime_error("RSX feedback texture snapshot too large");
+        auto backing=std::make_shared<GuestBacking>(size);
+        if(s.memory.concurrent() || HostByteAccess::active())pinned_host_read(s.memory,first,backing->data(),unsigned(size));
+        else std::memcpy(backing->data(),first,size);
+        for(auto& level:t.levels)level.data=backing->data()+(level.data-first);
+        t.untiled=std::move(backing);
+    }
+    // Cache only stable texture bytes (aliasing textures are snapshots now).
     if(std::uint64_t(x1-x0)*(y1-y0)>=4096)for(auto& texture:textures)
         if(texture.valid && (texture.untiled || !aliases_target(texture.storage,texture.storage_size)))prepare_texture_cache(texture);
 #ifdef ANYPS3_RSX_VK

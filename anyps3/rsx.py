@@ -20,6 +20,8 @@ struct NativeRsx {
     bool fifo_enabled=false,semaphore_wait=false,trace=false,vsync=true;std::uint32_t return_offset=UINT32_MAX,packet_index=0;
     std::uint64_t commands=0;
     std::uint64_t zcull_generation=0;
+    // NV4097_INVALIDATE_L2 (0x1fd8) count, last value and the draw count at that time (diagnostics only).
+    std::uint64_t texture_invalidations=0,texture_invalidation_draw=0;std::uint32_t texture_invalidation_value=0;
     std::uint64_t vertex_cache_generation=0;
     std::array<std::uint32_t,5> report_values{};
     std::uint64_t report_timestamp=0;
@@ -773,6 +775,7 @@ static bool rsx_run_impl(PpuState& s,unsigned budget,bool idle_poll=false){
                     if(reg==0x1d94)rsx_diag(s,"clear",reg,[&]{rsx_clear_surface(s,value);});
                     if(reg==0x234){++gpu.zcull_generation;continue;}
                     if(reg==0xa1c || reg==0x1fd8){
+                        if(reg==0x1fd8){++gpu.texture_invalidations;gpu.texture_invalidation_draw=gpu.draw.draws;gpu.texture_invalidation_value=value;}
 #ifdef ANYPS3_RSX_VK
                         if(reg==0xa1c)rsx_graphics_flush(s,"zcull_sync");
 #endif
