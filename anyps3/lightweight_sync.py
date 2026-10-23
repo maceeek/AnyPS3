@@ -131,7 +131,7 @@ CPP = r'''
     }
     if(m.load(condition.mutex,4)!=s.thread_id)return MM_EPERM;
     if(!r[4] && s.ppu_threads.size()<2)throw std::runtime_error("lightweight condition wait requires an active peer");
-    if(r[4] && !s.wait_deadline)s.wait_deadline=sync_ext_now()+r[4];
+    if(r[4] && !s.wait_deadline)s.wait_deadline=sync_ext_deadline(r[4]);
     s.wait_depth=m.load(condition.mutex+12,4);s.wait_sequence=s.next_wait_sequence++;
     m.store(condition.mutex+12,4,0);m.store(condition.mutex,4,UINT32_MAX);
     s.reschedule=true;ppu_defer_block(s,8,object);return 0;

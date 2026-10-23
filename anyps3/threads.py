@@ -36,6 +36,11 @@ CPP = r'''
 static std::uint64_t sync_ext_now() {
     return std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
 }
+// Absolute deadline of a relative LV2 timeout (microseconds). Saturates: games pass values such as 0xffffffff80000000,
+// which must mean "practically never", not wrap to an already expired deadline.
+static std::uint64_t sync_ext_deadline(std::uint64_t timeout) {
+    const auto now=sync_ext_now();return timeout>UINT64_MAX-now?UINT64_MAX:now+timeout;
+}
 static bool sync_ext_match(std::uint64_t& pattern,std::uint64_t bits,unsigned mode) {
     if((mode&15)==1 ? (pattern&bits)!=bits : !(pattern&bits))return false;
     if(mode&16)pattern&=~bits;
@@ -143,9 +148,9 @@ struct PpuDeferredScope {
         if(kind==1){for(const auto& q:s.events.queues)if(q.id==thread.wait_id){ready=q.data.has_events();break;}}
         else if(kind==2){for(const auto& sem:s.kernel.semaphores)if(sem.id==thread.wait_id){ready=sem.value!=0;break;}}
         else if(kind==3){for(const auto& mutex:s.kernel.mutexes)if(mutex.id==thread.wait_id){ready=!mutex.owner;break;}}
-        // An expired timed mutex wait resumes; the retried lock reports ETIMEDOUT
-        // unless the mutex became free (RPCS3 sys_mutex.cpp:247-290).
-        if(!ready && (kind==1 || kind==3 || kind==7 || kind==8) &&
+        // An expired timed mutex/semaphore wait resumes; the retried call reports ETIMEDOUT
+        // unless the object became available (RPCS3 sys_mutex.cpp:247-290, sys_semaphore.cpp:193-221).
+        if(!ready && (kind==1 || kind==2 || kind==3 || kind==7 || kind==8) &&
            thread.wait_deadline && clock_now()>=thread.wait_deadline){thread.wait_timed_out=true;ready=true;}
         if(kind==5)for(const auto& group:s.spu.groups)if(group.id==thread.wait_id && group.join_cause)ready=true;
         if(kind==6)for(const auto& target:s.ppu_threads)if(target.thread_id==thread.wait_id && target.returned)ready=true;

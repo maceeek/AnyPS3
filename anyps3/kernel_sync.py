@@ -63,9 +63,13 @@ static std::uint32_t kernel_sync(PpuState& s) {
         auto pin=it->guard;std::lock_guard<std::recursive_mutex> object(*pin);
         if(r[11]==91){k.semaphores.erase(it);return 0;}
         if(r[11]==92 || r[11]==93) {
-            if(it->value){--it->value;return 0;}
+            if(it->value){--it->value;if(r[11]==92){s.wait_deadline=0;s.wait_timed_out=false;}return 0;}
             if(r[11]==93)return MM_EBUSY;
-            if(s.ppu_threads.size()>1 && !r[4])ppu_block(s,2,it->id);
+            if(r[4]){ // timeout in microseconds (sys_semaphore_wait); the deadline survives retried waits
+                if(s.wait_timed_out){s.wait_timed_out=false;s.wait_deadline=0;return 0x8001000b;} // CELL_ETIMEDOUT
+                if(!s.wait_deadline)s.wait_deadline=sync_ext_deadline(r[4]);
+            }
+            if(s.ppu_threads.size()>1)ppu_block(s,2,it->id);
             throw std::runtime_error("semaphore wait requires an active scheduler");
         }
         if(r[11]==94) {
@@ -108,7 +112,7 @@ static std::uint32_t kernel_sync(PpuState& s) {
                 if(r[11]==103)return MM_EBUSY;
                 if(r[4]){ // timeout in microseconds; the deadline survives retried syscalls
                     if(s.wait_timed_out){s.wait_timed_out=false;s.wait_deadline=0;return 0x8001000b;} // CELL_ETIMEDOUT
-                    if(!s.wait_deadline)s.wait_deadline=sync_ext_now()+r[4];
+                    if(!s.wait_deadline)s.wait_deadline=sync_ext_deadline(r[4]);
                 }
                 ppu_block(s,3,m.id);
             }

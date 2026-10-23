@@ -293,6 +293,36 @@ int main() {
  assert(call(102,id,5000)==0 && !s.wait_timed_out && !s.wait_deadline);
 ''')
 
+    def test_timed_semaphore_wait_times_out_or_acquires(self):
+        # ACIT's pause menu waits with timeout 0xffffffff80000000 (run 20261023T134648 STOP at pc=0x0068ff14).
+        self.run_native(r'''
+ mem.store(0x10100,4,2);mem.store(0x10104,4,0x200);
+ assert(call(90,0x10000,0x10100,0,1)==0);const auto id=mem.load(0x10000,4);
+ PpuContext peer;peer.thread_id=2;s.ppu_threads.push_back(static_cast<PpuContext&>(s));s.ppu_threads.push_back(peer);
+ bool blocked=false;
+ try{call(92,id,5000);}catch(const PpuBlocked&){blocked=true;}
+ assert(blocked && s.wait_kind==2 && s.wait_id==id && s.wait_deadline);
+ const auto deadline=s.wait_deadline;s.wait_kind=0;blocked=false;
+ try{call(92,id,5000);}catch(const PpuBlocked&){blocked=true;}
+ assert(blocked && s.wait_deadline==deadline);    // retry keeps the original deadline
+ s.wait_kind=0;s.wait_timed_out=true;
+ assert(call(92,id,5000)==0x8001000b && !s.wait_deadline && !s.wait_timed_out);   // CELL_ETIMEDOUT
+ // A huge timeout saturates instead of wrapping into an expired deadline.
+ blocked=false;try{call(92,id,UINT64_C(0xffffffff80000000));}catch(const PpuBlocked&){blocked=true;}
+ assert(blocked && s.wait_deadline==UINT64_MAX);
+ // The value arriving before the retry acquires and clears the timeout state.
+ s.wait_kind=0;s.wait_timed_out=true;assert(call(94,id,1)==0);
+ assert(call(92,id,UINT64_C(0xffffffff80000000))==0 && !s.wait_deadline && !s.wait_timed_out);
+ // Scheduler: an expired semaphore waiter is woken with the timeout flag, a live one is not.
+ PpuContext waiter;waiter.thread_id=3;waiter.wait_kind=2;waiter.wait_id=id;waiter.wait_deadline=1;
+ PpuContext pending=waiter;pending.thread_id=4;pending.wait_deadline=UINT64_MAX;
+ s.thread_id=1;s.wait_kind=0;s.ppu_threads.clear();s.ppu_threads.push_back(static_cast<PpuContext&>(s));s.ppu_threads.push_back(waiter);s.ppu_threads.push_back(pending);
+ ppu_schedule(s);
+ bool woke=false,stays=false;
+ for(const auto& t:s.ppu_threads){if(t.thread_id==3)woke=!t.wait_kind && t.wait_timed_out;if(t.thread_id==4)stays=t.wait_kind==2 && !t.wait_timed_out;}
+ assert(woke && stays);
+''')
+
     def test_preemption_alternates_two_hardware_threads(self):
         # Cell PPU: two hardware threads run the two best ready LV2 threads concurrently.
         self.run_native(r'''
