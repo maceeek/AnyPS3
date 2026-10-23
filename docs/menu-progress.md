@@ -594,3 +594,7 @@ See knowledge/experiments/2026-10-23-render-scale.md.
 2026-10-23 milestone final: build805 original Great Clock, same-flip720p/1440p captures inspected, original bytes exact/noSTOP. Feature branch rebased onto54cea81; final capture regression and complete GUI/manager checks pass. Best quiet scaled result remains45.52FPS; detail preservation and stable60FPS remain open.
 
 2026-10-23 cloud follow-up (no GPU/game in the container): visual companions now keep subpixel history through alias merge, equal-footprint rebind and typeless-depth RTT; RENDER_SCALE queue counters fixed; paired draw reuses the native pipeline. Verified only by lavapipe Vulkan unit tests with validation; no new FPS or game evidence. See knowledge/experiments/2026-10-23-cloud-render-scale.md.
+
+2026-10-23 FIX7: START crash = untimed-only semaphore wait (fixed, 810); pause blur needs texture-feedback GPU path
+(fast2/fix7-pause, unbuilt). GUI toggles/keys/skip intro; save-menu audio + two windows (fast2/fix7-audio); stutter =
+CPU scaled blits (fast2/fix7-stutter). See knowledge/experiments/2026-10-23-fix7.md.

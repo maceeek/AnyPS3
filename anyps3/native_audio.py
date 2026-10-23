@@ -66,7 +66,9 @@ struct NativeAudio {
     }
     bool sink_ready=false;
     unsigned maximum=0,running=0;std::uint32_t indices=0,device=0;
-    std::uint64_t next_tick=0,submitted_frames=0;
+    std::uint64_t next_tick=0,submitted_frames=0,late_dropped_frames=0;
+    // Host-output diagnostics for PERF AUDIO: worst period lateness and SDL queue depth since the previous report.
+    mutable std::uint64_t interval_late_ticks=0,interval_queued_bytes=0;
     bool null_sink=false,null_logged=false,subsystem=false;
     void* library=nullptr;
     int (*init)(std::uint32_t)=nullptr;void (*quit)(std::uint32_t)=nullptr;
@@ -148,7 +150,12 @@ struct NativeAudio {
         pause(device,0);
         std::fprintf(stderr,"native audio initialized sink=SDL2 rate=48000 channels=%u (8->2 downmix if needed)\n",host_channels);
     }
-    void submit(const std::array<float,256*8>& pcm){
+    // late: the period's playback time is already AUDIO_LATE_LIMIT past (the host stalled audio service). Its guest
+    // effects (block consumption, tags, notify events) still happen; only host output skips it, as the hardware
+    // would have played it during the stall. Queueing it would add the stall to the host latency permanently and a
+    // stall >= 2 s tripped the queue stop (user run 20261023T134218).
+    void submit(const std::array<float,256*8>& pcm,bool late=false){
+        if(late){late_dropped_frames+=256;return;}
         std::array<float,256*2> stereo{};
         const bool downmix=host_channels==2 || output_channels==2;
         if(downmix)for(unsigned i=0;i<256;++i){stereo[i*2]=pcm[i*8];stereo[i*2+1]=pcm[i*8+1];}
@@ -161,7 +168,8 @@ struct NativeAudio {
         // Queueing successful PCM is separate evidence from device enumeration.
         unsigned nonzero=0;for(unsigned i=0;i<bytes/4;++i)if(data[i]!=0)++nonzero;
         if(!null_sink){
-            if(queued(device)>48000u*host_channels*4*2)throw std::runtime_error("SDL2 audio output queue exceeds two seconds");
+            const auto depth=queued(device);interval_queued_bytes=std::max<std::uint64_t>(interval_queued_bytes,depth);
+            if(depth>48000u*host_channels*4*2)throw std::runtime_error("SDL2 audio output queue exceeds two seconds");
             if(queue(device,data,bytes))throw std::runtime_error(std::string("SDL2 audio queue failed: ")+error());
         }
         capture_pcm(data,bytes/4);
@@ -179,6 +187,8 @@ static constexpr std::uint32_t AUDIO_ALREADY_INIT=0x80310701,AUDIO_NOT_INIT=0x80
     AUDIO_PARAM=0x80310704,AUDIO_PORT_FULL=0x80310705,AUDIO_ALREADY_RUN=0x80310706,
     AUDIO_NOT_OPEN=0x80310707,AUDIO_NOT_RUN=0x80310708,AUDIO_SHAREDMEMORY=0x8031070b;
 static constexpr std::uint64_t AUDIO_PERIOD_TICKS=TIMEBASE_HZ*256/48000;
+// A period submitted more than 50 ms after its end is no longer sent to the host (NativeAudio::submit).
+static constexpr std::uint64_t AUDIO_LATE_LIMIT_TICKS=TIMEBASE_HZ/20;
 static_assert(TIMEBASE_HZ*256%48000==0,"audio period must be exact in timebase ticks");
 
 // Same budget, page alignment and reservation-aware search as sys_memory_allocate.
@@ -245,7 +255,8 @@ static void audio_close(PpuState& s,NativeAudio::Port& p){
               }
             }
         }
-        a.submit(mixed);
+        const auto late=now-a.next_tick;a.interval_late_ticks=std::max(a.interval_late_ticks,late);
+        a.submit(mixed,late>AUDIO_LATE_LIMIT_TICKS);
         for(auto& p:a.ports)if(p.status==2){
             const auto block=p.address+p.position*p.channels*256*4;
             if(m.concurrent()){std::vector<std::uint8_t> zero(p.channels*256*4);m.transfer(block,zero.data(),zero.size(),true);}
@@ -279,7 +290,7 @@ static void audio_close(PpuState& s,NativeAudio::Port& p){
         a.open_sink();
         try{a.indices=audio_allocate(s,0x10000);}catch(...){a.shutdown_sink();throw;}
         if(!a.indices){a.shutdown_sink();return MM_ENOMEM;}
-        a.maximum=s.sdk_version<=0x35ffff?4:8;a.running=0;a.submitted_frames=0;
+        a.maximum=s.sdk_version<=0x35ffff?4:8;a.running=0;a.submitted_frames=0;a.late_dropped_frames=0;
         a.counter=0;a.notify_dropped=0;a.nonzero_frames=0;a.next_tick=timebase_ticks()+AUDIO_PERIOD_TICKS;
         for(unsigned i=0;i<8;++i)a.ports[i].index=a.indices+(i+1)*16;
         return 0;

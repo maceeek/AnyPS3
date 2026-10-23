@@ -115,6 +115,22 @@ class SettingsGuiTests(unittest.TestCase):
         self.assertEqual(stored["video.present_mode"], "mailbox")
         self.assertIs(type(stored["video.present_mode"]), str)
 
+    def test_skip_intro_shown_only_for_titles_with_a_recipe(self):
+        # The fixture title has no recipe: the option is hidden, not just disabled.
+        self.assertNotIn("input.skip_intro", self.widget().editors)
+        self.lib.register(dict(id="BCES00511", title="Recipe title without a build"))
+        widget = Settings(self.client, "BCES00511")
+        self.widgets.append(widget)
+        self.wait(lambda: not self.client.calls and bool(widget.editors))
+        editor = widget.editors["input.skip_intro"]
+        self.assertTrue(editor.isEnabled())
+        self.assertFalse(editor.isChecked())
+        editor.setChecked(True)
+        self.button(editor, "Apply").click()
+        self.wait(lambda: not self.client.calls and widget.values["input.skip_intro"] is True)
+        self.assertEqual(self.errors, [])
+        self.assertIs(read_json(self.lib.title_dir("BCES00511")/"settings.json")["input.skip_intro"], True)
+
     def test_older_active_build_disables_scale_control(self):
         from anyps3_manager.storage import atomic_json
         build = self.lib.title_dir(TITLE)/"builds"/self.lib.title(TITLE)["active_build"]/"record.json"
@@ -126,6 +142,18 @@ class SettingsGuiTests(unittest.TestCase):
         self.assertFalse(editor.isEnabled())
         self.assertFalse(self.button(editor, "Apply").isEnabled())
         self.assertIn("Unavailable in the active build", editor.parentWidget().toolTip())
+        self.assertIn("rebuild", editor.parentWidget().toolTip())
+
+    def test_unimplemented_settings_hidden_until_advanced(self):
+        # No AnyPS3 runtime reads ANYPS3_WINDOW_MODE: it is noise for a player.
+        widget = self.widget()
+        self.assertNotIn("video.window_mode", widget.editors)
+        self.assertNotIn("performance.timer_slack_ns", widget.editors)
+        self.assertIn("video.present_mode", widget.editors)
+        widget.advanced.setChecked(True)
+        self.assertFalse(widget.editors["video.window_mode"].isEnabled())
+        self.assertIn("not implemented", widget.editors["video.window_mode"].parentWidget().toolTip())
+        self.assertIn("performance.timer_slack_ns", widget.editors)
 
 
 if __name__ == "__main__":

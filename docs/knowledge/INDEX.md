@@ -1,5 +1,8 @@
 # AnyPS3 project knowledge base
 
+[2026-10-23 FIX7 user-reported problems](experiments/2026-10-23-fix7.md): START crash, GUI settings,
+skip intro, save-menu audio, two windows, stutter, RPCS3 patches (not adopted).
+
 [2026-10-23 cloud follow-up](experiments/2026-10-23-cloud-render-scale.md):
 visual history through alias merge/rebind and typeless depth, counter fix; lavapipe
 unit tests only, no game run.

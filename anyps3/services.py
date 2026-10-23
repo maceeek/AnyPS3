@@ -256,7 +256,7 @@ struct HleImportScope {
                 if(state.lwmutex_waiting){mem.store(object+4,4,mem.load(object+4,4)-1);state.lwmutex_waiting=0;}
                 state.r[3]=0x8001000b;return; // CELL_ETIMEDOUT
             }
-            if(!state.wait_deadline)state.wait_deadline=sync_ext_now()+state.r[4];
+            if(!state.wait_deadline)state.wait_deadline=sync_ext_deadline(state.r[4]);
         }else if(state.ppu_threads.size()<2)throw std::runtime_error("lightweight mutex wait requires an active peer");
         if(!state.lwmutex_waiting){
             const auto count=mem.load(object+4,4);

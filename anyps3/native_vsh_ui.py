@@ -38,6 +38,10 @@ struct NativeVshUi {
     unsigned raw_phase=0;
     std::vector<std::uint8_t> icon;
     std::array<std::chrono::steady_clock::time_point,7> repeat_deadlines{};
+    // PacketRead waiters (thread id, condition) parked while the SAVE UI waits for host input. Real VSH signals
+    // the channel condition only when it writes a reply; sysutil_park_service wakes them (sysutil_transport.py).
+    std::vector<std::pair<std::uint32_t,std::uint64_t>> parked;bool park_pending=false;
+    std::chrono::steady_clock::time_point park_poll{};
 };
 '''
 

@@ -63,9 +63,13 @@ static std::uint32_t kernel_sync(PpuState& s) {
         auto pin=it->guard;std::lock_guard<std::recursive_mutex> object(*pin);
         if(r[11]==91){k.semaphores.erase(it);return 0;}
         if(r[11]==92 || r[11]==93) {
-            if(it->value){--it->value;return 0;}
+            if(it->value){--it->value;if(r[11]==92){s.wait_deadline=0;s.wait_timed_out=false;}return 0;}
             if(r[11]==93)return MM_EBUSY;
-            if(s.ppu_threads.size()>1 && !r[4])ppu_block(s,2,it->id);
+            if(r[4]){ // timeout in microseconds (sys_semaphore_wait); the deadline survives retried waits
+                if(s.wait_timed_out){s.wait_timed_out=false;s.wait_deadline=0;return 0x8001000b;} // CELL_ETIMEDOUT
+                if(!s.wait_deadline)s.wait_deadline=sync_ext_deadline(r[4]);
+            }
+            if(s.ppu_threads.size()>1)ppu_block(s,2,it->id);
             throw std::runtime_error("semaphore wait requires an active scheduler");
         }
         if(r[11]==94) {
@@ -108,7 +112,7 @@ static std::uint32_t kernel_sync(PpuState& s) {
                 if(r[11]==103)return MM_EBUSY;
                 if(r[4]){ // timeout in microseconds; the deadline survives retried syscalls
                     if(s.wait_timed_out){s.wait_timed_out=false;s.wait_deadline=0;return 0x8001000b;} // CELL_ETIMEDOUT
-                    if(!s.wait_deadline)s.wait_deadline=sync_ext_now()+r[4];
+                    if(!s.wait_deadline)s.wait_deadline=sync_ext_deadline(r[4]);
                 }
                 ppu_block(s,3,m.id);
             }
@@ -161,13 +165,17 @@ static std::uint32_t kernel_sync(PpuState& s) {
         }
         if (mutex->owner!=s.thread_id) return MM_EPERM;
         mutex->owner=0;
-        bool serviced=false;
+        bool serviced=false,park=false;
         object.unlock();parent.unlock();
-        try { GuestMemory::RawPermit legacy_transport(mem);report_sysutil_rings(s); serviced=service_sysutil_connect(s,r[3]); } catch (...) { std::lock(parent,object);mutex->owner=s.thread_id; throw; }
+        try { GuestMemory::RawPermit legacy_transport(mem);report_sysutil_rings(s);s.settings.vsh_ui.park_pending=false;
+            serviced=service_sysutil_connect(s,r[3]);park=std::exchange(s.settings.vsh_ui.park_pending,false); } catch (...) { std::lock(parent,object);mutex->owner=s.thread_id; throw; }
         std::lock(parent,object);
         mutex->owner=s.thread_id;
         if (serviced) return 0;
+        // A SAVE UI PacketRead without a blockable context keeps the former spurious wake (no reply is invented).
+        if(park && (s.ppu_threads.size()<=1 || r[4]))return 0;
         if(s.ppu_threads.size()>1 && !r[4]){
+            if(park)s.settings.vsh_ui.parked.emplace_back(s.thread_id,it->id);
             s.wait_depth=mutex->depth;mutex->owner=0;mutex->depth=0;ppu_block(s,4,it->id);
         }
         throw std::runtime_error("kernel condition wait requires an active peer/scheduler");

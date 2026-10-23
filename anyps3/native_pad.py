@@ -12,7 +12,10 @@ TYPES = r'''
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
+#include <fstream>
 #include <mutex>
+#include <sstream>
+#include <string>
 #include <thread>
 struct NativePad {
     struct Port {
@@ -23,6 +26,17 @@ struct NativePad {
         std::chrono::steady_clock::time_point last_report{};
     };
     void* library=nullptr;unsigned maximum=0;std::array<Port,7> ports{};
+    // Host input injection (ANYPS3_PAD_INJECT=<file>): an external driver, e.g.
+    // the manager's intro-skip recipe, presses buttons through the unchanged
+    // cellPad path. The file holds one line "v1 PRESENT DIGITAL1 DIGITAL2"
+    // (decimal; CELL_PAD_CTRL_* bits of words 2/3). PRESENT=1 keeps port 0
+    // connected without a physical pad; the bits are OR-ed onto port 0 and
+    // never replace physical input. Unset = inactive; malformed = STOP.
+    struct Inject {
+        std::string path;bool present=false,physical_reported=false;
+        std::uint16_t digital1=0,digital2=0;
+        std::chrono::steady_clock::time_point read{};
+    } inject;
     int (*init)(std::uint32_t)=nullptr;void (*quit)(std::uint32_t)=nullptr;
     int (*count)()=nullptr;int (*is_controller)(int)=nullptr;
     int (*device_id)(int)=nullptr;void* (*open)(int)=nullptr;
@@ -66,6 +80,28 @@ struct NativePad {
         const bool stopped=!(p.device && (p.low || p.high) && rumble) || rumble(p.device,0,0,0)==0;
         p.low=p.high=0;return stopped;
     }
+    void inject_refresh(bool force){
+        if(inject.path.empty())return;
+        const auto now=std::chrono::steady_clock::now();
+        // Host polling choice: at most one file read per 10ms of guest polling.
+        if(!force && now-inject.read<std::chrono::milliseconds(10))return;
+        inject.read=now;
+        std::ifstream file(inject.path);std::string text,tag,extra;
+        if(!file || !std::getline(file,text,'\0'))throw std::runtime_error("pad injection file unreadable: "+inject.path);
+        std::istringstream words(text);long long present=-1,d1=-1,d2=-1;
+        if(!(words>>tag>>present>>d1>>d2) || tag!="v1" || (words>>extra) || (present!=0 && present!=1) ||
+           d1<0 || (d1&~0x1ffLL) || d2<0 || d2>0xff)
+            throw std::runtime_error("unsupported pad injection protocol: "+text);
+        if(bool(present)!=inject.present || d1!=inject.digital1 || d2!=inject.digital2){
+            if(bool(present)!=inject.present){
+                if(!ports[0].device)ports[0].changed=true;
+                inject.physical_reported=false;
+            }
+            inject.present=present;inject.digital1=std::uint16_t(d1);inject.digital2=std::uint16_t(d2);
+            std::fprintf(stderr,"native pad inject present=%d digital1=%04x digital2=%04x\n",int(present),unsigned(d1),unsigned(d2));
+        }
+    }
+    bool present(unsigned index)const{return ports[index].device || (index==0 && inject.present);}
     void start_feedback(){
         if(feedback.joinable())return;
         feedback_stop=false;
@@ -100,11 +136,12 @@ struct NativePad {
         bool stopped=true;
         for(auto& p:ports){stopped=stop_effect(p) && stopped;if(p.device)close(p.device);p=Port{};}
         if(maximum)quit(0x2000);
-        maximum=0;return stopped;
+        maximum=0;inject=Inject{};return stopped;
     }
     ~NativePad(){shutdown();if(library)dlclose(library);}
     unsigned poll(){
         std::lock_guard<std::recursive_mutex> lock(mutex);
+        inject_refresh(false);
         update();
         for(auto& p:ports)if(p.device && !attached(p.device)){
             stop_effect(p);close(p.device);
@@ -133,11 +170,16 @@ struct NativePad {
             }
         }
         for(const auto& p:ports)if(p.feedback_error)throw std::runtime_error("SDL2 controller rumble refresh failed");
-        return std::count_if(ports.begin(),ports.end(),[](const auto& p){return p.device!=nullptr;});
+        unsigned connected=0;for(unsigned i=0;i<7;++i)connected+=present(i);
+        return connected;
     }
     std::array<std::uint16_t,24> sample(unsigned index){
         std::lock_guard<std::recursive_mutex> lock(mutex);
         auto* d=ports[index].device;std::array<std::uint16_t,24> data{};
+        if(!d){ // Injection-only port 0: centred sticks, released buttons.
+            for(unsigned i=0;i<4;++i)data[4+i]=128;
+            return data;
+        }
         const int digital1[]={4,7,8,6,11,14,12,13};
         const int digital2[]={-1,-1,9,10,3,1,0,2};
         for(unsigned i=0;i<8;++i){
@@ -151,11 +193,26 @@ struct NativePad {
         if(left>0)data[3]|=1;
         if(right>0)data[3]|=2;
         for(unsigned i=0;i<4;++i)data[4+i]=(int(axis(d,(i+2)%4))+32768)/256;
+        data[18]=(left*255+16383)/32767;data[19]=(right*255+16383)/32767;
+        pressures(data);
+        return data;
+    }
+    static void pressures(std::array<std::uint16_t,24>& data){
         const unsigned pressure_word[]={2,2,2,2,3,3,3,3,3,3};
         const unsigned pressure_bit[]={5,7,4,6,4,5,6,7,2,3};
         for(unsigned i=0;i<10;++i)data[8+i]=(data[pressure_word[i]]&(1u<<pressure_bit[i]))?255:0;
-        data[18]=(left*255+16383)/32767;data[19]=(right*255+16383)/32767;
-        return data;
+    }
+    // OR injected digital bits onto port 0 (pressure 255 for pressed injected buttons).
+    void apply_inject(unsigned index,std::array<std::uint16_t,24>& data){
+        if(index!=0 || !inject.present)return;
+        if(ports[0].device && !inject.physical_reported && ((data[2]&0x1ff) || (data[3]&0xff))){
+            // Lets the driver yield to the player (manager intro skip stops here).
+            std::fprintf(stderr,"native pad inject physical input port=0\n");inject.physical_reported=true;
+        }
+        if(!inject.digital1 && !inject.digital2)return;
+        const auto l2=data[18],r2=data[19];
+        data[2]|=inject.digital1;data[3]|=inject.digital2;pressures(data);
+        data[18]=(inject.digital2&1)?255:l2;data[19]=(inject.digital2&2)?255:r2;
     }
     std::uint32_t motion(unsigned index,std::array<std::uint16_t,24>& data){
         auto& p=ports[index];if(!p.sensors || !p.sensors_enabled)return 0x80121108;
@@ -195,7 +252,12 @@ template<class State> static bool pad_vsh_intercept(State& s,unsigned operation)
         if(p.maximum)return 0x80121103;
         if(!r[3] || r[3]>127)return 0x80121102;
         p.load();if(p.init(0x2000))return 0x80121105;
-        p.maximum=r[3];const auto connected=p.poll();
+        p.maximum=r[3];
+        if(const char* inject=std::getenv("ANYPS3_PAD_INJECT");inject && *inject){
+            p.inject.path=inject;p.inject_refresh(true);
+            std::fprintf(stderr,"native pad injection file=%s (OR-ed onto port 0)\n",inject);
+        }
+        const auto connected=p.poll();
         std::fprintf(stderr,"native pad initialized ports=%u connected=%u backend=SDL2\n",std::min(p.maximum,7u),connected);
         return 0;
     }
@@ -209,11 +271,12 @@ template<class State> static bool pad_vsh_intercept(State& s,unsigned operation)
         m.store(r[3]+8,4,pad_vsh_system_info(s));
         for(unsigned i=0;i<std::min(p.maximum,7u);++i){
             auto& port=p.ports[i];
-            m.store(r[3]+12+i*4,4,(port.device?1:0)|(port.changed?2:0));
+            m.store(r[3]+12+i*4,4,(p.present(i)?1:0)|(port.changed?2:0));
             m.store(r[3]+40+i*4,4,port.setting);
             // RPCS3 Emu/Io/pad_types.h:136-140: conformity=1, sensor=4,
             // HP sticks=8, actuator=16. SDL has no native PS3 pressure buttons.
-            if(port.device)m.store(r[3]+68+i*4,4,1|8|(port.sensors?4:0)|(port.actuator?16:0));
+            // An injection-only port is a plain conforming pad (no sensors/actuator).
+            if(p.present(i))m.store(r[3]+68+i*4,4,1|8|(port.sensors?4:0)|(port.actuator?16:0));
             port.changed=false;
         }
         return 0;
@@ -232,7 +295,7 @@ template<class State> static bool pad_vsh_intercept(State& s,unsigned operation)
         if(!r[4])return 0x80121102;
         if(std::int32_t(s.sdk_version)>0x1fffff)
             for(unsigned i=2;i<8;++i)if(m.load(r[4]+i,1))return 0x80121102;
-        p.poll();if(index>=std::min(p.maximum,7u) || !p.ports[index].device)return 0x80121107;
+        p.poll();if(index>=std::min(p.maximum,7u) || !p.present(index))return 0x80121107;
         auto& port=p.ports[index];if(!port.actuator)return 0x80121108;
         // PSL1GHT io/pad.h:210-213: small = on/off, large = 0..255.
         // SDL low-frequency = large; high-frequency = small (0 or 65535).
@@ -243,10 +306,10 @@ template<class State> static bool pad_vsh_intercept(State& s,unsigned operation)
     }
     if(operation!=4)throw std::runtime_error("unsupported native pad operation");
     if(!r[4])return 0x80121102;
-    p.poll();if(index>=std::min(p.maximum,7u) || !p.ports[index].device)return 0x80121107;
+    p.poll();if(index>=std::min(p.maximum,7u) || !p.present(index))return 0x80121107;
     // VSH dialog: NO_CHANGE while intercepted, neutral data until release (RPCS3 cellPad.cpp:362-375).
     if(pad_vsh_intercept(s,operation))return 0;
-    auto& port=p.ports[index];auto data=p.sample(index);
+    auto& port=p.ports[index];auto data=p.sample(index);p.apply_inject(index,data);
     if(port.setting&4){const auto error=p.motion(index,data);if(error)return error;}
     // RPCS3 cellPad.h:30-32, pad_types.h:274-277: 8 / 20 / 24 words.
     const unsigned length=(port.setting&4)?24:(port.setting&2)?20:8;

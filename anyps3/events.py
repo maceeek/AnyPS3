@@ -153,7 +153,7 @@ static std::uint32_t event_syscall(PpuState& s) {
             if (q.data.empty()) {
                 if(r[5]){ // timeout in microseconds; deadline survives retried receives
                     if(s.wait_timed_out){s.wait_timed_out=false;s.wait_deadline=0;return 0x8001000b;} // CELL_ETIMEDOUT
-                    if(!s.wait_deadline)s.wait_deadline=sync_ext_now()+r[5];
+                    if(!s.wait_deadline)s.wait_deadline=sync_ext_deadline(r[5]);
                 }else if(s.ppu_threads.size()<2 && !s.process.spu_worker.enabled)throw std::runtime_error("empty event queue receive requires active peer/scheduler");
                 ppu_defer_block(s,1,q.id);return 0;
             }

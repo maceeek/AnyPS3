@@ -7,11 +7,22 @@ import re
 from .storage import ManagerError, atomic_json, read_json
 
 
-def field(default, description, group, *, scope="launch", env=None, **extra):
+def field(default, description, group, *, scope="launch", env=None, advanced=False, **extra):
     kind = "boolean" if type(default) is bool else "integer" if type(default) is int else "string"
     return dict(type=kind, default=default, description=description, group=group,
-                scope=scope, env=env, advanced=False, diagnostic=False,
+                scope=scope, env=env, advanced=advanced, diagnostic=False,
                 experimental=False, **extra)
+
+
+# Runtime features every player launch needs. They were settings once, but
+# turning them off only made games unplayable (serial SPU) or measurably slower
+# (RSX on the PPU coordinator), so launches always enable them.
+ALWAYS_ON_ENV = ("ANYPS3_RSX_WORKER", "ANYPS3_SPU_THREADS")
+# Former setting keys ignored when read from older settings files: the two
+# features above, and A/B switches whose runtime default is on (an unchecked box
+# exported =0 and silently disabled them).
+RETIRED = frozenset(("performance.rsx_worker", "performance.spu_threads",
+                     "experimental.host_drain", "experimental.flip_early"))
 
 
 FIELDS = {
@@ -28,11 +39,9 @@ FIELDS = {
     "run.cpus": field("0-5,12-17" if (os.cpu_count() or 1) >= 24 else "", "Game CPU set; empty allows all CPUs.", "Performance", format="cpus"),
     "run.stop_timeout": field(5, "Seconds between SIGTERM and SIGKILL.", "General", minimum=1, maximum=60),
     "run.keep": field(20, "Number of completed run records to retain.", "General", minimum=1, maximum=10000),
-    "performance.rsx_worker": field(True, "Run RSX on a worker.", "Performance", env="ANYPS3_RSX_WORKER"),
-    "performance.spu_threads": field(True, "Parallel SPU workers.", "Performance", env="ANYPS3_SPU_THREADS"),
-    "performance.rsx_threads": field(0, "RSX CPU threads (0 uses runtime default).", "Performance", env="ANYPS3_RSX_THREADS", minimum=0, maximum=128),
-    "performance.rsx_memory_cache_mb": field(256, "RSX memory cache in MiB.", "Performance", env="ANYPS3_RSX_MEMORY_CACHE_MB", minimum=0, maximum=16384),
-    "performance.timer_slack_ns": field(50000, "Host timer slack in nanoseconds.", "Performance", env="ANYPS3_TIMER_SLACK_NS", minimum=1, maximum=1000000000),
+    "performance.rsx_threads": field(0, "RSX CPU threads (0 uses runtime default).", "Performance", env="ANYPS3_RSX_THREADS", minimum=0, maximum=128, advanced=True),
+    "performance.rsx_memory_cache_mb": field(256, "RSX memory cache in MiB.", "Performance", env="ANYPS3_RSX_MEMORY_CACHE_MB", minimum=0, maximum=16384, advanced=True),
+    "performance.timer_slack_ns": field(50000, "Host timer slack in nanoseconds.", "Performance", env="ANYPS3_TIMER_SLACK_NS", minimum=1, maximum=1000000000, advanced=True),
     "video.present_mode": field("fifo", "Presentation mode.", "Video", env="ANYPS3_PRESENT_MODE", choices=["fifo", "mailbox", "immediate"]),
     "video.window_mode": field("windowed", "Window mode (requires player-mode runtime).", "Video", env="ANYPS3_WINDOW_MODE", choices=["windowed", "fullscreen", "borderless"]),
     "video.width": field(1280, "Initial window width.", "Video", env="ANYPS3_WINDOW_WIDTH", minimum=320, maximum=7680),
@@ -45,6 +54,10 @@ FIELDS = {
     "input.sdl_mappings": field("", "SDL GameController mapping database entries.", "Input", env="SDL_GAMECONTROLLERCONFIG"),
     "input.ps5_hidapi": field(True, "Enable SDL DualSense HIDAPI support.", "Input", env="SDL_JOYSTICK_HIDAPI_PS5"),
     "input.pad_config": field('{"ports":[]}', "Port assignments and mappings (requires pad-config runtime).", "Input", env="ANYPS3_PAD_CONFIG", format="pad-config"),
+    "input.skip_intro": field(False, "Press START automatically through the startup notices, logos and title screen until the main menu appears. "
+                              "Stops at the menu, after 3 minutes, or as soon as you press a controller button. "
+                              "Only for titles with an intro-skip recipe.", "Input", env="ANYPS3_PAD_INJECT",
+                              label="Skip intro", requires_recipe=True),
     "saves.backup_before_run": field(True, "Back up saves before launching.", "Saves"),
     "saves.keep": field(10, "Automatic backups to retain; manual backups are kept.", "Saves", minimum=1, maximum=1000),
     "saves.backup_game_data": field(False, "Include installed game data in backups.", "Saves"),
@@ -54,8 +67,6 @@ FIELDS = {
     "diagnostics.capture_stride": field(0, "Capture every Nth frame; 0 disables captures.", "Diagnostics", minimum=0, maximum=1000000),
     "diagnostics.spu_max_steps": field(1000000000000, "SPU instruction budget per thread.", "Diagnostics", env="ANYPS3_SPU_MAX_STEPS", minimum=1, maximum=18446744073709551615),
     "diagnostics.sleep_budget_us": field(300000000000, "Guest sleep budget in microseconds.", "Diagnostics", env="ANYPS3_SLEEP_BUDGET_US", minimum=1, maximum=18446744073709551615),
-    "experimental.host_drain": field(False, "Experimental host-request drain.", "Experimental", env="ANYPS3_RSX_HOST_DRAIN"),
-    "experimental.flip_early": field(False, "Experimental early flip.", "Experimental", env="ANYPS3_RSX_FLIP_EARLY"),
     "experimental.recorder": field(False, "Asynchronous recorder; known teal-frame issue, keep off.", "Experimental", env="ANYPS3_RSX_RECORDER"),
 }
 for _f in FIELDS.values():
@@ -118,7 +129,7 @@ def _stored_layers(lib, title=None):
         layer = read_json(path, {})
         if not isinstance(layer, dict):
             raise ManagerError("invalid-settings", "Settings must be a JSON object.")
-        layer = dict(layer)
+        layer = {k: v for k, v in layer.items() if k not in RETIRED}
         legacy = "audio.audible_allowed" in layer or "audio.sink" in layer
         if "audio.audible_allowed" in layer:
             allowed = layer.pop("audio.audible_allowed")
@@ -176,10 +187,20 @@ def set_value(lib, key, value, title=None, reset=False):
     return dict(key=key, value=effective(lib, title)[key])
 
 
-def schema(available=None):
-    return {key: dict(spec, available=(available is None or not spec["env"] or
-                                      not spec["env"].startswith("ANYPS3_") or spec["env"] in available))
-            for key, spec in FIELDS.items()}
+def schema(available=None, supported=None, title=None):
+    """available: runtime variables of the active build; supported: those of the
+    installed source, i.e. what a rebuild would provide."""
+    def has(spec, names):
+        return names is None or not spec["env"] or not spec["env"].startswith("ANYPS3_") or spec["env"] in names
+    result = {key: dict(spec, available=has(spec, available), supported=has(spec, supported))
+              for key, spec in FIELDS.items()}
+    # Title-scoped options that need per-title data (e.g. an intro-skip recipe)
+    # do not apply to other titles; the GUI hides them there.
+    from .intro_skip import recipe
+    for spec in result.values():
+        if spec.get("requires_recipe") and title and not recipe(title):
+            spec.update(available=False, applies=False)
+    return result
 
 
 def clean_environment():
@@ -198,9 +219,10 @@ def run_environment(lib, title, settings, available, run_dir):
                ANYPS3_HDD_ROOT=str(root/"userdata/hdd0"), ANYPS3_CACHE_ROOT=str(root/"cache"),
                ANYPS3_PRESENT="sdl", ANYPS3_VK_DEVICE="gpu", ANYPS3_RSX_BACKEND="gpu",
                SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS="1", VK_INSTANCE_LAYERS="")
+    env.update({variable: "1" for variable in ALWAYS_ON_ENV if variable in available})
     for key, spec in FIELDS.items():
         variable = spec["env"]
-        if not variable or variable == "ANYPS3_PAD_CONFIG":
+        if not variable or variable in ("ANYPS3_PAD_CONFIG", "ANYPS3_PAD_INJECT"):
             continue
         if variable.startswith("ANYPS3_") and variable not in available:
             continue
@@ -211,6 +233,11 @@ def run_environment(lib, title, settings, available, run_dir):
     if "ANYPS3_PAD_CONFIG" in available:
         atomic_json(run_dir/"pads.json", json.loads(settings["input.pad_config"]))
         env["ANYPS3_PAD_CONFIG"] = str(run_dir/"pads.json")
+    from .intro_skip import recipe, write_state
+    if settings["input.skip_intro"] and "ANYPS3_PAD_INJECT" in available and recipe(title):
+        # The driver (runs.py) classifies PERF reports, so they are required.
+        write_state(run_dir/"pad-inject.txt", True)
+        env.update(ANYPS3_PAD_INJECT=str(run_dir/"pad-inject.txt"), ANYPS3_PERF_REPORT="1")
     if settings["diagnostics.vulkan_validation"]:
         env["VK_INSTANCE_LAYERS"] = "VK_LAYER_KHRONOS_validation"
     if settings["diagnostics.capture_stride"]:
