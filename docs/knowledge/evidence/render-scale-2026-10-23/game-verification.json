@@ -1,0 +1,56 @@
+{
+  "quiet803": {
+    "verified_at_utc": "2026-10-23T11:57:43.784635+00:00",
+    "returncode": -9,
+    "stop": null,
+    "original_game_segments": [
+      {
+        "address": 65536,
+        "bytes": 12628704,
+        "exact_match": true,
+        "sha256": "d889c25fae01b1c865d5ed9355c22539780053e46f079ed294daa562bd7499c1"
+      },
+      {
+        "address": 12713984,
+        "bytes": 1856124,
+        "exact_match": true,
+        "sha256": "dc8eeea942d0d87a6afd78ff33a55954f77f0531ed23080bb17fefbd43d34cc0"
+      }
+    ],
+    "artifacts": {
+      "program": "2b9bc375cff19133901b9247469213dd90a3e3b490548b2daf3d46a7c6a9b9ba",
+      "program.cpp": "e68320e77a7a5d3a423830ac195ac7af63805319c306b6ce8c6ad898277da191",
+      "program.elf": "ad8405fb84a81c9e1ff5ea4cd0f9b72235bb2f69e1ddc5dc4875cfb49ec94e79",
+      "profile.json": "32516c6a142b3873165a344fecc3e72df4d27732310aaa7c3ff807e34cb8fa12",
+      "stdout.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stderr.log": "184fdff02e2fc1b6ad64a5e28a8c25bf0694e2bdfc63b05aa1222af86ca8df36"
+    }
+  },
+  "paired804": {
+    "verified_at_utc": "2026-10-23T12:11:18.437479+00:00",
+    "returncode": -9,
+    "stop": null,
+    "original_game_segments": [
+      {
+        "address": 65536,
+        "bytes": 12628704,
+        "exact_match": true,
+        "sha256": "d889c25fae01b1c865d5ed9355c22539780053e46f079ed294daa562bd7499c1"
+      },
+      {
+        "address": 12713984,
+        "bytes": 1856124,
+        "exact_match": true,
+        "sha256": "dc8eeea942d0d87a6afd78ff33a55954f77f0531ed23080bb17fefbd43d34cc0"
+      }
+    ],
+    "artifacts": {
+      "program": "262c0ea2d972539cf8ec30f1d79374800ef23f3c22b7c3ae9ed21f98cc25d067",
+      "program.cpp": "e68320e77a7a5d3a423830ac195ac7af63805319c306b6ce8c6ad898277da191",
+      "program.elf": "ad8405fb84a81c9e1ff5ea4cd0f9b72235bb2f69e1ddc5dc4875cfb49ec94e79",
+      "profile.json": "32516c6a142b3873165a344fecc3e72df4d27732310aaa7c3ff807e34cb8fa12",
+      "stdout.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stderr.log": "102ccbec7c3b0a54a0689fcc4856d360f6da3a75128e10a076981ed12e0f7bf3"
+    }
+  }
+}

@@ -1,5 +1,23 @@
 # Current state and goal
 
+## Higher-resolution rendering — 2026-10-23, active
+
+Verified quiet build803 result: 45.5198 FPS over60.104s, min2s40.67,
+main11.413ms/frame and RSX13.667ms/frame. Original Great Clock capture inspected,
+PT_LOAD exact, no STOP; harness deliberately terminated the run (-9).
+No game/build is live. GUI source integrated,28 combined targeted tests passed;
+not installed or promoted. Suite802 reconciles to925 passes+7 skips after the
+unchanged five-second concurrency fixture passed an uncontended rerun; original
+red report is preserved. Higher-resolution stable60 remains unfinished.
+
+Current blocker: image detail. General alias merge/equal-footprint rebind and
+unsupported RTT rebuild visual companions from native pixels (verified source);
+their contribution to final world quality is still a hypothesis. See
+`local/ratchet/work/resscale-quality-loss.md`. A same-flip native/visual capture
+diagnostic is being tested before a new build804; this is not a quality fix.
+[Evidence, commands and next action](experiments/2026-10-23-render-scale.md).
+
+
 ## Wave 6 result — 2026-10-21 ~17:10 (Opus 5.5 coordinator; Opus 5.5 medium agents; gpt-6.1-sol / gpt-6-astra)
 
 **State: the original level holds the 60 Hz VSYNC cap with ~3–4 ms headroom per frame; the strict acceptance is met on the

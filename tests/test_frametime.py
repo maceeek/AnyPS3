@@ -27,10 +27,24 @@ PROGRAM = r'''
 #include <thread>
 #include <vector>
 ''' + CPP + r'''
-struct FakeMemory {std::uint64_t load(std::uint64_t address,unsigned size)const{(void)size;return address==0x1230 ? 0xCAFEF00Du : 0;}};
+struct FakeMemory {std::uint64_t load(std::uint64_t address,unsigned size)const{(void)size;if(std::getenv("FT_FORBID_PEEK"))std::abort();return address==0x1230 ? 0xCAFEF00Du : 0;}};
 struct FakeState {std::uint64_t r[32]{};std::uint64_t lr=0,pc=0;unsigned thread_id=1;FakeMemory memory;};
 int main(int argc,char** argv){
     const std::string mode=argc>1?argv[1]:"";
+    if(mode=="filter"){
+        for(unsigned kind=1;kind<=23;++kind)anyps3_ft::mark(kind,10,20,0,40);
+        anyps3_ft::mark(anyps3_ft::LabelPub,11,22,1,44);
+        {anyps3_ft::Span span(anyps3_ft::Idle,1);if(span.t0)return 10;}
+        {anyps3_ft::Span span(anyps3_ft::FlipVsync,123,456);if(!span.t0)return 11;}
+        std::function<void()> original=+[]{};
+        auto wrapped=anyps3_ft::wrap(anyps3_ft::HostExec,1,original);
+        if(!wrapped.target<void(*)()>())return 12;
+        wrapped();
+        FakeState state;state.r[26]=0x1230;anyps3_ft::block(state,12,0);
+        anyps3_ft::put(123,anyps3_ft::Block,0,0,0,0);
+        if(anyps3_ft::header->pad[0]!=1)return 13;
+        return 0;
+    }
     if(mode=="off"){
         // Not enabled: nothing is recorded or created, the stamp calls are no-ops.
         anyps3_ft::mark(anyps3_ft::Mark,1,2,3,4);
@@ -129,6 +143,22 @@ class FrameTimeRingTests(unittest.TestCase):
         if with_path:
             e['ANYPS3_FRAMETIME'] = str(path)
         return path, subprocess.run([self.exe, mode], capture_output=True, text=True, env=e, timeout=60)
+
+    def test_flips_filter_and_disabled_hot_paths(self):
+        path, result = self.run_mode('filter', 'filtered.bin', ANYPS3_FRAMETIME_MODE='flips',
+                                    ANYPS3_FRAMETIME_PEEK_REG='26', FT_FORBID_PEEK='1')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        header, events = ftring.read_ring(path)
+        self.assertEqual([e.kind for e in events], [3, 4, 5, 6, 9, 5])
+        self.assertEqual((header['head'], header['dropped'], header['missing']), (6, 0, 0))
+        self.assertEqual((events[4].a, events[4].b, events[4].c, events[4].d), (11, 22, 1, 44))
+        self.assertEqual((events[5].a, events[5].c), (123, 456))
+        self.assertEqual(struct.unpack_from('<Q', path.read_bytes(), 40)[0], 1)
+
+    def test_reject_invalid_mode(self):
+        _, result = self.run_mode('off', 'bad-mode.bin', ANYPS3_FRAMETIME_MODE='unknown')
+        self.assertEqual(result.returncode, 2)
+        self.assertIn('invalid ANYPS3_FRAMETIME_MODE', result.stderr)
 
     def test_off_by_default(self):
         path, result = self.run_mode('off', 'off.bin', with_path=False)

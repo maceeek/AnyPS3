@@ -14,6 +14,10 @@ MEMBERS = r'''
 public:
     struct GraphicsState {
         unsigned width=0,height=0,samples=1,colors=1;
+        // Guest coordinates stay in width/height. A visual draw can rasterize
+        // into a larger attachment without changing guest viewport constants.
+        unsigned raster_width=0,raster_height=0;
+        bool scale_visual=false,visual_pass=false;
         VkFormat color=VK_FORMAT_R8G8B8A8_UNORM,depth=VK_FORMAT_UNDEFINED;
         std::array<VkPipelineColorBlendAttachmentState,4> blend{};
         VkPipelineDepthStencilStateCreateInfo z{};
@@ -22,6 +26,24 @@ public:
         VkRect2D scissor{};
         bool logic_enable=false;VkLogicOp logic=VK_LOGIC_OP_COPY;
     };
+    static VkRect2D graphics_raster_scissor(const GraphicsState& s){
+        if(!s.raster_width && !s.raster_height)return s.scissor;
+        if(!s.width || !s.height || !s.raster_width || !s.raster_height ||
+           s.width>INT32_MAX || s.height>INT32_MAX || s.raster_width>INT32_MAX || s.raster_height>INT32_MAX ||
+           s.scissor.offset.x<0 || s.scissor.offset.y<0)
+            throw std::runtime_error("invalid RSX visual raster extent/scissor");
+        // Include exactly the physical pixel centers whose guest coordinate
+        // lies in [begin,end). This also handles fractional resolution ratios
+        // and clips an overhanging guest scissor before multiplying.
+        auto edge=[](std::uint64_t x,unsigned native,unsigned raster){
+            x=std::min<std::uint64_t>(x,native);
+            return unsigned((2*x*raster+native-1)/(2*std::uint64_t(native)));
+        };
+        const auto x=edge(unsigned(s.scissor.offset.x),s.width,s.raster_width),y=edge(unsigned(s.scissor.offset.y),s.height,s.raster_height);
+        const auto right=edge(std::uint64_t(s.scissor.offset.x)+s.scissor.extent.width,s.width,s.raster_width);
+        const auto bottom=edge(std::uint64_t(s.scissor.offset.y)+s.scissor.extent.height,s.height,s.raster_height);
+        return {{int(x),int(y)},{right-x,bottom-y}};
+    }
     struct GraphicsPipeline;
     struct GraphicsImage {
         NativeVulkan* owner;
@@ -31,6 +53,7 @@ public:
         VkImageView array_view=VK_NULL_HANDLE,attachment_array=VK_NULL_HANDLE;
         VkFormat format;unsigned width,height,layers;
         bool depth;std::uint64_t memory_bytes=0;
+        std::shared_ptr<GraphicsImage> visual;
         GraphicsImage(NativeVulkan* o,VkFormat f,unsigned w,unsigned h,unsigned l,bool d):owner(o),format(f),width(w),height(h),layers(l),depth(d){}
         ~GraphicsImage(){if(sampler)vkDestroySampler(owner->device,sampler,nullptr);
             for(auto v:views)vkDestroyImageView(owner->device,v,nullptr);
@@ -75,7 +98,19 @@ public:
     };
     using GraphicsImagePins=GraphicsPins<GraphicsImage>;
     // Push constants of every graphics draw (vertex and fragment stages).
-    struct GraphicsPush{float width,height,x,y;unsigned plane,layers;float shifts[8];};
+    struct GraphicsPush{float width,height,x,y;unsigned plane,layers;float shifts[8];float raster_scale[2];};
+    static_assert(offsetof(GraphicsPush,raster_scale)==56 && sizeof(GraphicsPush)==64);
+    struct GraphicsBatch;
+    struct DrawJob {
+        GraphicsBatch* batch=nullptr;std::shared_ptr<GraphicsPipeline> pipeline;GraphicsState s;
+        std::array<std::shared_ptr<GraphicsImage>,4> colors;std::shared_ptr<GraphicsImage> depth;
+        std::array<std::shared_ptr<GraphicsImage>,20> textures;std::array<std::shared_ptr<GraphicsBuffer>,16> raw_textures;
+        std::array<std::array<float,2>,4> positions{};
+        float bias_constant=0,bias_slope=0,min_bounds=0,max_bounds=1;
+        unsigned vertices=0,first_vertex=0,query=0,passes=1;bool indexed=false,layered=false,multiview=false,defer_planes=false;
+        std::uint64_t at=0,range=0,index_offset=0;
+        void reset(){batch=nullptr;pipeline.reset();depth.reset();for(auto& x:colors)x.reset();for(auto& x:textures)x.reset();for(auto& x:raw_textures)x.reset();}
+    };
     struct GraphicsBatch {
         NativeVulkan* owner;
         VkBuffer buffer=VK_NULL_HANDLE,data_buffer=VK_NULL_HANDLE;VkDeviceMemory memory=VK_NULL_HANDLE,data_memory=VK_NULL_HANDLE;void* map=nullptr;
@@ -107,7 +142,7 @@ public:
         // Shader failures are consumed only after batch completion. Keep the
         // device words live until then instead of a graphics->transfer turn
         // and a four-byte copy after every draw (and every packed primitive).
-        std::vector<std::uint64_t> status_offsets;
+        std::vector<std::uint64_t> status_offsets,visual_status_offsets;
         // Only fresh immutable CPU slices go in the prelude. GPU scratch and
         // readbacks are deliberately absent: they retain their command order.
         std::vector<VkBufferCopy> uploads;
@@ -126,6 +161,11 @@ public:
         std::vector<PlaneDraw> plane_draws;std::array<VkFramebuffer,4> plane_framebuffers{};
         VkRenderPass plane_pass=VK_NULL_HANDLE;VkExtent2D plane_extent{};unsigned plane_count=0;
         std::uint64_t plane_deferred=0;
+        // Recorder-owned snapshots survive ring-slot reuse. Semantic command
+        // boundaries drain them; generic recorder synchronization does not.
+        std::vector<DrawJob> visual_jobs;
+        bool replaying_visual=false;
+        std::uint64_t visual_queued=0,visual_drains=0,visual_run_max=0;
         VkPipeline bound_graphics_pipeline=VK_NULL_HANDLE;
         bool dynamic_valid=false;
         std::array<unsigned,22> dynamic_state{};
@@ -255,24 +295,34 @@ private:
             vkCmdBeginRenderPass(b.command,&pass,VK_SUBPASS_CONTENTS_INLINE);graphics_mark(b,MarkPassBegin);++b.render_passes;::RsxPerfCounters::add(::RsxPerfCounters::render_passes);
             const std::array<unsigned,22>* previous=b.dynamic_valid?&b.dynamic_state:nullptr;
             for(const auto& d:b.plane_draws){
-                vkCmdBeginQuery(b.command,b.occlusion,d.query+plane,d.query_flags);
+                if(d.query!=UINT_MAX)vkCmdBeginQuery(b.command,b.occlusion,d.query+plane,d.query_flags);
                 if(b.bound_graphics_pipeline!=d.pipeline){vkCmdBindPipeline(b.command,VK_PIPELINE_BIND_POINT_GRAPHICS,d.pipeline);b.bound_graphics_pipeline=d.pipeline;++b.pipeline_binds;}
                 vkCmdBindDescriptorSets(b.command,VK_PIPELINE_BIND_POINT_GRAPHICS,d.layout,0,1,&d.set,1,&d.offset);
                 vkCmdPushConstants(b.command,d.layout,VK_SHADER_STAGE_VERTEX_BIT|VK_SHADER_STAGE_FRAGMENT_BIT,0,sizeof(GraphicsPush),&d.push[plane]);
                 graphics_emit_dynamic(b.command,d.dynamic,previous);previous=&d.dynamic;
                 if(d.indexed){vkCmdBindIndexBuffer(b.command,b.data_buffer,d.index_offset,VK_INDEX_TYPE_UINT32);vkCmdDrawIndexed(b.command,d.vertices,d.instances,d.first_vertex,0,0);}
                 else vkCmdDraw(b.command,d.vertices,d.instances,d.first_vertex,0);
-                vkCmdEndQuery(b.command,b.occlusion,d.query+plane);graphics_mark(b,MarkDraw);
+                if(d.query!=UINT_MAX)vkCmdEndQuery(b.command,b.occlusion,d.query+plane);
+                graphics_mark(b,MarkDraw);
             }
             b.dynamic_state=b.plane_draws.back().dynamic;b.dynamic_valid=true;
             vkCmdEndRenderPass(b.command);graphics_mark(b,MarkPassEnd);::RsxPerfCounters::add(::RsxPerfCounters::pass_ends);
         }
         b.plane_draws.clear();b.plane_count=0;
     }
-    static void graphics_end_pass(GraphicsBatch& b){
-        b.sync();
+    static void graphics_close_pass_only(GraphicsBatch& b){
         if(b.active_framebuffer){vkCmdEndRenderPass(b.command);graphics_mark(b,MarkPassEnd);b.active_framebuffer=VK_NULL_HANDLE;::RsxPerfCounters::add(::RsxPerfCounters::pass_ends);}
         if(!b.plane_draws.empty())graphics_replay_planes(b);
+    }
+    static void graphics_end_pass(GraphicsBatch& b){
+        b.sync();graphics_close_pass_only(b);
+        if(b.replaying_visual || b.visual_jobs.empty())return;
+        b.replaying_visual=true;++b.visual_drains;
+        try{
+            for(auto& job:b.visual_jobs)b.owner->graphics_record_draw(job);
+            graphics_close_pass_only(b);
+            b.visual_jobs.clear();b.replaying_visual=false;
+        }catch(...){b.replaying_visual=false;b.failed=true;throw;}
     }
     static void graphics_barrier(GraphicsBatch& b){
         graphics_end_pass(b);graphics_mark(b,graphics_last_kind());graphics_last_kind()=MarkOther;
@@ -385,7 +435,7 @@ private:
         bind[37]={37,VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,1,VK_SHADER_STAGE_VERTEX_BIT|VK_SHADER_STAGE_FRAGMENT_BIT,nullptr};
         VkDescriptorSetLayoutCreateInfo di{};di.sType=VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;di.bindingCount=bind.size();di.pBindings=bind.data();
         check(vkCreateDescriptorSetLayout(device,&di,nullptr,&layout->descriptors),"graphics descriptors");
-        VkPushConstantRange push{VK_SHADER_STAGE_VERTEX_BIT|VK_SHADER_STAGE_FRAGMENT_BIT,0,56};
+        VkPushConstantRange push{VK_SHADER_STAGE_VERTEX_BIT|VK_SHADER_STAGE_FRAGMENT_BIT,0,sizeof(GraphicsPush)};
         VkPipelineLayoutCreateInfo li{};li.sType=VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;li.setLayoutCount=1;li.pSetLayouts=&layout->descriptors;li.pushConstantRangeCount=1;li.pPushConstantRanges=&push;
         check(vkCreatePipelineLayout(device,&li,nullptr,&layout->layout),"graphics layout");graphics_layout=std::move(layout);}
         p->shared_layout=graphics_layout;p->descriptors=graphics_layout->descriptors;p->layout=graphics_layout->layout;
@@ -515,8 +565,23 @@ public:
             check(vkCreateQueryPool(device,&qi,nullptr,&b->marks),"graphics mark timestamps");}
         return b;
     }
+    unsigned graphics_render_scale=1;
+    bool graphics_visual_batch=true;
+    static bool graphics_read_visual_batch(){
+        const char* value=std::getenv("ANYPS3_RENDER_SCALE_BATCH");
+        if(!value || !std::strcmp(value,"1"))return true;
+        if(!std::strcmp(value,"0"))return false;
+        throw std::runtime_error("ANYPS3_RENDER_SCALE_BATCH must be 0 or 1");
+    }
+    std::uint64_t graphics_visual_draws=0,graphics_visual_native_copies=0,graphics_visual_host_invalidations=0;
+    static unsigned graphics_read_render_scale(){
+        const char* value=std::getenv("ANYPS3_RENDER_SCALE");
+        if(!value)return 1;
+        if(value[0]<'1' || value[0]>'4' || value[1])throw std::runtime_error("ANYPS3_RENDER_SCALE must be an integer from 1 to 4");
+        return unsigned(value[0]-'0');
+    }
     std::uint64_t graphics_image_creations=0;
-    std::shared_ptr<GraphicsImage> graphics_image(GraphicsBatch& b,VkFormat f,unsigned w,unsigned h,unsigned layers,bool depth=false){b.sync();
+    std::shared_ptr<GraphicsImage> graphics_image(GraphicsBatch& b,VkFormat f,unsigned w,unsigned h,unsigned layers,bool depth=false,bool pair=true){b.sync();
         if(!w || !h || !layers || layers>4 || !graphics_format(f,depth))throw std::runtime_error("unsupported graphics image format/extent");
         ++graphics_image_creations;auto image=std::make_shared<GraphicsImage>(this,f,w,h,layers,depth);
         VkImageCreateInfo ii{};ii.sType=VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;ii.imageType=VK_IMAGE_TYPE_2D;ii.format=f;ii.extent={w,h,1};ii.mipLevels=1;ii.arrayLayers=layers;
@@ -532,7 +597,32 @@ public:
         graphics_begin(b);graphics_end_pass(b);VkImageMemoryBarrier barrier{};barrier.sType=VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;barrier.oldLayout=VK_IMAGE_LAYOUT_UNDEFINED;barrier.newLayout=VK_IMAGE_LAYOUT_GENERAL;
         barrier.srcQueueFamilyIndex=barrier.dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED;barrier.image=image->image;barrier.subresourceRange={aspect,0,1,0,layers};barrier.dstAccessMask=VK_ACCESS_MEMORY_READ_BIT|VK_ACCESS_MEMORY_WRITE_BIT;
         vkCmdPipelineBarrier(b.command,VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,0,0,nullptr,0,nullptr,1,&barrier);
-        b.pins.push_back(image);return image;
+        b.pins.push_back(image);
+        if(pair && graphics_render_scale>1){
+            const auto scale=graphics_render_scale;
+            if(w>graphics_properties.limits.maxImageDimension2D/scale || h>graphics_properties.limits.maxImageDimension2D/scale)
+                throw std::runtime_error("RSX visual image exceeds device limit");
+            image->visual=graphics_image(b,f,w*scale,h*scale,layers,depth,false);
+            // Parent cache accounting includes the paired allocation. Batch
+            // pins may conservatively count it again; never undercount it.
+            image->memory_bytes+=image->visual->memory_bytes;
+        }
+        return image;
+    }
+    // Native uploads/unsupported visual conversions are reconstructed from
+    // authoritative pixels. This is counted separately from visual geometry.
+    void graphics_visual_sync(GraphicsBatch& b,const std::shared_ptr<GraphicsImage>& image){
+        if(!image || !image->visual)return;
+        b.sync();const auto& to=image->visual;
+        VkFormatProperties props{};vkGetPhysicalDeviceFormatProperties(physical,image->format,&props);
+        if((props.optimalTilingFeatures&(VK_FORMAT_FEATURE_BLIT_SRC_BIT|VK_FORMAT_FEATURE_BLIT_DST_BIT))!=(VK_FORMAT_FEATURE_BLIT_SRC_BIT|VK_FORMAT_FEATURE_BLIT_DST_BIT))
+            throw std::runtime_error("RSX visual native upload format cannot blit");
+        graphics_begin(b);graphics_barrier(b);
+        const auto aspects=image->depth?(image->format==VK_FORMAT_D24_UNORM_S8_UINT?std::vector<VkImageAspectFlags>{VK_IMAGE_ASPECT_DEPTH_BIT,VK_IMAGE_ASPECT_STENCIL_BIT}:std::vector<VkImageAspectFlags>{VK_IMAGE_ASPECT_DEPTH_BIT}):std::vector<VkImageAspectFlags>{VK_IMAGE_ASPECT_COLOR_BIT};
+        for(auto aspect:aspects){VkImageBlit c{};c.srcSubresource={aspect,0,0,image->layers};c.dstSubresource=c.srcSubresource;
+            c.srcOffsets[1]={int(image->width),int(image->height),1};c.dstOffsets[1]={int(to->width),int(to->height),1};
+            vkCmdBlitImage(b.command,image->image,VK_IMAGE_LAYOUT_GENERAL,to->image,VK_IMAGE_LAYOUT_GENERAL,1,&c,VK_FILTER_NEAREST);}
+        b.pins.push_back(image);b.pins.push_back(to);++graphics_visual_native_copies;
     }
     // Host bytes copied into the device data buffer at their command-order
     // position (not the batch prelude): later commands of this batch may
@@ -596,7 +686,7 @@ public:
         graphics_stamp(b,data?0:2);
         if(data)vkCmdCopyBufferToImage(b.command,b.buffer,image->image,VK_IMAGE_LAYOUT_GENERAL,1,&copy);
         else {vkCmdCopyImageToBuffer(b.command,image->image,VK_IMAGE_LAYOUT_GENERAL,b.buffer,1,&copy);b.download_bytes+=bytes;}
-        graphics_stamp(b,0,true);b.pins.push_back(image);return at;
+        graphics_stamp(b,0,true);b.pins.push_back(image);if(data)graphics_visual_sync(b,image);return at;
     }
     std::shared_ptr<GraphicsImage> graphics_aspect_image(GraphicsBatch& b,const std::shared_ptr<GraphicsImage>& source,VkImageAspectFlags aspect,const std::shared_ptr<GraphicsImage>& destination={},std::shared_ptr<GraphicsBuffer>* scratch=nullptr){b.sync();
         GraphicsSite site(SiteAspect);
@@ -625,7 +715,7 @@ public:
         vkCmdCopyImageToBuffer(b.command,source->image,VK_IMAGE_LAYOUT_GENERAL,transfer->buffer,1,&copy);graphics_barrier(b);
         copy.imageSubresource.aspectMask=VK_IMAGE_ASPECT_COLOR_BIT;copy.imageExtent.width=result->width;
         vkCmdCopyBufferToImage(b.command,transfer->buffer,result->image,VK_IMAGE_LAYOUT_GENERAL,1,&copy);graphics_barrier(b);
-        b.buffer_pins.push_back(transfer);b.pins.push_back(source);b.pins.push_back(result);return result;
+        b.buffer_pins.push_back(transfer);b.pins.push_back(source);b.pins.push_back(result);graphics_visual_sync(b,result);return result;
     }
     std::uint64_t graphics_full_clears=0;
     void graphics_clear_image(GraphicsBatch& b,const std::shared_ptr<GraphicsImage>& image,const VkClearColorValue& color,float depth,unsigned stencil,VkImageAspectFlags aspects){b.sync();
@@ -635,6 +725,7 @@ public:
         if(image->depth){const VkClearDepthStencilValue value{depth,stencil};vkCmdClearDepthStencilImage(b.command,image->image,VK_IMAGE_LAYOUT_GENERAL,&value,1,&range);}
         else vkCmdClearColorImage(b.command,image->image,VK_IMAGE_LAYOUT_GENERAL,&color,1,&range);
         b.pins.push_back(image);++graphics_full_clears;
+        if(image->visual)graphics_clear_image(b,image->visual,color,depth,stencil,aspects);
     }
     void graphics_copy(GraphicsBatch& b,const std::shared_ptr<GraphicsImage>& from,const std::shared_ptr<GraphicsImage>& to){b.sync();
         if(from==to)return;
@@ -650,6 +741,7 @@ public:
         if(from->format==VK_FORMAT_D24_UNORM_S8_UINT){VkImageCopy c{};c.srcSubresource={VK_IMAGE_ASPECT_STENCIL_BIT,0,0,from->layers};c.dstSubresource={VK_IMAGE_ASPECT_STENCIL_BIT,0,0,to->layers};c.extent={from->width,from->height,1};
             vkCmdCopyImage(b.command,from->image,VK_IMAGE_LAYOUT_GENERAL,to->image,VK_IMAGE_LAYOUT_GENERAL,1,&c);}
         b.pins.push_back(from);b.pins.push_back(to);
+        if(to->visual){if(from->visual)graphics_copy(b,from->visual,to->visual);else graphics_visual_sync(b,to);}
     }
     // ---- asynchronous draw recorder (ANYPS3_RSX_RECORDER=1) ----
     // graphics_draw is split into a front half (pipeline lookup, staging copy, pins, query/status accounting; RSX worker thread) and a back
@@ -660,16 +752,6 @@ public:
     // receives a GraphicsBatch calls b.sync() first, which waits until all queued draws are recorded (and rethrows a recorder failure);
     // the frontend-only entry points (graphics_begin of a fresh batch, graphics_space/upload/reserve_upload/state_blocks) do not.
     // Each batch records into its own command pool, so resetting/freeing another batch never races with the recorder.
-    struct DrawJob {
-        GraphicsBatch* batch=nullptr;std::shared_ptr<GraphicsPipeline> pipeline;GraphicsState s;
-        std::array<std::shared_ptr<GraphicsImage>,4> colors;std::shared_ptr<GraphicsImage> depth;
-        std::array<std::shared_ptr<GraphicsImage>,20> textures;std::array<std::shared_ptr<GraphicsBuffer>,16> raw_textures;
-        std::array<std::array<float,2>,4> positions{};
-        float bias_constant=0,bias_slope=0,min_bounds=0,max_bounds=1;
-        unsigned vertices=0,first_vertex=0,query=0,passes=1;bool indexed=false,layered=false,multiview=false,defer_planes=false;
-        std::uint64_t at=0,range=0,index_offset=0;
-        void reset(){batch=nullptr;pipeline.reset();depth.reset();for(auto& x:colors)x.reset();for(auto& x:textures)x.reset();for(auto& x:raw_textures)x.reset();}
-    };
     static bool& in_recorder_thread(){static thread_local bool recorder=false;return recorder;}
     static void recorder_relax(){
 #if defined(__x86_64__) || defined(__i386__)
@@ -821,7 +903,15 @@ public:
     // Back half of graphics_draw: descriptor set, framebuffer, render pass, dynamic state and the draw itself. Runs inline or on the
     // draw recorder thread; it only touches recorder-owned batch state (see DrawJob) and immutable objects.
     void graphics_record_draw(DrawJob& j){
+        if(j.s.visual_pass && graphics_visual_batch && !j.batch->replaying_visual){
+            auto& b=*j.batch;b.visual_jobs.push_back(j);++b.visual_queued;
+            b.visual_run_max=std::max<std::uint64_t>(b.visual_run_max,b.visual_jobs.size());
+            if(b.visual_jobs.size()>=128)graphics_end_pass(b);
+            return;
+        }
         auto& b=*j.batch;auto& p=*j.pipeline;const auto& s=j.s;const auto& colors=j.colors;const auto& depth=j.depth;const auto& textures=j.textures;const auto& raw_textures=j.raw_textures;
+        const unsigned raster_width=s.raster_width?s.raster_width:s.width,raster_height=s.raster_height?s.raster_height:s.height;
+        const auto scissor=graphics_raster_scissor(s);
         const auto& positions=j.positions;const float bias_constant=j.bias_constant,bias_slope=j.bias_slope,min_bounds=j.min_bounds,max_bounds=j.max_bounds;
         const unsigned vertices=j.vertices,first_vertex=j.first_vertex,query=j.query,passes=j.passes;const bool layered=j.layered,multiview=j.multiview,defer_planes=j.defer_planes;
         const std::uint64_t at=j.at,range=j.range;
@@ -854,16 +944,15 @@ public:
         // Descriptor storage stays in the bounded pool until the batch fence.
         b.descriptor_cache.emplace(std::move(descriptor_key),typename GraphicsBatch::DescriptorEntry{set,++recorder_clock});
         }
-        graphics_stamp(b,1);if(b.queries){b.phase_pipelines.resize(b.phases.size(),nullptr);b.phase_pipelines.back()=&p;}
         typename GraphicsBatch::PlaneDraw deferred{};std::array<VkFramebuffer,4> plane_fb{};
         for(unsigned layer=0;layer<passes;++layer){
             std::array<VkImageView,5> views{};unsigned view_count=0;for(unsigned i=0;i<s.colors;++i)views[view_count++]=layered?graphics_attachment_array(*colors[i]):colors[i]->views[layer];
             if(depth)views[view_count++]=layered?graphics_attachment_array(*depth):depth->views[layer];
-            VkFramebufferCreateInfo fi{};fi.sType=VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;fi.renderPass=p.pass;fi.attachmentCount=view_count;fi.pAttachments=views.data();fi.width=s.width;fi.height=s.height;fi.layers=layered&&!multiview?s.samples:1;VkFramebuffer framebuffer;
+            VkFramebufferCreateInfo fi{};fi.sType=VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;fi.renderPass=p.pass;fi.attachmentCount=view_count;fi.pAttachments=views.data();fi.width=raster_width;fi.height=raster_height;fi.layers=layered&&!multiview?s.samples:1;VkFramebuffer framebuffer;
             // All generated passes have one graphics subpass and identical
             // load/store/layout policy. Attachment formats/count define exact
             // render-pass compatibility; blend/shader variants share the FB.
-            std::array<std::uint64_t,10> framebuffer_key{};framebuffer_key[0]=s.colors;framebuffer_key[1]=s.color;framebuffer_key[2]=s.depth;framebuffer_key[3]=s.width;framebuffer_key[4]=s.height;
+            std::array<std::uint64_t,10> framebuffer_key{};framebuffer_key[0]=s.colors;framebuffer_key[1]=s.color;framebuffer_key[2]=s.depth;framebuffer_key[3]=raster_width;framebuffer_key[4]=raster_height;
             for(unsigned i=0;i<view_count;++i)framebuffer_key[5+i]=reinterpret_cast<std::uint64_t>(views[i]);
             auto found=b.framebuffers.find(framebuffer_key);
             if(found!=b.framebuffers.end()){framebuffer=found->second->handle;found->second->last_use=++recorder_clock;b.framebuffer_pins.push_back(found->second);++b.framebuffer_hits;}
@@ -872,12 +961,12 @@ public:
                 if(depth)entry->images.push_back(depth);
                 if(b.framebuffers.size()>=framebuffer_limit)b.framebuffers.erase(lru_entry(b.framebuffers));
                 b.framebuffer_pins.push_back(entry);b.framebuffers.emplace(std::move(framebuffer_key),std::move(entry));++b.framebuffer_misses;::RsxPerfCounters::add(::RsxPerfCounters::framebuffer_misses);}
-            VkRenderPassBeginInfo pass{};pass.sType=VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;pass.renderPass=p.pass;pass.framebuffer=framebuffer;pass.renderArea={{0,0},{s.width,s.height}};
+            VkRenderPassBeginInfo pass{};pass.sType=VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;pass.renderPass=p.pass;pass.framebuffer=framebuffer;pass.renderArea={{0,0},{raster_width,raster_height}};
             // Push constants: sample location P is evaluated by moving the
             // geometry by .5-P. Do not translate the viewport: negative viewport
             // origins need a Vulkan 1.1 extension. VS subtracts this offset in
             // clip coordinates.
-            GraphicsPush push{float(s.width),float(s.height),positions[layer][0]-.5f,positions[layer][1]-.5f,layer,layered?s.samples:1u,{}};
+            GraphicsPush push{float(s.width),float(s.height),positions[layer][0]-.5f,positions[layer][1]-.5f,layer,layered?s.samples:1u,{}, {float(raster_width)/s.width,float(raster_height)/s.height}};
             for(unsigned n=0;n<4;++n){push.shifts[2*n]=positions[n][0]-.5f;push.shifts[2*n+1]=positions[n][1]-.5f;}
             if(defer_planes && layer){plane_fb[layer]=framebuffer;deferred.push[layer]=push;continue;}
             // Framebuffer identity includes each layer view, extent, attachment
@@ -888,8 +977,11 @@ public:
                 vkCmdBeginRenderPass(b.command,&pass,VK_SUBPASS_CONTENTS_INLINE);graphics_mark(b,MarkPassBegin);
                 b.active_framebuffer=framebuffer;++b.render_passes;::RsxPerfCounters::add(::RsxPerfCounters::render_passes);
             }else ++b.render_pass_reuses;
+            // A framebuffer change may replay older visual draws. Open this
+            // draw's timestamp pair only after their pairs have been closed.
+            if(!layer){graphics_stamp(b,1);if(b.queries){b.phase_pipelines.resize(b.phases.size(),nullptr);b.phase_pipelines.back()=&p;}}
             // One query per sample pass; sum at the ownership boundary.
-            vkCmdBeginQuery(b.command,b.occlusion,query+layer,graphics_features.occlusionQueryPrecise?VK_QUERY_CONTROL_PRECISE_BIT:0);
+            if(query!=UINT_MAX)vkCmdBeginQuery(b.command,b.occlusion,query+layer,graphics_features.occlusionQueryPrecise?VK_QUERY_CONTROL_PRECISE_BIT:0);
             if(b.bound_graphics_pipeline!=p.pipeline){vkCmdBindPipeline(b.command,VK_PIPELINE_BIND_POINT_GRAPHICS,p.pipeline);b.bound_graphics_pipeline=p.pipeline;++b.pipeline_binds;}
             const auto dynamic_at=static_cast<std::uint32_t>(at);vkCmdBindDescriptorSets(b.command,VK_PIPELINE_BIND_POINT_GRAPHICS,p.layout,0,1,&set,1,&dynamic_at);
             vkCmdPushConstants(b.command,p.layout,VK_SHADER_STAGE_VERTEX_BIT|VK_SHADER_STAGE_FRAGMENT_BIT,0,sizeof(GraphicsPush),&push);
@@ -897,8 +989,8 @@ public:
             // but never command-buffer reset. Compare exact float bits so NaNs
             // and signed zero cannot manufacture a false state-cache hit.
             std::array<unsigned,22> dynamic{};
-            dynamic[0]=s.width;dynamic[1]=s.height;
-            dynamic[2]=s.scissor.offset.x;dynamic[3]=s.scissor.offset.y;dynamic[4]=s.scissor.extent.width;dynamic[5]=s.scissor.extent.height;
+            dynamic[0]=raster_width;dynamic[1]=raster_height;
+            dynamic[2]=scissor.offset.x;dynamic[3]=scissor.offset.y;dynamic[4]=scissor.extent.width;dynamic[5]=scissor.extent.height;
             for(unsigned face=0;face<2;++face){const auto& stencil=face?s.z.back:s.z.front;
                 dynamic[6+face*3]=stencil.compareMask;dynamic[7+face*3]=stencil.writeMask;dynamic[8+face*3]=stencil.reference;}
             std::memcpy(dynamic.data()+12,s.constants.data(),16);
@@ -906,8 +998,8 @@ public:
             std::memcpy(dynamic.data()+18,&min_bounds,4);std::memcpy(dynamic.data()+19,&max_bounds,4);
             auto changed=[&](unsigned first,unsigned count){const bool yes=!b.dynamic_valid || !std::equal(dynamic.begin()+first,dynamic.begin()+first+count,b.dynamic_state.begin()+first);
                 if(yes)++b.dynamic_emits;else ++b.dynamic_reuses;return yes;};
-            if(changed(0,2)){VkViewport viewport{0,0,float(s.width),float(s.height),0,1};vkCmdSetViewport(b.command,0,1,&viewport);}
-            if(changed(2,4))vkCmdSetScissor(b.command,0,1,&s.scissor);
+            if(changed(0,2)){VkViewport viewport{0,0,float(raster_width),float(raster_height),0,1};vkCmdSetViewport(b.command,0,1,&viewport);}
+            if(changed(2,4))vkCmdSetScissor(b.command,0,1,&scissor);
             for(unsigned face=0;face<2;++face){const auto mask=face?VK_STENCIL_FACE_BACK_BIT:VK_STENCIL_FACE_FRONT_BIT;const auto& stencil=face?s.z.back:s.z.front;
                 if(changed(6+face*3,1))vkCmdSetStencilCompareMask(b.command,mask,stencil.compareMask);
                 if(changed(7+face*3,1))vkCmdSetStencilWriteMask(b.command,mask,stencil.writeMask);
@@ -919,7 +1011,8 @@ public:
             const unsigned instances=layered&&!multiview?s.samples:1;
             if(j.indexed){vkCmdBindIndexBuffer(b.command,b.data_buffer,at+j.index_offset,VK_INDEX_TYPE_UINT32);vkCmdDrawIndexed(b.command,vertices,instances,first_vertex,0,0);}
             else vkCmdDraw(b.command,vertices,instances,first_vertex,0);
-            vkCmdEndQuery(b.command,b.occlusion,query+layer);graphics_mark(b,MarkDraw);
+            if(query!=UINT_MAX)vkCmdEndQuery(b.command,b.occlusion,query+layer);
+            graphics_mark(b,MarkDraw);
             if(defer_planes){deferred.pipeline=p.pipeline;deferred.layout=p.layout;deferred.set=set;deferred.offset=dynamic_at;deferred.dynamic=dynamic;
                 deferred.vertices=vertices;deferred.instances=instances;deferred.first_vertex=first_vertex;deferred.query=query;
                 deferred.indexed=j.indexed;deferred.index_offset=deferred.indexed?at+j.index_offset:0;
@@ -928,10 +1021,10 @@ public:
         if(defer_planes){
             // A run keeps one framebuffer per plane; anything else ends it first
             // (this also ends the pass holding this draw's plane 0).
-            bool same=b.plane_count==passes && b.plane_extent.width==s.width && b.plane_extent.height==s.height;
+            bool same=b.plane_count==passes && b.plane_extent.width==raster_width && b.plane_extent.height==raster_height;
             for(unsigned layer=1;layer<passes && same;++layer)same=b.plane_framebuffers[layer]==plane_fb[layer];
             if(!b.plane_draws.empty() && !same)graphics_end_pass(b);
-            if(b.plane_draws.empty()){b.plane_framebuffers=plane_fb;b.plane_pass=p.pass;b.plane_extent={s.width,s.height};b.plane_count=passes;}
+            if(b.plane_draws.empty()){b.plane_framebuffers=plane_fb;b.plane_pass=p.pass;b.plane_extent={raster_width,raster_height};b.plane_count=passes;}
             b.plane_draws.push_back(deferred);++b.plane_deferred;
         }
         graphics_stamp(b,0,true);++b.draws;if(timed)b.record_back_ms+=resident_ms(t);
@@ -940,6 +1033,25 @@ public:
                        const std::shared_ptr<GraphicsImage>& depth,const std::string& vs,const std::string& fs,
                        const std::vector<unsigned>& data,unsigned vertices,const std::array<std::array<float,2>,4>& positions,
                        float bias_constant=0,float bias_slope=0,float min_bounds=0,float max_bounds=1,const std::array<std::shared_ptr<GraphicsImage>,20>& textures={},unsigned first_vertex=0,std::uint64_t reuse=UINT64_MAX,const std::array<std::shared_ptr<GraphicsBuffer>,16>& raw_textures={},const std::shared_ptr<const std::string>& vs_owner={},const std::shared_ptr<const std::string>& fs_owner={},const std::uint8_t* tail=nullptr,std::uint64_t tail_bytes=0,bool layered_ok=false){
+        if(!s.visual_pass && !s.raster_width && s.scale_visual && graphics_render_scale>1){
+            // Refuse before recording the native half if the complete pair
+            // cannot fit. Reused native payload still needs a visual status slice.
+            const auto alignment=std::max<std::uint64_t>(256,graphics_properties.limits.minStorageBufferOffsetAlignment);
+            const auto bytes=std::uint64_t(data.size())*4+tail_bytes;
+            auto at=b.used;auto fits=[&]{at=(at+alignment-1)&~(alignment-1);if(at>b.capacity || bytes>b.capacity-at)return false;at+=bytes;return true;};
+            if((reuse==UINT64_MAX && !fits()) || !fits())throw std::runtime_error("RSX paired draw staging exhausted before recording");
+        }
+        if(s.raster_width || s.raster_height){
+            (void)graphics_raster_scissor(s);
+            const auto& limits=graphics_properties.limits;
+            if(s.raster_width>limits.maxFramebufferWidth || s.raster_height>limits.maxFramebufferHeight ||
+               s.raster_width>limits.maxViewportDimensions[0] || s.raster_height>limits.maxViewportDimensions[1])
+                throw std::runtime_error("RSX visual raster exceeds device limits");
+            for(unsigned i=0;i<s.colors;++i)if(!colors[i] || colors[i]->width<s.raster_width || colors[i]->height<s.raster_height)
+                throw std::runtime_error("RSX visual color attachment extent mismatch");
+            if(depth && (depth->width<s.raster_width || depth->height<s.raster_height))
+                throw std::runtime_error("RSX visual depth attachment extent mismatch");
+        }
         // Layered planes: every attachment must be a samples-layer array (else per-plane passes).
         bool layered=layered_ok && graphics_layered_output && s.samples>1;
         if(layered){for(unsigned i=0;i<s.colors;++i)if(colors[i]->layers!=s.samples)layered=false;if(depth && depth->layers!=s.samples)layered=false;}
@@ -963,8 +1075,8 @@ public:
         for(const auto& image:textures)if(image)b.pins.push_back(image);
         for(const auto& raw:raw_textures)if(raw)b.buffer_pins.push_back(raw);
         if(reuse==UINT64_MAX)b.uploads.push_back({at,at,bytes});
-        if(b.visibility_count+s.samples>1024)throw std::runtime_error("RSX graphics visibility budget");
-        const auto query=b.visibility_count++;::RsxPerfCounters::add(::RsxPerfCounters::draw_layers,s.samples);
+        if(!s.visual_pass && b.visibility_count+s.samples>1024)throw std::runtime_error("RSX graphics visibility budget");
+        const auto query=s.visual_pass?UINT_MAX:b.visibility_count++;::RsxPerfCounters::add(::RsxPerfCounters::draw_layers,s.samples);
         // Layered: every sample plane is one instance of a single draw into
         // a layered framebuffer. Per plane the primitive order is unchanged;
         // planes are distinct layers, so their relative order is unobservable.
@@ -976,11 +1088,12 @@ public:
             if(v && std::strcmp(v,"0") && std::strcmp(v,"1")){throw std::runtime_error("invalid ANYPS3_RSX_PLANE_RUNS");}
             return !v || !std::strcmp(v,"1");}();
         const bool defer_planes=plane_runs && passes>1;
-        b.visibility_count+=(multiview?s.samples:passes)-1;
+        if(!s.visual_pass)b.visibility_count+=(multiview?s.samples:passes)-1;
         // Keep the existing logical readback accounting at record time. The
         // submit combines these requests; it does not create new requests.
         b.status_offsets.push_back(at+28);b.download_bytes+=4;
-        ++graphics_draws;b.record_ms+=resident_ms(t);
+        if(s.visual_pass){++graphics_visual_draws;b.visual_status_offsets.push_back(at+28);}else ++graphics_draws;
+        b.record_ms+=resident_ms(t);
         const bool asynchronous=draw_recorder && !b.inline_draws && !b.queries && !b.marks && !graphics_gpu_loop();
         std::optional<DrawJob> inline_job;DrawJob* job=asynchronous?&recorder_slot():&inline_job.emplace();
         job->batch=&b;job->pipeline=std::move(pipeline);job->s=s;job->colors=colors;job->depth=depth;job->textures=textures;job->raw_textures=raw_textures;job->positions=positions;
@@ -988,6 +1101,21 @@ public:
         job->query=query;job->passes=passes;job->layered=layered;job->multiview=multiview;job->defer_planes=defer_planes;job->at=at;job->range=range;
         job->indexed=data.size()>15 && data[15]==1;job->index_offset=job->indexed?std::uint64_t(data[13])*4:0;
         if(asynchronous){b.pending_jobs.fetch_add(1,std::memory_order_relaxed);recorder_publish();}else graphics_record_draw(*job);
+        if(!s.visual_pass && !s.raster_width && graphics_render_scale>1){
+            if(s.scale_visual){
+                auto scaled=s;scaled.visual_pass=true;scaled.raster_width=s.width*graphics_render_scale;scaled.raster_height=s.height*graphics_render_scale;
+                std::array<std::shared_ptr<GraphicsImage>,4> visual_colors{};
+                for(unsigned i=0;i<s.colors;++i){if(!colors[i] || !colors[i]->visual)throw std::runtime_error("RSX missing visual color companion");visual_colors[i]=colors[i]->visual;}
+                if(depth && !depth->visual)throw std::runtime_error("RSX missing visual depth companion");
+                auto visual_textures=textures;for(auto& image:visual_textures)if(image && image->visual)image=image->visual;
+                const auto saved_queries=graphics_last_queries;
+                graphics_draw(b,scaled,visual_colors,depth?depth->visual:nullptr,vs,fs,data,vertices,positions,bias_constant,bias_slope,min_bounds,max_bounds,visual_textures,first_vertex,UINT64_MAX,raw_textures,vs_owner,fs_owner,tail,tail_bytes,layered_ok);
+                graphics_last_queries=saved_queries;
+            }else{
+                for(unsigned i=0;i<s.colors;++i)graphics_visual_sync(b,colors[i]);
+                if(depth)graphics_visual_sync(b,depth);
+            }
+        }
         return at;
     }
     // A value identifies one queue prefix. Submission never waits for it.
@@ -1203,6 +1331,10 @@ public:
                         for(unsigned k=0;k<graphics_mark_ns.size();++k){if(!graphics_mark_count[k])continue;
                             std::fprintf(stderr," %s:%s=%llu/%llu",sites[std::min<unsigned>(k/16,SiteCount-1)],names[std::min<unsigned>(k%16,MarkOther)],(unsigned long long)graphics_mark_ns[k],(unsigned long long)graphics_mark_count[k]);}
                         std::fputc('\n',stderr);}}}
+            for(auto offset:b.visual_status_offsets){unsigned status=0;std::memcpy(&status,static_cast<const char*>(b.map)+offset,4);
+                if(status)throw std::runtime_error("RSX visual shader failed status="+std::to_string(status));}
+            if(b.frames && graphics_render_scale>1 && graphics_profile_frames%120==0)
+                std::fprintf(stderr,"PERF RENDER_SCALE scale=%u visual_draws=%llu native_copies=%llu host_invalidations=%llu queued=%llu drains=%llu max_run=%llu\n",graphics_render_scale,(unsigned long long)graphics_visual_draws,(unsigned long long)graphics_visual_native_copies,(unsigned long long)graphics_visual_host_invalidations,(unsigned long long)b.visual_queued,(unsigned long long)b.visual_drains,(unsigned long long)b.visual_run_max);
             b.visibility.resize(b.visibility_count);
             if(b.visibility_count)check(vkGetQueryPoolResults(device,b.occlusion,0,b.visibility_count,b.visibility.size()*8,b.visibility.data(),8,VK_QUERY_RESULT_64_BIT),"graphics visibility results");
             return true;
@@ -1213,6 +1345,8 @@ public:
         from.sync();
         // Counters the draw recorder increments move only while the destination has no queued draws (otherwise they stay with `from`).
         if(!to.pending_jobs.load(std::memory_order_acquire)){
+            to.visual_queued+=from.visual_queued;to.visual_drains+=from.visual_drains;to.visual_run_max=std::max(to.visual_run_max,from.visual_run_max);
+            from.visual_queued=from.visual_drains=from.visual_run_max=0;
             to.draws+=from.draws;to.record_back_ms+=from.record_back_ms;to.descriptor_hits+=from.descriptor_hits;to.descriptor_misses+=from.descriptor_misses;to.framebuffer_hits+=from.framebuffer_hits;to.framebuffer_misses+=from.framebuffer_misses;
             from.draws=0;from.record_back_ms=0;from.descriptor_hits=from.descriptor_misses=from.framebuffer_hits=from.framebuffer_misses=0;
         }
@@ -1250,7 +1384,8 @@ public:
         check(vkResetCommandBuffer(b.upload_command,0),"graphics reset uploads");if(b.transfer_command)check(vkResetCommandBuffer(b.transfer_command,0),"graphics reset transfer");b.upload_wait=0;
         check(vkResetDescriptorPool(device,b.descriptors,0),"graphics reset descriptors");
         for(std::size_t i=0;i<b.overflow_used;++i){check(vkResetDescriptorPool(device,b.overflow_descriptors[i],0),"graphics reset descriptors");}
-        b.overflow_used=0;b.used=0;b.status_offsets.clear();b.uploads.clear();b.active_framebuffer=VK_NULL_HANDLE;b.completion=0;b.frames=0;b.descriptor_cache.clear();b.signal=VK_NULL_HANDLE;b.visibility_count=0;b.visibility.clear();b.query_count=0;b.phases.clear();b.phase_pipelines.clear();
+        if(!b.visual_jobs.empty())throw std::runtime_error("RSX pending visual draws at batch reset");
+        b.overflow_used=0;b.used=0;b.status_offsets.clear();b.visual_status_offsets.clear();b.uploads.clear();b.active_framebuffer=VK_NULL_HANDLE;b.completion=0;b.frames=0;b.descriptor_cache.clear();b.signal=VK_NULL_HANDLE;b.visibility_count=0;b.visibility.clear();b.query_count=0;b.phases.clear();b.phase_pipelines.clear();
         b.bound_graphics_pipeline=VK_NULL_HANDLE;b.dynamic_valid=false;b.state_versions.fill(0);b.state_offsets.fill(0);
 
     }

@@ -1,0 +1,7 @@
+test_native_pairs_match_the_same_scaled_flip (tests.test_rsx_drain_bound.BoundedDrain.test_native_pairs_match_the_same_scaled_flip) ... ok
+test_scaled_sync_and_async_captures_have_actual_extent (tests.test_rsx_drain_bound.BoundedDrain.test_scaled_sync_and_async_captures_have_actual_extent) ... ok
+
+----------------------------------------------------------------------
+Ran 2 tests in 24.223s
+
+OK

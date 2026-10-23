@@ -55,7 +55,8 @@ MEMBERS = r'''
     }
     void rtt_space(std::uint64_t bytes){
         const auto retained=batch->pins.bytes;
-        if(batch->used+64*1024>batch->capacity || batch->visibility_count+1>=1000 || batch->pipeline_pins.size()>=64 || retained+bytes>256*1024*1024)
+        const auto image_budget=256*1024*1024ull*(vk.graphics_render_scale==1?1:1+vk.graphics_render_scale*vk.graphics_render_scale);
+        if(batch->used+64*1024>batch->capacity || batch->visibility_count+1>=1000 || batch->pipeline_pins.size()>=64 || retained+bytes>image_budget)
             submit_async("rtt_capacity");
     }
     static const std::uint8_t* mapped_pointer(const GuestMemory::Range& mapping,unsigned offset,unsigned& available){
@@ -153,11 +154,18 @@ MEMBERS = r'''
             if(typeless_depth){sampling_image=vk.graphics_aspect_image(*batch,surface.image,VK_IMAGE_ASPECT_DEPTH_BIT,view.sampling,&view.color_transfer);stencil_image=vk.graphics_aspect_image(*batch,surface.image,VK_IMAGE_ASPECT_STENCIL_BIT,view.stencil,&view.stencil_transfer);reason("depth_typeless");}
             if(surface.image->format==VK_FORMAT_R8G8B8A8_SRGB){sampling_image=view.sampling?view.sampling:vk.graphics_image(*batch,VK_FORMAT_R8G8B8A8_UNORM,surface.width,surface.height,surface.samples);vk.graphics_copy(*batch,surface.image,sampling_image);reason("srgb_bytecopy");}
             auto image=view.image?view.image:vk.graphics_image(*batch,VK_FORMAT_R32G32B32A32_SFLOAT,level.width,level.height,1);
+            // A visual texel must correspond to one complete source texel.
+            // Byte-shifted aliases retain the exact native decoder below.
+            const bool visual_typed=!block && !typeless_float && !typeless_depth && !target.swizzle_width && !texture.swizzled && pixel_bytes==target.bpp &&
+                origin%target.bpp==0 && target.pitch%target.bpp==0 && level.pitch%target.bpp==0 &&
+                ((surface.depth && ((surface.format==1 && texture.format==0x92) || (surface.format==2 && texture.format==0x90))) ||
+                 (!surface.depth && expected && expected==surface.format));
             if(!view.fs){
             std::string fs="#version 450\nlayout(std430,binding=0) readonly buffer Data{uint w[];};\nlayout(location=0) out vec4 color_;\nlayout(binding=17) uniform ";
             const bool packed=surface.image->format==VK_FORMAT_R32_UINT,integer_source=packed || typeless_depth || typeless_float;
             fs+=integer_source?"usampler2DArray src_;\n":"sampler2DArray src_;\n";
             if(typeless_depth)fs+="layout(binding=18) uniform usampler2DArray stencil_;\n";
+            if(visual_typed)fs+="layout(push_constant) uniform Visual{layout(offset=56) vec2 raster_scale_;};\nivec2 visual_xy(uvec2 p){vec2 ratio=vec2(textureSize(src_,0).xy)/vec2("+std::to_string(surface.width)+","+std::to_string(surface.height)+");return ivec2((vec2(p)+fract(gl_FragCoord.xy/raster_scale_))*ratio); }\n";
             fs+="uint raw_format(uint unit){return "+rsxvk::u(texture.format)+";}\n";
             fs+="uint raw_byte(uint unit,uint at){uint a=at+w[0],y=a/w[1],x=(a%w[1])/w[2],byte_=a%w[2];";
             if(target.swizzle_width){fs+="uint block=min(w[2],4u),words=w[2]/block,index_=a/block;uint xx=0u,yy=0u,bit_=0u;for(uint i=0u;(w[5]>>i)>1u || (w[6]>>i)>1u;++i){if((w[5]>>i)>1u)xx|=((index_>>bit_++)&1u)<<i;if((w[6]>>i)>1u)yy|=((index_>>bit_++)&1u)<<i;}x=xx/words;y=yy;byte_=(xx%words)*block+a%block;";}
@@ -179,14 +187,15 @@ MEMBERS = r'''
             fs+=R"RTT(
 ''' + RAW_GLSL + r'''
 )RTT";
-            fs+="void main(){color_=raw_texel(0u,0u,0u,int(gl_FragCoord.x),int(gl_FragCoord.y),0);}\n";
+            if(visual_typed)replace_all(fs,"ivec3(x/w[3],y/w[4],layer)","ivec3(visual_xy(uvec2(x/w[3],y/w[4])),layer)");
+            fs+="void main(){vec2 xy="+std::string(visual_typed?"gl_FragCoord.xy/raster_scale_":"gl_FragCoord.xy")+";color_=raw_texel(0u,0u,0u,int(xy.x),int(xy.y),0);}\n";
             std::vector<unsigned> data(2588,0);data[0]=origin;data[1]=target.pitch;data[2]=target.bpp;data[3]=nx;data[4]=ny;data[5]=texture_pot(target.swizzle_width*(target.bpp/std::min(target.bpp,4u)));data[6]=texture_pot(target.swizzle_height);
             const unsigned d=2064;data[d+1]=1;data[d+11]=texture.features;data[d+12]=texture.signed_mask;data[d+27]=2;data[d+29]=texture.shadow;data[d+31]=2576;
             data[2576]=0;data[2577]=level.pitch;data[2578]=level.backing_width;data[2579]=level.backing_height;data[2582]=texture.swizzled;data[2583]=1;
             view.fs=std::make_shared<const std::string>(std::move(fs));view.data=std::move(data);
             }
             static const auto vs=std::make_shared<const std::string>("#version 450\nvoid main(){vec2 p=vec2((gl_VertexIndex<<1)&2,gl_VertexIndex&2);gl_Position=vec4(p*2.0-1.0,0,1);}");
-            NativeVulkan::GraphicsState fixed{};fixed.width=level.width;fixed.height=level.height;fixed.colors=1;fixed.samples=1;fixed.color=VK_FORMAT_R32G32B32A32_SFLOAT;
+            NativeVulkan::GraphicsState fixed{};fixed.scale_visual=visual_typed;fixed.width=level.width;fixed.height=level.height;fixed.colors=1;fixed.samples=1;fixed.color=VK_FORMAT_R32G32B32A32_SFLOAT;
             fixed.scissor={{0,0},{level.width,level.height}};fixed.blend[0].colorWriteMask=15;
             std::array<std::shared_ptr<NativeVulkan::GraphicsImage>,4> colors{};colors[0]=image;
             std::array<std::shared_ptr<NativeVulkan::GraphicsImage>,20> inputs{};inputs[16]=sampling_image;inputs[17]=stencil_image;
@@ -197,9 +206,10 @@ MEMBERS = r'''
             view.layout=surface.readback;view.origin=origin;view.sampling=std::move(sampling_image);view.stencil=std::move(stencil_image);
             if(!replacing){
                 auto cached_bytes=[&]{std::uint64_t total=0;for(const auto& e:rtt_views)total+=e.bytes();return total;};
-                while(!rtt_views.empty() && (rtt_views.size()>=64 || cached_bytes()+view.bytes()>128*1024*1024)){
+                const auto budget=128*1024*1024ull*(vk.graphics_render_scale==1?1:1+vk.graphics_render_scale*vk.graphics_render_scale);
+                while(!rtt_views.empty() && (rtt_views.size()>=64 || cached_bytes()+view.bytes()>budget)){
                     auto old=std::min_element(rtt_views.begin(),rtt_views.end(),[](const auto& a,const auto& b){return a.last_use<b.last_use;});rtt_views.erase(old);}
-                if(view.bytes()<=128*1024*1024)rtt_views.push_back(std::move(view));
+                if(view.bytes()<=budget)rtt_views.push_back(std::move(view));
             }
             reason("conversion");if(fallback_stats().enabled){++fallback_stats().paths[target.tile?"rtt_tiled":"rtt_linear"];if(surface.samples>1)++fallback_stats().paths["rtt_sample_expansion"];if(!expected || surface.format!=expected)++fallback_stats().paths["rtt_reinterpret"];}
             return image;

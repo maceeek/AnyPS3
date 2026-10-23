@@ -1,0 +1,14 @@
+{
+  "checkpoint": 802,
+  "expected": 932,
+  "initial_report_passed": false,
+  "initial_failed_module": "test_spu_putllc_lr.py",
+  "initial_failure": "native subprocess timeout after5s while other jobs active",
+  "recheck": "putllc-recheck802.log",
+  "recheck_result": "uncontended unittest1PASS in12.163s, unchanged source",
+  "combined_passed": 925,
+  "skipped": 7,
+  "source_drift": [],
+  "original_report_sha256": "75c0695d23a415bb9d8719ee08bbc677399bb35e4ce0c27ae69bccfb2199ff9b",
+  "limitation": "Original failed report preserved; counts combine initial suite and one focused rerun. Subsequent803 instrumentation/GUI additions have separate targeted evidence."
+}

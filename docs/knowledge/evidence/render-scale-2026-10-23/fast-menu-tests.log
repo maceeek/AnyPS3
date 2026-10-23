@@ -1,0 +1,21 @@
+test_early_title_timeout_releases_start (tests.test_fast_menu.FastMenuTest.test_early_title_timeout_releases_start) ... 14:09:07 title -> START (hold 1 s)
+14:09:07 timeout; menu not verified
+ok
+test_guest_stop_aborts (tests.test_fast_menu.FastMenuTest.test_guest_stop_aborts) ... 14:09:07 guest STOP; driver stopped
+ok
+test_incomplete_line_is_not_confirmation (tests.test_fast_menu.FastMenuTest.test_incomplete_line_is_not_confirmation) ... 14:09:07 timeout; menu not verified
+ok
+test_one_menu_sample_is_not_confirmation (tests.test_fast_menu.FastMenuTest.test_one_menu_sample_is_not_confirmation) ... 14:09:08 timeout; menu not verified
+ok
+test_sample_classes (tests.test_fast_menu.FastMenuTest.test_sample_classes) ... ok
+test_start_protocol (tests.test_fast_menu.FastMenuTest.test_start_protocol) ... ok
+test_timeout_releases_start (tests.test_fast_menu.FastMenuTest.test_timeout_releases_start) ... 14:09:08 video -> START (hold 1 s)
+14:09:08 timeout; menu not verified
+ok
+test_two_distinct_menu_samples_confirm (tests.test_fast_menu.FastMenuTest.test_two_distinct_menu_samples_confirm) ... 14:09:08 MENU (two fresh PERF samples; visual verification required)
+ok
+
+----------------------------------------------------------------------
+Ran 8 tests in 1.203s
+
+OK

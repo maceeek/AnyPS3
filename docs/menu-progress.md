@@ -578,3 +578,15 @@ See [analysis](knowledge/experiments/2026-10-20-sandbox-analysis.md) and the upd
 FRAMETIME + rsxblit batch path; first 30 s 32.7 FPS, sustained 30 FPS after 12 s). The post-load slow phase was CPU-side
 scaled blits, not GPU waits. Main-thread SPU wait is 94 % lane compute (wake trace). Build 473 (all combined + review fixes)
 unmeasured; blit batch review findings (1 High) not yet committed. See [CURRENT](knowledge/CURRENT.md).
+
+2026-10-23: higher-resolution work on feat/render-scale (baseline 706).
+Original menu visually verified at 37 s using earlier virtual START; original
+segments unchanged. Raster extents, guest coordinates and two-pass RTT detail
+were tested on NVIDIA. Game rendering above 720p and stable 60 FPS remain pending.
+See knowledge/experiments/2026-10-23-render-scale.md.
+
+2026-10-23: build801 original Great Clock verified at2560x1440,14.22FPS; same binary native59.87FPS. Fast menu is default (36–42s). Confirmed render-pass alternation bottleneck; deferred visual batching under targeted validation, game result pending. See knowledge/experiments/2026-10-23-render-scale.md.
+
+2026-10-23: batching802 diagnostics39.16FPS at1440p,41.23FPS with recorder; noSTOP/PT_LOAD exact, backgroundjobs on otherCCD so notquietacceptance. GUI render scale integration added to requiredscope.803 flip-timing build and802suite stilllive; one SPUfixturetimeout needsisolatedrecheck.
+
+2026-10-23: quiet803 1440p45.5198FPS, original Great Clock inspected; no60FPS acceptance. Investigating confirmed native reconstruction paths before claiming full-resolution detail. GUI source integrated, desktop release unchanged.

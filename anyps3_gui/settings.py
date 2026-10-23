@@ -85,9 +85,11 @@ class Settings(QWidget):
                 getter = editor.isChecked
             elif spec.get("choices"):
                 editor = QComboBox()
-                editor.addItems(spec["choices"])
-                editor.setCurrentText(value)
-                getter = editor.currentText
+                labels = spec.get("choice_labels", {})
+                for choice in spec["choices"]:
+                    editor.addItem(labels.get(str(choice), str(choice)), choice)
+                editor.setCurrentIndex(editor.findData(value))
+                getter = editor.currentData
             else:
                 editor = QLineEdit(str(value))
                 getter = (lambda e=editor: int(e.text())) if spec["type"] == "integer" else editor.text

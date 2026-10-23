@@ -1,0 +1,34 @@
+test_contended_wraps_never_mix_events (tests.test_frametime.FrameTimeRingTests.test_contended_wraps_never_mix_events) ... ok
+test_delayed_writer_after_wraps_is_dropped (tests.test_frametime.FrameTimeRingTests.test_delayed_writer_after_wraps_is_dropped) ... ok
+test_field_layout_spans_wrap_and_block (tests.test_frametime.FrameTimeRingTests.test_field_layout_spans_wrap_and_block) ... ok
+test_flips_filter_and_disabled_hot_paths (tests.test_frametime.FrameTimeRingTests.test_flips_filter_and_disabled_hot_paths) ... ok
+test_invalid_capacity_is_an_error (tests.test_frametime.FrameTimeRingTests.test_invalid_capacity_is_an_error) ... ok
+test_killed_mid_write_is_never_returned (tests.test_frametime.FrameTimeRingTests.test_killed_mid_write_is_never_returned) ... ok
+test_off_by_default (tests.test_frametime.FrameTimeRingTests.test_off_by_default) ... ok
+test_reader_rejects_uncommitted_and_foreign_lap_slots_and_reads_version_1 (tests.test_frametime.FrameTimeRingTests.test_reader_rejects_uncommitted_and_foreign_lap_slots_and_reads_version_1) ... ok
+test_reject_invalid_mode (tests.test_frametime.FrameTimeRingTests.test_reject_invalid_mode) ... ok
+test_ring_wraps_and_keeps_newest (tests.test_frametime.FrameTimeRingTests.test_ring_wraps_and_keeps_newest) ... ok
+test_slot_claimed_while_the_reader_copies_it_is_rejected (tests.test_frametime.FrameTimeRingTests.test_slot_claimed_while_the_reader_copies_it_is_rejected) ... ok
+test_threads_complete_and_sequenced_after_sigkill (tests.test_frametime.FrameTimeRingTests.test_threads_complete_and_sequenced_after_sigkill) ... ok
+test_writer_stalled_inside_a_slot_across_wraps_blocks_only_that_slot (tests.test_frametime.FrameTimeRingTests.test_writer_stalled_inside_a_slot_across_wraps_blocks_only_that_slot) ... ok
+test_default_and_capability_gating_remove_ambient_scale (tests.manager.test_render_scale.RenderScaleSettingsTests.test_default_and_capability_gating_remove_ambient_scale) ... ok
+test_invalid_values_do_not_change_saved_configuration (tests.manager.test_render_scale.RenderScaleSettingsTests.test_invalid_values_do_not_change_saved_configuration) ... ok
+test_saved_scale_reaches_child_and_unsupported_build_omits_it (tests.manager.test_render_scale.RenderScaleSettingsTests.test_saved_scale_reaches_child_and_unsupported_build_omits_it) ... ok
+test_typed_values_persist_and_inherit_without_changing_window_size (tests.manager.test_render_scale.RenderScaleSettingsTests.test_typed_values_persist_and_inherit_without_changing_window_size) ... ok
+test_extra_flags_are_applied_and_recorded (tests.manager.test_native_flags.NativeFlagsTests.test_extra_flags_are_applied_and_recorded) ... ok
+test_inherit_restores_global_scale_and_string_choices_remain_strings (tests.gui.test_settings.SettingsGuiTests.test_inherit_restores_global_scale_and_string_choices_remain_strings) ... ok
+test_older_active_build_disables_scale_control (tests.gui.test_settings.SettingsGuiTests.test_older_active_build_disables_scale_control) ... ok
+test_scale_selection_persists_reopens_and_reaches_launched_child (tests.gui.test_settings.SettingsGuiTests.test_scale_selection_persists_reopens_and_reaches_launched_child) ... ok
+test_controllers_show_motion_and_rumble_capabilities (tests.gui.test_gui.GuiTests.test_controllers_show_motion_and_rumble_capabilities) ... ok
+test_errors_preserve_code_message_and_detail (tests.gui.test_gui.GuiTests.test_errors_preserve_code_message_and_detail) ... ok
+test_firmware_terminal_result_advances_to_disc_import_once (tests.gui.test_gui.GuiTests.test_firmware_terminal_result_advances_to_disc_import_once) ... ok
+test_gui_has_no_runtime_or_manager_imports (tests.gui.test_gui.GuiTests.test_gui_has_no_runtime_or_manager_imports) ... ok
+test_malformed_protocol_is_visible (tests.gui.test_gui.GuiTests.test_malformed_protocol_is_visible) ... ok
+test_streaming_events_and_unknown_fields (tests.gui.test_gui.GuiTests.test_streaming_events_and_unknown_fields) ... ok
+test_window_smoke_and_geometry (tests.gui.test_gui.GuiTests.test_window_smoke_and_geometry) ... This plugin does not support propagateSizeHints()
+ok
+
+----------------------------------------------------------------------
+Ran 28 tests in 1.908s
+
+OK

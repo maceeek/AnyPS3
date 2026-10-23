@@ -47,6 +47,18 @@ CPP = r'''
     }();
     return stride;
 }
+// Diagnostic pairs cover synchronous captures (first eight flips and operator
+// triggers). Native and visual readbacks run on the same RSX owner before it
+// advances the FIFO. Asynchronous stride captures remain unchanged.
+[[maybe_unused]] static bool rsx_capture_native_pair(){
+    static const bool enabled=[]{
+        const char* v=std::getenv("ANYPS3_CAPTURE_NATIVE_PAIR");
+        if(!v || !*v || std::string(v)=="0")return false;
+        if(std::string(v)=="1")return true;
+        throw std::runtime_error("invalid ANYPS3_CAPTURE_NATIVE_PAIR");
+    }();
+    return enabled;
+}
 // DIAGNOSTIC: ANYPS3_FRAME_TRIGGER=<file> saves the next flip outside the stride
 // while the file exists, then removes it (operator evidence at low frame rates).
 [[maybe_unused]] static bool rsx_frame_trigger(bool consume){
@@ -125,7 +137,12 @@ static void rsx_capture_display(PpuState& s,unsigned id){
     if(gpu.flips>8 && gpu.flips%stride && !requested)return;
     if(gpu.captured_frames>=256)throw std::runtime_error("headless RSX capture budget exhausted (256 frames)");
     if(s.video.format!=0)throw std::runtime_error("unsupported RSX scanout format");
-    auto rgba=rsx_display_pixels(s,id);const auto& buffer=gpu.display_buffers[id];
+    const auto& buffer=gpu.display_buffers[id];unsigned width=buffer.width,height=buffer.height;
+    std::vector<std::uint8_t> rgba;
+#ifdef ANYPS3_RSX_VK
+    if(!rsx_graphics_scanout(s,id,&rgba,false,&width,&height))
+#endif
+        rsx_display_pixels(s,id,rgba);
     if(!gpu.renderer)gpu.renderer=std::make_unique<NativeVulkan>(s.rsx.host);
 #ifndef ANYPS3_RSX_VK
     // Preserve the standalone clear-backend diagnostic's explicit Vulkan
@@ -133,10 +150,23 @@ static void rsx_capture_display(PpuState& s,unsigned id){
     gpu.renderer->readback(rgba,buffer.width,buffer.height);
 #endif
     const auto path=root/rsx_capture_name(gpu.captured_frames+1);
-    rsx_capture_write(path,rgba,id,buffer.width,buffer.height);
+    if(rsx_capture_native_pair()){
+        std::vector<std::uint8_t> native_rgba;
+#ifdef ANYPS3_RSX_VK
+        // The visual capture already marked this flip for GPU profiling.
+        if(!rsx_graphics_scanout(s,id,&native_rgba,false,nullptr,nullptr,false))
+#endif
+            rsx_display_pixels(s,id,native_rgba);
+        const auto comparison=root/("comparison-"+path.filename().string());
+        rsx_capture_write(comparison,native_rgba,id,buffer.width,buffer.height);
+        std::fprintf(stderr,"RSX capture pair frame=%llu flip=%llu buffer=%u native=%ux%u visual=%ux%u file=%s\n",
+            static_cast<unsigned long long>(gpu.captured_frames+1),static_cast<unsigned long long>(gpu.flips),
+            id,buffer.width,buffer.height,width,height,comparison.c_str());
+    }
+    rsx_capture_write(path,rgba,id,width,height);
     ++gpu.captured_frames;
     std::fprintf(stderr,"RSX captured frame=%llu buffer=%u size=%ux%u file=%s\n",
-        static_cast<unsigned long long>(gpu.captured_frames),id,buffer.width,buffer.height,path.c_str());
+        static_cast<unsigned long long>(gpu.captured_frames),id,width,height,path.c_str());
 #endif
 }
 '''

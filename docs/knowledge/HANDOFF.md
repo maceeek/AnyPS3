@@ -1,5 +1,23 @@
 # Handoff to the next instance
 
+## Higher-resolution rendering — 2026-10-23, active
+
+Verified quiet build803 result: 45.5198 FPS over60.104s, min2s40.67,
+main11.413ms/frame and RSX13.667ms/frame. Original Great Clock capture inspected,
+PT_LOAD exact, no STOP; harness deliberately terminated the run (-9).
+No game/build is live. GUI source integrated,28 combined targeted tests passed;
+not installed or promoted. Suite802 reconciles to925 passes+7 skips after the
+unchanged five-second concurrency fixture passed an uncontended rerun; original
+red report is preserved. Higher-resolution stable60 remains unfinished.
+
+Current blocker: image detail. General alias merge/equal-footprint rebind and
+unsupported RTT rebuild visual companions from native pixels (verified source);
+their contribution to final world quality is still a hypothesis. See
+`local/ratchet/work/resscale-quality-loss.md`. A same-flip native/visual capture
+diagnostic is being tested before a new build804; this is not a quality fix.
+[Evidence, commands and next action](experiments/2026-10-23-render-scale.md).
+
+
 ## Wave 6 — 2026-10-21 (ended on user instruction ~17:15)
 
 Read the top of [CURRENT.md](CURRENT.md). Branch `claude/wave6-60fps` (pushed; the user merges it into main) = main + integration
