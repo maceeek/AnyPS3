@@ -194,9 +194,11 @@ int main(){
  mem.store(stopped.address,4,0x3f000000);
  for(unsigned i=0;i<16;++i)mem.store(p.address+i*8192+8192-4,4,0x3e800000);
  const auto start=a.next_tick;
- audio_advance(s,start+14*425600);assert(mem.load(p.index,8)==15 && a.submitted_frames==15*256);
+ // One call catches up 15 periods; periods k=0..4 end 14-k periods (74.7..53.3 ms) before now, beyond the 50 ms host
+ // limit: their guest effects stay, but they are not queued to the host (late_dropped_frames).
+ audio_advance(s,start+14*425600);assert(mem.load(p.index,8)==15 && a.submitted_frames==10*256 && a.late_dropped_frames==5*256);
  assert(mem.load(p.address+15*8192+8192-4,4)==0x3e800000);
- audio_advance(s,start+15*425600);assert(mem.load(p.index,8)==0 && a.submitted_frames==16*256);
+ audio_advance(s,start+15*425600);assert(mem.load(p.index,8)==0 && a.submitted_frames==11*256 && a.late_dropped_frames==5*256);
  for(unsigned i=0;i<p.size;++i)assert(mem.load(p.address+i,1)==0);
  assert(mem.load(stopped.index,8)==0 && mem.load(stopped.address,4)==0x3f000000);
  a.next_tick=UINT64_MAX/2;assert(audio(1)==0);
