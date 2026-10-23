@@ -148,7 +148,7 @@ MEMBERS = r'''
             if(!surface.depth && !(texture.features&1 && texture.signed_mask) && surface.samples==1 && origin==0 && level.width==surface.width && level.height==surface.height && surface.format==expected && surface.image->format==color_format(expected) && texture.swizzled==bool(target.swizzle_width) && level.pitch==target.pitch){
                 reason("direct");return surface.image;
             }
-            rtt_space(std::uint64_t(level.width)*level.height*16+surface.image->memory_bytes+(typeless_depth?std::uint64_t(surface.width)*surface.height*surface.samples*5:typeless_float?surface.image->memory_bytes:0));
+            rtt_space(std::uint64_t(level.width)*level.height*16+surface.image->memory_bytes+(typeless_depth?std::uint64_t(surface.width)*surface.height*surface.samples*5*(1+vk.graphics_render_scale*vk.graphics_render_scale):typeless_float?surface.image->memory_bytes:0));
             auto sampling_image=surface.image;std::shared_ptr<NativeVulkan::GraphicsImage> stencil_image;
             if(typeless_float){sampling_image=vk.graphics_aspect_image(*batch,surface.image,VK_IMAGE_ASPECT_COLOR_BIT,view.sampling,&view.color_transfer);reason("float_typeless");}
             if(typeless_depth){sampling_image=vk.graphics_aspect_image(*batch,surface.image,VK_IMAGE_ASPECT_DEPTH_BIT,view.sampling,&view.color_transfer);stencil_image=vk.graphics_aspect_image(*batch,surface.image,VK_IMAGE_ASPECT_STENCIL_BIT,view.stencil,&view.stencil_transfer);reason("depth_typeless");}
@@ -156,9 +156,12 @@ MEMBERS = r'''
             auto image=view.image?view.image:vk.graphics_image(*batch,VK_FORMAT_R32G32B32A32_SFLOAT,level.width,level.height,1);
             // A visual texel must correspond to one complete source texel.
             // Byte-shifted aliases retain the exact native decoder below.
-            const bool visual_typed=!block && !typeless_float && !typeless_depth && !target.swizzle_width && !texture.swizzled && pixel_bytes==target.bpp &&
+            // Typeless depth samples word images whose companions graphics_aspect_image
+            // reinterpreted from the visual depth/stencil (one word per texel).
+            const bool visual_depth=typeless_depth && sampling_image->visual && stencil_image->visual && surface.image->visual;
+            const bool visual_typed=!block && !typeless_float && (!typeless_depth || visual_depth) && !target.swizzle_width && !texture.swizzled && pixel_bytes==target.bpp &&
                 origin%target.bpp==0 && target.pitch%target.bpp==0 && level.pitch%target.bpp==0 &&
-                ((surface.depth && ((surface.format==1 && texture.format==0x92) || (surface.format==2 && texture.format==0x90))) ||
+                ((surface.depth && ((surface.format==1 && texture.format==0x92) || (surface.format==2 && (texture.format==0x90 || visual_depth)))) ||
                  (!surface.depth && expected && expected==surface.format));
             if(!view.fs){
             std::string fs="#version 450\nlayout(std430,binding=0) readonly buffer Data{uint w[];};\nlayout(location=0) out vec4 color_;\nlayout(binding=17) uniform ";

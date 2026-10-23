@@ -1,5 +1,9 @@
 # AnyPS3 project knowledge base
 
+[2026-10-23 cloud follow-up](experiments/2026-10-23-cloud-render-scale.md):
+visual history through alias merge/rebind and typeless depth, counter fix; lavapipe
+unit tests only, no game run.
+
 [2026-10-23 resolution scaling milestone](experiments/2026-10-23-render-scale.md):
 1440p45.52FPS, GUI resolution selection, batched visual draws and matched
 native/scaled captures. Quality-loss paths and stable60FPS remain open.
