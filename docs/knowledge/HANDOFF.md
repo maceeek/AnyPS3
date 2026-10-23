@@ -1,5 +1,24 @@
 # Handoff to the next instance
 
+## Cloud follow-up (no game, no GPU) — 2026-10-23
+
+Branch `claude/jolly-pasteur-z3etd7` (base `8c66615`), source-level only, verified with
+native Vulkan unit tests on lavapipe + validation; **no game build, run or FPS figure**:
+
+- Alias merge / equal-footprint rebind now copy whole-texel subpixel blocks from the old
+  visual companion instead of nearest-upscaling native pixels (native path untouched;
+  unmapped texels keep native reconstruction; fully mapped transitions skip the sync;
+  `ANYPS3_RENDER_SCALE_HISTORY=0` disables it for A/B; ~1 ms host cost per plan-cache miss).
+- Typeless D24S8-as-ARGB8 RTT keeps visual depth/stencil subpixels (one-word aspects).
+- `PERF RENDER_SCALE` queue/drain counters are run totals (were printed as 0); new
+  `history_copies`/`history_texels`.
+- A visual draw reuses its native draw's pipeline (one lookup per pair; saving unmeasured).
+
+First next action on the real PC: new build from this branch, quiet scale-2 run (compare
+803: 45.52 FPS), same-flip native/visual capture. Stable 60 FPS at scale 2 and the
+final-image dependency chain remain unverified.
+[Record](experiments/2026-10-23-cloud-render-scale.md).
+
 ## Resolution-scaling milestone — 2026-10-23
 
 Implemented on `feat/render-scale`, based on current `origin/main`:

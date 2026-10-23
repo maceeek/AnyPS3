@@ -32,13 +32,19 @@ static void paired_sequence(const char* recorder,unsigned samples,bool batch){
   }
  };
  // Exceeds both the 128 visual-job cap and the 256 recorder ring entries.
- std::uint64_t expected_samples=0;
+ std::uint64_t expected_samples=0;const auto queued_before=g.vk.graphics_visual_queued_total,drains_before=g.vk.graphics_visual_drains_total;
+ const auto lookups_before=g.vk.compile_stats.graphics_hits+g.vk.compile_stats.graphics_misses;
  for(unsigned i=0;i<200;++i){unsigned x=i%13,y=(i*7)%13;draw(0,x,y,4,4,0xff000000u+i*271u);expected_samples+=16*samples;}
+ // One pipeline lookup per paired draw: the visual half reuses the native pipeline.
+ assert(g.vk.compile_stats.graphics_hits+g.vk.compile_stats.graphics_misses-lookups_before==200 && !g.vk.graphics_paired_pipeline);
  check();std::uint64_t actual_samples=0;for(auto n:g.b->visibility)actual_samples+=n;
  assert(actual_samples==expected_samples);
  const auto passes=g.b->render_passes;
- if(batch){assert(passes<=4*samples);assert(g.b->visual_run_max==128 && g.b->visual_drains==2);}
- else assert(passes==400*samples);
+ // Collection folds the batch's queue counters into run totals (the PERF
+ // RENDER_SCALE report); they must survive the batch being collected.
+ if(batch){assert(passes<=4*samples);assert(g.b->visual_run_max==0 && g.b->visual_drains==0);
+  assert(g.vk.graphics_visual_run_max==128 && g.vk.graphics_visual_drains_total-drains_before==2 && g.vk.graphics_visual_queued_total-queued_before==200);}
+ else assert(passes==400*samples && g.vk.graphics_visual_queued_total==queued_before);
  g.vk.graphics_reset(*g.b);
  // Copy, clear, upload, target switches and predicate changes are dependencies.
  draw(0,0,0,16,16,0xff0000ffu);

@@ -9,6 +9,7 @@ from .rsx_access_trace import CPP as ACCESS_TRACE_CPP
 from .rsx_graphics_sampled import MEMBERS as SAMPLED_MEMBERS
 from .rsx_graphics_rtt import MEMBERS as RTT_MEMBERS
 from .rsx_graphics_rebind import MEMBERS as REBIND_MEMBERS
+from .rsx_graphics_visual_history import MEMBERS as VISUAL_HISTORY_MEMBERS
 from .rsx_graphics_conditional import MEMBERS as CONDITIONAL_MEMBERS
 from .rsx_graphics_fp import CPP as SCALAR_FP_CPP
 from .rsx_graphics_alias import CPP as ALIAS_CPP, HELPERS as ALIAS_HELPERS, RASTER as ALIAS_RASTER
@@ -952,7 +953,7 @@ struct Session {
     }
     std::vector<RawTexture> raw_textures;
     std::uint64_t raw_hits=0,raw_misses=0,raw_invalidations=0,raw_bytes=0,resource_clock=0,raw_evictions=0,surface_evictions=0;
-''' + TEXTURE_CACHE_MEMBERS + SAMPLED_MEMBERS + RTT_MEMBERS + REBIND_MEMBERS + CONDITIONAL_MEMBERS + r'''
+''' + TEXTURE_CACHE_MEMBERS + SAMPLED_MEMBERS + RTT_MEMBERS + REBIND_MEMBERS + VISUAL_HISTORY_MEMBERS + CONDITIONAL_MEMBERS + r'''
     std::shared_ptr<NativeVulkan::GraphicsBuffer> texture_buffer(const Texture& t){
         if(state.coordinator_maps)state.maps=state.memory.regions;
         HostPhase phase(HostStage::texture_upload);
@@ -1386,19 +1387,24 @@ struct Session {
             at=vk.graphics_device_upload(*batch,data,bytes);}
         bool dirty=false;std::vector<VkBufferCopy> regions;
         std::vector<Surface> remainders;std::vector<std::shared_ptr<NativeVulkan::GraphicsImage>> replaced;
+        std::vector<std::pair<std::shared_ptr<NativeVulkan::GraphicsImage>,VisualHistoryUse>> history;std::uint64_t history_texels=0;
         for(auto i:olds){auto& old=surfaces[i];replaced.push_back(old.image);
             if(old.dirty){
                 if(!discard){
                 dirty=true;
                 const auto source=vk.graphics_pack_readback(*batch,old.image,old.format,old.depth,old.target.bpp,old.target.pitch,old.samples,old.readback->words,old.readback->gpu_words,false);
                 // Both run lists are sorted by physical address and disjoint.
-                const auto& x=old.readback->runs;const auto& y=plan->runs;std::size_t a=0,c=0;
+                const auto& x=old.readback->runs;const auto& y=plan->runs;std::size_t a=0,c=0;std::vector<VisualHistoryPair> pairs;
                 while(a<x.size() && c<y.size()){
                     const auto xb=reinterpret_cast<std::uintptr_t>(x[a].data),xe=xb+x[a].size,yb=reinterpret_cast<std::uintptr_t>(y[c].data),ye=yb+y[c].size;
                     const auto first=std::max(xb,yb),last=std::min(xe,ye);
-                    if(first<last)regions.push_back({source+x[a].offset+(first-xb),at+y[c].offset+(first-yb),last-first});
+                    if(first<last){regions.push_back({source+x[a].offset+(first-xb),at+y[c].offset+(first-yb),last-first});
+                        pairs.push_back({unsigned(x[a].offset+(first-xb)),unsigned(y[c].offset+(first-yb)),unsigned(last-first)});}
                     if(xe<=ye)++a;else ++c;
                 }
+                // Dirty owners are disjoint, so mapped destination texels are too.
+                if(image->visual){auto use=visual_history_plan(old,surface,format,pairs);
+                    if(use.regions){history_texels+=use.texels;history.emplace_back(old.image,std::move(use));}}
                 }
                 std::vector<GuestMemory::HostGuard::Span> rest;
                 GuestMemory::HostGuard::difference(old.physical,surface.physical,[&](auto span){rest.push_back(span);});
@@ -1409,7 +1415,10 @@ struct Session {
             }
         }
         if(!discard){vk.graphics_device_copies(*batch,regions);
-            vk.graphics_unpack_upload(*batch,image,surface.format,surface.depth,t.bpp,t.pitch,surface.samples,plan->words,plan->gpu_words,nullptr,at);}
+            // Fully mapped destinations need no native reconstruction first.
+            const bool complete=history_texels==std::uint64_t(surface.width)*surface.height*surface.samples;
+            vk.graphics_unpack_upload(*batch,image,surface.format,surface.depth,t.bpp,t.pitch,surface.samples,plan->words,plan->gpu_words,nullptr,at,!complete);
+            for(const auto& h:history)vk.graphics_visual_history(*batch,h.first,image,*h.second.regions,h.second.texels);}
         surfaces.erase(std::remove_if(surfaces.begin(),surfaces.end(),[&](const auto& s){return std::find(replaced.begin(),replaced.end(),s.image)!=replaced.end();}),surfaces.end());
         for(auto& keep:remainders)surfaces.push_back(std::move(keep));
         surface.image=std::move(image);surface.dirty=dirty;surface.last_use=++resource_clock;surface.generation=1;

@@ -3,7 +3,7 @@ MEMBERS = r'''
     std::uint64_t graphics_surface_uploads=0;
     void graphics_unpack_upload(GraphicsBatch& b,const std::shared_ptr<GraphicsImage>& image,
             unsigned format,bool depth,unsigned bpp,unsigned pitch,unsigned samples,
-            const std::vector<unsigned>& words,std::shared_ptr<GraphicsBuffer>& word_buffer,const void* bytes,std::uint64_t device_input=UINT64_MAX){b.sync();
+            const std::vector<unsigned>& words,std::shared_ptr<GraphicsBuffer>& word_buffer,const void* bytes,std::uint64_t device_input=UINT64_MAX,bool sync_visual=true){b.sync();
         GraphicsSite site(SiteUnpack);
         const auto size=words.size()*4,pixels=std::uint64_t(image->width)*image->height*samples;
         const bool stencil=depth && format==2;
@@ -67,6 +67,6 @@ void main(){uint i=gl_GlobalInvocationID.x+gl_WorkGroupID.y*gl_NumWorkGroups.x*6
         VkBufferImageCopy copy{};copy.bufferOffset=output;copy.imageSubresource={depth?VK_IMAGE_ASPECT_DEPTH_BIT:VK_IMAGE_ASPECT_COLOR_BIT,0,0,image->layers};copy.imageExtent={image->width,image->height,1};
         vkCmdCopyBufferToImage(b.command,b.data_buffer,image->image,VK_IMAGE_LAYOUT_GENERAL,1,&copy);
         if(stencil){copy.bufferOffset=stencil_at;copy.imageSubresource.aspectMask=VK_IMAGE_ASPECT_STENCIL_BIT;vkCmdCopyBufferToImage(b.command,b.data_buffer,image->image,VK_IMAGE_LAYOUT_GENERAL,1,&copy);}
-        graphics_barrier(b);b.buffer_pins.push_back(word_buffer);b.pins.push_back(image);++graphics_surface_uploads;graphics_visual_sync(b,image);
+        graphics_barrier(b);b.buffer_pins.push_back(word_buffer);b.pins.push_back(image);++graphics_surface_uploads;if(sync_visual)graphics_visual_sync(b,image);
     }
 '''

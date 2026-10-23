@@ -574,6 +574,8 @@ public:
         throw std::runtime_error("ANYPS3_RENDER_SCALE_BATCH must be 0 or 1");
     }
     std::uint64_t graphics_visual_draws=0,graphics_visual_native_copies=0,graphics_visual_host_invalidations=0;
+    std::uint64_t graphics_visual_queued_total=0,graphics_visual_drains_total=0,graphics_visual_run_max=0;
+    std::shared_ptr<GraphicsPipeline> graphics_paired_pipeline; // handed from a native draw to its visual half only
     static unsigned graphics_read_render_scale(){
         const char* value=std::getenv("ANYPS3_RENDER_SCALE");
         if(!value)return 1;
@@ -688,6 +690,7 @@ public:
         else {vkCmdCopyImageToBuffer(b.command,image->image,VK_IMAGE_LAYOUT_GENERAL,b.buffer,1,&copy);b.download_bytes+=bytes;}
         graphics_stamp(b,0,true);b.pins.push_back(image);if(data)graphics_visual_sync(b,image);return at;
     }
+    std::uint64_t graphics_visual_aspect_copies=0;
     std::shared_ptr<GraphicsImage> graphics_aspect_image(GraphicsBatch& b,const std::shared_ptr<GraphicsImage>& source,VkImageAspectFlags aspect,const std::shared_ptr<GraphicsImage>& destination={},std::shared_ptr<GraphicsBuffer>* scratch=nullptr){b.sync();
         GraphicsSite site(SiteAspect);
         const bool depth=source->depth && source->format==VK_FORMAT_D24_UNORM_S8_UINT && (aspect==VK_IMAGE_ASPECT_DEPTH_BIT || aspect==VK_IMAGE_ASPECT_STENCIL_BIT);
@@ -700,13 +703,18 @@ public:
         const auto format=bpp==1?VK_FORMAT_R8_UINT:VK_FORMAT_R32_UINT;
         auto result=destination?destination:graphics_image(b,format,source->width*words,source->height,source->layers);
         if(result->format!=format || result->width!=source->width*words || result->height!=source->height || result->layers!=source->layers || result->depth)throw std::runtime_error("RSX cached aspect destination mismatch");
+        // One word per texel keeps the scaled layout: the visual companion is
+        // reinterpreted the same way after the native bytes (16-byte aligned).
+        // Several words per texel would interleave subpixels; those rebuild.
+        const bool visual=words==1 && source->visual && result->visual && graphics_render_scale>1;
+        const auto visual_at=(bytes+15)&~UINT64_C(15),total=visual?visual_at+bytes*graphics_render_scale*graphics_render_scale:bytes;
         // A device-local transfer buffer permits byte-preserving depth/color
         // reinterpretation without an illegal cross-aspect vkCmdCopyImage,
         // normalized float reconstruction or any host-visible staging/read.
         auto transfer=scratch?*scratch:std::shared_ptr<GraphicsBuffer>{};
-        if(transfer && transfer->size!=bytes)throw std::runtime_error("RSX cached aspect buffer mismatch");
-        if(!transfer){transfer=std::make_shared<GraphicsBuffer>(this,bytes);
-        VkBufferCreateInfo bi{};bi.sType=VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;bi.size=bytes;bi.usage=VK_BUFFER_USAGE_TRANSFER_SRC_BIT|VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+        if(transfer && transfer->size!=total)throw std::runtime_error("RSX cached aspect buffer mismatch");
+        if(!transfer){transfer=std::make_shared<GraphicsBuffer>(this,total);
+        VkBufferCreateInfo bi{};bi.sType=VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;bi.size=total;bi.usage=VK_BUFFER_USAGE_TRANSFER_SRC_BIT|VK_BUFFER_USAGE_TRANSFER_DST_BIT;
         check(vkCreateBuffer(device,&bi,nullptr,&transfer->buffer),"graphics typeless buffer");
         VkMemoryRequirements requirements{};vkGetBufferMemoryRequirements(device,transfer->buffer,&requirements);
         VkMemoryAllocateInfo allocation{};allocation.sType=VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;allocation.allocationSize=requirements.size;allocation.memoryTypeIndex=memory_type(requirements.memoryTypeBits,VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
@@ -715,7 +723,12 @@ public:
         vkCmdCopyImageToBuffer(b.command,source->image,VK_IMAGE_LAYOUT_GENERAL,transfer->buffer,1,&copy);graphics_barrier(b);
         copy.imageSubresource.aspectMask=VK_IMAGE_ASPECT_COLOR_BIT;copy.imageExtent.width=result->width;
         vkCmdCopyBufferToImage(b.command,transfer->buffer,result->image,VK_IMAGE_LAYOUT_GENERAL,1,&copy);graphics_barrier(b);
-        b.buffer_pins.push_back(transfer);b.pins.push_back(source);b.pins.push_back(result);graphics_visual_sync(b,result);return result;
+        if(visual){copy.bufferOffset=visual_at;copy.imageSubresource.aspectMask=aspect;copy.imageExtent={source->visual->width,source->visual->height,1};
+            vkCmdCopyImageToBuffer(b.command,source->visual->image,VK_IMAGE_LAYOUT_GENERAL,transfer->buffer,1,&copy);graphics_barrier(b);
+            copy.imageSubresource.aspectMask=VK_IMAGE_ASPECT_COLOR_BIT;
+            vkCmdCopyBufferToImage(b.command,transfer->buffer,result->visual->image,VK_IMAGE_LAYOUT_GENERAL,1,&copy);graphics_barrier(b);
+            ++graphics_visual_aspect_copies;}
+        b.buffer_pins.push_back(transfer);b.pins.push_back(source);b.pins.push_back(result);if(!visual)graphics_visual_sync(b,result);return result;
     }
     std::uint64_t graphics_full_clears=0;
     void graphics_clear_image(GraphicsBatch& b,const std::shared_ptr<GraphicsImage>& image,const VkClearColorValue& color,float depth,unsigned stencil,VkImageAspectFlags aspects){b.sync();
@@ -742,6 +755,38 @@ public:
             vkCmdCopyImage(b.command,from->image,VK_IMAGE_LAYOUT_GENERAL,to->image,VK_IMAGE_LAYOUT_GENERAL,1,&c);}
         b.pins.push_back(from);b.pins.push_back(to);
         if(to->visual){if(from->visual)graphics_copy(b,from->visual,to->visual);else graphics_visual_sync(b,to);}
+    }
+    // Visual history through a native byte permutation (alias merge, equal
+    // footprint rebind): regions are whole native texels in native units,
+    // already proven by the caller to carry identical guest bytes. Each one
+    // copies the scale x scale subpixel block between paired companions.
+    std::uint64_t graphics_visual_history_copies=0,graphics_visual_history_texels=0;
+    void graphics_visual_history(GraphicsBatch& b,const std::shared_ptr<GraphicsImage>& from,const std::shared_ptr<GraphicsImage>& to,
+            const std::vector<VkImageCopy>& regions,std::uint64_t texels){b.sync();
+        if(regions.empty())return;
+        if(!from->visual || !to->visual || from->depth!=to->depth || from->visual->width!=from->width*graphics_render_scale ||
+           to->visual->width!=to->width*graphics_render_scale || from->visual->height!=from->height*graphics_render_scale || to->visual->height!=to->height*graphics_render_scale)
+            throw std::runtime_error("RSX visual history pair mismatch");
+        const bool rgba_compatible=(from->format==VK_FORMAT_R8G8B8A8_SRGB && to->format==VK_FORMAT_R8G8B8A8_UNORM) ||
+            (to->format==VK_FORMAT_R8G8B8A8_SRGB && from->format==VK_FORMAT_R8G8B8A8_UNORM);
+        if(from->format!=to->format && !rgba_compatible)throw std::runtime_error("RSX visual history format mismatch");
+        GraphicsSite site(SiteSurfaceCopy);
+        const unsigned scale=graphics_render_scale;
+        std::vector<VkImageAspectFlags> aspects{from->depth?VK_IMAGE_ASPECT_DEPTH_BIT:VK_IMAGE_ASPECT_COLOR_BIT};
+        if(from->format==VK_FORMAT_D24_UNORM_S8_UINT)aspects.push_back(VK_IMAGE_ASPECT_STENCIL_BIT);
+        std::vector<VkImageCopy> scaled;scaled.reserve(regions.size()*aspects.size());
+        for(const auto aspect:aspects)for(auto c:regions){
+            if(c.srcSubresource.baseArrayLayer>=from->layers || c.dstSubresource.baseArrayLayer>=to->layers || c.extent.depth!=1 ||
+               c.srcOffset.x<0 || c.srcOffset.y<0 || c.dstOffset.x<0 || c.dstOffset.y<0 ||
+               unsigned(c.srcOffset.x)+c.extent.width>from->width || unsigned(c.srcOffset.y)+c.extent.height>from->height ||
+               unsigned(c.dstOffset.x)+c.extent.width>to->width || unsigned(c.dstOffset.y)+c.extent.height>to->height)
+                throw std::runtime_error("RSX visual history region bounds");
+            c.srcSubresource.aspectMask=c.dstSubresource.aspectMask=aspect;c.srcSubresource.mipLevel=c.dstSubresource.mipLevel=0;c.srcSubresource.layerCount=c.dstSubresource.layerCount=1;
+            c.srcOffset={c.srcOffset.x*int(scale),c.srcOffset.y*int(scale),0};c.dstOffset={c.dstOffset.x*int(scale),c.dstOffset.y*int(scale),0};
+            c.extent={c.extent.width*scale,c.extent.height*scale,1};scaled.push_back(c);}
+        graphics_begin(b);graphics_barrier(b);
+        vkCmdCopyImage(b.command,from->visual->image,VK_IMAGE_LAYOUT_GENERAL,to->visual->image,VK_IMAGE_LAYOUT_GENERAL,unsigned(scaled.size()),scaled.data());
+        b.pins.push_back(from);b.pins.push_back(to);++graphics_visual_history_copies;graphics_visual_history_texels+=texels;
     }
     // ---- asynchronous draw recorder (ANYPS3_RSX_RECORDER=1) ----
     // graphics_draw is split into a front half (pipeline lookup, staging copy, pins, query/status accounting; RSX worker thread) and a back
@@ -1056,9 +1101,14 @@ public:
         bool layered=layered_ok && graphics_layered_output && s.samples>1;
         if(layered){for(unsigned i=0;i<s.colors;++i)if(colors[i]->layers!=s.samples)layered=false;if(depth && depth->layers!=s.samples)layered=false;}
         const bool multiview=layered && graphics_multiview;
-        auto t=std::chrono::steady_clock::now();auto pipeline=graphics_pipeline(s,vs,fs,vs_owner,fs_owner,multiview);b.pipeline_pins.push_back(pipeline);b.pipeline_ms+=resident_ms(t);t=std::chrono::steady_clock::now();
+        // The pipeline key has no visual_pass/raster field and a visual pair
+        // has the same layer count, so the paired half reuses the native one.
+        auto t=std::chrono::steady_clock::now();
+        auto pipeline=s.visual_pass && graphics_paired_pipeline?std::move(graphics_paired_pipeline):graphics_pipeline(s,vs,fs,vs_owner,fs_owner,multiview);
+        graphics_paired_pipeline.reset();b.pipeline_pins.push_back(pipeline);b.pipeline_ms+=resident_ms(t);t=std::chrono::steady_clock::now();
         // An optional tail (vertex input bytes) directly follows the words in
         // the same immutable slice; the blob addresses it past data.size()*4.
+        std::shared_ptr<GraphicsPipeline> paired;
         const auto words=data.size()*4,bytes=words+tail_bytes;if(bytes>graphics_properties.limits.maxStorageBufferRange)throw std::runtime_error("RSX graphics storage range limit");
         std::uint64_t at=reuse;
         if(reuse==UINT64_MAX){graphics_begin(b);at=graphics_space(b,bytes);auto* out=static_cast<char*>(b.map)+at;std::memcpy(out,data.data(),words);if(tail_bytes)std::memcpy(out+words,tail,tail_bytes);
@@ -1096,6 +1146,8 @@ public:
         b.record_ms+=resident_ms(t);
         const bool asynchronous=draw_recorder && !b.inline_draws && !b.queries && !b.marks && !graphics_gpu_loop();
         std::optional<DrawJob> inline_job;DrawJob* job=asynchronous?&recorder_slot():&inline_job.emplace();
+        const bool pair=!s.visual_pass && !s.raster_width && s.scale_visual && graphics_render_scale>1;
+        if(pair)paired=pipeline;
         job->batch=&b;job->pipeline=std::move(pipeline);job->s=s;job->colors=colors;job->depth=depth;job->textures=textures;job->raw_textures=raw_textures;job->positions=positions;
         job->bias_constant=bias_constant;job->bias_slope=bias_slope;job->min_bounds=min_bounds;job->max_bounds=max_bounds;job->vertices=vertices;job->first_vertex=first_vertex;
         job->query=query;job->passes=passes;job->layered=layered;job->multiview=multiview;job->defer_planes=defer_planes;job->at=at;job->range=range;
@@ -1108,7 +1160,8 @@ public:
                 for(unsigned i=0;i<s.colors;++i){if(!colors[i] || !colors[i]->visual)throw std::runtime_error("RSX missing visual color companion");visual_colors[i]=colors[i]->visual;}
                 if(depth && !depth->visual)throw std::runtime_error("RSX missing visual depth companion");
                 auto visual_textures=textures;for(auto& image:visual_textures)if(image && image->visual)image=image->visual;
-                const auto saved_queries=graphics_last_queries;
+                const auto saved_queries=graphics_last_queries;graphics_paired_pipeline=std::move(paired);
+                struct Handoff {std::shared_ptr<GraphicsPipeline>& p;~Handoff(){p.reset();}} handoff{graphics_paired_pipeline};
                 graphics_draw(b,scaled,visual_colors,depth?depth->visual:nullptr,vs,fs,data,vertices,positions,bias_constant,bias_slope,min_bounds,max_bounds,visual_textures,first_vertex,UINT64_MAX,raw_textures,vs_owner,fs_owner,tail,tail_bytes,layered_ok);
                 graphics_last_queries=saved_queries;
             }else{
@@ -1333,8 +1386,12 @@ public:
                         std::fputc('\n',stderr);}}}
             for(auto offset:b.visual_status_offsets){unsigned status=0;std::memcpy(&status,static_cast<const char*>(b.map)+offset,4);
                 if(status)throw std::runtime_error("RSX visual shader failed status="+std::to_string(status));}
+            // Per-batch queue counters can move to a later batch (graphics_move_stats) before this one is collected; fold
+            // whatever this batch holds into run totals so each count is reported exactly once.
+            graphics_visual_queued_total+=b.visual_queued;graphics_visual_drains_total+=b.visual_drains;graphics_visual_run_max=std::max(graphics_visual_run_max,b.visual_run_max);
+            b.visual_queued=b.visual_drains=b.visual_run_max=0;
             if(b.frames && graphics_render_scale>1 && graphics_profile_frames%120==0)
-                std::fprintf(stderr,"PERF RENDER_SCALE scale=%u visual_draws=%llu native_copies=%llu host_invalidations=%llu queued=%llu drains=%llu max_run=%llu\n",graphics_render_scale,(unsigned long long)graphics_visual_draws,(unsigned long long)graphics_visual_native_copies,(unsigned long long)graphics_visual_host_invalidations,(unsigned long long)b.visual_queued,(unsigned long long)b.visual_drains,(unsigned long long)b.visual_run_max);
+                std::fprintf(stderr,"PERF RENDER_SCALE scale=%u visual_draws=%llu native_copies=%llu host_invalidations=%llu queued=%llu drains=%llu max_run=%llu history_copies=%llu history_texels=%llu\n",graphics_render_scale,(unsigned long long)graphics_visual_draws,(unsigned long long)graphics_visual_native_copies,(unsigned long long)graphics_visual_host_invalidations,(unsigned long long)graphics_visual_queued_total,(unsigned long long)graphics_visual_drains_total,(unsigned long long)graphics_visual_run_max,(unsigned long long)graphics_visual_history_copies,(unsigned long long)graphics_visual_history_texels);
             b.visibility.resize(b.visibility_count);
             if(b.visibility_count)check(vkGetQueryPoolResults(device,b.occlusion,0,b.visibility_count,b.visibility.size()*8,b.visibility.data(),8,VK_QUERY_RESULT_64_BIT),"graphics visibility results");
             return true;

@@ -37,7 +37,10 @@ MEMBERS = r'''
         auto image=surface_image(format,surface.width,surface.height,surface.samples,surface.depth);
         if(!discard){
             const auto packed=vk.graphics_pack_readback(*batch,source->image,source->format,source->depth,source->target.bpp,source->target.pitch,source->samples,source->readback->words,source->readback->gpu_words,false);
-            vk.graphics_unpack_upload(*batch,image,surface.format,surface.depth,surface.target.bpp,surface.target.pitch,surface.samples,surface.readback->words,surface.readback->gpu_words,nullptr,packed);
+            // Index i of both tables is the same physical word: one identity pair.
+            const auto use=image->visual?visual_history_plan(*source,surface,format,{{0,0,unsigned(bytes)}}):VisualHistoryUse{};
+            vk.graphics_unpack_upload(*batch,image,surface.format,surface.depth,surface.target.bpp,surface.target.pitch,surface.samples,surface.readback->words,surface.readback->gpu_words,nullptr,packed,!use.complete);
+            if(use.regions)vk.graphics_visual_history(*batch,source->image,image,*use.regions,use.texels);
         }
         const bool dirty=source->dirty;const auto original=source->image;
         surface.image=std::move(image);surface.dirty=dirty;surface.last_use=++resource_clock;

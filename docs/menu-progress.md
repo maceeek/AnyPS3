@@ -592,3 +592,5 @@ See knowledge/experiments/2026-10-23-render-scale.md.
 2026-10-23: quiet803 1440p45.5198FPS, original Great Clock inspected; no60FPS acceptance. Investigating confirmed native reconstruction paths before claiming full-resolution detail. GUI source integrated, desktop release unchanged.
 
 2026-10-23 milestone final: build805 original Great Clock, same-flip720p/1440p captures inspected, original bytes exact/noSTOP. Feature branch rebased onto54cea81; final capture regression and complete GUI/manager checks pass. Best quiet scaled result remains45.52FPS; detail preservation and stable60FPS remain open.
+
+2026-10-23 cloud follow-up (no GPU/game in the container): visual companions now keep subpixel history through alias merge, equal-footprint rebind and typeless-depth RTT; RENDER_SCALE queue counters fixed; paired draw reuses the native pipeline. Verified only by lavapipe Vulkan unit tests with validation; no new FPS or game evidence. See knowledge/experiments/2026-10-23-cloud-render-scale.md.
