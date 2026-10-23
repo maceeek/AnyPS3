@@ -1,5 +1,24 @@
 # Handoff to the next instance
 
+## FIX7: user-reported playability problems — 2026-10-23 (branch `claude/fix7`)
+
+The user played through the GUI (release of 2026-10-21) and reported nine problems. Record:
+[FIX7](experiments/2026-10-23-fix7.md).
+
+- **START in game:** timed `sys_semaphore_wait` + saturating LV2 deadlines (4d8b6a9). Build 810: the semaphore STOP is
+  gone; the pause menu's blur draws then stop on `sequential_color_texture_feedback`. With the diagnostic CPU fallback
+  (810b) the original pause menu renders and unpauses. GPU snapshot fix on `fast2/fix7-pause` 0f7addf — **unbuilt**.
+- **GUI:** worker toggles removed (always on); `host_drain`/`flip_early` toggles removed (the GUI had been disabling
+  both); unimplemented settings hidden; clear key-download result; **Skip intro** (`ANYPS3_PAD_INJECT`, default off,
+  no game run yet).
+- **Two windows / save-menu audio:** fixed and merged (d6647f6); run 820a verified one Vulkan window, menu ~60 FPS and
+  no silent audio periods with the savedata dialogs open.
+- **Stutter:** CPU scaled blits dominate; `fast2/fix7-stutter` (blit planner + shader cache cap) — **unbuilt**.
+- **RPCS3 patches:** only "Unlock FPS" exists for 01.00; user decided to keep the no-patch rule.
+
+**First next action:** build `fast2/fix7-pause` (+ `fast2/fix7-stutter`) on top of `claude/fix7`, run the pause probe
+(`local/ratchet/work/fix7-pause/pause_probe.sh`) and a walking run (`local/ratchet/work/fix7-stutter/tools/walk.sh`).
+
 ## Cloud follow-up (no game, no GPU) — 2026-10-23
 
 Branch `claude/jolly-pasteur-z3etd7` (base `8c66615`), source-level only, verified with
