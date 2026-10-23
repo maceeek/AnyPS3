@@ -165,13 +165,17 @@ static std::uint32_t kernel_sync(PpuState& s) {
         }
         if (mutex->owner!=s.thread_id) return MM_EPERM;
         mutex->owner=0;
-        bool serviced=false;
+        bool serviced=false,park=false;
         object.unlock();parent.unlock();
-        try { GuestMemory::RawPermit legacy_transport(mem);report_sysutil_rings(s); serviced=service_sysutil_connect(s,r[3]); } catch (...) { std::lock(parent,object);mutex->owner=s.thread_id; throw; }
+        try { GuestMemory::RawPermit legacy_transport(mem);report_sysutil_rings(s);s.settings.vsh_ui.park_pending=false;
+            serviced=service_sysutil_connect(s,r[3]);park=std::exchange(s.settings.vsh_ui.park_pending,false); } catch (...) { std::lock(parent,object);mutex->owner=s.thread_id; throw; }
         std::lock(parent,object);
         mutex->owner=s.thread_id;
         if (serviced) return 0;
+        // A SAVE UI PacketRead without a blockable context keeps the former spurious wake (no reply is invented).
+        if(park && (s.ppu_threads.size()<=1 || r[4]))return 0;
         if(s.ppu_threads.size()>1 && !r[4]){
+            if(park)s.settings.vsh_ui.parked.emplace_back(s.thread_id,it->id);
             s.wait_depth=mutex->depth;mutex->owner=0;mutex->depth=0;ppu_block(s,4,it->id);
         }
         throw std::runtime_error("kernel condition wait requires an active peer/scheduler");
