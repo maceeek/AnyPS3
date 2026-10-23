@@ -77,7 +77,28 @@ private:
         std::error_code ec;std::filesystem::last_write_time(path,std::filesystem::file_time_type::clock::now(),ec);
         return {blob.begin()+16,blob.end()};
     }
+    // Persistent SPIR-V + pipeline-cache files are bounded by count and bytes (LRU by write time; a read refreshes it). The old
+    // 1024-file / 256 MiB bound was below one session's shader set: boot + menu + a walk through the original level evicted every
+    // file older than ~15 minutes (fix7-stutter, shared cache 2026-10-23: 1022 files all newer than the walk), so each later
+    // session compiled the same GLSL again (~23 ms glslang each, 263 in one walk). A full-directory scan per write also cost
+    // O(files). Now: limits from ANYPS3_RSX_DISK_CACHE_FILES (default 32768) / ANYPS3_RSX_DISK_CACHE_MB (default 4096); the
+    // directory is scanned once, later writes only add to the running totals, and a write that would exceed a bound rescans
+    // and evicts the oldest files (also correcting totals changed by other processes sharing the directory).
+    std::uint64_t disk_cache_files=0,disk_cache_bytes=0;bool disk_cache_counted=false;
+    static std::uint64_t disk_cache_limit(const char* name,std::uint64_t fallback,std::uint64_t scale){
+        const auto* text=std::getenv(name);if(!text || !*text)return fallback*scale;
+        char* end=nullptr;const auto n=std::strtoull(text,&end,10);
+        if(*text=='-' || *end || !n || n>(UINT64_C(1)<<40)/scale)throw std::runtime_error(std::string("invalid ")+name);
+        return n*scale;
+    }
+    const std::uint64_t disk_file_limit=disk_cache_limit("ANYPS3_RSX_DISK_CACHE_FILES",32768,1);
+    const std::uint64_t disk_byte_limit=disk_cache_limit("ANYPS3_RSX_DISK_CACHE_MB",4096,UINT64_C(1)<<20);
     void trim_disk_cache(std::uint64_t incoming){
+        // incoming == 0 (a replaced pipeline-cache file, at most 128 MiB): no rescan on the owner thread; the next write that
+        // would exceed a bound rescans and corrects the totals.
+        if(disk_cache_counted && !incoming)return;
+        if(disk_cache_counted && disk_cache_files<disk_file_limit && disk_cache_bytes+incoming<=disk_byte_limit){
+            ++disk_cache_files;disk_cache_bytes+=incoming;return;}
         struct Entry{std::filesystem::path path;std::filesystem::file_time_type time;std::uint64_t size;};std::vector<Entry> entries;std::uint64_t bytes=0;
         std::error_code ec;
         for(std::filesystem::directory_iterator it(vk_cache_root,ec),end;!ec && it!=end;it.increment(ec)){
@@ -86,9 +107,11 @@ private:
             const auto size=it->file_size(ec);if(ec)break;const auto time=it->last_write_time(ec);if(ec)break;
             entries.push_back({it->path(),time,size});bytes+=size;
         }
+        if(ec){cache_io_error();disk_cache_counted=false;return;}
         std::sort(entries.begin(),entries.end(),[](const auto& a,const auto& b){return a.time<b.time;});
-        std::size_t left=entries.size();for(const auto& entry:entries){if(left<1024 && bytes+incoming<=256*1024*1024)break;
+        std::size_t left=entries.size();for(const auto& entry:entries){if(left<disk_file_limit && bytes+incoming<=disk_byte_limit)break;
             if(std::filesystem::remove(entry.path,ec)){bytes-=entry.size;--left;}if(ec){cache_io_error();break;}}
+        disk_cache_files=left+(incoming?1:0);disk_cache_bytes=bytes+incoming;disk_cache_counted=!ec;
     }
     // One checksummed file, replaced atomically (temporary + rename). No member state: also runs on the pipeline-cache saver task.
     static bool cache_file_write(const std::filesystem::path& path,const std::vector<char>& payload)noexcept{

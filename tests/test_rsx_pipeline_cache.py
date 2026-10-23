@@ -178,8 +178,29 @@ static void raw_lru(unsigned keys){
   assert(session.raw_textures.size()<=512 && session.raw_bytes<=UINT64_C(512)*1024*1024);if(i%32==31 || i==keys){session.flush();assert(near_argb(s.memory.load(0xc0100000,4),key%2?0xff00ff00:0xffff0000));}}
  assert(session.raw_evictions>0);std::printf("PASS bounded %u raw texture keys, evictions=%llu\n",keys,(unsigned long long)session.raw_evictions);s.rsx.graphics_session=nullptr;
 }
+// fix7-stutter: one session writing `keys` distinct SPIR-V files keeps the cache directory within ANYPS3_RSX_DISK_CACHE_FILES /
+// _MB at every write (checked after each compile, inside the same NativeVulkan: totals are kept in memory after one scan) and
+// evicts the oldest files first (the newest key's file survives, the first key's is gone once the bound was exceeded).
+static void disk_bound(unsigned keys){
+ const std::filesystem::path dir=std::filesystem::path(std::getenv("ANYPS3_CACHE_ROOT"))/"vk";
+ const auto* f=std::getenv("ANYPS3_RSX_DISK_CACHE_FILES");const auto* m=std::getenv("ANYPS3_RSX_DISK_CACHE_MB");
+ const std::uint64_t file_limit=f?std::stoull(f):32768,byte_limit=(m?std::stoull(m):4096)<<20;
+ NativeVulkan vk;std::vector<unsigned> words(1);std::uint64_t peak_files=0,peak_bytes=0;
+ auto census=[&](std::uint64_t& files,std::uint64_t& bytes){files=bytes=0;for(const auto& e:std::filesystem::directory_iterator(dir)){const auto n=e.path().filename().string();
+  if(n.rfind("spv-",0)==0 || n.rfind("pipeline-",0)==0){++files;bytes+=e.file_size();}}};
+ std::vector<std::filesystem::path> written;
+ for(unsigned key=0;key<keys;++key){
+  const auto source="#version 450\nlayout(local_size_x=64) in;layout(std430,binding=0) buffer D{uint w[];};void main(){if(gl_GlobalInvocationID.x==0u)w[0]="+std::to_string(key*7+3)+"u;}";
+  vk.compute(source,words,1);assert(words[0]==key*7+3);
+  std::uint64_t files=0,bytes=0;census(files,bytes);peak_files=std::max(peak_files,files);peak_bytes=std::max(peak_bytes,bytes);
+  if(files>file_limit || bytes>byte_limit)throw std::runtime_error("disk cache over its bound after key "+std::to_string(key)+": files="+std::to_string(files)+" bytes="+std::to_string(bytes));
+ }
+ std::uint64_t files=0,bytes=0;census(files,bytes);
+ std::printf("PASS disk bound %u keys files=%llu peak_files=%llu peak_bytes=%llu compiles=%llu\n",keys,(unsigned long long)files,(unsigned long long)peak_files,(unsigned long long)peak_bytes,(unsigned long long)vk.compile_stats.spirv_compiles);
+}
 int main(int argc,char** argv){try{
- if(argc>1 && std::string(argv[1])=="persist")persist(std::stoul(argv[2]));
+ if(argc>1 && std::string(argv[1])=="disk_bound")disk_bound(std::stoul(argv[2]));
+ else if(argc>1 && std::string(argv[1])=="persist")persist(std::stoul(argv[2]));
  else if(argc>1 && std::string(argv[1])=="save_retry")save_retry();
  else if(argc>1 && std::string(argv[1])=="working_set")default_working_set(argc>2?std::stoul(argv[2]):300);
  else if(argc>1 && std::string(argv[1])=="stress"){bounded(argc>2?std::stoul(argv[2]):1100);raw_lru(1100);compute_lru(1100);resident_working_set();}
@@ -231,7 +252,17 @@ class PipelineCacheTests(unittest.TestCase):
             self.assertIn('spirv_compiles=3', run())
             self.assertIn('fixed stencil oracles', run('stencil'))
             self.assertIn('1100 raw texture keys', run('stress'))
-            self.assertLessEqual(len(list((root / 'cache/vk').glob('*.bin'))), 1024)
+            self.assertLessEqual(len(list((root / 'cache/vk').glob('*.bin'))), 32768)
+            # fix7-stutter: the default bound keeps more than the old 1024 files of one session; an explicit file or byte bound holds
+            # after every write of one process (the running totals, not only the first scan).
+            for name, limits, keys, expect_files in (('default', {}, 1100, 1100), ('files', {'ANYPS3_RSX_DISK_CACHE_FILES': '40'}, 120, None),
+                                                     ('bytes', {'ANYPS3_RSX_DISK_CACHE_MB': '1'}, 120, None)):
+                bound_env = dict(env, ANYPS3_CACHE_ROOT=str(root / f'bound-{name}'), **limits)
+                result = subprocess.run([str(root / 'test'), 'disk_bound', str(keys)], env=bound_env, capture_output=True, text=True, timeout=600)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn(f'PASS disk bound {keys} keys', result.stdout)
+                if expect_files:
+                    self.assertGreaterEqual(len(list((root / f'bound-{name}' / 'vk').glob('spv-*.bin'))), expect_files)
             self.assertIn('retain a 300 pipeline working set', run('working_set', '300'))
             # Lifecycle of the persisted VkPipelineCache, independent of how a driver serializes it: a session creating 200 distinct
             # pipelines keeps one cache (no rotation; the old code replaced it after every 128 creations and persisted only the last
