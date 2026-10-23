@@ -72,6 +72,7 @@ static bool rsx_graphics_poll(PpuState&);
 static bool rsx_graphics_defer_label(PpuState&,std::uint64_t,unsigned);
 static bool rsx_graphics_defer_report(PpuState&,std::uint64_t,unsigned,bool,bool);
 [[maybe_unused]] static bool rsx_graphics_scanout(PpuState& s,unsigned id,std::vector<std::uint8_t>* capture,bool present,unsigned* visual_width=nullptr,unsigned* visual_height=nullptr,bool count_frame=true);
+[[maybe_unused]] static bool rsx_graphics_present_pixels(PpuState& s,unsigned id,const std::vector<std::uint8_t>& rgba);
 #endif
 // FRAMETIME wave: page-synchronisation requests of other threads (SPU lanes, PPU faults) used to wait for the owner's whole FIFO run or
 // vsync wait (measured: mean 1.7 ms behind a run, 9 ms behind a vsync wait, 9.8 ms/frame summed over the lanes). The game worker installs a
@@ -475,6 +476,28 @@ static bool rsx_graphics_flip_async(PpuState& s,unsigned id,std::uint64_t addres
         for(std::size_t i=3;i<capture->size();i+=4)(*capture)[i]=255;
         session->flush(false,nullptr,0,"scanout");
     }
+    if(!s.rsx.graphics_session)session->leave_fifo();
+    return true;
+}
+// A scanout without a GPU-resident surface (CPU/SPU-written buffer, packed R32 scanout) is converted on the CPU
+// (rsx_display_pixels) and presented through the same Vulkan WSI window as GPU scanouts. A separate SDL renderer
+// window for these frames was a second visible "guest scanout" window (FIX7: user saw two windows; run 805au1).
+// False without a graphics session; the caller then uses the SDL renderer sink (CPU backend, non-Vulkan builds).
+[[maybe_unused]] static bool rsx_graphics_present_pixels(PpuState& s,unsigned id,const std::vector<std::uint8_t>& rgba){
+    auto* session=static_cast<rsxgraphics::Session*>(s.rsx.graphics_session?s.rsx.graphics_session:s.rsx.graphics_owner.get());
+    if(!session || id>=s.rsx.display_buffers.size())return false;
+    const auto& b=s.rsx.display_buffers[id];
+    if(!b.width || !b.height || rgba.size()!=std::size_t(b.width)*b.height*4)throw std::runtime_error("invalid RSX scanout pixels for presentation");
+    if(!s.rsx.graphics_session)session->enter_fifo();
+    session->flush(false,nullptr,0,"scanout");
+    const auto bytes=std::uint64_t(b.width)*b.height*4;
+    if(!session->ensure_upload_capacity(bytes+65536))throw std::runtime_error("RSX scanout presentation exceeds staging capacity");
+    if(!session->vk.graphics_space_fits(*session->batch,bytes))session->submit_async("present_space");
+    // pair=false: the CPU frame has no visual companion, so the WSI blits exactly these pixels.
+    auto image=session->vk.graphics_image(*session->batch,VK_FORMAT_R8G8B8A8_UNORM,b.width,b.height,1,false,false);
+    session->vk.graphics_transfer(*session->batch,image,VK_IMAGE_ASPECT_COLOR_BIT,4,rgba.data());
+    session->vk.graphics_present(*session->batch,image,b.width,b.height,s.rsx.vsync);
+    session->flush(false,nullptr,0,"scanout");++s.present.presented_frames;
     if(!s.rsx.graphics_session)session->leave_fifo();
     return true;
 }

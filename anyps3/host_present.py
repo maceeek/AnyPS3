@@ -134,6 +134,10 @@ CPP = r'''
     if(s.video.format!=0)throw std::runtime_error("unsupported RSX scanout format");
     if(id>=s.rsx.display_buffers.size())throw std::runtime_error("invalid RSX display buffer");
     const auto& buffer=s.rsx.display_buffers[id];
+#ifdef ANYPS3_RSX_VK
+    // With a Vulkan graphics session every scanout goes to its WSI window (one window; the WSI composes the overlay).
+    if(s.rsx.graphics_session || s.rsx.graphics_owner){std::vector<std::uint8_t> rgba;rsx_display_pixels(s,id,rgba);if(rsx_graphics_present_pixels(s,id,rgba))return;}
+#endif
     p.host_call([&]{p.open(buffer.width,buffer.height);p.poll_events();});
     // Reuse the capture converter and storage; upload every flip, present at most 60 Hz.
     rsx_display_pixels(s,id,p.pixels);anyps3_vsh_overlay::composite(p.pixels,buffer.width,buffer.height);p.host_call([&]{p.upload();p.present_if_due(NativePresent::Clock::now());});
