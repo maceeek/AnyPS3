@@ -68,7 +68,7 @@ class Settings(QWidget):
         for key, spec in self.schema.items():
             # Settings this AnyPS3 version cannot honour at all stay out of the
             # way unless advanced settings are shown (then they are disabled).
-            if (spec.get("advanced") or not spec.get("supported", True)) and not self.advanced.isChecked():
+            if (spec.get("advanced") or not spec.get("supported", True)) and not self.advanced.isChecked() or spec.get("applies") is False:
                 continue
             group = spec["group"]
             if group not in forms:

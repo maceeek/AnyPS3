@@ -295,7 +295,7 @@ def dispatch(args, lib):
     if cmd == "settings":
         if args.action == "schema":
             from .capabilities import environment_reads
-            return dict(settings=settings.schema(available(lib, args.title), environment_reads(lib.source/"anyps3")))
+            return dict(settings=settings.schema(available(lib, args.title), environment_reads(lib.source/"anyps3"), args.title))
         if args.action == "get":
             return dict(settings=settings.effective(lib, args.title),
                         overrides=settings.stored_values(lib, args.title))

@@ -312,6 +312,27 @@ The GUI warns to save in-game first. Run records preserve stdout/stderr, runtime
 STOP, errors, FPS intervals, exit status, memory observations and elapsed time.
 Verified boot means observed flips, **not** a verified original menu or gameplay.
 
+### Skip intro
+
+**Settings → Input → Skip intro** (`input.skip_intro`, default off) appears only
+for titles with an intro-skip recipe in `anyps3_manager/intro_skip.py`; currently
+Ratchet & Clank: A Crack in Time (BCES00511). When on, the run supervisor presses
+START through the game's own controller input path during the startup notices,
+logos and title screen until the main menu is detected. It stops at the menu,
+after 3 minutes, on a runtime STOP, or as soon as you press any controller button.
+Nothing in the game, its files or saves is changed; the game decides what START
+does. Detection uses the runtime's FPS/draw reports (forced on while active), not
+the picture, so it is a heuristic. The run record stores the outcome under
+`intro_skip` (reason `menu`, `timeout`, `player-input`, `guest-stop` or
+`run-ended`). Requires a build whose runtime reads `ANYPS3_PAD_INJECT`; older
+builds show the option as unavailable until **Rebuild**.
+
+`ANYPS3_PAD_INJECT=FILE` is a generic runtime channel: the file holds one line
+`v1 PRESENT DIGITAL1 DIGITAL2` (decimal `CELL_PAD_CTRL_*` bits). Bits are OR-ed
+onto controller port 0 without replacing a physical pad; `PRESENT=1` keeps port 0
+connected when no physical pad is attached. A malformed or missing file stops
+the run explicitly.
+
 ## Runtime-dependent features
 
 Runtime window/fullscreen settings and custom pad configuration remain unavailable.
