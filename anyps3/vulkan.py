@@ -147,7 +147,7 @@ class NativeVulkan {
             if(graphics_loop_timeline)vkDestroySemaphore(device,graphics_loop_timeline,nullptr);
             if(graphics_sampler)vkDestroySampler(device,graphics_sampler,nullptr);
             save_pipeline_cache(true);compile_stats_print(true);
-            graphics_pipelines.clear();
+            graphics_framebuffers.clear();graphics_pipelines.clear();
             graphics_layout.reset();
             graphics_shaders.clear();
             if(pipeline_cache)vkDestroyPipelineCache(device,pipeline_cache,nullptr);

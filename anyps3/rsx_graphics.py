@@ -595,8 +595,14 @@ struct Session {
     // completed (retire, or the synchronous flush), before its staging memory is reset. They never touch guest state.
     std::vector<std::function<void(const NativeVulkan::GraphicsBatch&)>> completions;
     double flight_ns=300000;   // EWMA of submit -> retire latency of a flight; only maintained for ANYPS3_RSX_POLL=adaptive (rsx_poll_adaptive)
-    // Three persistent mappings/command+descriptor pools; an arena cannot be
+    // flight_limit+1 persistent mappings/command+descriptor pools; an arena cannot be
     // reused until its exact timeline value completed and results retired.
+    // ANYPS3_RSX_FLIGHTS (1..8, default 2) bounds the submitted, unretired arenas.
+    static unsigned rsx_flight_limit(){static const unsigned value=[]{const char* v=std::getenv("ANYPS3_RSX_FLIGHTS");if(!v)return 2u;
+            if(v[0]<'1' || v[0]>'8' || v[1])throw std::runtime_error("ANYPS3_RSX_FLIGHTS must be an integer from 1 to 8");
+            return unsigned(v[0]-'0');}();
+        return value;}
+    const unsigned flight_limit=rsx_flight_limit();
     std::deque<Flight> flights;
     std::vector<std::unique_ptr<NativeVulkan::GraphicsBatch>> spare_batches;
     std::uint64_t async_submits=0,async_retires=0,label_waits=0,label_ready=0;
@@ -612,7 +618,7 @@ struct Session {
         // prefix (bounded) instead of paying another queue submission. An
         // idle queue receives the prefix at the usual threshold.
         if(!flights.empty() && pending.size()<std::size_t(submit_draws)*submit_extend)return;
-        if(flights.size()>=2 && spare_batches.empty())return;
+        if(flights.size()>=flight_limit && spare_batches.empty())return;
         submit_async("draw_prefix");
     }
     bool has_labels()const{if(!labels.empty())return true;for(const auto& f:flights)if(!f.labels.empty())return true;return false;}
@@ -649,7 +655,7 @@ struct Session {
     void submit_async(const char* reason,bool wait_for_arena=true){
         GuestMemory::RawYield payload(state.memory);
         if(failed)throw std::runtime_error("RSX graphics session poisoned");
-        if(!wait_for_arena){retire(false);if(flights.size()>=2 && spare_batches.empty())return;}
+        if(!wait_for_arena){retire(false);if(flights.size()>=flight_limit && spare_batches.empty())return;}
         if(!batch->recording && !batch->submitted && pending.empty() && labels.empty() && !batch->frames)return;
         // No new GPU instruction means the last queued prefix is also this
         // completion point. Do not create an empty submission just for a
@@ -669,7 +675,7 @@ struct Session {
             anyps3_ft::mark(anyps3_ft::GpuSubmit,ft_completion,pending.size(),labels.size(),anyps3_ft::pack(reason));
             std::unique_ptr<NativeVulkan::GraphicsBatch> next;
             if(!spare_batches.empty()){next=std::move(spare_batches.back());spare_batches.pop_back();}
-            else if(flights.size()<2)next=vk.graphics_batch(batch->capacity);
+            else if(flights.size()<flight_limit)next=vk.graphics_batch(batch->capacity);
             else{{PerfTimer arena_timer(fallback_stats().enabled?&fallback_stats().flush_retire_time["arena_rotation"]:nullptr);retire(true,flights.front().batch->completion);}
                 next=std::move(spare_batches.back());spare_batches.pop_back();}
             vk.graphics_move_stats(*batch,*next);
@@ -949,14 +955,6 @@ struct Session {
     struct SurfaceImage {std::shared_ptr<NativeVulkan::GraphicsImage> image;std::uint64_t use;};
     std::vector<SurfaceImage> surface_images;
     std::uint64_t surface_image_bytes=0,surface_image_hits=0,surface_image_misses=0;
-    static void release_idle_framebuffers(NativeVulkan::GraphicsBatch& b,const std::shared_ptr<NativeVulkan::GraphicsImage>& image){
-        b.sync();   // framebuffers are recorder-owned
-        for(auto it=b.framebuffers.begin();it!=b.framebuffers.end();){
-            const auto& fb=it->second;
-            if(fb.use_count()==1 && std::find(fb->images.begin(),fb->images.end(),image)!=fb->images.end())it=b.framebuffers.erase(it);
-            else ++it;
-        }
-    }
     std::shared_ptr<NativeVulkan::GraphicsImage> surface_image(VkFormat f,unsigned w,unsigned h,unsigned layers,bool depth=false){
         for(auto& e:surface_images){const auto& i=e.image;
             if(i->format!=f || i->width!=w || i->height!=h || i->layers!=layers || i->depth!=depth)continue;
@@ -965,12 +963,8 @@ struct Session {
             if(active)continue;
             for(const auto& surface:surfaces)if(surface.image==i){active=true;break;}
             if(active)continue;
-            // Framebuffer caches own handles, not pixel contents. Drop only
-            // idle cache entries; command-buffer pins, RTT views and active
-            // surfaces must still retain the image and prevent its reuse.
-            release_idle_framebuffers(*batch,i);
-            for(auto& spare:spare_batches)release_idle_framebuffers(*spare,i);
-            for(auto& flight:flights)release_idle_framebuffers(*flight.batch,i);
+            // The framebuffer cache holds images weakly (handles, not pixel contents); command-buffer pins, RTT views
+            // and active surfaces still retain the image and prevent its reuse.
             if(i.use_count()!=1)continue;
             e.use=++resource_clock;batch->pins.push_back(i);++surface_image_hits;return i;
         }

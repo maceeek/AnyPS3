@@ -45,15 +45,17 @@ static void raster_oracle(unsigned raster,unsigned samples,bool paired=false){
  std::array<std::shared_ptr<NativeVulkan::GraphicsImage>,4> images{native};
  if(paired){
   const auto used=b->used;const auto queries=b->visibility_count;const auto draws=vk.graphics_draws;
-  for(bool reuse:{false,true}){
-   b->used=b->capacity-(reuse?512:1024);const auto before=b->used;bool refused=false;
-   try{vk.graphics_draw(*b,s,images,{},vs,fs,data,3,positions,0,0,0,1,{},0,reuse?0:UINT64_MAX);}
-   catch(const std::runtime_error& e){refused=std::string(e.what()).find("before recording")!=std::string::npos;}
-   assert(refused && b->used==before && b->visibility_count==queries && vk.graphics_draws==draws);
-  }
+  // The visual half reads the native slice: a pair needs exactly one slice. Less space refuses the native half
+  // before anything is recorded.
+  b->used=b->capacity-512;const auto before=b->used;bool refused=false;
+  try{vk.graphics_draw(*b,s,images,{},vs,fs,data,3,positions);}
+  catch(const std::runtime_error& e){refused=std::string(e.what()).find("staging exhausted")!=std::string::npos;}
+  assert(refused && b->used==before && b->visibility_count==queries && vk.graphics_draws==draws && vk.graphics_visual_draws==0);
   b->used=used;
  }
+ const auto slice_from=b->used;
  vk.graphics_draw(*b,s,images,{},vs,fs,data,3,positions);
+ assert(b->used-slice_from<data.size()*4+256);   // one aligned slice for the native/visual pair (two would exceed it)
  const auto before=vk.graphics_transfer(*b,native,VK_IMAGE_ASPECT_COLOR_BIT,4);
  if(!paired){s.raster_width=s.raster_height=raster;images[0]=visual;
  vk.graphics_draw(*b,s,images,{},vs,fs,data,3,positions);}

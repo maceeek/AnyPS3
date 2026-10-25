@@ -97,7 +97,7 @@ static void bounded(unsigned keys){
   auto fs=std::make_shared<const std::string>(std::move(text)),vs=std::make_shared<const std::string>(simple_vs);
   std::vector<unsigned> data(16);data[0]=i;vk.graphics_draw(*b,s,images,{},*vs,*fs,data,3,sample_positions,0,0,0,1,{},0,UINT64_MAX,{},vs,fs);
   expected.push_back({vk.graphics_transfer(*b,image,VK_IMAGE_ASPECT_COLOR_BIT,4),i,key});
-  assert(vk.graphics_cache_size()<=8 && b->framebuffers.size()<=4);
+  assert(vk.graphics_cache_size()<=8 && vk.graphics_framebuffer_cache_size()<=4);
   if(i%16==15)finish();
  }
  finish();assert(vk.compile_stats.pipeline_evictions>=keys-8 && vk.compile_stats.module_evictions>=keys-4);
