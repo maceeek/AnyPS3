@@ -129,7 +129,33 @@ static void metadata_lru22(){
  std::puts("PASS metadata LRU: hot lowest address survives key513, cold key1 misses, fixed512/64MiB bounds and live BE payload");
 }
 
-int main(int argc,char** argv){try{if(argc!=2)return 2;capture22(argv[1]);capture_gpu_failure22(argv[1]);conditional22();masked_packed22();metadata_lru22();}catch(const std::exception& e){std::fprintf(stderr,"FAIL %s\n",e.what());return 1;}}
+// Per-unit memo of the last metadata lookup: hits keep LRU order and sampling state live; an eviction of the memoized entry
+// (by another unit's miss) must never be served from the memo.
+static void metadata_memo22(){
+ PpuState s;setup_draw(s,8,8,32,false);texture_fp(s);auto& r=s.rsx.registers;auto& m=s.memory;
+ r[0x1a18]=0x00010001;r[0x1840]=4;
+ for(unsigned reg:{0x1a04u,0x1a08u,0x1a0cu,0x1a10u,0x1a14u,0x1a18u,0x1a1cu}){r[reg+32]=r[reg];}
+ r[0x1844]=r[0x1840];
+ for(unsigned i=0;i<513;++i)m.store(0xc0004000+i*64,4,0xff000000u+i);
+ NativeVulkan vk;rsxgraphics::Session session(vk,s);session.observe();s.rsx.graphics_session=&session;
+ auto texture=[&](unsigned unit,unsigned i){r[0x1a00+32*unit]=0x4000+i*64;return session.texture_metadata(unit);};
+ auto t0=texture(0,0);auto t1=texture(0,0);assert(session.texture_metadata_misses==1 && session.texture_metadata_hits==1 && t1.plan==t0.plan);
+ // sampling registers are not part of the key: a memo hit still applies the current filter
+ r[0x1a14]=(2u<<24)|(1u<<16);auto f=texture(0,0);assert(f.mag==2 && f.min==1 && f.plan==t0.plan);
+ r[0x1a14]=(1u<<24)|(2u<<16);f=texture(0,0);assert(f.mag==1 && f.min==2 && session.texture_metadata_hits==3);
+ auto u=texture(1,0);assert(u.plan==t0.plan && session.texture_metadata_misses==1 && session.texture_metadata_hits==4);
+ // key 0 becomes the least recently used of 512 entries; a miss on unit 1 evicts it while unit 0's memo still names it
+ for(unsigned i=1;i<512;++i)(void)texture(1,i);
+ assert(session.texture_metadata_misses==512 && session.texture_plans.size()==512);
+ (void)texture(1,512);assert(session.texture_metadata_misses==513 && session.texture_plans.size()==512 && !session.texture_plans.count({0x4000,r[0x1a04],r[0x1a18],r[0x1840]}));
+ m.store(0xc0004000,4,0xcafebabe);
+ auto again=texture(0,0);assert(session.texture_metadata_misses==514 && rsxdraw::read_be(again.plan->runs.front().data,4)==0xcafebabe);
+ auto hit=texture(0,0);assert(session.texture_metadata_misses==514 && hit.plan==again.plan);
+ s.rsx.graphics_session=nullptr;
+ std::puts("PASS metadata memo: repeated key hits with live sampling state, shared across units, evicted entry is a miss");
+}
+
+int main(int argc,char** argv){try{if(argc!=2)return 2;capture22(argv[1]);capture_gpu_failure22(argv[1]);conditional22();masked_packed22();metadata_lru22();metadata_memo22();}catch(const std::exception& e){std::fprintf(stderr,"FAIL %s\n",e.what());return 1;}}
 '''
 def native_source():
     return '#include <fcntl.h>\n'+graphics_source().split('int main(int argc,char** argv)')[0]+MAIN
@@ -144,4 +170,4 @@ class Rsxvk22Tests(unittest.TestCase):
             run=subprocess.run([str(binary),str(root)],env=env,capture_output=True,text=True,timeout=180)
             self.assertEqual(run.returncode,0,run.stdout+run.stderr)
             self.assertNotIn('Validation Error',run.stderr);self.assertNotIn('Validation Warning',run.stderr)
-            self.assertEqual(run.stdout.count('PASS '),5)
+            self.assertEqual(run.stdout.count('PASS '),6)
