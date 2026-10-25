@@ -163,4 +163,22 @@ binding cost.
 
 ## Regression scope run here
 
-Recorded in the section below after the run.
+Final source (commit on this branch), lavapipe + validation, compiler shim as
+above, one module per process: **24 of 25 RSX/Vulkan modules pass** (35
+cases, 1 skip in `test_rsx_scalar_fp`): visual_history (9 cases incl. two
+typeless-depth), visual_batch, render_scale, drain_bound (13), rtt,
+alias_flow, subword_alias, graphics, gpu_batch, gpu_status, gpu_upload,
+async_upload (4), graphics_cache, graphics_costs, parity, recorder, residency,
+scalar_fp, unused_coords, rsxfast_draw, rsxvk21, rsxvk22, rsxvk22_cpu370 and
+par4_rsx.
+
+**One environmental failure:** `test_rsx_pipeline_cache` `save_retry` reports
+"the read-only background save was never collected as failed". The test makes
+the cache directory owner-read-only and expects the save to fail; the container
+runs as uid 0, which bypasses directory permissions. It exercises pipeline-cache
+persistence, which this change does not touch. Rerun it as a normal user on
+the real PC.
+
+**Not run:** the complete 930-case suite, `tests/manager`, `tests/gui` (no
+changes there) and any NVIDIA run. The last full-suite reconciliation is
+still suite 802.
