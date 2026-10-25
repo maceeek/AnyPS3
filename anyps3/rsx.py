@@ -404,6 +404,7 @@ static bool rsx_graphics_flip_async(PpuState& s,unsigned id,std::uint64_t addres
     if(!image || image->format==VK_FORMAT_R32_UINT)return false;
     if(capture && (image->width!=buffer.width || image->height!=buffer.height || image->layers!=1))return false;
     const auto capture_image=image->visual?image->visual:image;
+    if(capture && image->visual && NativeVulkan::graphics_visual_trace())std::fprintf(stderr,"RENDER_SCALE_CAPTURE frame=%u taint=%s\n",unsigned(s.rsx.captured_frames),session->vk.graphics_visual_taint_names(image->visual->visual_taint).c_str());
     if(capture && s.rsx.captured_frames>=256)throw std::runtime_error("headless RSX capture budget exhausted (256 frames)");
     // The capture copy needs width*height*4 bytes of this batch's staging. Decide before defer_flip attaches the flip labels: submit
     // the preceding work and record the flip into a fresh batch, or take the synchronous capture path when even an empty batch is

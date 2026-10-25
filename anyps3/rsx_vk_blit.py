@@ -82,7 +82,7 @@ void main(){
             vkCmdCopyBufferToImage(b.command,b.data_buffer,to->image,VK_IMAGE_LAYOUT_GENERAL,1,&copy);
             if(depth){copy.bufferOffset=ds;copy.imageSubresource.aspectMask=VK_IMAGE_ASPECT_STENCIL_BIT;
                 vkCmdCopyBufferToImage(b.command,b.data_buffer,to->image,VK_IMAGE_LAYOUT_GENERAL,1,&copy);}
-            graphics_barrier(b);b.pins.push_back(from);b.pins.push_back(to);
+            graphics_barrier(b);b.pins.push_back(from);b.pins.push_back(to);graphics_visual_taint(*to,from->visual_taint,false);
         }
         return true;
     }
