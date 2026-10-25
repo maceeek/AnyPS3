@@ -1,5 +1,14 @@
 # Handoff to the next instance
 
+## HIRES wave: true 1440p at a stable 60 FPS — 2026-10-25 evening (goal NOT reached)
+
+Baseline 882 walking (QUIET): 1440p 33.15 FPS / rsx_worker 16.1 ms; 720p 44.68 FPS / 10.6 ms — the RSX worker's
+per-draw CPU cost (~11.5 µs) is the critical path, and the 1440p image was derived from native pixels (MSAA sample-grid
+layout bug → zig-zag comb). Fixes from three agents (visual MSAA layout, per-draw CPU caches, Vulkan pair/shader/
+framebuffer costs) are merged and tested on branch `hires/integ`; **no game measurement of them yet**. Integration build
+960 + run 960q1 were queued detached at session end. Record and next actions:
+[HIRES wave](experiments/2026-10-25-hires-wave.md).
+
 ## Performance milestone closed — 2026-10-25
 
 The user cleared the goal and requested closing the milestones and committing. Root matches tested snapshot 882 (348 Python files; `local/ratchet/integration-manifest-882.json`). This is an implementation/evidence checkpoint: **higher-resolution 60 FPS and zero movement shader stutter are not achieved**.
