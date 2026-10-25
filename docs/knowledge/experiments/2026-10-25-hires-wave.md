@@ -86,3 +86,17 @@ munmap, decode_texture, watches); (3) cold first-use vkCreateGraphicsPipelines (
 882q1 frame 17); (2) repeat QUIET runs alternating with 882; (3) the 60-FPS gap remains large: the RSX worker needs
 ~2× less CPU per draw — next structural candidates: HostObserver incremental watch, report publication, per-draw
 shared_ptr/array churn, cold pipeline pre-creation, texture streaming off the worker.
+
+## Integration build 960 measured (19:07)
+
+**Verified:** build 960 (`hires/integ` e1e61b6; compile rc=0, source hashes match the snapshot), run 960q1 (QUIET,
+scale 2, walking with the long-deadline walker, `ANYPS3_RENDER_SCALE_TRACE=1`): window **35.77 FPS** (median 30.5, min
+23.5), entire walk 34.95 FPS, 41.4 % one-vblank, worst frame **185 ms**; ms/frame main_ppu 10.9 / main_idle 16.2,
+rsx_worker **12.9** / flip_wait 8.1 / gpu_wait 3.4. Compared with 882q1 (33.15 FPS, worst 413 ms, rsx_worker 16.1): the
+worker is 3.2 ms/frame cheaper; single run, noise ±1.5 FPS, repeat before deciding. No STOP, deliberate -9, both
+original PT_LOAD segments exact. Run totals: RENDER_SCALE_SYNC rebind_merge/upload 15.6 k, rebind_equal/upload 12.3 k,
+rtt 16×16 BC1 2.5 k, bind_fresh 51.
+**Derived (one frame):** a 1:1 crop of frame-000017 (camera near a wall, different view than 882q1 frame 17) shows a
+long diagonal gold edge without the zig-zag comb or 2-px staircase. A same-view comparison is still to do.
+The goal (stable 60 FPS at 1440p, no stutter) remains **unmet**: the RSX worker still needs ~4 ms/frame less and
+1-vblank frames are only 41 %.
