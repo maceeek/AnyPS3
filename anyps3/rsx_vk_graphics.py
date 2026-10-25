@@ -143,7 +143,8 @@ public:
         // Shader failures are consumed only after batch completion. Keep the
         // device words live until then instead of a graphics->transfer turn
         // and a four-byte copy after every draw (and every packed primitive).
-        std::vector<std::uint64_t> status_offsets,visual_status_offsets;
+        // paired_status_offsets: words a visual half shares with its native half (one slice per pair).
+        std::vector<std::uint64_t> status_offsets,visual_status_offsets,paired_status_offsets;
         // Only fresh immutable CPU slices go in the prelude. GPU scratch and
         // readbacks are deliberately absent: they retain their command order.
         std::vector<VkBufferCopy> uploads;
@@ -186,7 +187,7 @@ public:
         GraphicsImagePins pins;
         std::vector<std::shared_ptr<GraphicsBuffer>> buffer_pins;
         std::vector<std::shared_ptr<ComputePipeline>> compute_pins;
-        double upload_ms=0,draw_ms=0,download_ms=0,wait_ms=0,pipeline_ms=0,record_ms=0;
+        double upload_ms=0,draw_ms=0,download_ms=0,wait_ms=0;
         std::uint64_t upload_bytes=0,download_bytes=0,submissions=0,draws=0;
         double record_back_ms=0;   // recorder-owned (back half of graphics_draw)
         bool inline_draws=false;   // ConditionalScope: draws are recorded inline while a conditional-rendering scope is open
@@ -360,7 +361,11 @@ private:
     }
     std::shared_ptr<GraphicsPipeline> graphics_pipeline(const GraphicsState& s,const std::string& vs,const std::string& fs,const std::shared_ptr<const std::string>& vs_owner={},const std::shared_ptr<const std::string>& fs_owner={},bool multiview=false){
         // The steady path has a bounded, allocation-free exact state key.
-        const auto a=shader_identity(vs,vs_owner),b=shader_identity(fs,fs_owner);
+        const std::string* vs_canonical=&vs,*fs_canonical=&fs;
+        const auto a=shader_identity(vs,vs_owner,&vs_canonical),b=shader_identity(fs,fs_owner,&fs_canonical);
+        // Pointer equality with the canonical text owner proves equal bytes (shader_identity compared them once).
+        const auto same_vs=[&](const GraphicsPipeline& p){return p.vs_source.get()==&vs || p.vs_source.get()==vs_canonical || (++shader_text_compares,*p.vs_source==vs);};
+        const auto same_fs=[&](const GraphicsPipeline& p){return p.fs_source.get()==&fs || p.fs_source.get()==fs_canonical || (++shader_text_compares,*p.fs_source==fs);};
         std::array<std::uint64_t,34> fast_key{};fast_key[0]=a;fast_key[1]=b;unsigned field=0;
         auto field_=[&](unsigned v){const auto word=2+field/2;fast_key[word]|=std::uint64_t(v)<<(32*(field%2));++field;};
         field_(s.colors);field_(s.color);field_(s.depth);
@@ -370,7 +375,7 @@ private:
         field_(s.raster.frontFace);field_(s.raster.cullMode);field_(s.raster.depthBiasEnable);field_(s.logic_enable);field_(s.logic);field_(multiview?s.samples:0);
         auto cached=graphics_pipeline_fast.find(fast_key);
         if(cached!=graphics_pipeline_fast.end())if(auto hit=cached->second.lock()){
-            if((hit->vs_source.get()==&vs || *hit->vs_source==vs) && (hit->fs_source.get()==&fs || *hit->fs_source==fs)){
+            if(same_vs(*hit) && same_fs(*hit)){
                 hit->last_use=++cache_clock;++compile_stats.graphics_hits;last_pipeline_diagnostic=hit;compile_stats_print();return hit;}}
         if(graphics_pipeline_fast.size()>=graphics_pipeline_limit)graphics_pipeline_fast.erase(graphics_pipeline_fast.begin());
         // Cold diagnostics retain the serialized field decomposition.
@@ -389,7 +394,7 @@ private:
         parts[5]=state_key.substr(split);
         key+=state_key;auto it=graphics_pipelines.find(key);
         // Hashes accelerate lookup; exact bytes remain authoritative even on a collision.
-        if(it!=graphics_pipelines.end() && ((it->second->vs_source.get()!=&vs && *it->second->vs_source!=vs) || (it->second->fs_source.get()!=&fs && *it->second->fs_source!=fs))){
+        if(it!=graphics_pipelines.end() && (!same_vs(*it->second) || !same_fs(*it->second))){
             key+='\0'+vs+'\0'+fs;it=graphics_pipelines.find(key);}
         if(it!=graphics_pipelines.end()){it->second->last_use=++cache_clock;++compile_stats.graphics_hits;last_pipeline_parts=parts;last_pipeline_identity=std::string(reinterpret_cast<const char*>(&a),sizeof(a))+std::string(reinterpret_cast<const char*>(&b),sizeof(b));compile_stats_print();graphics_pipeline_fast[fast_key]=it->second;last_pipeline_diagnostic=it->second;return it->second;}
         ++compile_stats.graphics_misses;::RsxPerfCounters::add(::RsxPerfCounters::pipeline_misses);
@@ -402,7 +407,7 @@ private:
         for(unsigned i=0;i<6;++i)if(parts[i]!=last_pipeline_parts[i])++*reason_counts[i];
         last_pipeline_parts=parts;last_pipeline_identity=identity;
         if(graphics_pipelines.size()>=graphics_pipeline_limit){graphics_pipelines.erase(lru_entry(graphics_pipelines));++compile_stats.pipeline_evictions;}
-        auto p=std::make_shared<GraphicsPipeline>();p->device=device;p->last_use=++cache_clock;p->vs_source=vs_owner?vs_owner:std::make_shared<const std::string>(vs);p->fs_source=fs_owner?fs_owner:std::make_shared<const std::string>(fs);
+        auto p=std::make_shared<GraphicsPipeline>();p->device=device;p->last_use=++cache_clock;p->vs_source=vs_owner?shader_canonical_owner(vs_owner):std::make_shared<const std::string>(vs);p->fs_source=fs_owner?shader_canonical_owner(fs_owner):std::make_shared<const std::string>(fs);
         p->diagnostic_parts=parts;p->diagnostic_identity=identity;last_pipeline_diagnostic=p;
         std::vector<VkAttachmentDescription> attachments;
         std::vector<VkAttachmentReference> colors;
@@ -1082,14 +1087,6 @@ public:
                        const std::shared_ptr<GraphicsImage>& depth,const std::string& vs,const std::string& fs,
                        const std::vector<unsigned>& data,unsigned vertices,const std::array<std::array<float,2>,4>& positions,
                        float bias_constant=0,float bias_slope=0,float min_bounds=0,float max_bounds=1,const std::array<std::shared_ptr<GraphicsImage>,20>& textures={},unsigned first_vertex=0,std::uint64_t reuse=UINT64_MAX,const std::array<std::shared_ptr<GraphicsBuffer>,16>& raw_textures={},const std::shared_ptr<const std::string>& vs_owner={},const std::shared_ptr<const std::string>& fs_owner={},const std::uint8_t* tail=nullptr,std::uint64_t tail_bytes=0,bool layered_ok=false){
-        if(!s.visual_pass && !s.raster_width && s.scale_visual && graphics_render_scale>1){
-            // Refuse before recording the native half if the complete pair
-            // cannot fit. Reused native payload still needs a visual status slice.
-            const auto alignment=std::max<std::uint64_t>(256,graphics_properties.limits.minStorageBufferOffsetAlignment);
-            const auto bytes=std::uint64_t(data.size())*4+tail_bytes;
-            auto at=b.used;auto fits=[&]{at=(at+alignment-1)&~(alignment-1);if(at>b.capacity || bytes>b.capacity-at)return false;at+=bytes;return true;};
-            if((reuse==UINT64_MAX && !fits()) || !fits())throw std::runtime_error("RSX paired draw staging exhausted before recording");
-        }
         if(s.raster_width || s.raster_height){
             (void)graphics_raster_scissor(s);
             const auto& limits=graphics_properties.limits;
@@ -1107,9 +1104,8 @@ public:
         const bool multiview=layered && graphics_multiview;
         // The pipeline key has no visual_pass/raster field and a visual pair
         // has the same layer count, so the paired half reuses the native one.
-        auto t=std::chrono::steady_clock::now();
         auto pipeline=s.visual_pass && graphics_paired_pipeline?std::move(graphics_paired_pipeline):graphics_pipeline(s,vs,fs,vs_owner,fs_owner,multiview);
-        graphics_paired_pipeline.reset();b.pipeline_pins.push_back(pipeline);b.pipeline_ms+=resident_ms(t);t=std::chrono::steady_clock::now();
+        graphics_paired_pipeline.reset();b.pipeline_pins.push_back(pipeline);
         // An optional tail (vertex input bytes) directly follows the words in
         // the same immutable slice; the blob addresses it past data.size()*4.
         std::shared_ptr<GraphicsPipeline> paired;
@@ -1146,8 +1142,8 @@ public:
         // Keep the existing logical readback accounting at record time. The
         // submit combines these requests; it does not create new requests.
         b.status_offsets.push_back(at+28);b.download_bytes+=4;
-        if(s.visual_pass){++graphics_visual_draws;b.visual_status_offsets.push_back(at+28);}else ++graphics_draws;
-        b.record_ms+=resident_ms(t);
+        // A visual half that reuses a native slice shares its failure word (either half's failure stops the batch).
+        if(s.visual_pass){++graphics_visual_draws;(reuse==UINT64_MAX?b.visual_status_offsets:b.paired_status_offsets).push_back(at+28);}else ++graphics_draws;
         const bool asynchronous=draw_recorder && !b.inline_draws && !b.queries && !b.marks && !graphics_gpu_loop();
         std::optional<DrawJob> inline_job;DrawJob* job=asynchronous?&recorder_slot():&inline_job.emplace();
         const bool pair=!s.visual_pass && !s.raster_width && s.scale_visual && graphics_render_scale>1;
@@ -1166,7 +1162,9 @@ public:
                 auto visual_textures=textures;for(auto& image:visual_textures)if(image && image->visual)image=image->visual;
                 const auto saved_queries=graphics_last_queries;graphics_paired_pipeline=std::move(paired);
                 struct Handoff {std::shared_ptr<GraphicsPipeline>& p;~Handoff(){p.reset();}} handoff{graphics_paired_pipeline};
-                graphics_draw(b,scaled,visual_colors,depth?depth->visual:nullptr,vs,fs,data,vertices,positions,bias_constant,bias_slope,min_bounds,max_bounds,visual_textures,first_vertex,UINT64_MAX,raw_textures,vs_owner,fs_owner,tail,tail_bytes,layered_ok);
+                // The visual half reads the native half's immutable slice (same words and tail): no second copy, no
+                // second upload and no separate staging requirement for the pair.
+                graphics_draw(b,scaled,visual_colors,depth?depth->visual:nullptr,vs,fs,data,vertices,positions,bias_constant,bias_slope,min_bounds,max_bounds,visual_textures,first_vertex,at,raw_textures,vs_owner,fs_owner,tail,tail_bytes,layered_ok);
                 graphics_last_queries=saved_queries;
             }else{
                 for(unsigned i=0;i<s.colors;++i)graphics_visual_sync(b,colors[i]);
@@ -1390,6 +1388,8 @@ public:
                         std::fputc('\n',stderr);}}}
             for(auto offset:b.visual_status_offsets){unsigned status=0;std::memcpy(&status,static_cast<const char*>(b.map)+offset,4);
                 if(status)throw std::runtime_error("RSX visual shader failed status="+std::to_string(status));}
+            for(auto offset:b.paired_status_offsets){unsigned status=0;std::memcpy(&status,static_cast<const char*>(b.map)+offset,4);
+                if(status)throw std::runtime_error("RSX native/visual paired shader failed status="+std::to_string(status));}
             // Per-batch queue counters can move to a later batch (graphics_move_stats) before this one is collected; fold
             // whatever this batch holds into run totals so each count is reported exactly once.
             graphics_visual_queued_total+=b.visual_queued;graphics_visual_drains_total+=b.visual_drains;graphics_visual_run_max=std::max(graphics_visual_run_max,b.visual_run_max);
@@ -1411,8 +1411,8 @@ public:
             to.draws+=from.draws;to.record_back_ms+=from.record_back_ms;to.descriptor_hits+=from.descriptor_hits;to.descriptor_misses+=from.descriptor_misses;to.framebuffer_hits+=from.framebuffer_hits;to.framebuffer_misses+=from.framebuffer_misses;
             from.draws=0;from.record_back_ms=0;from.descriptor_hits=from.descriptor_misses=from.framebuffer_hits=from.framebuffer_misses=0;
         }
-        to.upload_ms+=from.upload_ms;to.draw_ms+=from.draw_ms;to.download_ms+=from.download_ms;to.wait_ms+=from.wait_ms;to.pipeline_ms+=from.pipeline_ms;to.record_ms+=from.record_ms;
-        from.upload_ms=from.draw_ms=from.download_ms=from.wait_ms=from.pipeline_ms=from.record_ms=0;
+        to.upload_ms+=from.upload_ms;to.draw_ms+=from.draw_ms;to.download_ms+=from.download_ms;to.wait_ms+=from.wait_ms;
+        from.upload_ms=from.draw_ms=from.download_ms=from.wait_ms=0;
         to.upload_bytes+=from.upload_bytes;to.download_bytes+=from.download_bytes;to.submissions+=from.submissions;
         from.upload_bytes=from.download_bytes=from.submissions=0;
     }
@@ -1446,7 +1446,7 @@ public:
         check(vkResetDescriptorPool(device,b.descriptors,0),"graphics reset descriptors");
         for(std::size_t i=0;i<b.overflow_used;++i){check(vkResetDescriptorPool(device,b.overflow_descriptors[i],0),"graphics reset descriptors");}
         if(!b.visual_jobs.empty())throw std::runtime_error("RSX pending visual draws at batch reset");
-        b.overflow_used=0;b.used=0;b.status_offsets.clear();b.visual_status_offsets.clear();b.uploads.clear();b.active_framebuffer=VK_NULL_HANDLE;b.completion=0;b.frames=0;b.descriptor_cache.clear();b.signal=VK_NULL_HANDLE;b.visibility_count=0;b.visibility.clear();b.query_count=0;b.phases.clear();b.phase_pipelines.clear();
+        b.overflow_used=0;b.used=0;b.status_offsets.clear();b.visual_status_offsets.clear();b.paired_status_offsets.clear();b.uploads.clear();b.active_framebuffer=VK_NULL_HANDLE;b.completion=0;b.frames=0;b.descriptor_cache.clear();b.signal=VK_NULL_HANDLE;b.visibility_count=0;b.visibility.clear();b.query_count=0;b.phases.clear();b.phase_pipelines.clear();
         b.bound_graphics_pipeline=VK_NULL_HANDLE;b.dynamic_valid=false;b.state_versions.fill(0);b.state_offsets.fill(0);
 
     }

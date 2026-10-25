@@ -18,12 +18,18 @@ private:
     VkPipelineCache pipeline_cache=VK_NULL_HANDLE;
     bool pipeline_cache_dirty=false,cache_io_warned=false;
     std::filesystem::path vk_cache_root,pipeline_cache_path;
-    std::chrono::steady_clock::time_point cache_saved_at{},compile_printed_at{};
+    std::chrono::steady_clock::time_point cache_saved_at{};std::uint64_t compile_printed_coarse_ns=0;
     std::string last_pipeline_identity;
     std::array<std::string,6> last_pipeline_parts{};
     std::uint64_t cache_clock=0;
-    struct ShaderIdentity {std::shared_ptr<const std::string> owner;std::uint64_t id,last_use;};
-    std::map<const std::string*,ShaderIdentity> shader_owner_ids;
+public:
+    std::uint64_t shader_text_compares=0;   // full GLSL text comparisons on pipeline lookups (canonical owners avoid them)
+private:
+    // `canonical` is the first live owner seen with byte-identical text: different source owners of one text (distinct
+    // source-cache keys that generate the same GLSL) then compare by pointer instead of by full text on every pipeline hit.
+    struct ShaderIdentity {std::shared_ptr<const std::string> owner,canonical;std::uint64_t id,last_use;};
+    std::unordered_map<const std::string*,ShaderIdentity> shader_owner_ids;
+    std::unordered_multimap<std::uint64_t,std::shared_ptr<const std::string>> shader_canonical;   // text hash -> canonical owners
     static unsigned cache_limit(const char* name,unsigned fallback){
         const auto* text=std::getenv(name);if(!text || !*text)return fallback;
         char* end=nullptr;const auto n=std::strtoul(text,&end,10);
@@ -45,14 +51,33 @@ private:
     template<class Map> static auto lru_entry(Map& entries){
         return std::min_element(entries.begin(),entries.end(),[](const auto& a,const auto& b){return a.second->last_use<b.second->last_use;});
     }
-    std::uint64_t shader_identity(const std::string& source,const std::shared_ptr<const std::string>& owner){
+    // Returns the text hash; *canonical (if given) receives a string with exactly this text that is stable across owners
+    // (the owner itself when it has no live equal), or &source without an owner. Pointer comparison only: an evicted
+    // canonical cannot equal any live pipeline's source address. shader_canonical_owner() yields the owning pointer.
+    std::uint64_t shader_identity(const std::string& source,const std::shared_ptr<const std::string>& owner,const std::string** canonical=nullptr){
         if(owner){if(owner.get()!=&source)throw std::runtime_error("RSX shader owner mismatch");
-            auto hit=shader_owner_ids.find(owner.get());if(hit!=shader_owner_ids.end()){hit->second.last_use=++cache_clock;return hit->second.id;}}
+            auto hit=shader_owner_ids.find(owner.get());if(hit!=shader_owner_ids.end()){hit->second.last_use=++cache_clock;if(canonical)*canonical=hit->second.canonical.get();return hit->second.id;}}
         const auto id=cache_hash(source.data(),source.size());
-        if(owner){if(shader_owner_ids.size()>=identity_limit){auto old=std::min_element(shader_owner_ids.begin(),shader_owner_ids.end(),[](const auto& a,const auto& b){return a.second.last_use<b.second.last_use;});shader_owner_ids.erase(old);}
-            shader_owner_ids.emplace(owner.get(),ShaderIdentity{owner,id,++cache_clock});}
+        if(canonical)*canonical=&source;
+        if(owner){if(shader_owner_ids.size()>=identity_limit){auto old=std::min_element(shader_owner_ids.begin(),shader_owner_ids.end(),[](const auto& a,const auto& b){return a.second.last_use<b.second.last_use;});
+                // Canonical strings only live while some identity entry names them.
+                const auto text=old->second.canonical;shader_owner_ids.erase(old);
+                if(text.use_count()==2){auto range=shader_canonical.equal_range(cache_hash(text->data(),text->size()));
+                    for(auto it=range.first;it!=range.second;++it)if(it->second==text){shader_canonical.erase(it);break;}}}
+            std::shared_ptr<const std::string> same;auto range=shader_canonical.equal_range(id);
+            for(auto it=range.first;it!=range.second && !same;++it)if(*it->second==source)same=it->second;   // exact bytes; hashes only select candidates
+            if(!same){same=owner;shader_canonical.emplace(id,owner);
+                // Canonicals that only this index still holds (their pipelines and identities are gone) are dropped in bulk.
+                if(shader_canonical.size()>2*std::size_t(identity_limit)){
+                    for(auto it=shader_canonical.begin();it!=shader_canonical.end();){if(it->second.use_count()==1)it=shader_canonical.erase(it);else ++it;}}}
+            auto& entry=shader_owner_ids.emplace(owner.get(),ShaderIdentity{owner,std::move(same),id,++cache_clock}).first->second;
+            if(canonical)*canonical=entry.canonical.get();
+        }
         return id;
     }
+    std::shared_ptr<const std::string> shader_canonical_owner(const std::shared_ptr<const std::string>& owner)const{
+        if(!owner)return {};
+        const auto it=shader_owner_ids.find(owner.get());return it!=shader_owner_ids.end()?it->second.canonical:owner;}
     static std::uint64_t elapsed_ns(std::chrono::steady_clock::time_point start){
         return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-start).count();
     }
@@ -249,8 +274,10 @@ public:
         static const bool enabled=[]{const auto* a=std::getenv("ANYPS3_RSX_FALLBACK_STATS"),*b=std::getenv("ANYPS3_RSX_HOST_PROFILE");
             return (a && !std::strcmp(a,"1")) || (b && !std::strcmp(b,"1"));}();
         if(!enabled)return;
-        if(!force && elapsed_ns(compile_printed_at)<UINT64_C(2000000000))return;
-        compile_printed_at=std::chrono::steady_clock::now();save_pipeline_cache();const auto& c=compile_stats;
+        // Runs on every pipeline hit: the coarse clock (no TSC read) suffices for a 2-s period.
+        timespec coarse{};clock_gettime(CLOCK_MONOTONIC_COARSE,&coarse);const auto coarse_ns=std::uint64_t(coarse.tv_sec)*1000000000u+std::uint64_t(coarse.tv_nsec);
+        if(!force && coarse_ns-compile_printed_coarse_ns<UINT64_C(2000000000))return;
+        compile_printed_coarse_ns=coarse_ns;save_pipeline_cache();const auto& c=compile_stats;
         print_resource_stats();vk_call_print();
         std::fprintf(stderr,"RSX VK COMPILE STATS phase=%s modules=%llu module_hits=%llu graphics_pipelines=%llu compute_pipelines=%llu spirv_compiles=%llu spirv_disk_hits=%llu spirv_disk_misses=%llu graphics_hits=%llu graphics_misses=%llu compute_hits=%llu compute_misses=%llu miss_cold=%llu miss_shader=%llu miss_fixed_state=%llu module_ms=%.3f pipeline_ms=%.3f glslang_ms=%.3f pipeline_cache_load_bytes=%llu pipeline_cache_saves=%llu cache_driver_size_fixups=%llu cache_rejected=%llu cache_io_errors=%llu miss_vs=%llu miss_fs=%llu miss_targets=%llu miss_blend=%llu miss_depth_stencil=%llu miss_raster=%llu pipeline_evictions=%llu module_evictions=%llu compute_evictions=%llu pipeline_cache_rotations=%llu live_pipeline_cache=%zu live_compute_cache=%zu live_module_cache=%zu live_identities=%zu spirv_cache_items=0 spirv_cache_bytes=0\n",
             force?"final":"periodic",(unsigned long long)c.shader_modules,(unsigned long long)c.shader_module_hits,(unsigned long long)c.graphics_pipelines,(unsigned long long)c.compute_pipelines,(unsigned long long)c.spirv_compiles,
