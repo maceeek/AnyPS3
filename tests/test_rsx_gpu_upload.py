@@ -50,8 +50,12 @@ static void upload_cache(){
  assert(near_argb(s.memory.load(0xc0100000,4),0xff774466));assert(session.raw_misses==3);
  repeat_draw(s);session.flush(false);
  // Inactive resident render target is a texture without a snapshot copy.
- auto image=rsxdraw::rsx_graphics_texture(s,0x100000,0,32,16,128,0x85,false);
+ auto image=rsxdraw::rsx_graphics_texture(s,0x100000,0,32,16,128,0x85,false,false);
  assert(image && image==session.surfaces.back().image);
+ // The validated-metadata shortcut finds the same surface and rejects a mismatching extent or address like the full test.
+ assert(rsxdraw::rsx_graphics_texture(s,0x100000,0,32,16,128,0x85,false,true)==image);
+ assert(!rsxdraw::rsx_graphics_texture(s,0x100000,0,16,16,128,0x85,false,true) && !rsxdraw::rsx_graphics_texture(s,0x100000,0,16,16,128,0x85,false,false));
+ assert(!rsxdraw::rsx_graphics_texture(s,0x100100,0,32,16,128,0x85,false,true) && !rsxdraw::rsx_graphics_texture(s,0x100100,0,32,16,128,0x85,false,false));
  // An alias-compute commit bypasses the observer; it must invalidate uploads.
  auto& R=s.rsx.registers;R[0x210]=R[0x214]=0x2000;R[0xa74]=R[0xa70]=1;R[0xa6c]=0x207;
  fpword(s,0,(1u<<24)|(15u<<9)|1u);fpword(s,1,2u|(0xe4u<<9)|(7u<<18));fpword(s,2,0);fpword(s,3,0);

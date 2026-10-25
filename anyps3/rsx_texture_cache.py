@@ -77,7 +77,7 @@ MEMBERS = r'''
         const auto format=r(base+4),filter=r(base+0x14);
         const auto& level=static_cast<const Texture&>(t).levels[0];
         if(!t.cube && t.dimension==2 && t.mip_count==1 && !level.border && !(filter>>28))
-            t.resident_image=rsx_graphics_texture(state,r(base),(format&3)-1,level.width,level.height,level.pitch,t.format,t.swizzled);
+            t.resident_image=rsx_graphics_texture(state,r(base),(format&3)-1,level.width,level.height,level.pitch,t.format,t.swizzled,true);
         if(!t.resident_image && !t.cube && t.dimension==2 && t.mip_count==1 && !level.border && !(filter>>28))
             t.resident_image=rtt_image(t,r(base),(format&3)-1);
         return t;

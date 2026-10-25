@@ -31,8 +31,14 @@ static void replace_all(std::string& s,const std::string& a,const std::string& b
 ''' + '\nstatic const char* fixed_glsl=R"RSXVK(' + FIXED_GLSL + ')RSXVK";\n' + r'''
 struct SourceKeyHash {
     std::size_t operator()(const std::string& key)const{return std::hash<std::string>{}(key);}
+    // Four independent multiply chains (the serial chain was ~4 cycles per word on per-draw keys); equality is still exact.
     std::size_t operator()(const std::vector<unsigned>& key)const{
-        std::size_t h=0;for(auto v:key)h=(h*16777619u)^v;return h;
+        std::uint64_t a=0x9e3779b97f4a7c15u,b=0xc2b2ae3d27d4eb4fu,c=0x165667b19e3779f9u,d=0x27d4eb2f165667c5u;
+        const auto* p=key.data();std::size_t n=key.size(),i=0;
+        for(;i+4<=n;i+=4){a=(a^p[i])*0x100000001b3u;b=(b^p[i+1])*0x100000001b3u;c=(c^p[i+2])*0x100000001b3u;d=(d^p[i+3])*0x100000001b3u;}
+        for(;i<n;++i)a=(a^p[i])*0x100000001b3u;
+        std::uint64_t h=a^(b>>1|b<<63)^(c>>2|c<<62)^(d>>3|d<<61)^(std::uint64_t(n)*0xff51afd7ed558ccdu);
+        h^=h>>33;h*=0xc4ceb9fe1a85ec53u;h^=h>>29;return std::size_t(h);
     }
 };
 static unsigned source_cache_limit(const char* name,unsigned fallback,unsigned maximum){
@@ -2193,20 +2199,27 @@ static bool clear(Session& session,unsigned mask){
 }
 } // namespace rsxgraphics
 namespace rsxdraw {
-template<class State> static std::shared_ptr<NativeVulkan::GraphicsImage> rsx_graphics_texture(State& s,unsigned offset,unsigned location,unsigned width,unsigned height,unsigned pitch,unsigned format,bool swizzled){
+template<class State> static std::shared_ptr<NativeVulkan::GraphicsImage> rsx_graphics_texture(State& s,unsigned offset,unsigned location,unsigned width,unsigned height,unsigned pitch,unsigned format,bool swizzled,bool validated_metadata){
     if(!s.rsx.graphics_session)return {};
     auto& session=*static_cast<rsxgraphics::Session*>(s.rsx.graphics_session);
     if(!session.allow_resident_textures)return {};
     const unsigned expected=format==0x85?8:format==0x84?3:format==0x9a?11:format==0x9b?12:0;
     if(!expected)return {};
+    auto candidate=[&](const auto& surface){const auto& t=surface.target;
+        if(surface.partial || surface.depth || surface.samples!=1 || surface.width!=width || surface.height!=height || surface.format!=expected ||
+           surface.image->format!=rsxgraphics::color_format(expected) ||
+           bool(t.swizzle_width)!=swizzled || (!swizzled && t.pitch!=pitch))return false;
+        if(swizzled && (t.swizzle_width!=texture_pot(width) || t.swizzle_height!=texture_pot(height)))return false;
+        return !t.tile && t.offset==t.base_offset;};
+    // The host identity of the first byte is needed only to compare it with a surface that passes every other test. A
+    // validated_metadata caller (Session::texture_metadata) holds this texture's plan decoded under the validated texture
+    // context (same maps, IO table and rights), so the translation below cannot fault there, and with observers paused it
+    // touches no guest-visible state. Other callers keep the translation (and its original error) first.
+    if(validated_metadata && std::none_of(session.surfaces.begin(),session.surfaces.end(),candidate))return {};
     GuestMemory::ObserverPause acquire(s.memory);
     const auto address=location_address(s.rsx,location,offset,1);const auto mapping=s.memory.range(address,1,false);const auto* data=range_identity(mapping,0,1);
     for(const auto& surface:session.surfaces){const auto& t=surface.target;
-        if(surface.partial || surface.depth || surface.samples!=1 || surface.width!=width || surface.height!=height || surface.format!=expected ||
-           surface.image->format!=rsxgraphics::color_format(expected) ||
-           bool(t.swizzle_width)!=swizzled || (!swizzled && t.pitch!=pitch))continue;
-        if(swizzled && (t.swizzle_width!=texture_pot(width) || t.swizzle_height!=texture_pot(height)))continue;
-        if(t.tile || t.base!=data || t.offset!=t.base_offset)continue;
+        if(!candidate(surface) || t.base!=data)continue;
         // Inactive render targets can be sampled directly. A same-draw
         // framebuffer feedback is still rejected/snapshotted by prepared().
         return surface.image;

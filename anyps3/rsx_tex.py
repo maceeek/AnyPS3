@@ -60,7 +60,7 @@ struct Texture {
     bool null_texture=false;
 };
 #ifdef ANYPS3_RSX_VK
-template<class State> static std::shared_ptr<NativeVulkan::GraphicsImage> rsx_graphics_texture(State&,unsigned,unsigned,unsigned,unsigned,unsigned,unsigned,bool);
+template<class State> static std::shared_ptr<NativeVulkan::GraphicsImage> rsx_graphics_texture(State&,unsigned,unsigned,unsigned,unsigned,unsigned,unsigned,bool,bool);
 #endif
 // RPCS3 image_utils.hpp:31-64,156-180: ceil-log2 Morton, X then Y then Z.
 // Large texels are adjacent 32-bit words along X (TextureUtils.cpp:258-271).
@@ -214,7 +214,7 @@ template<class State> static Texture decode_texture(State& s,const Reg& reg,unsi
     const std::uint8_t* data=nullptr;
 #ifdef ANYPS3_RSX_VK
     if(!metadata && !vertex && !t.cube && dimension==2 && mipmaps==1 && !border && !(filter>>28))
-        t.resident_image=rsx_graphics_texture(s,texture_offset,location-1,width,height,pending[0].pitch,t.format,t.swizzled);
+        t.resident_image=rsx_graphics_texture(s,texture_offset,location-1,width,height,pending[0].pitch,t.format,t.swizzled,false);
     if(t.resident_image){
         GuestMemory::ObserverPause snapshot_metadata(s.memory);
         const auto start=location_address(gpu,location-1,texture_offset,static_cast<unsigned>(offset));
