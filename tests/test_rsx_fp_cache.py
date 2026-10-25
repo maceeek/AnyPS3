@@ -325,7 +325,80 @@ static void sharing_and_eviction(){
  (void)r;
  std::puts("PASS equal programs share one result; eviction past 1024 entries never returns a wrong program; rewrites are seen");
 }
-int main(){try{random_programs();observer_spans();partial_block_admission();tail_of_memory();sharing_and_eviction();}catch(const std::exception& e){std::fprintf(stderr,"FAIL %s\n",e.what());return 1;}}
+// Constant-only rewrites (games patch inline FP constants per draw): the cached instruction structure is reused with the new
+// constants. Expectations come from the literal original parser (program and observed bytes) and from the uncached GLSL generator.
+static void rewrite_constants(PpuState& s,std::uint64_t address,const std::vector<Ref>& program,std::uint32_t& r){
+ for(const auto& inst:program)if(inst.has_constant)for(unsigned k=0;k<4;++k)
+  put_word(s,address+inst.word_offset*4+16+4*k,rsxdraw::float_bits(float(int(lcg(r)%4000)-2000)/16.f));
+}
+static void constant_rewrites(){
+ unsigned patched=0,shared_structures=0;
+ for(unsigned location=1;location<=2;++location)for(unsigned variant=0;variant<24;++variant){
+  PpuState s;setup_draw(s,8,8,32,false);auto& m=s.memory;auto& R=s.rsx.registers;
+  m.map(0x70010000,0xf0000,6,nullptr,0);s.rsx.io[1]=0x70100000;m.map(0x70100000,0x100000,6,nullptr,0);
+  const unsigned base=location==1?0xc0000000u:0x70000000u;std::uint32_t r=31337+variant*7+location;
+  const std::uint32_t offset=0x60000+0x1000*variant;
+  const unsigned length=write_program(s,base+offset,r,2+variant%9,true,variant);
+  // a valid-looking continuation behind END: a read past END would be visible in the coverage
+  std::uint32_t tail=r+3;write_program(s,base+offset+length,tail,8,false,variant,false);
+  R[0x8e4]=value_of(location,offset);
+  const auto first=rsxdraw::load_fragment_program_shared(s,rsxdraw::Reg{s.rsx});same(reference(s,location,offset),*first);
+  const auto program=reference(s,location,offset);
+  const bool constants=std::any_of(program.begin(),program.end(),[](const Ref& i){return i.has_constant;});
+  // 1. same address, new constants: equal to the original parser, observing exactly its bytes; a new result of the same structure
+  rewrite_constants(s,base+offset,program,r);
+  const auto start=host_of(s,base+offset);
+  Coverage ref(start-256,start+length+1024),got(start-256,start+length+1024);
+  m.host_access_observer=[&](const void* p,std::uint64_t n,bool write){if(!write)ref.add(p,n);};
+  const auto expected=reference(s,location,offset);m.host_access_observer=nullptr;
+  m.host_access_observer=[&](const void* p,std::uint64_t n,bool write){if(!write)got.add(p,n);};
+  std::shared_ptr<const std::vector<FpInst>> second;
+  try{second=rsxdraw::load_fragment_program_shared(s,rsxdraw::Reg{s.rsx});}catch(...){m.host_access_observer=nullptr;throw;}
+  m.host_access_observer=nullptr;
+  same(expected,*second);
+  if(!got.equals(ref))throw std::runtime_error("constant rewrite: observed bytes differ from the original parser (variant "+std::to_string(variant)+")");
+  assert(first->front().structure && second->front().structure==first->front().structure);
+  if(constants){assert(second!=first);++patched;}else assert(second==first);
+  // the old result is immutable: it still holds the old constants
+  for(std::size_t i=0;i<program.size();++i)if(program[i].has_constant){std::uint32_t a,b;std::memcpy(&a,&(*first)[i].constant[0],4);std::memcpy(&b,&program[i].constant[0],4);assert(a==b);}
+  // 2. the same instruction words with other constants at a NEW address: parsed, then the known structure is reused
+  {const std::uint32_t copy=offset+0x800;for(unsigned w=0;w<length;w+=4)s.memory.store(base+copy+w,4,s.memory.load(base+offset+w,4));
+   rewrite_constants(s,base+copy,program,r);R[0x8e4]=value_of(location,copy);
+   const auto third=rsxdraw::load_fragment_program_shared(s,rsxdraw::Reg{s.rsx});same(reference(s,location,copy),*third);
+   assert(third->front().structure==first->front().structure);++shared_structures;R[0x8e4]=value_of(location,offset);}
+  // 3. an s1 swizzle bit of the last instruction changes (END, opcode and operand types are kept): a different structure, equal to the original parser
+  {const std::uint64_t at=base+offset+program.back().word_offset*4+8;const unsigned w=s.memory.load(at,4);put_word(s,at,(((w<<16)|(w>>16))^0x00010000u)&0x7fffffffu);
+   const auto changed=rsxdraw::load_fragment_program_shared(s,rsxdraw::Reg{s.rsx});same(reference(s,location,offset),*changed);
+   assert(changed->front().structure!=first->front().structure);}
+  // 4. END moves to the first instruction (a shorter program at the cached address)
+  if(program.size()>1){const std::uint64_t at=base+offset;const unsigned w=s.memory.load(at,4);put_word(s,at,((w<<16)|(w>>16))|1u);
+   const auto shorter=rsxdraw::load_fragment_program_shared(s,rsxdraw::Reg{s.rsx});same(reference(s,location,offset),*shorter);assert(shorter->size()==1);}
+ }
+ assert(patched>=30 && shared_structures==48);
+ // GLSL identity: constants are draw data, so a constant rewrite keeps the cached source; a changed opcode must not reuse it.
+ {PpuState s;setup_draw(s,8,8,32,false);auto& R=s.rsx.registers;const rsxdraw::Reg reg{s.rsx};std::array<rsxdraw::Texture,16> textures{};
+  auto fp=[&](unsigned i,unsigned w){s.memory.store(0xc0003000+i*4,4,(w<<16)|(w>>16));};
+  auto program=[&](unsigned op,float k){fp(0,(1u<<24)|(15u<<9)|(1u<<1));fp(1,2u|(0xe4u<<9)|(7u<<18));fp(2,0);fp(3,0);
+   for(unsigned i=0;i<4;++i)fp(4+i,rsxdraw::float_bits(k+float(i)));
+   fp(8,(op<<24)|(15u<<9)|1u);fp(9,(1u<<2)|(0xe4u<<9)|(7u<<18));fp(10,2u|(0xe4u<<9));fp(11,0);
+   for(unsigned i=0;i<4;++i)fp(12+i,rsxdraw::float_bits(.5f*k-float(i)));};
+  R[0x8e4]=0x3001;
+  program(3,1.f);const auto a=rsxdraw::load_fragment_program_shared(s,reg);
+  program(3,7.f);const auto b=rsxdraw::load_fragment_program_shared(s,reg);
+  program(2,7.f);const auto c=rsxdraw::load_fragment_program_shared(s,reg);
+  assert(a!=b && a->front().structure==b->front().structure && c->front().structure!=a->front().structure);
+  const auto fa=rsxgraphics::fragment_source(*a,reg,1,textures),fb=rsxgraphics::fragment_source(*b,reg,1,textures),fc=rsxgraphics::fragment_source(*c,reg,1,textures);
+  const auto ua=rsxgraphics::fragment_source_uncached(*a,reg,1,textures),ub=rsxgraphics::fragment_source_uncached(*b,reg,1,textures),uc=rsxgraphics::fragment_source_uncached(*c,reg,1,textures);
+  assert(fa && fb && fc && ua && ub && uc && *ua==*ub && *ua!=*uc);
+  assert(fa==fb && *fa==*ua && *fc==*uc && fc!=fa);
+  // a mutable copy carries no structure id, so an edited copy is keyed by its words
+  auto copy=rsxdraw::load_fragment_program(s,reg);assert(!copy.front().structure);
+  copy[1].d=(copy[1].d&0x00ffffffu)|(3u<<24);
+  const auto fcopy=rsxgraphics::fragment_source(copy,reg,1,textures);assert(fcopy && *fcopy==*ua);}
+ std::printf("INFO constant rewrites: %u patched results, %u shared structures\n",patched,shared_structures);
+ std::puts("PASS constant-only rewrites reuse the structure (original parser results and observed bytes); GLSL identity follows the instruction words");
+}
+int main(){try{random_programs();observer_spans();partial_block_admission();tail_of_memory();sharing_and_eviction();constant_rewrites();}catch(const std::exception& e){std::fprintf(stderr,"FAIL %s\n",e.what());return 1;}}
 '''
 
 
@@ -345,7 +418,7 @@ class RsxFpCacheTests(unittest.TestCase):
             env = dict(os.environ, ANYPS3_VK_DEVICE='lavapipe', VK_DRIVER_FILES='/usr/share/vulkan/icd.d/lvp_icd.json')
             result = subprocess.run([str(root / 'test')], env=env, capture_output=True, text=True, timeout=300)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            self.assertEqual(result.stdout.count('PASS '), 5, result.stdout)
+            self.assertEqual(result.stdout.count('PASS '), 6, result.stdout)
 
 
 if __name__ == '__main__':

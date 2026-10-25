@@ -300,15 +300,21 @@ static std::shared_ptr<const std::string> fragment_source(const std::vector<FpIn
         const bool manual=!implicit_sampler(t) || (explicit_units&(1u<<unit));
         const bool dynamic=bool(t.resident_image) && dynamic_resident_sampler();
         key.insert(key.end(),{unsigned(bool(t.resident_image)),t.format,t.dimension,unsigned(t.dimension==3 && t.levels[0].depth>1),unsigned(t.cube),t.shadow,unsigned(t.alpha_kill),dynamic?0u:t.wrap_s,dynamic?0u:t.wrap_t,dynamic?0u:t.wrap_r,manual?t.mip_count:0u,dynamic?0u:unsigned(t.unnormalized),manual?t.min:0u,manual?t.mag:0u});}
-    for(const auto& i:fp)key.insert(key.end(),{i.d,i.s0,i.s1,i.s2,unsigned(i.has_constant),i.word_offset});
+    // The source reads only the instruction words of fp (never its constants). A loader structure id names exactly those words
+    // (rsxdraw::FpInst::structure); the tag word keeps the two key forms disjoint.
+    if(!fp.empty() && fp[0].structure)key.insert(key.end(),{1u,unsigned(fp.size()),unsigned(fp[0].structure),unsigned(fp[0].structure>>32)});
+    else{key.push_back(0u);for(const auto& i:fp)key.insert(key.end(),{i.d,i.s0,i.s1,i.s2,unsigned(i.has_constant),i.word_offset});}
+    // Consecutive draws mostly repeat the previous key: compare before hashing.
+    static thread_local std::vector<unsigned> last_key;static thread_local std::shared_ptr<const std::string> last_source;
+    if(last_source && key==last_key){::RsxPerfCounters::add(::RsxPerfCounters::src_fs_hits);return last_source;}
     static thread_local SourceCache<std::vector<unsigned>> cache;
-    if(auto hit=cache.find(key)){::RsxPerfCounters::add(::RsxPerfCounters::src_fs_hits);return hit;}
+    if(auto hit=cache.find(key)){::RsxPerfCounters::add(::RsxPerfCounters::src_fs_hits);last_key=key;last_source=hit;return hit;}
     ::RsxPerfCounters::add(::RsxPerfCounters::src_fs_misses);
     auto source=fragment_source_uncached(fp,r,count,textures,lines,failure);if(!source)return {};
     if(rsx_layered_shaders().load(std::memory_order_relaxed)){const auto main=source->find("void main(){");
         if(main==std::string::npos || source->find("void main(){",main+1)!=std::string::npos)throw std::runtime_error("RSX layered fragment shader template mismatch");
         source->replace(main,12,"void main(){shift=layers_>1u?shifts_[plane_in_]:shift_push_;plane=layers_>1u?plane_in_:plane_push_;");}
-    return cache.put(key,std::move(*source));
+    auto stored=cache.put(key,std::move(*source));last_key=key;last_source=stored;return stored;
 }
 // Layered MSAA planes (rsx_layered_shaders): instance n renders sample plane n
 // into layer n with its own sample shift; FS planes come from plane_out_.
