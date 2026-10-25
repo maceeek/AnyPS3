@@ -161,7 +161,7 @@ int main(int argc,char** argv){
                 }
             }
             const auto initial=snapshot(s);const auto count=test_parallel_draws.load();
-            const auto error=differential(s,6000+n);
+            const auto error=differential(s,6000+n,0,n==5 || n==6);
             if(test_parallel_draws.load()!=count){std::fprintf(stderr,"unexpected parallel fallback case %u\n",n);std::abort();}
             if(must_error)assert(!error.empty());
             if(n==8 || n==12 || n==18 || n==24)assert(snapshot(s).bytes!=initial.bytes);

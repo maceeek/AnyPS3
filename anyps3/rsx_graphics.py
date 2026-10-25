@@ -35,15 +35,22 @@ struct SourceKeyHash {
         std::size_t h=0;for(auto v:key)h=(h*16777619u)^v;return h;
     }
 };
+static unsigned source_cache_limit(const char* name,unsigned fallback,unsigned maximum){
+    const char* text=std::getenv(name);if(!text || !*text)return fallback;
+    char* end=nullptr;const auto value=std::strtoul(text,&end,10);
+    if(*text=='-' || *end || !value || value>maximum)throw std::runtime_error(std::string("invalid ")+name);
+    return unsigned(value);
+}
 template<class Key> struct SourceCache {
     struct Entry{std::shared_ptr<const std::string> source;std::uint64_t used;};
     std::unordered_map<Key,Entry,SourceKeyHash> entries;std::uint64_t clock=0,bytes=0;
+    const unsigned entry_limit=source_cache_limit("ANYPS3_RSX_SOURCE_CACHE_ENTRIES",1024,4096);
+    const std::uint64_t byte_limit=std::uint64_t(source_cache_limit("ANYPS3_RSX_SOURCE_CACHE_MB",64,256))<<20;
     std::shared_ptr<const std::string> find(const Key& key){auto it=entries.find(key);if(it==entries.end())return {};it->second.used=++clock;return it->second.source;}
     std::shared_ptr<const std::string> put(Key key,std::string text){
         auto value=std::make_shared<const std::string>(std::move(text));
-        constexpr std::uint64_t limit=16*1024*1024;
-        if(value->size()>limit)return value;
-        while(!entries.empty() && (entries.size()>=256 || bytes+value->size()>limit)){
+        if(value->size()>byte_limit)return value;
+        while(!entries.empty() && (entries.size()>=entry_limit || bytes+value->size()>byte_limit)){
             auto old=std::min_element(entries.begin(),entries.end(),[](const auto& a,const auto& b){return a.second.used<b.second.used;});bytes-=old->second.source->size();entries.erase(old);::RsxPerfCounters::add(::RsxPerfCounters::src_evictions);}
         bytes+=value->size();entries.emplace(std::move(key),Entry{value,++clock});return value;
     }
@@ -57,9 +64,28 @@ vec4 state4(uint a){return uintBitsToFloat(uvec4(state_[a],state_[a+1u],state_[a
 vec4 cstate4(uint i){return state4(state_[w[2]+(i>>7u)]+(i&127u));}
 )GLSL";
 static bool packed_color(const Reg& r){const unsigned f=r(0x208)&31;return r(0x220)!=0 && (f==13 || (!float_color(f) && ((f!=8 && f!=3) || (r(0x374)&1) || (f==3 && r(0x1fec)))));}
+// Native implicit sampling obtains filtering and mip count from per-draw
+// descriptors/samplers. Manual TXL/TXD and unsupported sampler layouts still
+// specialize their tap paths. Do not compile dead helpers for sampler changes.
+static bool implicit_sampler(const Texture& t){
+    auto wrap=[](unsigned v){return v>=1 && v<=5 && v!=4;};
+    return t.valid && !t.resident_image && !t.cube && !t.shadow && !t.alpha_kill &&
+        !(t.dimension==3 && t.levels[0].depth==1) && wrap(t.wrap_s) && wrap(t.wrap_t) && (t.dimension!=3 || wrap(t.wrap_r));
+}
+static bool dynamic_resident_sampler(){
+    static const bool enabled=[](){const char* value=std::getenv("ANYPS3_RSX_RESIDENT_SAMPLER_DYNAMIC");
+        if(value && std::strcmp(value,"0") && std::strcmp(value,"1"))throw std::runtime_error("invalid ANYPS3_RSX_RESIDENT_SAMPLER_DYNAMIC");
+        return !value || !std::strcmp(value,"1");}();
+    return enabled;
+}
+static unsigned explicit_sampler_mask(const std::vector<FpInst>& fp){
+    unsigned mask=0;for(const auto& i:fp){const unsigned op=((i.d>>24)&63)|((i.s1>>31)<<6);
+        if(op==25 || op==47)mask|=1u<<((i.d>>17)&15);}
+    return mask;
+}
 static std::optional<std::string> fragment_source_uncached(const std::vector<FpInst>& fp,const Reg& r,unsigned count,const std::array<Texture,16>& textures,bool lines=false,rsxvk::FragmentFailure* failure=nullptr){
     HostPhase phase(HostStage::source);
-    const bool packed=packed_color(r);
+    const bool packed=packed_color(r);const unsigned explicit_units=explicit_sampler_mask(fp);
     auto shade=scalar_fragment(fp,failure);if(!shade)return {};
     std::string source="#version 450\n";
     if(shade->find("subgroupQuadBroadcast")!=std::string::npos)source+="#extension GL_KHR_shader_subgroup_quad : require\n";
@@ -118,11 +144,15 @@ vec4 filter_(uint unit,uint level,vec3 uv,bool linear_,uint face,float ref){
         replace_all(text,"cube_(","cube_"+n+"(");replace_all(text,"unit",u);
         replace_all(text,"w[d+27u]",rsxvk::u(t.dimension));replace_all(text,"w[d+28u]",rsxvk::u(t.cube));replace_all(text,"w[d+29u]",rsxvk::u(t.shadow));
         if(t.dimension!=3)replace_all(text,"n<2u","n<1u");
-        // Static sampler choices must not be rediscovered through SSBO
-        // loads in every inlined tap/mip path. Dimensions/LOD/remap remain
-        // dynamic; only values present in the shader identity are folded.
+        // Live manual taps retain specialization. For implicit-only units,
+        // these three fields occur only in unused manual helper functions;
+        // keeping their descriptor loads avoids shader variants for dead code.
+        const bool manual=!implicit_sampler(t) || (explicit_units&(1u<<unit));
+        const bool dynamic=bool(t.resident_image) && dynamic_resident_sampler();
         for(const auto& field:std::vector<std::pair<unsigned,unsigned>>{{1,t.mip_count},{2,t.unnormalized},{3,t.wrap_s},{4,t.wrap_t},{5,t.min},{6,t.mag},{14,t.alpha_kill},{27,t.dimension},{28,t.cube},{29,t.shadow},{30,t.wrap_r}})
-            replace_all(text,"w[d+"+rsxvk::u(field.first)+"]",rsxvk::u(field.second));
+            if((manual || (field.first!=1 && field.first!=5 && field.first!=6)) &&
+               (!dynamic || (field.first!=2 && field.first!=3 && field.first!=4 && field.first!=30)))
+                replace_all(text,"w[d+"+rsxvk::u(field.first)+"]",rsxvk::u(field.second));
         functions+=text;
         replace_all(*shade,"gradient("+u+",b)","gradient"+n+"(a,b)");replace_all(*shade,"gradient("+u+",c)","gradient"+n+"(a,c)");
         replace_all(*shade,"gradient("+u+",dFdx(a))","gradient"+n+"(a,dFdx(a))");replace_all(*shade,"gradient("+u+",dFdy(a))","gradient"+n+"(a,dFdy(a))");
@@ -136,8 +166,7 @@ vec4 filter_(uint unit,uint level,vec3 uv,bool linear_,uint face,float ref){
     common.replace(common.find("vec4 texel_("),common.find("uint logic_(")-common.find("vec4 texel_("),functions);
     source+=common;if(packed)source+=fixed_glsl;
     for(unsigned unit=0;unit<16;++unit){const auto& t=textures[unit];
-        auto native_wrap=[](unsigned wrap){return wrap>=1 && wrap<=5 && wrap!=4;};
-        if(!t.valid || t.resident_image || t.cube || t.shadow || t.alpha_kill || (t.dimension==3 && t.levels[0].depth==1) || !native_wrap(t.wrap_s) || !native_wrap(t.wrap_t) || (t.dimension==3 && !native_wrap(t.wrap_r)))continue;
+        if(!implicit_sampler(t))continue;
         const auto n=std::to_string(unit),u=rsxvk::u(unit);
         const bool volume=t.dimension==3 && t.levels[0].depth>1;
         source+="vec4 implicit"+n+"(vec4 coord,float bias,inout bool killed){uint d=2064u+32u*"+u+",l=texture_offset(w[d]);vec3 uv=coord.xyz;\n";
@@ -266,7 +295,11 @@ void main(){C q[1];bool front=w[11]!=0u || gl_FrontFacing;
 static std::shared_ptr<const std::string> fragment_source(const std::vector<FpInst>& fp,const Reg& r,unsigned count,const std::array<Texture,16>& textures,bool lines=false,rsxvk::FragmentFailure* failure=nullptr){
     static thread_local std::vector<unsigned> key;key.assign({count,unsigned(lines),unsigned(packed_color(r)),unsigned(bool(r(0x1d60)&14u)),r(0x1d60)&64u,unsigned(float_color(r(0x208)&31u)),unsigned(rsx_layered_shaders().load(std::memory_order_relaxed))});
     unsigned mask=0;for(unsigned unit=0;unit<16;++unit)if(textures[unit].valid)mask|=1u<<unit;else if(textures[unit].null_texture)mask|=0x10000u<<unit;key.push_back(mask);
-    for(const auto& t:textures)if(t.valid)key.insert(key.end(),{unsigned(bool(t.resident_image)),t.format,t.dimension,unsigned(t.dimension==3 && t.levels[0].depth>1),unsigned(t.cube),t.shadow,unsigned(t.alpha_kill),t.wrap_s,t.wrap_t,t.wrap_r,t.mip_count,unsigned(t.unnormalized),t.min,t.mag});
+    const unsigned explicit_units=explicit_sampler_mask(fp);
+    for(unsigned unit=0;unit<16;++unit){const auto& t=textures[unit];if(!t.valid)continue;
+        const bool manual=!implicit_sampler(t) || (explicit_units&(1u<<unit));
+        const bool dynamic=bool(t.resident_image) && dynamic_resident_sampler();
+        key.insert(key.end(),{unsigned(bool(t.resident_image)),t.format,t.dimension,unsigned(t.dimension==3 && t.levels[0].depth>1),unsigned(t.cube),t.shadow,unsigned(t.alpha_kill),dynamic?0u:t.wrap_s,dynamic?0u:t.wrap_t,dynamic?0u:t.wrap_r,manual?t.mip_count:0u,dynamic?0u:unsigned(t.unnormalized),manual?t.min:0u,manual?t.mag:0u});}
     for(const auto& i:fp)key.insert(key.end(),{i.d,i.s0,i.s1,i.s2,unsigned(i.has_constant),i.word_offset});
     static thread_local SourceCache<std::vector<unsigned>> cache;
     if(auto hit=cache.find(key)){::RsxPerfCounters::add(::RsxPerfCounters::src_fs_hits);return hit;}
@@ -987,7 +1020,7 @@ struct Session {
         if(!entry.trusted)entry.snapshot.assign(upload,upload+size);
         entry.buffer=vk.graphics_buffer(*batch,upload,size);entry.cost=size;auto result=entry.buffer;++raw_misses;store_raw(std::move(entry),reuse);return result;
     }
-    bool observer_installed=false;
+    bool observer_installed=false;std::uint64_t observer_lifetime=0;
     GuestMemory::HostObserver previous_observer;
     explicit Session(NativeVulkan& v,RendererContext s):vk(v),state(std::move(s)),batch(v.graphics_batch()){
         if(const auto* value=std::getenv("ANYPS3_RSX_SUBMIT_DRAWS")){
@@ -1015,6 +1048,7 @@ struct Session {
         surface_watches.clear();
         previous_observer=std::move(state.memory.host_access_observer);observer_installed=true;
         state.memory.host_access_observer=[this](const void* p,std::uint64_t n,bool write){host_access(p,n,write);if(previous_observer)previous_observer(p,n,write);};
+        observer_lifetime=state.memory.host_access_observer.lifetime.load(std::memory_order_acquire);
         state.memory.host_access_observer.filtered=!previous_observer;
         state.memory.host_access_observer.supports_exact_bytes=true;
         for(auto& entry:raw_textures)if(!entry.dirty_inputs)raw_spans(entry,[&](const void* p,std::uint64_t n){watch_span(p,n,true);});

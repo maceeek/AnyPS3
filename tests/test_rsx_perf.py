@@ -935,7 +935,19 @@ static std::string execute(PpuState& s,bool reference){
     catch(const std::runtime_error& e){return e.what();}
     catch(const std::out_of_range& e){return std::string("std::out_of_range: ")+e.what();}
 }
-static std::string differential(PpuState& s,unsigned case_id,unsigned reference_tile_size=0){
+static std::string differential(PpuState& s,unsigned case_id,unsigned reference_tile_size=0,bool snapshot_feedback=false){
+    // 0f7addf intentionally changed feedback to a pre-draw texture snapshot.
+    // Keep the frozen renderer untouched: only these explicit linear ARGB8 8x8
+    // fixtures give its sampler an independent, immutable copy in spare VRAM.
+    // Color/depth aliasing and the actual renderer's aliased input stay intact.
+    constexpr unsigned snapshot_offset=0x400000,snapshot_bytes=448; // 8x8 + 4x4 + 2x2, each with pitch 32
+    const unsigned texture_offset=snapshot_feedback?s.rsx.registers.at(0x1a00):0;
+    if(snapshot_feedback){auto& bytes=*s.memory.regions[1].bytes;
+        assert(s.memory.regions[1].base==0xc0000000 && s.rsx.registers[0x1840]==32 && s.rsx.registers[0x1a18]==0x80008);
+        assert(((s.rsx.registers[0x1a04]>>8)&255)==0xa5 && (s.rsx.registers[0x1a04]&3)==1);
+        assert(texture_offset+snapshot_bytes<=bytes.size() && snapshot_offset+snapshot_bytes<=bytes.size());
+        std::copy_n(bytes.begin()+texture_offset,snapshot_bytes,bytes.begin()+snapshot_offset);
+    }
     const auto initial=snapshot(s);const auto last=s.memory.last_region;
     // The frozen binder requires one backing for the entire tile. For the
     // adjacent-region case only, bound its reference view to the first MiB:
@@ -944,7 +956,9 @@ static std::string differential(PpuState& s,unsigned case_id,unsigned reference_
     // write mark explicitly, including any shared host reservation line.
     const auto tile_size=s.rsx.tiles[0].size;
     if(reference_tile_size)s.rsx.tiles[0].size=reference_tile_size;
+    if(snapshot_feedback)s.rsx.registers[0x1a00]=snapshot_offset;
     const auto error=execute(s,true);
+    if(snapshot_feedback)s.rsx.registers[0x1a00]=texture_offset;
     if(reference_tile_size){
         assert(error.empty() && s.memory.regions[2].base==0xc0200000);
         s.memory.mark_write(s.memory.regions[2].bytes->data(),tile_size-reference_tile_size);
@@ -1076,12 +1090,12 @@ int main(int argc,char** argv){
             R[0xa70]=1;R[0x214]=R[0x210]+(n/2)*4;observe(m,1);
             const unsigned words[]={(23u<<24)|(15u<<9)|(4u<<13)|1u,1u|(0xe4u<<9)|(7u<<18),0,0};
             for(unsigned i=0;i<4;++i)m.store(0xc0001000+4*i,4,(words[i]<<16)|(words[i]>>16));
-            // Texture, color and depth share host bytes. Traversal and read/write
-            // order must remain identical even with texture feedback.
-            for(auto& tile:s.rsx.tiles)tile.bound=false; // unchanged linear feedback semantics
+            // Texture, color and depth share host bytes. The frozen reference samples
+            // an independent pre-draw copy; actual execution keeps the aliased input.
+            for(auto& tile:s.rsx.tiles)tile.bound=false;
             R[0x1a00]=R[0x210];R[0x1a04]=0x00010029|(0xa5<<8);R[0x1a08]=0x0303;
             R[0x1a0c]=0x80000000;R[0x1a10]=0xaae4;R[0x1a14]=0x02020000;R[0x1a18]=(8u<<16)|8;R[0x1840]=32;
-            assert(differential(s,3000+n).empty());
+            assert(differential(s,3000+n,0,true).empty());
         }
         std::puts("PASS 195 draw states, whole memory and exact write versions");
     }else if(mode=="faults"){

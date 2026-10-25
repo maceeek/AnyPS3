@@ -42,8 +42,9 @@ public:
     std::recursive_mutex compute_mutex;
     unsigned resident_recordings=0;
     std::vector<unsigned> compile_glsl(const std::string& source,glslang_stage_t stage,bool optimize=false){
+        const bool quad=source.find("subgroupQuadBroadcast")!=std::string::npos || source.find("GL_EXT_multiview")!=std::string::npos;
         const auto cache_key=spirv_key(source,stage,optimize);
-        if(auto code=load_spirv(cache_key);!code.empty()){++compile_stats.spirv_disk_hits;return code;}
+        if(auto code=load_spirv(cache_key,quad?0x00010300u:0x00010000u);!code.empty()){++compile_stats.spirv_disk_hits;return code;}
         ++compile_stats.spirv_disk_misses;
         const auto compile_start=std::chrono::steady_clock::now();++compile_stats.spirv_compiles;
         // glslang has process-wide state. Serialize initialization and compiler use.
@@ -53,7 +54,6 @@ public:
         if(!initialized)throw std::runtime_error("glslang initialization failed");
         glslang_input_t input{};
         input.language=GLSLANG_SOURCE_GLSL;input.stage=stage;
-        const bool quad=source.find("subgroupQuadBroadcast")!=std::string::npos || source.find("GL_EXT_multiview")!=std::string::npos;
         input.client=GLSLANG_CLIENT_VULKAN;input.client_version=quad?GLSLANG_TARGET_VULKAN_1_1:GLSLANG_TARGET_VULKAN_1_0;
         input.target_language=GLSLANG_TARGET_SPV;input.target_language_version=quad?GLSLANG_TARGET_SPV_1_3:GLSLANG_TARGET_SPV_1_0;
         input.code=source.c_str();input.default_version=450;input.default_profile=GLSLANG_NO_PROFILE;

@@ -8,6 +8,7 @@ from .rsx_vk_sampled import MEMBERS as SAMPLED_MEMBERS
 from .rsx_vk_readback import MEMBERS as READBACK_MEMBERS
 from .rsx_vk_upload import MEMBERS as UPLOAD_MEMBERS
 from .rsx_vk_texture_decode import MEMBERS as DECODE_MEMBERS
+from .rsx_vk_blit import MEMBERS as BLIT_MEMBERS
 
 MEMBERS = r'''
 #ifdef ANYPS3_RSX_VK
@@ -672,7 +673,7 @@ public:
         graphics_begin(b);const auto at=graphics_space(b,bytes);std::memset(static_cast<char*>(b.map)+at,0,bytes);std::memcpy(static_cast<char*>(b.map)+at,data,size);b.upload_bytes+=bytes;
         graphics_barrier(b);VkBufferCopy copy{at,0,bytes};vkCmdCopyBuffer(b.command,b.buffer,result->buffer,1,&copy);graphics_barrier(b);b.buffer_pins.push_back(result);return result;
     }
-''' + READBACK_MEMBERS + UPLOAD_MEMBERS + DECODE_MEMBERS + r'''
+''' + READBACK_MEMBERS + UPLOAD_MEMBERS + DECODE_MEMBERS + BLIT_MEMBERS + r'''
     // Images stay GENERAL, allowing explicit cross-draw transfer barriers.
     // Would graphics_space(b, bytes) (graphics_transfer of that size) succeed now? (Same alignment and bounds; no state change.)
     bool graphics_space_fits(const GraphicsBatch& b,std::uint64_t bytes)const{

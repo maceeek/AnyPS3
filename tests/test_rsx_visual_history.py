@@ -14,6 +14,63 @@ from tests.test_rsx_graphics import native_source
 from tests.test_rsx_vk import LIBRARIES
 
 MAIN = r'''
+static void geometry_cache(){
+ const bool structural=std::strcmp(std::getenv("ANYPS3_RSX_HISTORY_GEOMETRY_CACHE"),"0")!=0;
+ setenv("ANYPS3_RENDER_SCALE","2",1);
+ PpuState s;setup_draw(s,128,128,512,false);NativeVulkan vk;rsxgraphics::Session session(vk,s);
+ rsxgraphics::Surface a{},c{};a.width=c.width=128;a.height=c.height=128;a.samples=c.samples=1;
+ a.format=c.format=8;a.target.bpp=c.target.bpp=4;a.target.pitch=c.target.pitch=512;
+ a.image=vk.graphics_image(*session.batch,VK_FORMAT_R8G8B8A8_UNORM,128,128,1);c.image=a.image;
+ a.readback=std::make_shared<rsxgraphics::Surface::ReadbackPlan>();c.readback=std::make_shared<rsxgraphics::Surface::ReadbackPlan>();
+ for(unsigned i=0;i<16384;++i){a.readback->words.push_back(i*4);c.readback->words.push_back(i*4);}
+ using Pair=rsxgraphics::Session::VisualHistoryPair;
+ // Fixed FNV32 collision, both ranges wholly inside the tables. Hash equality is not pair equality.
+ const std::vector<Pair> p{{34136,39020,336}},q{{26564,27964,828}};
+ assert(session.visual_history_key(a,c,p)==session.visual_history_key(a,c,q));
+ auto original=session.visual_history_plan(a,c,VK_FORMAT_R8G8B8A8_UNORM,p);assert(original.texels==84);
+ auto collision=session.visual_history_plan(a,c,VK_FORMAT_R8G8B8A8_UNORM,q);assert(collision.texels==207 && collision.regions!=original.regions);
+ const auto hits=session.visual_history_structural_hits;
+ a.readback=std::make_shared<rsxgraphics::Surface::ReadbackPlan>(*a.readback);
+ c.readback=std::make_shared<rsxgraphics::Surface::ReadbackPlan>(*c.readback);
+ auto reused=session.visual_history_plan(a,c,VK_FORMAT_R8G8B8A8_UNORM,p);
+ assert((reused.regions==original.regions)==structural && session.visual_history_structural_hits==hits+unsigned(structural));
+ assert(reused.texels==original.texels);
+ // A new immutable word permutation with identical dimensions/pairs must not reuse stale coordinates.
+ auto changed=std::make_shared<rsxgraphics::Surface::ReadbackPlan>(*a.readback);
+ std::swap(changed->words[34136/4],changed->words[34136/4+1]);a.readback=std::move(changed);
+ const auto misses=session.visual_history_plan_misses;
+ auto mapped=session.visual_history_plan(a,c,VK_FORMAT_R8G8B8A8_UNORM,p);assert(session.visual_history_plan_misses==misses+1);
+ auto source_at=[](const rsxgraphics::Session::VisualHistoryUse& use,unsigned x,unsigned y){
+  for(const auto& r:*use.regions)if(r.dstSubresource.baseArrayLayer==0 && x>=unsigned(r.dstOffset.x) && y>=unsigned(r.dstOffset.y) &&
+     x<unsigned(r.dstOffset.x)+r.extent.width && y<unsigned(r.dstOffset.y)+r.extent.height)
+   return unsigned(r.srcOffset.y+y-r.dstOffset.y)*128+unsigned(r.srcOffset.x+x-r.dstOffset.x);
+  throw std::runtime_error("missing requested history texel");};
+ assert(source_at(original,(39020/4)%128,(39020/4)/128)==34136/4);
+ assert(source_at(mapped,(39020/4)%128,(39020/4)/128)==34136/4+1);
+ // Cold row coalescing must be independent of physical-range traversal order.
+ a.readback=std::make_shared<rsxgraphics::Surface::ReadbackPlan>(*c.readback);
+ for(unsigned order=0;order<4;++order){
+  std::vector<Pair> rows;
+  for(unsigned i=0;i<128;++i){const unsigned y=order==1?(i%64)*2+i/64:order==2?127-i:i;
+   rows.push_back({(order==3?127-y:y)*512,y*512,512});}
+  auto layout=session.visual_history_plan(a,c,VK_FORMAT_R8G8B8A8_UNORM,rows);
+  assert(layout.complete && layout.texels==16384 && layout.regions);
+  assert(layout.regions->size()==(order==3?128u:1u));
+  for(unsigned y=0;y<128;++y)for(unsigned x=0;x<128;++x)
+   assert(source_at(layout,x,y)==(order==3?127-y:y)*128+x);
+ }
+ for(unsigned i=0;i<70;++i){session.visual_history_plan(a,c,VK_FORMAT_R8G8B8A8_UNORM,{{i*4,i*4,4}});assert(session.visual_history_plans.size()<=64);}
+ // Large tables force the byte bound before the entry bound; old returned regions stay usable after eviction.
+ a.width=c.width=a.height=c.height=1024;a.target.pitch=c.target.pitch=4096;
+ a.image=vk.graphics_image(*session.batch,VK_FORMAT_R8G8B8A8_UNORM,1024,1024,1);c.image=a.image;
+ a.readback=std::make_shared<rsxgraphics::Surface::ReadbackPlan>();c.readback=std::make_shared<rsxgraphics::Surface::ReadbackPlan>();
+ for(unsigned i=0;i<1024*1024;++i){a.readback->words.push_back(i*4);c.readback->words.push_back(i*4);}
+ for(unsigned i=0;i<10;++i){session.visual_history_plan(a,c,VK_FORMAT_R8G8B8A8_UNORM,{{i*4,i*4,4}});
+  assert(session.visual_history_plan_bytes<=64u*1024*1024 && session.visual_history_plans.size()<=64);}
+ assert((!structural || session.visual_history_plans.size()<10) && original.texels==84 && original.regions && !original.regions->empty());
+ vk.graphics_finish(*session.batch);unsetenv("ANYPS3_RENDER_SCALE");
+ std::puts("PASS history exact pairs, recreated geometry, changed words, retained regions and bounded storage");
+}
 struct Layout {unsigned offset,pitch,width,height,samples;};
 // Guest byte address of native texel (layer,row,col) of a 4-byte surface.
 static unsigned texel_address(const Layout& l,unsigned layer,unsigned row,unsigned col){
@@ -72,6 +129,16 @@ static void history(const char* name,Layout a,Layout c,const char* expected_path
 }
 // D24S8 sampled as ARGB8 (typeless depth) at scale 2: each converted visual
 // texel decodes its own depth/stencil subpixel, not the nearest native texel.
+// SPIR-V OpFDiv permits 2.5 ULP for this normal denominator (255).
+// https://docs.vulkan.org/spec/latest/appendices/spirvenv.html#spirvenv-precision-operation
+// Compare to double-precision byte/255, using the smaller adjacent float spacing.
+// Native/visual byte-copy history oracles above remain bit-exact.
+static bool normalized_byte(float actual,unsigned byte){
+ const double exact=double(byte)/255.0;const float rounded=float(exact);
+ const double ulp=std::min(double(std::nextafter(rounded,INFINITY))-rounded,
+                           double(rounded)-std::nextafter(rounded,-INFINITY));
+ return std::isfinite(actual) && std::abs(double(actual)-exact)<=2.5*ulp;
+}
 static void typeless_depth(unsigned samples){
  setenv("ANYPS3_RENDER_SCALE","2",1);
  PpuState s;setup_draw(s,8,8,8*samples*4,false);auto& r=s.rsx.registers;
@@ -94,8 +161,8 @@ static void typeless_depth(unsigned samples){
   // Guest pixel x/2 of the level is surface texel (x/2)/samples, plane (x/2)%samples.
   const unsigned gx=x/2,plane=gx%samples,i=(plane*vh+(y/2)*2+y%2)*vw+(gx/samples)*2+x%2;
   const std::uint32_t v=((words[i]&0xffffffu)<<8)|stencil[i];
-  const float expected[4]={float((v>>16)&255)/255.f,float((v>>8)&255)/255.f,float(v&255)/255.f,float(v>>24)/255.f};
-  for(unsigned c=0;c<4;++c)if(pixels[(y*cw+x)*4+c]!=expected[c]){std::fprintf(stderr,"typeless samples=%u x=%u y=%u c=%u actual=%f expected=%f\n",samples,x,y,c,pixels[(y*cw+x)*4+c],expected[c]);throw std::runtime_error("typeless depth visual mismatch");}
+  const unsigned expected[4]={(v>>16)&255,(v>>8)&255,v&255,v>>24};
+  for(unsigned c=0;c<4;++c)if(!normalized_byte(pixels[(y*cw+x)*4+c],expected[c])){std::fprintf(stderr,"typeless samples=%u x=%u y=%u c=%u actual=%a expected=%a\n",samples,x,y,c,pixels[(y*cw+x)*4+c],double(expected[c])/255.0);throw std::runtime_error("typeless depth visual mismatch");}
  }
  session.flush(false);s.rsx.graphics_session=nullptr;unsetenv("ANYPS3_RENDER_SCALE");
  std::printf("PASS history typeless-depth samples=%u visual depth/stencil subpixels decoded\n",samples);
@@ -103,7 +170,9 @@ static void typeless_depth(unsigned samples){
 int main(){try{
  // Fallback statistics latch on first use; enable them before any session.
  setvbuf(stdout,nullptr,_IONBF,0);setenv("ANYPS3_RSX_FALLBACK_STATS","1",1);
- typeless_depth(1);typeless_depth(2);
+ for(unsigned byte=0;byte<256;++byte){assert(normalized_byte(float(byte)/255.f,byte));
+  assert(!normalized_byte(float((byte+1)%256)/255.f,byte));assert(!normalized_byte(NAN,byte));}
+ geometry_cache();typeless_depth(1);typeless_depth(2);
  history("equal-footprint",{0x100000,64,16,4,1},{0x100000,32,8,8,1},"surface_equal_rebind_gpu",true);
  history("equal-footprint-msaa2",{0x100000,64,8,4,2},{0x100000,32,4,8,2},"surface_equal_rebind_gpu",true);
  history("merge-rows",{0x100000,32,8,8,1},{0x100080,32,8,8,1},"surface_alias_merge_gpu",false);
@@ -131,13 +200,18 @@ class VisualHistoryTests(unittest.TestCase):
             env.pop('ANYPS3_AUDIO_AUDIBLE', None)
             if not env.get('ANYPS3_REQUIRE_NVIDIA') and not env.get('VK_DRIVER_FILES') and not env.get('VK_ICD_FILENAMES'):
                 env.update(ANYPS3_VK_DEVICE='lavapipe', VK_DRIVER_FILES='/usr/share/vulkan/icd.d/lvp_icd.json')
-            result = subprocess.run([str(root/'test')], capture_output=True, text=True, env=env, timeout=300)
-            output = result.stdout+result.stderr
-            self.assertEqual(result.returncode, 0, output)
-            self.assertNotIn('Validation Error', output)
-            self.assertNotIn('Validation Warning', output)
-            self.assertEqual(result.stdout.count('PASS history'), 9, output)
-            print(result.stdout, flush=True)
+            for mode, compact in (('1','1'), ('0','1'), ('1','0'), ('0','0')):
+                with self.subTest(geometry_cache=mode, compact_runs=compact):
+                    env['ANYPS3_RSX_HISTORY_GEOMETRY_CACHE'] = mode
+                    env['ANYPS3_RSX_HISTORY_COMPACT_RUNS'] = compact
+                    result = subprocess.run([str(root/'test')], capture_output=True, text=True, env=env, timeout=300)
+                    output = result.stdout+result.stderr
+                    self.assertEqual(result.returncode, 0, output)
+                    self.assertNotIn('Validation Error', output)
+                    self.assertNotIn('Validation Warning', output)
+                    self.assertEqual(result.stdout.count('PASS history'), 10, output)
+                    print(result.stdout, flush=True)
+
 
 
 if __name__ == '__main__':

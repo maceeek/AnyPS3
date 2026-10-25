@@ -138,14 +138,14 @@ private:
             std::to_string(GLSLANG_VERSION_MINOR)+"."+std::to_string(GLSLANG_VERSION_PATCH)+GLSLANG_VERSION_FLAVOR+":"+
             std::to_string(stage)+":"+std::to_string(optimize)+":"+source;
     }
-    std::vector<unsigned> load_spirv(const std::string& key){
+    std::vector<unsigned> load_spirv(const std::string& key,unsigned expected_version){
         if(vk_cache_root.empty())return {};
         auto blob=cache_read(vk_cache_root/("spv-"+cache_hex(cache_hash(key.data(),key.size()))+".bin"));if(blob.empty())return {};
         const auto at=sizeof(std::uint64_t)+key.size();std::uint64_t key_size=0;
         if(blob.size()>=8)std::memcpy(&key_size,blob.data(),8);
         if(key_size!=key.size() || blob.size()<at+20 || (blob.size()-at)%4 || std::memcmp(blob.data()+8,key.data(),key.size())){++compile_stats.cache_rejected;return {};}
         std::vector<unsigned> code((blob.size()-at)/4);std::memcpy(code.data(),blob.data()+at,code.size()*4);
-        if(code[0]!=0x07230203u || code[1]!=0x00010000u || !code[3] || code[4]){++compile_stats.cache_rejected;return {};}
+        if(code[0]!=0x07230203u || code[1]!=expected_version || !code[3] || code[4]){++compile_stats.cache_rejected;return {};}
         return code;
     }
     void save_spirv(const std::string& key,const std::vector<unsigned>& code){
