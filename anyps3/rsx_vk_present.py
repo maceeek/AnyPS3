@@ -44,7 +44,7 @@ private:
             unsigned n=0;if(!extensions(window,&n,nullptr))fail("instance extensions");
             std::vector<const char*> names(n);if(!extensions(window,&n,names.data()))fail("instance extensions");return names;
         }
-        void poll(){vk.graphics_host->invoke([&]{poll_host();});}
+        void poll(){VkCallTimer t(VcHostPoll);vk.graphics_host->invoke([&]{poll_host();});}
         void poll_host(){
             pump();alignas(void*) unsigned char event[128]{};int count;
             for(unsigned type:{0x100u,0x200u}){

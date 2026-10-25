@@ -251,7 +251,7 @@ public:
         if(!enabled)return;
         if(!force && elapsed_ns(compile_printed_at)<UINT64_C(2000000000))return;
         compile_printed_at=std::chrono::steady_clock::now();save_pipeline_cache();const auto& c=compile_stats;
-        print_resource_stats();
+        print_resource_stats();vk_call_print();
         std::fprintf(stderr,"RSX VK COMPILE STATS phase=%s modules=%llu module_hits=%llu graphics_pipelines=%llu compute_pipelines=%llu spirv_compiles=%llu spirv_disk_hits=%llu spirv_disk_misses=%llu graphics_hits=%llu graphics_misses=%llu compute_hits=%llu compute_misses=%llu miss_cold=%llu miss_shader=%llu miss_fixed_state=%llu module_ms=%.3f pipeline_ms=%.3f glslang_ms=%.3f pipeline_cache_load_bytes=%llu pipeline_cache_saves=%llu cache_driver_size_fixups=%llu cache_rejected=%llu cache_io_errors=%llu miss_vs=%llu miss_fs=%llu miss_targets=%llu miss_blend=%llu miss_depth_stencil=%llu miss_raster=%llu pipeline_evictions=%llu module_evictions=%llu compute_evictions=%llu pipeline_cache_rotations=%llu live_pipeline_cache=%zu live_compute_cache=%zu live_module_cache=%zu live_identities=%zu spirv_cache_items=0 spirv_cache_bytes=0\n",
             force?"final":"periodic",(unsigned long long)c.shader_modules,(unsigned long long)c.shader_module_hits,(unsigned long long)c.graphics_pipelines,(unsigned long long)c.compute_pipelines,(unsigned long long)c.spirv_compiles,
             (unsigned long long)c.spirv_disk_hits,(unsigned long long)c.spirv_disk_misses,(unsigned long long)c.graphics_hits,(unsigned long long)c.graphics_misses,(unsigned long long)c.compute_hits,(unsigned long long)c.compute_misses,

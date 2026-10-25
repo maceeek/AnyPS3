@@ -45,7 +45,7 @@ public:
         const bool quad=source.find("subgroupQuadBroadcast")!=std::string::npos || source.find("GL_EXT_multiview")!=std::string::npos;
         const auto cache_key=spirv_key(source,stage,optimize);
         if(auto code=load_spirv(cache_key,quad?0x00010300u:0x00010000u);!code.empty()){++compile_stats.spirv_disk_hits;return code;}
-        ++compile_stats.spirv_disk_misses;
+        ++compile_stats.spirv_disk_misses;VkCallTimer glslang_timer(VcGlslang,source.size());
         const auto compile_start=std::chrono::steady_clock::now();++compile_stats.spirv_compiles;
         // glslang has process-wide state. Serialize initialization and compiler use.
         static std::mutex compiler_mutex;

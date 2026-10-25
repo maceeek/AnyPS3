@@ -823,6 +823,9 @@ public:
         [[noreturn]] void rethrow(){std::exception_ptr e;{std::lock_guard<std::mutex> lock(mutex);e=error;}std::rethrow_exception(e);}
         void run(){
             in_recorder_thread()=true;::pthread_setname_np(::pthread_self(),"rsx-record");
+            // ANYPS3_SAMPLE_PROFILE with role rsx also samples this thread (its driver/recording cost is RSX work).
+            std::unique_ptr<anyps3_sample::Thread> sample_profile;
+            if(anyps3_sample::config().selected(anyps3_sample::Role::Rsx))sample_profile=std::make_unique<anyps3_sample::Thread>(anyps3_sample::Role::Rsx);
             for(;;){
                 const auto c=consumed.load(std::memory_order_relaxed);
                 if(produced.load(std::memory_order_acquire)>c){
