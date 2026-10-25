@@ -587,7 +587,8 @@ struct Session {
     // reused until its exact timeline value completed and results retired.
     // ANYPS3_RSX_FLIGHTS (1..8, default 2) bounds the submitted, unretired arenas.
     static unsigned rsx_flight_limit(){static const unsigned value=[]{const char* v=std::getenv("ANYPS3_RSX_FLIGHTS");if(!v)return 2u;
-            if(v[0]<'1' || v[0]>'8' || v[1])throw std::runtime_error("ANYPS3_RSX_FLIGHTS must be an integer from 1 to 8");return unsigned(v[0]-'0');}();
+            if(v[0]<'1' || v[0]>'8' || v[1])throw std::runtime_error("ANYPS3_RSX_FLIGHTS must be an integer from 1 to 8");
+            return unsigned(v[0]-'0');}();
         return value;}
     const unsigned flight_limit=rsx_flight_limit();
     std::deque<Flight> flights;
@@ -942,14 +943,6 @@ struct Session {
     struct SurfaceImage {std::shared_ptr<NativeVulkan::GraphicsImage> image;std::uint64_t use;};
     std::vector<SurfaceImage> surface_images;
     std::uint64_t surface_image_bytes=0,surface_image_hits=0,surface_image_misses=0;
-    static void release_idle_framebuffers(NativeVulkan::GraphicsBatch& b,const std::shared_ptr<NativeVulkan::GraphicsImage>& image){
-        b.sync();   // framebuffers are recorder-owned
-        for(auto it=b.framebuffers.begin();it!=b.framebuffers.end();){
-            const auto& fb=it->second;
-            if(fb.use_count()==1 && std::find(fb->images.begin(),fb->images.end(),image)!=fb->images.end())it=b.framebuffers.erase(it);
-            else ++it;
-        }
-    }
     std::shared_ptr<NativeVulkan::GraphicsImage> surface_image(VkFormat f,unsigned w,unsigned h,unsigned layers,bool depth=false){
         for(auto& e:surface_images){const auto& i=e.image;
             if(i->format!=f || i->width!=w || i->height!=h || i->layers!=layers || i->depth!=depth)continue;
@@ -958,12 +951,8 @@ struct Session {
             if(active)continue;
             for(const auto& surface:surfaces)if(surface.image==i){active=true;break;}
             if(active)continue;
-            // Framebuffer caches own handles, not pixel contents. Drop only
-            // idle cache entries; command-buffer pins, RTT views and active
-            // surfaces must still retain the image and prevent its reuse.
-            release_idle_framebuffers(*batch,i);
-            for(auto& spare:spare_batches)release_idle_framebuffers(*spare,i);
-            for(auto& flight:flights)release_idle_framebuffers(*flight.batch,i);
+            // The framebuffer cache holds images weakly (handles, not pixel contents); command-buffer pins, RTT views
+            // and active surfaces still retain the image and prevent its reuse.
             if(i.use_count()!=1)continue;
             e.use=++resource_clock;batch->pins.push_back(i);++surface_image_hits;return i;
         }

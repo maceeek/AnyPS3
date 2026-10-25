@@ -172,7 +172,11 @@ public:
         bool dynamic_valid=false;
         std::array<unsigned,22> dynamic_state{};
         std::uint64_t dynamic_emits=0,dynamic_reuses=0,pipeline_binds=0;
-        struct Framebuffer {NativeVulkan* owner;VkFramebuffer handle;std::uint64_t last_use=0;std::vector<std::shared_ptr<GraphicsImage>> images;std::shared_ptr<GraphicsPipeline> pipeline;
+        // Cached in NativeVulkan::graphics_framebuffers (device-wide). The images are weak: an entry never keeps an
+        // image alive (a batch pins the attachments it records), and it matches only while all of them are alive,
+        // because only then can no other view carry the keyed handles.
+        struct Framebuffer {NativeVulkan* owner;VkFramebuffer handle;std::uint64_t last_use=0;std::vector<std::weak_ptr<GraphicsImage>> images;std::shared_ptr<GraphicsPipeline> pipeline;
+            bool live()const{for(const auto& image:images)if(image.expired())return false;return true;}
             ~Framebuffer(){if(handle)vkDestroyFramebuffer(owner->device,handle,nullptr);}};
         struct FramebufferHash {
             std::size_t operator()(const std::array<std::uint64_t,10>& key)const{
@@ -180,7 +184,6 @@ public:
                 h^=h>>30;h*=UINT64_C(0xbf58476d1ce4e5b9);return h^(h>>27);
             }
         };
-        std::unordered_map<std::array<std::uint64_t,10>,std::shared_ptr<Framebuffer>,FramebufferHash> framebuffers;
         GraphicsPins<Framebuffer> framebuffer_pins;
         GraphicsPins<GraphicsPipeline> pipeline_pins;
         std::uint64_t framebuffer_hits=0,framebuffer_misses=0;
@@ -203,7 +206,7 @@ public:
             // the submission itself, independently of profiling, and cleared by graphics_reset after retirement.
             if(upload_wait && owner->graphics_upload_timeline){VkSemaphoreWaitInfo wi{};wi.sType=VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;wi.semaphoreCount=1;wi.pSemaphores=&owner->graphics_upload_timeline;wi.pValues=&upload_wait;
                 vkWaitSemaphores(owner->device,&wi,UINT64_MAX);}
-            framebuffer_pins.clear();framebuffers.clear();pipeline_pins.clear();
+            framebuffer_pins.clear();pipeline_pins.clear();
             if(busy_queries)vkDestroyQueryPool(owner->device,busy_queries,nullptr);
             if(occlusion)vkDestroyQueryPool(owner->device,occlusion,nullptr);
             if(queries)vkDestroyQueryPool(owner->device,queries,nullptr);
@@ -246,6 +249,11 @@ private:
     std::map<std::string,std::shared_ptr<GraphicsPipeline>> graphics_pipelines;
     std::weak_ptr<GraphicsPipeline> last_pipeline_diagnostic;
     std::unordered_map<std::array<std::uint64_t,34>,std::weak_ptr<GraphicsPipeline>,GraphicsKeyHash<34>> graphics_pipeline_fast;
+    // Device-wide framebuffer cache (recording thread only: the draw recorder, or the owner after GraphicsBatch::sync).
+    std::unordered_map<std::array<std::uint64_t,10>,std::shared_ptr<typename GraphicsBatch::Framebuffer>,typename GraphicsBatch::FramebufferHash> graphics_framebuffers;
+public:
+    std::size_t graphics_framebuffer_cache_size()const{return graphics_framebuffers.size();}
+private:
     struct GraphicsShader {std::uint64_t last_use=0;VkDevice device;VkShaderModule module=VK_NULL_HANDLE;~GraphicsShader(){if(module)vkDestroyShaderModule(device,module,nullptr);}};
     std::map<std::string,std::shared_ptr<GraphicsShader>> graphics_shaders;
     VkSampler graphics_sampler=VK_NULL_HANDLE;
@@ -1006,15 +1014,18 @@ public:
             // All generated passes have one graphics subpass and identical
             // load/store/layout policy. Attachment formats/count define exact
             // render-pass compatibility; blend/shader variants share the FB.
-            std::array<std::uint64_t,10> framebuffer_key{};framebuffer_key[0]=s.colors;framebuffer_key[1]=s.color;framebuffer_key[2]=s.depth;framebuffer_key[3]=raster_width;framebuffer_key[4]=raster_height;
+            std::array<std::uint64_t,10> framebuffer_key{};framebuffer_key[0]=s.colors|(std::uint64_t(fi.layers)<<32);framebuffer_key[1]=s.color;framebuffer_key[2]=s.depth;framebuffer_key[3]=raster_width;framebuffer_key[4]=raster_height;
             for(unsigned i=0;i<view_count;++i)framebuffer_key[5+i]=reinterpret_cast<std::uint64_t>(views[i]);
-            auto found=b.framebuffers.find(framebuffer_key);
-            if(found!=b.framebuffers.end()){framebuffer=found->second->handle;found->second->last_use=++recorder_clock;b.framebuffer_pins.push_back(found->second);++b.framebuffer_hits;}
+            auto found=graphics_framebuffers.find(framebuffer_key);
+            if(found!=graphics_framebuffers.end() && !found->second->live()){graphics_framebuffers.erase(found);found=graphics_framebuffers.end();}
+            if(found!=graphics_framebuffers.end()){framebuffer=found->second->handle;found->second->last_use=++recorder_clock;b.framebuffer_pins.push_back(found->second);++b.framebuffer_hits;}
             else{check(vkCreateFramebuffer(device,&fi,nullptr,&framebuffer),"graphics framebuffer");auto entry=std::make_shared<typename GraphicsBatch::Framebuffer>();entry->owner=this;entry->handle=framebuffer;entry->last_use=++recorder_clock;entry->pipeline=j.pipeline;
                 for(unsigned i=0;i<s.colors;++i)entry->images.push_back(colors[i]);
                 if(depth)entry->images.push_back(depth);
-                if(b.framebuffers.size()>=framebuffer_limit)b.framebuffers.erase(lru_entry(b.framebuffers));
-                b.framebuffer_pins.push_back(entry);b.framebuffers.emplace(std::move(framebuffer_key),std::move(entry));++b.framebuffer_misses;::RsxPerfCounters::add(::RsxPerfCounters::framebuffer_misses);}
+                if(graphics_framebuffers.size()>=framebuffer_limit){
+                    for(auto it=graphics_framebuffers.begin();it!=graphics_framebuffers.end();){if(!it->second->live())it=graphics_framebuffers.erase(it);else ++it;}
+                    if(graphics_framebuffers.size()>=framebuffer_limit)graphics_framebuffers.erase(lru_entry(graphics_framebuffers));}
+                b.framebuffer_pins.push_back(entry);graphics_framebuffers.emplace(std::move(framebuffer_key),std::move(entry));++b.framebuffer_misses;::RsxPerfCounters::add(::RsxPerfCounters::framebuffer_misses);}
             VkRenderPassBeginInfo pass{};pass.sType=VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;pass.renderPass=p.pass;pass.framebuffer=framebuffer;pass.renderArea={{0,0},{raster_width,raster_height}};
             // Push constants: sample location P is evaluated by moving the
             // geometry by .5-P. Do not translate the viewport: negative viewport

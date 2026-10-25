@@ -46,7 +46,8 @@ private:
     unsigned graphics_pipeline_limit=cache_limit("ANYPS3_RSX_PIPELINE_LIMIT",1024);
     unsigned compute_pipeline_limit=cache_limit("ANYPS3_RSX_COMPUTE_LIMIT",64);
     unsigned shader_module_limit=cache_limit("ANYPS3_RSX_MODULE_LIMIT",1024);
-    unsigned framebuffer_limit=cache_limit("ANYPS3_RSX_FRAMEBUFFER_LIMIT",64);
+    // One device-wide framebuffer cache of handles (weak image references) for all arenas.
+    unsigned framebuffer_limit=cache_limit("ANYPS3_RSX_FRAMEBUFFER_LIMIT",256);
     unsigned identity_limit=cache_limit("ANYPS3_RSX_IDENTITY_LIMIT",2048);
     template<class Map> static auto lru_entry(Map& entries){
         return std::min_element(entries.begin(),entries.end(),[](const auto& a,const auto& b){return a.second->last_use<b.second->last_use;});

@@ -75,7 +75,33 @@ static void paired_slice_oracle(){
  run(0,2,&error);assert(error.find("paired shader failed status=2")!=std::string::npos);
  std::puts("PASS paired native/visual slice: one slice, both images exact, visual-only and native-only failures stop at collection");
 }
-int main(){try{canonical_owner_oracle();paired_slice_oracle();}catch(const std::exception& e){std::fprintf(stderr,"SUBMIT TEST STOP %s\n",e.what());return 1;}}
+static void framebuffer_cache_oracle(){
+ NativeVulkan vk;
+ NativeVulkan::GraphicsState s{};s.width=s.height=4;s.samples=1;s.colors=1;s.color=VK_FORMAT_R8G8B8A8_UNORM;s.scissor={{0,0},{4,4}};s.blend[0].colorWriteMask=15;
+ const std::string vs="#version 450\nvoid main(){vec2 p=vec2((gl_VertexIndex<<1)&2,gl_VertexIndex&2);gl_Position=vec4(p*2-1,0,1);}\n";
+ const std::string fs="#version 450\nlayout(std430,binding=0) buffer Data{uint w[];};layout(location=0) out vec4 c;void main(){c=vec4(float(w[0])/255.,0,0,1);}\n";
+ std::array<std::array<float,2>,4> positions{{{.5f,.5f},{0,0},{0,0},{0,0}}};
+ auto draw=[&](NativeVulkan::GraphicsBatch& b,const std::shared_ptr<NativeVulkan::GraphicsImage>& image,unsigned red){
+  std::array<std::shared_ptr<NativeVulkan::GraphicsImage>,4> images{image};std::vector<unsigned> data(16);data[0]=red;
+  vk.graphics_draw(b,s,images,{},vs,fs,data,3,positions);};
+ auto check=[&](NativeVulkan::GraphicsBatch& b,std::uint64_t at,unsigned red){for(unsigned n=0;n<16;++n){unsigned v=0;std::memcpy(&v,static_cast<const char*>(b.map)+at+4*n,4);assert(v==(0xff000000u|red));}};
+ auto b1=vk.graphics_batch(4*1024*1024),b2=vk.graphics_batch(4*1024*1024);
+ auto image=vk.graphics_image(*b1,s.color,4,4,1);
+ const auto created=::RsxPerfCounters::values[::RsxPerfCounters::vk_framebuffers].load();
+ draw(*b1,image,0x11);auto at=vk.graphics_transfer(*b1,image,VK_IMAGE_ASPECT_COLOR_BIT,4);vk.graphics_finish(*b1);check(*b1,at,0x11);
+ // Another arena reuses the device-wide handle.
+ draw(*b2,image,0x22);at=vk.graphics_transfer(*b2,image,VK_IMAGE_ASPECT_COLOR_BIT,4);vk.graphics_finish(*b2);check(*b2,at,0x22);
+ assert(::RsxPerfCounters::values[::RsxPerfCounters::vk_framebuffers].load()==created+1 && b2->framebuffer_hits==1 && b2->framebuffer_misses==0);
+ vk.graphics_reset(*b1);vk.graphics_reset(*b2);
+ // The cache does not own the image: only this test holds it after retirement.
+ assert(image.use_count()==1 && vk.graphics_framebuffer_cache_size()==1);
+ // A dead image's entry never matches again, even when a new image's view handles repeat.
+ image.reset();
+ for(unsigned i=0;i<4;++i){auto fresh=vk.graphics_image(*b1,s.color,4,4,1);draw(*b1,fresh,0x30+i);at=vk.graphics_transfer(*b1,fresh,VK_IMAGE_ASPECT_COLOR_BIT,4);vk.graphics_finish(*b1);check(*b1,at,0x30+i);vk.graphics_reset(*b1);}
+ assert(::RsxPerfCounters::values[::RsxPerfCounters::vk_framebuffers].load()==created+5);
+ std::printf("PASS device-wide framebuffer cache: cross-arena hit, weak image ownership, dead-image entries never reused (%zu cached)\n",vk.graphics_framebuffer_cache_size());
+}
+int main(){try{canonical_owner_oracle();paired_slice_oracle();framebuffer_cache_oracle();}catch(const std::exception& e){std::fprintf(stderr,"SUBMIT TEST STOP %s\n",e.what());return 1;}}
 '''
 
 
@@ -94,6 +120,7 @@ class RsxVkSubmitTests(unittest.TestCase):
             self.assertEqual(run.returncode, 0, run.stdout + run.stderr[-4000:])
             self.assertIn('PASS canonical shader owners', run.stdout)
             self.assertIn('PASS paired native/visual slice', run.stdout)
+            self.assertIn('PASS device-wide framebuffer cache', run.stdout)
 
 
 if __name__ == '__main__':
