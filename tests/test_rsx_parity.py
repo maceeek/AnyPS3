@@ -163,7 +163,7 @@ def native_source():
     fragment = COMPUTE_MAIN.split('static void fragment_tests(){')[1].split('static void invalid_coordinates(){')[0]
     fragment = 'static void fragment_tests(){' + fragment
     feedback = 'static void graphics_vertex_feedback_fallback(){' + graphics.split('static void graphics_vertex_feedback_fallback(){')[1].split('static void graphics_dynamic_constants(){')[0]
-    return source + fragment + feedback + MAIN.replace('state_parity();format_parity();', 'fragment_tests();graphics_vertex_feedback_fallback();graphics_fragment_feedback_fallback();state_parity();format_parity();')
+    return source + fragment + feedback + MAIN.replace('state_parity();format_parity();', 'fragment_tests();graphics_vertex_feedback_fallback();graphics_fragment_feedback_snapshot();graphics_fragment_feedback_resident();state_parity();format_parity();')
 
 
 @unittest.skipUnless(shutil.which('c++') and Path('/usr/include/glslang/Include/glslang_c_interface.h').exists(), 'Requires Vulkan/glslang')
@@ -183,5 +183,7 @@ class GraphicsParityTests(unittest.TestCase):
             self.assertNotIn('Validation Warning', run.stdout + run.stderr)
             self.assertIn('RSX FALLBACK STATS phase=final', run.stderr)
             self.assertIn('RSX FALLBACK STATS phase=periodic draws=7', run.stderr)
-            self.assertIn('sequential_color_texture_feedback=1', run.stderr)
+            self.assertNotIn('sequential_color_texture_feedback', run.stderr)
+            self.assertIn('path_texture_feedback_snapshot=', run.stderr)
+            self.assertIn('path_texture_feedback_image_copy=1', run.stderr)
             self.assertIn('sequential_vertex_feedback_or_unmapped_input=1', run.stderr)

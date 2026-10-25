@@ -1676,33 +1676,39 @@ template<class Vertex> static bool prepared(Session& session,const std::vector<s
         depth=Target{};alias=false;attempt.path("neutral_depth_alias");}
     for(unsigned i=0;i<count;++i){if(!certified_target(colors[i],width*nx,height*ny))return attempt.reject("color_storage_alias");
         for(unsigned j=0;j<i;++j)if(target_overlaps(colors[i],colors[j],width*nx,height*ny)){if(!depth.base)return attempt.reject("mrt_alias");alias=true;}}
-    // Contiguous unsnapshotted texture feedback is sequential in the CPU
-    // reference. Keep that order until the reference adopts a shared snapshot
-    // model; a GPU snapshot must not silently change inter-primitive reads.
     // The compute alias rasterizer has no 0x1d7c coverage/alpha-to-one or null texture model.
     if(alias && r.get(0x1d7c,0xffff0000)!=0xffff0000)return attempt.reject("alias_multisample_control");
+    // Fragment textures whose bytes alias a color target sample a pre-draw
+    // snapshot (the CPU reference copies the same bytes in rsx_execute_draw):
+    // the RSX texture cache is not coherent with ROP writes inside a draw, and
+    // RPCS3 ffba2bf0 samples a bound target through a pre-draw copy
+    // (texture_cache_helpers.h:750-779). A guest-byte upload is already such a
+    // copy; an image that this draw writes is copied below. Depth feedback
+    // keeps its CPU reference until a GPU depth snapshot is proven.
+    bool color_feedback=false;
+    for(const auto& texture:supplied_textures)if(texture.valid && !texture.untiled && !(texture.plan && texture.plan->gathered)){
+        if(target_overlaps(depth,texture.storage,texture.storage_size,width*nx,height*ny))return attempt.reject("sequential_depth_texture_feedback");
+        for(unsigned i=0;i<count;++i)if(target_overlaps(colors[i],texture.storage,texture.storage_size,width*nx,height*ny))color_feedback=true;
+    }
     // The 16-texture array is copied only where this draw can edit it: the attachment-alias path (materialize /
-    // re-decode) and the gathered-RTT feedback snapshot. Every other draw reads the caller's array.
-    bool edit_textures=alias;
+    // re-decode) and the feedback snapshots. Every other draw reads the caller's array.
+    bool edit_textures=alias || color_feedback;
     if(!edit_textures)for(const auto& texture:supplied_textures)if(texture.resident_image && texture.plan && texture.plan->gathered){edit_textures=true;break;}
     std::optional<std::array<Texture,16>> owned_textures;if(edit_textures)owned_textures.emplace(supplied_textures);
     const auto& textures=edit_textures?*owned_textures:supplied_textures;
     if(alias)for(const auto& texture:textures)if(texture.null_texture)return attempt.reject("alias_null_texture");
-    for(const auto& texture:textures)if(texture.valid && !texture.untiled && !(texture.plan && texture.plan->gathered)){
-        if(target_overlaps(depth,texture.storage,texture.storage_size,width*nx,height*ny))return attempt.reject("sequential_depth_texture_feedback");
-        for(unsigned i=0;i<count;++i)if(target_overlaps(colors[i],texture.storage,texture.storage_size,width*nx,height*ny))return attempt.reject("sequential_color_texture_feedback");
-    }
-    // Gathered CPU textures have a pre-draw snapshot contract. A tiled RTT
-    // view of the active attachment needs the same snapshot on the GPU; an
-    // image must never be sampled while this draw writes that very image.
-    if(edit_textures)for(auto& texture:*owned_textures)if(texture.resident_image && texture.plan && texture.plan->gathered){
+    if(color_feedback)attempt.path("texture_feedback_snapshot");
+    // An image must never be sampled while this draw writes that very image:
+    // gathered RTT views and contiguous feedback textures resolved to an
+    // active attachment sample a GPU copy taken before the draw.
+    if(edit_textures)for(auto& texture:*owned_textures)if(texture.resident_image && ((texture.plan && texture.plan->gathered) || (color_feedback && texture.valid && !texture.untiled))){
         bool feedback=false;
         for(const auto& surface:session.surfaces)if(surface.image==texture.resident_image){
             for(unsigned i=0;i<count;++i)if(colors[i].base && surface.same(colors[i],width,height,samples,r(0x208)&31,false))feedback=true;
             if(depth.base && surface.same(depth,width,height,samples,(r(0x208)>>5)&7,true))feedback=true;
         }
         if(feedback){session.rtt_space(texture.resident_image->memory_bytes);auto snapshot=vk.graphics_image(*session.batch,texture.resident_image->format,texture.resident_image->width,texture.resident_image->height,texture.resident_image->layers,texture.resident_image->depth);
-            vk.graphics_copy(*session.batch,texture.resident_image,snapshot);texture.resident_image=std::move(snapshot);attempt.path("rtt_feedback_snapshot");}
+            vk.graphics_copy(*session.batch,texture.resident_image,snapshot);texture.resident_image=std::move(snapshot);attempt.path(texture.plan && texture.plan->gathered?"rtt_feedback_snapshot":"texture_feedback_image_copy");}
     }
     if(device && alias){materialize();device=nullptr;}
     phase.next(HostStage::g_inputs);
