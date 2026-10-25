@@ -1,42 +1,34 @@
 # AnyPS3 project knowledge base
 
-[2026-10-25 higher-resolution performance milestone](experiments/2026-10-25-scale2-walking.md):
-GPU depth copies, bounded history/source caches and sampler shader reuse; original 1440p walking evidence,
-partial-suite closeout and remaining 60-FPS/zero-stutter acceptance limits.
-
-[2026-10-23 FIX7 user-reported problems](experiments/2026-10-23-fix7.md): START crash, GUI settings,
-skip intro, save-menu audio, two windows, stutter, RPCS3 patches (not adopted).
-
-[2026-10-23 cloud follow-up](experiments/2026-10-23-cloud-render-scale.md):
-visual history through alias merge/rebind and typeless depth, counter fix; lavapipe
-unit tests only, no game run.
-
-[2026-10-23 resolution scaling milestone](experiments/2026-10-23-render-scale.md):
-1440p45.52FPS, GUI resolution selection, batched visual draws and matched
-native/scaled captures. Quality-loss paths and stable60FPS remain open.
-
-[Manager and Qt wrapper implementation](experiments/2026-10-20-manager-gui.md)
-and [usage](../manager/README.md), isolated `fast2/manager-gui` worktree.
-Synthetic wrapper verification does not change original-game acceptance.
-[GUI-first quickstart and isolated desktop installer](experiments/2026-10-21-gui-installer.md)
-(2026-10-21; merged into main, not yet pushed).
-
 This is the version-controlled entry point for the next model, a new run and a human. Read the goal state and runtime evidence in [CURRENT.md](CURRENT.md), the writing rules in [WORKFLOW.md](WORKFLOW.md), the handoff in [HANDOFF.md](HANDOFF.md). A record in the documentation does not, by itself, verify the emulator's function.
 
-Latest state and handoff: [CURRENT.md](CURRENT.md) and [HANDOFF.md](HANDOFF.md)
-(2026-10-21: branch `claude/wave6-60fps`, build 706 holds the 60 Hz cap at ~59.7 FPS with ~3–4 ms headroom; GUI audio toggle,
-DualSense SIXAXIS/rumble; RAM bit flips verified on this PC).
-(2026-10-20 sandbox assessment: saved build 603a rechecked at 54.045 FPS in the original level;
-main = 472 + ZeroTable; combined 473 unbuilt; 60 FPS and physical gamepad remain unverified).
-[Current analysis, fixes and offline wait attribution](experiments/2026-10-20-sandbox-analysis.md).
-The older records below describe their own snapshots.
-[Results 379–380 and next steps](experiments/2026-10-19-performance-379.md),
-[web research of real PS3 recomp projects](experiments/2026-10-19-web-ps3-recomp.md).
-**2026-10-19 afternoon: FAST wave (target 60 FPS in the level, game mode 0 verified, default 14.25 FPS):**
-[FAST record](experiments/2026-10-19-fast-wave.md).
-**2026-10-20 FAST2 wave (best build 472 = main: 46.68 FPS in the level; ended on user instruction):** [FAST2 record](experiments/2026-10-20-fast2-wave.md).
-**2026-10-19/20 cloud optimization round (PPU, SPU, RSX host cost; no game build and no FPS figure, best verified build
-still 460 at 22.59 FPS):** [cloud optimization record](experiments/2026-10-19-cloud-optimization.md).
+Latest state and handoff: the top sections of [CURRENT.md](CURRENT.md) and [HANDOFF.md](HANDOFF.md). Sections older than
+2026-10-21 moved to [history/](history/) on 2026-10-25.
+
+## Records, newest first
+
+Each record describes its own snapshot, not the current runtime.
+
+- 2026-10-25 [higher-resolution performance milestone](experiments/2026-10-25-scale2-walking.md): GPU depth copies,
+  bounded history/source caches and sampler shader reuse; original 1440p walking evidence, partial-suite closeout and
+  remaining 60-FPS/zero-stutter acceptance limits.
+- 2026-10-23 [FIX7 user-reported problems](experiments/2026-10-23-fix7.md): START crash, GUI settings, skip intro,
+  save-menu audio, two windows, stutter, RPCS3 patches (not adopted).
+- 2026-10-23 [cloud follow-up](experiments/2026-10-23-cloud-render-scale.md): visual history through alias merge/rebind and
+  typeless depth, counter fix; lavapipe unit tests only, no game run.
+- 2026-10-23 [resolution scaling milestone](experiments/2026-10-23-render-scale.md): 1440p 45.52 FPS, GUI resolution
+  selection, batched visual draws, matched native/scaled captures; quality-loss paths and stable 60 FPS open.
+- 2026-10-21 wave 6: build 706 holds the 60 Hz cap at ~59.7 FPS with ~3–4 ms headroom
+  ([FAST2 record, wave 6](experiments/2026-10-20-fast2-wave.md#wave-6-results-2026-10-21));
+  [GUI-first quickstart and desktop installer](experiments/2026-10-21-gui-installer.md).
+- 2026-10-20 [manager and Qt wrapper](experiments/2026-10-20-manager-gui.md) and [usage](../manager/README.md);
+  [sandbox analysis and offline wait attribution](experiments/2026-10-20-sandbox-analysis.md) (603a 54.045 FPS);
+  [FAST2 wave](experiments/2026-10-20-fast2-wave.md) (472: 46.68 FPS).
+- 2026-10-19 [FAST wave](experiments/2026-10-19-fast-wave.md) (default 14.25 FPS),
+  [cloud optimization round](experiments/2026-10-19-cloud-optimization.md) (460: 22.59 FPS),
+  [results 379–380](experiments/2026-10-19-performance-379.md),
+  [web research of real PS3 recomp projects](experiments/2026-10-19-web-ps3-recomp.md).
+- Older: [../menu-progress.md](../menu-progress.md) and the `experiments/` directory.
 
 ## Orientation
 
