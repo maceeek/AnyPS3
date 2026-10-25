@@ -100,3 +100,5 @@ rtt 16×16 BC1 2.5 k, bind_fresh 51.
 long diagonal gold edge without the zig-zag comb or 2-px staircase. A same-view comparison is still to do.
 The goal (stable 60 FPS at 1440p, no stutter) remains **unmet**: the RSX worker still needs ~4 ms/frame less and
 1-vblank frames are only 41 %.
+
+**Queued at 19:12 (detached):** `local/ratchet/work/hiresI/ab-960.sh` runs alternating QUIET scale-2 walks 882q2, 960q2, 882q3, 960q3 (long-deadline walker) behind the still-running HIRES-B A/B `work/hiresB/ab-921.sh`; results in `local/ratchet/walking-RUN.json`, logs `work/hiresI/run-RUN.out`. Evaluate these first in the next session.
