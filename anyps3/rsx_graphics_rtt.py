@@ -149,7 +149,13 @@ MEMBERS = r'''
                 reason("direct");return surface.image;
             }
             rtt_space(std::uint64_t(level.width)*level.height*16+surface.image->memory_bytes+(typeless_depth?std::uint64_t(surface.width)*surface.height*surface.samples*5*(1+vk.graphics_render_scale*vk.graphics_render_scale):typeless_float?surface.image->memory_bytes:0));
-            NativeVulkan::VisualWhy why(vk,"rtt");
+            // Trace mode labels reconstructions with the conversion kind (interned, bounded).
+            const char* rtt_label="rtt";
+            if(NativeVulkan::graphics_visual_trace()){static std::set<std::string> labels;
+                const auto label="rtt:tex"+std::to_string(level.width)+"x"+std::to_string(level.height)+"f"+std::to_string(texture.format)+(texture.swizzled?"sw":"")+
+                    ":surf"+std::to_string(surface.width)+"x"+std::to_string(surface.height)+"f"+std::to_string(surface.format)+"s"+std::to_string(surface.samples)+(target.swizzle_width?"sw":"");
+                if(labels.size()<128 || labels.count(label))rtt_label=labels.insert(label).first->c_str();}
+            NativeVulkan::VisualWhy why(vk,rtt_label);
             auto sampling_image=surface.image;std::shared_ptr<NativeVulkan::GraphicsImage> stencil_image;
             if(typeless_float){sampling_image=vk.graphics_aspect_image(*batch,surface.image,VK_IMAGE_ASPECT_COLOR_BIT,view.sampling,&view.color_transfer);reason("float_typeless");}
             if(typeless_depth){sampling_image=vk.graphics_aspect_image(*batch,surface.image,VK_IMAGE_ASPECT_DEPTH_BIT,view.sampling,&view.color_transfer);stencil_image=vk.graphics_aspect_image(*batch,surface.image,VK_IMAGE_ASPECT_STENCIL_BIT,view.stencil,&view.stencil_transfer);reason("depth_typeless");}
@@ -160,16 +166,23 @@ MEMBERS = r'''
             // Typeless depth samples word images whose companions graphics_aspect_image
             // reinterpreted from the visual depth/stencil (one word per texel).
             const bool visual_depth=typeless_depth && sampling_image->visual && stencil_image->visual && surface.image->visual;
-            const bool visual_typed=!block && !typeless_float && (!typeless_depth || visual_depth) && !target.swizzle_width && !texture.swizzled && pixel_bytes==target.bpp &&
+            // A swizzled texture of a swizzled single-sample surface with the same extent at
+            // origin 0 addresses the same Morton order: texel (x,y) is surface pixel (x,y), so
+            // destination subtexels map spatially like the linear case.
+            const bool swizzle_identity=target.swizzle_width && texture.swizzled && origin==0 && surface.samples==1 &&
+                level.width==surface.width && level.height==surface.height && target.swizzle_width==surface.width && target.swizzle_height==surface.height;
+            // B8 render targets are stored packed (one guest byte per R32_UINT texel); a B8 texture reads that byte.
+            const bool packed_b8=!surface.depth && surface.format==9 && texture.format==0x81 && surface.image->format==VK_FORMAT_R32_UINT;
+            const bool visual_typed=!block && !typeless_float && (!typeless_depth || visual_depth) && (swizzle_identity || (!target.swizzle_width && !texture.swizzled)) && pixel_bytes==target.bpp &&
                 origin%target.bpp==0 && target.pitch%target.bpp==0 && level.pitch%target.bpp==0 &&
                 ((surface.depth && ((surface.format==1 && texture.format==0x92) || (surface.format==2 && (texture.format==0x90 || visual_depth)))) ||
-                 (!surface.depth && expected && expected==surface.format));
+                 (!surface.depth && expected && expected==surface.format) || packed_b8);
             if(NativeVulkan::graphics_visual_trace() && vk.graphics_render_scale>1){
                 static std::vector<std::array<unsigned,12>> seen;
                 const std::array<unsigned,12> key{texture.format,level.width,level.height,level.pitch,surface.format,surface.width,surface.height,surface.samples,target.pitch,unsigned(bool(target.tile)),unsigned(visual_typed),unsigned(typeless_float)|unsigned(typeless_depth)<<1|unsigned(block)<<2|unsigned(texture.swizzled)<<3};
                 if(seen.size()<256 && std::find(seen.begin(),seen.end(),key)==seen.end()){seen.push_back(key);
-                    std::fprintf(stderr,"RENDER_SCALE_RTT texture=%ux%u fmt=0x%x pitch=%u swizzled=%d origin=%lld surface=%ux%u fmt=%u samples=%u pitch=%u tile=%d depth=%d typeless_float=%d typeless_depth=%d block=%d visual_typed=%d\n",
-                        level.width,level.height,texture.format,level.pitch,int(texture.swizzled),(long long)origin,surface.width,surface.height,surface.format,surface.samples,target.pitch,int(bool(target.tile)),int(surface.depth),int(typeless_float),int(typeless_depth),int(block),int(visual_typed));}}
+                    std::fprintf(stderr,"RENDER_SCALE_RTT texture=%ux%u fmt=0x%x pitch=%u swizzled=%d origin=%lld surface=%ux%u fmt=%u samples=%u pitch=%u swizzle=%u tile=%d depth=%d typeless_float=%d typeless_depth=%d block=%d visual_typed=%d\n",
+                        level.width,level.height,texture.format,level.pitch,int(texture.swizzled),(long long)origin,surface.width,surface.height,surface.format,surface.samples,target.pitch,target.swizzle_width,int(bool(target.tile)),int(surface.depth),int(typeless_float),int(typeless_depth),int(block),int(visual_typed));}}
             if(!view.fs){
             std::string fs="#version 450\nlayout(std430,binding=0) readonly buffer Data{uint w[];};\nlayout(location=0) out vec4 color_;\nlayout(binding=17) uniform ";
             const bool packed=surface.image->format==VK_FORMAT_R32_UINT,integer_source=packed || typeless_depth || typeless_float;
