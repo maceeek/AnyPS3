@@ -1448,7 +1448,7 @@ struct Session {
                     keep.dirty=true;keep.last_use=++resource_clock;remainders.push_back(std::move(keep));}
             }
         }
-        if(!discard){vk.graphics_device_copies(*batch,regions);
+        if(!discard){vk.graphics_device_copies(*batch,regions);NativeVulkan::VisualWhy why(vk,"rebind_merge");
             // Fully mapped destinations need no native reconstruction first.
             const bool complete=history_texels==std::uint64_t(surface.width)*surface.height*surface.samples;
             vk.graphics_unpack_upload(*batch,image,surface.format,surface.depth,t.bpp,t.pitch,surface.samples,plan->words,plan->gpu_words,nullptr,at,!complete);
@@ -1520,6 +1520,7 @@ struct Session {
         for(const auto& run:source->readback->runs)if((reinterpret_cast<std::uintptr_t>(run.data)|run.size|run.offset)&3)return false;
         for(const auto& span:surface.physical)if((span.begin|span.end)&3)return false;
         auto input=source->image;const unsigned source_samples=source->samples;const bool was_dirty=source->dirty;
+        NativeVulkan::VisualWhy why(vk,"sample_grid");
         if((input->format!=VK_FORMAT_R8G8B8A8_UNORM && input->format!=VK_FORMAT_R8G8B8A8_SRGB) || (format!=VK_FORMAT_R8G8B8A8_UNORM && format!=VK_FORMAT_R8G8B8A8_SRGB))return false;
         rtt_space(std::uint64_t(surface.width)*surface.height*(surface.samples+source_samples)*8);
         if(!discard && input->format==VK_FORMAT_R8G8B8A8_SRGB){auto raw=surface_image(VK_FORMAT_R8G8B8A8_UNORM,source->width,source->height,source_samples);vk.graphics_copy(*batch,input,raw);input=std::move(raw);}
@@ -1540,7 +1541,11 @@ struct Session {
         }
         if(!discard){
         const std::string vs="#version 450\nvoid main(){vec2 p=vec2((gl_VertexIndex<<1)&2,gl_VertexIndex&2);gl_Position=vec4(p*2.0-1.0,0,1);}";
-        const std::string fs="#version 450\nlayout(binding=17) uniform sampler2DArray src_;layout(location=0) out vec4 color_;layout(push_constant) uniform Params{vec2 extent;vec2 shift;uint plane_;layout(offset=56) vec2 raster_scale_;};void main(){vec2 u=gl_FragCoord.xy/raster_scale_;ivec2 p=ivec2(u);uint gx=uint(p.x)*"+std::to_string(surface.samples)+"u+plane_;if(gx>="+std::to_string(source->width*source_samples)+"u)discard;vec2 ratio=vec2(textureSize(src_,0).xy)/vec2("+std::to_string(source->width)+","+std::to_string(source->height)+");ivec2 q=ivec2((vec2(gx/"+std::to_string(source_samples)+"u,p.y)+fract(u))*ratio);color_=texelFetch(src_,ivec3(q,gx%"+std::to_string(source_samples)+"u),0);}";
+        // Same flattened-grid reinterpretation at native and visual extent: destination
+        // pixel X/plane maps to grid column X*Nd+plane, source pixel G/Ns, plane G%Ns.
+        // On the visual pair this is the reinterpretation of the grid the surface would
+        // have at the higher resolution (no native-cell blocks: planes stay in spatial order).
+        const std::string fs="#version 450\nlayout(binding=17) uniform sampler2DArray src_;layout(location=0) out vec4 color_;layout(push_constant) uniform Params{vec2 extent;vec2 shift;uint plane_;};void main(){ivec2 p=ivec2(gl_FragCoord.xy);uint gx=uint(p.x)*"+std::to_string(surface.samples)+"u+plane_;if(gx>=uint(textureSize(src_,0).x)*"+std::to_string(source_samples)+"u)discard;color_=texelFetch(src_,ivec3(int(gx/"+std::to_string(source_samples)+"u),p.y,int(gx%"+std::to_string(source_samples)+"u)),0);}";
         NativeVulkan::GraphicsState fixed{};fixed.scale_visual=true;fixed.width=surface.width;fixed.height=surface.height;fixed.colors=1;fixed.samples=surface.samples;fixed.color=VK_FORMAT_R8G8B8A8_UNORM;fixed.scissor={{0,0},{surface.width,surface.height}};fixed.blend[0].colorWriteMask=15;
         std::array<std::shared_ptr<NativeVulkan::GraphicsImage>,4> colors{};colors[0]=surface.image;
         std::array<std::shared_ptr<NativeVulkan::GraphicsImage>,20> inputs{};inputs[16]=input;
@@ -1652,6 +1657,7 @@ struct Session {
         surface.image=surface_image(f,width,height,samples,depth);
         for(const auto& span:surface.physical)this->guard.release(reinterpret_cast<const void*>(span.begin),span.end-span.begin);
         ++ownership_revision;
+        NativeVulkan::VisualWhy why(vk,alias?"bind_alias":"bind_fresh");
         const bool uploaded=discard || upload_surface(surface);
         if(!uploaded){const auto bpp=image_bpp(f);std::vector<std::uint8_t> bytes(std::uint64_t(width)*height*samples*bpp),stencil;
             if(depth && format==2)stencil.resize(std::uint64_t(width)*height*samples);

@@ -152,7 +152,7 @@ static void alias_detail_oracle(){
   const unsigned at=((plane*16+y)*16+x)*4;visual[at]=x;visual[at+1]=y;visual[at+2]=80+plane;visual[at+3]=255;}
  vk.graphics_transfer(*session.batch,original,VK_IMAGE_ASPECT_COLOR_BIT,4,native.data());
  vk.graphics_transfer(*session.batch,original->visual,VK_IMAGE_ASPECT_COLOR_BIT,4,visual.data());session.dirty_surface(src);
- // Actual Session texture conversion expands sample planes into native texels.
+ // Actual Session texture conversion flattens the visual sample planes like the guest grid.
  r[0x1a00]=0x100000;r[0x1a04]=0x0001a529;r[0x1a08]=0x00030303;r[0x1a0c]=0x80000000;
  r[0x1a10]=0xaae4;r[0x1a14]=0x01010000;r[0x1a18]=(16u<<16)|8;r[0x1840]=256;
  auto converted=session.texture_metadata(0).resident_image;assert(converted && converted->visual);
@@ -170,7 +170,8 @@ static void alias_detail_oracle(){
   for(const auto& path:rsxgraphics::fallback_stats().paths)std::fprintf(stderr,"path %s=%llu\n",path.first.c_str(),(unsigned long long)path.second);
   throw std::runtime_error("visual sample-grid roundtrip mismatch");}
  for(unsigned y=0;y<16;++y)for(unsigned x=0;x<32;++x){
-  const unsigned cell=x/2,plane=cell%2,source_x=2*(cell/2)+x%2;
+  // Visual grid column x of a 2-sample surface rendered at 16 px: pixel x/2, sample x%2.
+  const unsigned plane=x%2,source_x=x/2;
   const auto* expected=visual.data()+((plane*16+y)*16+source_x)*4;
   const auto* actual=reinterpret_cast<const float*>(bytes+rtt)+(y*32+x)*4;
   for(unsigned c=0;c<4;++c)assert(std::fabs(actual[c]-expected[c]/255.f)<1.e-6f);

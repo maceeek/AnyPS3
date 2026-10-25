@@ -7,6 +7,14 @@ texel (same guest format and bpp, 4-byte aligned words) to that source texel,
 so the paired visual companion can copy the source's subpixel block instead of
 nearest-upscaling native pixels. Partially covered texels, mixed formats and
 guest background keep the native reconstruction.
+
+Multi-sample surfaces: the visual image is the surface rendered at S times the
+extent, so its flattened sample grid has column G=X*nx+sample. Native grid texel
+g covers visual grid columns g*S..g*S+S-1, i.e. visual pixels g*S/nx.. of every
+plane when S is a multiple of nx (and ny). Equal sample layouts with such a scale
+copy those whole-pixel blocks of every plane; a sample-count change (or an odd
+scale with MSAA) has no block form and keeps the native reconstruction.
+Regions are returned in visual-image units.
 """
 MEMBERS = r'''
     struct VisualHistoryPair {unsigned from,to,bytes;
@@ -66,6 +74,10 @@ MEMBERS = r'''
         const unsigned bpp=from.target.bpp,fp=from.target.pitch,tp=to.target.pitch;
         const unsigned fnx=from.samples>1?2u:1u,fny=from.samples==4?2u:1u,tnx=to.samples>1?2u:1u,tny=to.samples==4?2u:1u;
         const std::uint64_t frow=std::uint64_t(from.width)*fnx*bpp,trow=std::uint64_t(to.width)*tnx*bpp;
+        const unsigned scale=vk.graphics_render_scale;
+        // grid: equal multi-sample layouts copy flattened grid runs (see module note).
+        const bool grid=(tnx>1 || tny>1) && tnx==fnx && tny==fny && scale%tnx==0 && scale%tny==0;
+        if((tnx>1 || tny>1 || fnx>1 || fny>1) && !grid){++visual_history_rejects;return {};}
         static const bool compact=[]{const char* v=std::getenv("ANYPS3_RSX_HISTORY_COMPACT_RUNS");
             if(v && std::strcmp(v,"0") && std::strcmp(v,"1"))throw std::runtime_error("ANYPS3_RSX_HISTORY_COMPACT_RUNS must be 0 or 1");
             return !v || !std::strcmp(v,"1");}();
@@ -80,8 +92,8 @@ MEMBERS = r'''
         // still works: nonconsecutive runs remain separate for the final canonical sort/merge.
         auto run=[&](unsigned gy,unsigned gx,unsigned sy,unsigned sx,unsigned len){
             if(++emitted>(1u<<20)){usable=false;return;}mapped+=len;
-            const std::array<unsigned,5> key{(gy%tny)*tnx+gx%tnx,gx/tnx,len,(sy%fny)*fnx+sx%fnx,sx/fnx};
-            const unsigned row=gy/tny,source_row=sy/fny;
+            const std::array<unsigned,5> key{0,gx,len,0,sx};
+            const unsigned row=gy,source_row=sy;
             auto extend=[&](std::size_t i){auto& r=runs[i];
                 if(!std::equal(key.begin(),key.end(),r.k.begin()))return false;
                 if(r.k[5]+r.rows==row && r.k[6]+r.rows==source_row){++r.rows;}
@@ -106,9 +118,7 @@ MEMBERS = r'''
                 // A trailing partial texel is skipped: it is never mapped.
                 const unsigned pixels=n*4/bpp,gx=xc/bpp,sx=xa/bpp;k+=n;
                 if(!pixels)continue;
-                if(tnx==1 && fnx==1)run(rc,gx,ra,sx,pixels);
-                else if(tnx==2 && fnx==2 && gx%2==sx%2){for(unsigned i=0;i<2 && i<pixels;++i)run(rc,gx+i,ra,sx+i,(pixels-i+1)/2);}
-                else for(unsigned i=0;i<pixels;++i)run(rc,gx+i,ra,sx+i,1);
+                run(rc,gx,ra,sx,pixels); // flattened grid coordinates (pixel coordinates when single-sample)
             }
         }
         // A plan's physical->logical map is injective and the pairs are
@@ -119,9 +129,12 @@ MEMBERS = r'''
         for(std::size_t i=0;i<runs.size() && usable;){
             const auto& f=runs[i].k;std::size_t j=i+1;unsigned rows=runs[i].rows;
             while(j<runs.size() && std::equal(f.begin(),f.begin()+5,runs[j].k.begin()) && runs[j].k[5]==f[5]+rows && runs[j].k[6]==f[6]+rows){rows+=runs[j].rows;++j;}
-            VkImageCopy r{};r.srcSubresource={0,0,f[3],1};r.dstSubresource={0,0,f[0],1};
-            r.srcOffset={int(f[4]),int(f[6]),0};r.dstOffset={int(f[1]),int(f[5]),0};r.extent={f[2],rows,1};
-            plan->push_back(r);if(plan->size()>65536)usable=false;i=j;
+            for(unsigned plane=0;plane<tnx*tny;++plane){
+                VkImageCopy r{};r.srcSubresource={0,0,plane,1};r.dstSubresource={0,0,plane,1};
+                r.srcOffset={int(f[4]*scale/fnx),int(f[6]*scale/fny),0};r.dstOffset={int(f[1]*scale/tnx),int(f[5]*scale/tny),0};
+                r.extent={f[2]*scale/tnx,rows*scale/tny,1};plan->push_back(r);}
+            if(plan->size()>65536)usable=false;
+            i=j;
         }
         VisualHistoryPlan entry;entry.from=from.readback;entry.to=to.readback;entry.key=key;entry.clock=++visual_history_clock;
         entry.pairs=pairs;

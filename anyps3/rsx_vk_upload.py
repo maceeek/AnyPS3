@@ -67,6 +67,6 @@ void main(){uint i=gl_GlobalInvocationID.x+gl_WorkGroupID.y*gl_NumWorkGroups.x*6
         VkBufferImageCopy copy{};copy.bufferOffset=output;copy.imageSubresource={depth?VK_IMAGE_ASPECT_DEPTH_BIT:VK_IMAGE_ASPECT_COLOR_BIT,0,0,image->layers};copy.imageExtent={image->width,image->height,1};
         vkCmdCopyBufferToImage(b.command,b.data_buffer,image->image,VK_IMAGE_LAYOUT_GENERAL,1,&copy);
         if(stencil){copy.bufferOffset=stencil_at;copy.imageSubresource.aspectMask=VK_IMAGE_ASPECT_STENCIL_BIT;vkCmdCopyBufferToImage(b.command,b.data_buffer,image->image,VK_IMAGE_LAYOUT_GENERAL,1,&copy);}
-        graphics_barrier(b);b.buffer_pins.push_back(word_buffer);b.pins.push_back(image);++graphics_surface_uploads;if(sync_visual)graphics_visual_sync(b,image);
+        graphics_barrier(b);b.buffer_pins.push_back(word_buffer);b.pins.push_back(image);++graphics_surface_uploads;if(sync_visual)graphics_visual_sync(b,image,"upload");
     }
 '''

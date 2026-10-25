@@ -149,6 +149,7 @@ MEMBERS = r'''
                 reason("direct");return surface.image;
             }
             rtt_space(std::uint64_t(level.width)*level.height*16+surface.image->memory_bytes+(typeless_depth?std::uint64_t(surface.width)*surface.height*surface.samples*5*(1+vk.graphics_render_scale*vk.graphics_render_scale):typeless_float?surface.image->memory_bytes:0));
+            NativeVulkan::VisualWhy why(vk,"rtt");
             auto sampling_image=surface.image;std::shared_ptr<NativeVulkan::GraphicsImage> stencil_image;
             if(typeless_float){sampling_image=vk.graphics_aspect_image(*batch,surface.image,VK_IMAGE_ASPECT_COLOR_BIT,view.sampling,&view.color_transfer);reason("float_typeless");}
             if(typeless_depth){sampling_image=vk.graphics_aspect_image(*batch,surface.image,VK_IMAGE_ASPECT_DEPTH_BIT,view.sampling,&view.color_transfer);stencil_image=vk.graphics_aspect_image(*batch,surface.image,VK_IMAGE_ASPECT_STENCIL_BIT,view.stencil,&view.stencil_transfer);reason("depth_typeless");}
@@ -163,12 +164,24 @@ MEMBERS = r'''
                 origin%target.bpp==0 && target.pitch%target.bpp==0 && level.pitch%target.bpp==0 &&
                 ((surface.depth && ((surface.format==1 && texture.format==0x92) || (surface.format==2 && (texture.format==0x90 || visual_depth)))) ||
                  (!surface.depth && expected && expected==surface.format));
+            if(NativeVulkan::graphics_visual_trace() && vk.graphics_render_scale>1){
+                static std::vector<std::array<unsigned,12>> seen;
+                const std::array<unsigned,12> key{texture.format,level.width,level.height,level.pitch,surface.format,surface.width,surface.height,surface.samples,target.pitch,unsigned(bool(target.tile)),unsigned(visual_typed),unsigned(typeless_float)|unsigned(typeless_depth)<<1|unsigned(block)<<2|unsigned(texture.swizzled)<<3};
+                if(seen.size()<256 && std::find(seen.begin(),seen.end(),key)==seen.end()){seen.push_back(key);
+                    std::fprintf(stderr,"RENDER_SCALE_RTT texture=%ux%u fmt=0x%x pitch=%u swizzled=%d origin=%lld surface=%ux%u fmt=%u samples=%u pitch=%u tile=%d depth=%d typeless_float=%d typeless_depth=%d block=%d visual_typed=%d\n",
+                        level.width,level.height,texture.format,level.pitch,int(texture.swizzled),(long long)origin,surface.width,surface.height,surface.format,surface.samples,target.pitch,int(bool(target.tile)),int(surface.depth),int(typeless_float),int(typeless_depth),int(block),int(visual_typed));}}
             if(!view.fs){
             std::string fs="#version 450\nlayout(std430,binding=0) readonly buffer Data{uint w[];};\nlayout(location=0) out vec4 color_;\nlayout(binding=17) uniform ";
             const bool packed=surface.image->format==VK_FORMAT_R32_UINT,integer_source=packed || typeless_depth || typeless_float;
             fs+=integer_source?"usampler2DArray src_;\n":"sampler2DArray src_;\n";
             if(typeless_depth)fs+="layout(binding=18) uniform usampler2DArray stencil_;\n";
-            if(visual_typed)fs+="layout(push_constant) uniform Visual{layout(offset=56) vec2 raster_scale_;};\nivec2 visual_xy(uvec2 p){vec2 ratio=vec2(textureSize(src_,0).xy)/vec2("+std::to_string(surface.width)+","+std::to_string(surface.height)+");return ivec2((vec2(p)+fract(gl_FragCoord.xy/raster_scale_))*ratio); }\n";
+            // Visual sample grid = the flattened grid the surface would have if
+            // rendered at the visual extent: visual grid column G=X*nx+sample.
+            // A native grid texel g covers visual grid columns g*S..g*S+S-1, so
+            // G=(g+fract)*S, then pixel G/n and sample G%n (identity when n=1).
+            // Mapping native sample cells to SxS same-plane blocks instead would
+            // interleave planes out of spatial order (zig-zag after a resolve).
+            if(visual_typed)fs+="layout(push_constant) uniform Visual{layout(offset=56) vec2 raster_scale_;};\nivec3 visual_xyl(uvec2 g){vec2 ratio=vec2(textureSize(src_,0).xy)/vec2("+std::to_string(surface.width)+","+std::to_string(surface.height)+");uvec2 n=uvec2(w[3],w[4]),G=uvec2((vec2(g)+fract(gl_FragCoord.xy/raster_scale_))*ratio);uvec2 c=G/n,l=G%n;return ivec3(c,int(l.y*n.x+l.x)); }\n";
             fs+="uint raw_format(uint unit){return "+rsxvk::u(texture.format)+";}\n";
             fs+="uint raw_byte(uint unit,uint at){uint a=at+w[0],y=a/w[1],x=(a%w[1])/w[2],byte_=a%w[2];";
             if(target.swizzle_width){fs+="uint block=min(w[2],4u),words=w[2]/block,index_=a/block;uint xx=0u,yy=0u,bit_=0u;for(uint i=0u;(w[5]>>i)>1u || (w[6]>>i)>1u;++i){if((w[5]>>i)>1u)xx|=((index_>>bit_++)&1u)<<i;if((w[6]>>i)>1u)yy|=((index_>>bit_++)&1u)<<i;}x=xx/words;y=yy;byte_=(xx%words)*block+a%block;";}
@@ -190,7 +203,7 @@ MEMBERS = r'''
             fs+=R"RTT(
 ''' + RAW_GLSL + r'''
 )RTT";
-            if(visual_typed)replace_all(fs,"ivec3(x/w[3],y/w[4],layer)","ivec3(visual_xy(uvec2(x/w[3],y/w[4])),layer)");
+            if(visual_typed)replace_all(fs,"ivec3(x/w[3],y/w[4],layer)","visual_xyl(uvec2(x,y))");
             fs+="void main(){vec2 xy="+std::string(visual_typed?"gl_FragCoord.xy/raster_scale_":"gl_FragCoord.xy")+";color_=raw_texel(0u,0u,0u,int(xy.x),int(xy.y),0);}\n";
             std::vector<unsigned> data(2588,0);data[0]=origin;data[1]=target.pitch;data[2]=target.bpp;data[3]=nx;data[4]=ny;data[5]=texture_pot(target.swizzle_width*(target.bpp/std::min(target.bpp,4u)));data[6]=texture_pot(target.swizzle_height);
             const unsigned d=2064;data[d+1]=1;data[d+11]=texture.features;data[d+12]=texture.signed_mask;data[d+27]=2;data[d+29]=texture.shadow;data[d+31]=2576;
