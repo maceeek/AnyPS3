@@ -545,7 +545,10 @@ template<class State> static Vec4 fetch_attribute(State& s,const Reg& reg,unsign
 
 // ---------------- Fragment program ----------------
 ''' + rsx_fpdecode.TYPES + r'''
-struct FpInst { std::uint32_t d,s0,s1,s2; Vec4 constant; bool has_constant=false; unsigned word_offset=UINT32_MAX; std::array<FpSourcePlan,3> sources{};bool decoded=false,program_prepared=false;unsigned fast_opcode=0;std::shared_ptr<const FpFlowPlan> flow{}; };
+struct FpInst { std::uint32_t d,s0,s1,s2; Vec4 constant; bool has_constant=false; unsigned word_offset=UINT32_MAX; std::array<FpSourcePlan,3> sources{};bool decoded=false,program_prepared=false;unsigned fast_opcode=0;std::shared_ptr<const FpFlowPlan> flow{};
+    // program[0] only (0 = unknown): a loader-assigned id of the exact instruction sequence (d/s0/s1/s2 of every instruction block,
+    // hence has_constant/word_offset/END). Two programs with one nonzero id have identical instruction words; constants may differ.
+    std::uint64_t structure=0; };
 ''' + rsx_fpdecode.PREPARE + r'''
 // The program is a pure function of its microcode bytes. Cache the exact
 // byte image per SET_SHADER_PROGRAM value; a hit re-reads exactly those bytes
@@ -574,6 +577,16 @@ static bool read_fragment_bytes(PpuState& s,unsigned location,std::uint32_t at,s
     }
     return true;
 }
+// A program whose instruction blocks equal a known program's differs at most in its constant blocks: the original parser reads
+// the same blocks (whether a constant block follows and where END is are functions of the instruction words), so its result is
+// the known prepared program with the constants of the new bytes (prepare/flow plans never read constants). Games rewrite inline
+// FP constants per draw; this replaces a re-parse and re-prepare by a copy.
+static std::shared_ptr<const std::vector<FpInst>> fp_with_constants(const std::vector<FpInst>& base,const std::uint8_t* image){
+    auto program=std::make_shared<std::vector<FpInst>>(base);
+    for(auto& inst:*program)if(inst.has_constant){const auto* b=image+std::size_t(inst.word_offset)*4+16;
+        for(unsigned i=0;i<4;++i){const auto w=read_be(b+4*i,4);inst.constant[i]=bits_float((w<<16)|(w>>16));}}
+    return program;
+}
 static std::shared_ptr<const std::vector<FpInst>> load_fragment_program_shared(PpuState& s,const Reg& reg){
     const auto value=reg(0x8e4);const unsigned location=(value&3);
     if(location!=1 && location!=2)throw std::runtime_error("invalid RSX fragment program location");
@@ -583,6 +596,8 @@ static std::shared_ptr<const std::vector<FpInst>> load_fragment_program_shared(P
     // value whose bytes equal an earlier program shares its decoded/prepared result.
     struct Content {std::shared_ptr<const std::vector<FpInst>> program;std::uint64_t use;};
     static thread_local std::unordered_map<std::string,Content> by_content;
+    // Instruction blocks only (constants excluded) -> a prepared program of that structure and its unique id (never reused).
+    static thread_local std::unordered_map<std::string,Content> by_structure;static thread_local std::uint64_t structures=0;
     static thread_local std::vector<std::uint8_t> scratch;
     // O(n) once per n/8 insertions instead of a full min_element scan per insertion: drop the least recently used eighth.
     auto trim=[](auto& map){
@@ -594,8 +609,16 @@ static std::shared_ptr<const std::vector<FpInst>> load_fragment_program_shared(P
     const std::uint32_t start=value&~3u;
     if(auto found=cache.find(value);found!=cache.end()){auto& entry=found->second;
         scratch.resize(entry.bytes.size());
-        const bool same=read_fragment_bytes(s,location,start,scratch.data(),unsigned(scratch.size()),true) && !std::memcmp(scratch.data(),entry.bytes.data(),scratch.size());
-        if(same){entry.use=++clock;::RsxPerfCounters::add(::RsxPerfCounters::fp_hits);return entry.program;}
+        if(read_fragment_bytes(s,location,start,scratch.data(),unsigned(scratch.size()),true)){
+            if(!std::memcmp(scratch.data(),entry.bytes.data(),scratch.size())){entry.use=++clock;::RsxPerfCounters::add(::RsxPerfCounters::fp_hits);return entry.program;}
+            // The bulk read covered exactly the old extent. Equal instruction blocks mean the original parser reads exactly these
+            // blocks again (same END, same constant blocks), so these bytes are its complete input.
+            bool same_structure=true;
+            for(const auto& inst:*entry.program){const auto at=std::size_t(inst.word_offset)*4;
+                if(at+16>scratch.size() || std::memcmp(scratch.data()+at,entry.bytes.data()+at,16)){same_structure=false;break;}}
+            if(same_structure){::RsxPerfCounters::add(::RsxPerfCounters::fp_misses);
+                entry.program=fp_with_constants(*entry.program,scratch.data());entry.bytes.swap(scratch);entry.use=++clock;return entry.program;}
+        }
     }
     ::RsxPerfCounters::add(::RsxPerfCounters::fp_misses);
     std::vector<FpInst> program;std::vector<std::uint8_t> image;
@@ -634,7 +657,13 @@ static std::shared_ptr<const std::vector<FpInst>> load_fragment_program_shared(P
             const std::string key(reinterpret_cast<const char*>(image.data()),image.size());
             std::shared_ptr<const std::vector<FpInst>> result;
             if(auto same=by_content.find(key);same!=by_content.end()){result=same->second.program;same->second.use=++clock;}
-            else{result=std::make_shared<const std::vector<FpInst>>(prepared_fragment_program(std::move(program)));
+            else{
+                std::string shape;shape.reserve(program.size()*16);
+                for(const auto& i:program)shape.append(reinterpret_cast<const char*>(image.data())+std::size_t(i.word_offset)*4,16);
+                if(auto known=by_structure.find(shape);known!=by_structure.end()){result=fp_with_constants(*known->second.program,image.data());known->second.use=++clock;}
+                else{auto prepared=prepared_fragment_program(std::move(program));if(!prepared.empty())prepared[0].structure=++structures;
+                    result=std::make_shared<const std::vector<FpInst>>(std::move(prepared));
+                    trim(by_structure);by_structure.emplace(std::move(shape),Content{result,++clock});}
                 trim(by_content);by_content[key]=Content{result,++clock};}
             if(!cache.count(value))trim(cache);
             cache[value]=Entry{std::move(image),result,++clock};
@@ -643,7 +672,8 @@ static std::shared_ptr<const std::vector<FpInst>> load_fragment_program_shared(P
     }
     throw std::runtime_error("RSX fragment program has no end");
 }
-[[maybe_unused]] static std::vector<FpInst> load_fragment_program(PpuState& s,const Reg& reg){return *load_fragment_program_shared(s,reg);}
+// A mutable copy: its words may be edited, so it carries no structure id (fragment_source keys it by its words).
+[[maybe_unused]] static std::vector<FpInst> load_fragment_program(PpuState& s,const Reg& reg){auto program=*load_fragment_program_shared(s,reg);if(!program.empty())program[0].structure=0;return program;}
 struct FpContext {
     std::array<std::array<std::uint32_t,4>,48> r{}; // raw R registers; H registers alias halves
     std::array<Vec4,15> inputs{};

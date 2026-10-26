@@ -31,19 +31,32 @@ static void replace_all(std::string& s,const std::string& a,const std::string& b
 ''' + '\nstatic const char* fixed_glsl=R"RSXVK(' + FIXED_GLSL + ')RSXVK";\n' + r'''
 struct SourceKeyHash {
     std::size_t operator()(const std::string& key)const{return std::hash<std::string>{}(key);}
+    // Four independent multiply chains (the serial chain was ~4 cycles per word on per-draw keys); equality is still exact.
     std::size_t operator()(const std::vector<unsigned>& key)const{
-        std::size_t h=0;for(auto v:key)h=(h*16777619u)^v;return h;
+        std::uint64_t a=0x9e3779b97f4a7c15u,b=0xc2b2ae3d27d4eb4fu,c=0x165667b19e3779f9u,d=0x27d4eb2f165667c5u;
+        const auto* p=key.data();std::size_t n=key.size(),i=0;
+        for(;i+4<=n;i+=4){a=(a^p[i])*0x100000001b3u;b=(b^p[i+1])*0x100000001b3u;c=(c^p[i+2])*0x100000001b3u;d=(d^p[i+3])*0x100000001b3u;}
+        for(;i<n;++i)a=(a^p[i])*0x100000001b3u;
+        std::uint64_t h=a^(b>>1|b<<63)^(c>>2|c<<62)^(d>>3|d<<61)^(std::uint64_t(n)*0xff51afd7ed558ccdu);
+        h^=h>>33;h*=0xc4ceb9fe1a85ec53u;h^=h>>29;return std::size_t(h);
     }
 };
+static unsigned source_cache_limit(const char* name,unsigned fallback,unsigned maximum){
+    const char* text=std::getenv(name);if(!text || !*text)return fallback;
+    char* end=nullptr;const auto value=std::strtoul(text,&end,10);
+    if(*text=='-' || *end || !value || value>maximum)throw std::runtime_error(std::string("invalid ")+name);
+    return unsigned(value);
+}
 template<class Key> struct SourceCache {
     struct Entry{std::shared_ptr<const std::string> source;std::uint64_t used;};
     std::unordered_map<Key,Entry,SourceKeyHash> entries;std::uint64_t clock=0,bytes=0;
+    const unsigned entry_limit=source_cache_limit("ANYPS3_RSX_SOURCE_CACHE_ENTRIES",1024,4096);
+    const std::uint64_t byte_limit=std::uint64_t(source_cache_limit("ANYPS3_RSX_SOURCE_CACHE_MB",64,256))<<20;
     std::shared_ptr<const std::string> find(const Key& key){auto it=entries.find(key);if(it==entries.end())return {};it->second.used=++clock;return it->second.source;}
     std::shared_ptr<const std::string> put(Key key,std::string text){
         auto value=std::make_shared<const std::string>(std::move(text));
-        constexpr std::uint64_t limit=16*1024*1024;
-        if(value->size()>limit)return value;
-        while(!entries.empty() && (entries.size()>=256 || bytes+value->size()>limit)){
+        if(value->size()>byte_limit)return value;
+        while(!entries.empty() && (entries.size()>=entry_limit || bytes+value->size()>byte_limit)){
             auto old=std::min_element(entries.begin(),entries.end(),[](const auto& a,const auto& b){return a.second.used<b.second.used;});bytes-=old->second.source->size();entries.erase(old);::RsxPerfCounters::add(::RsxPerfCounters::src_evictions);}
         bytes+=value->size();entries.emplace(std::move(key),Entry{value,++clock});return value;
     }
@@ -57,9 +70,28 @@ vec4 state4(uint a){return uintBitsToFloat(uvec4(state_[a],state_[a+1u],state_[a
 vec4 cstate4(uint i){return state4(state_[w[2]+(i>>7u)]+(i&127u));}
 )GLSL";
 static bool packed_color(const Reg& r){const unsigned f=r(0x208)&31;return r(0x220)!=0 && (f==13 || (!float_color(f) && ((f!=8 && f!=3) || (r(0x374)&1) || (f==3 && r(0x1fec)))));}
+// Native implicit sampling obtains filtering and mip count from per-draw
+// descriptors/samplers. Manual TXL/TXD and unsupported sampler layouts still
+// specialize their tap paths. Do not compile dead helpers for sampler changes.
+static bool implicit_sampler(const Texture& t){
+    auto wrap=[](unsigned v){return v>=1 && v<=5 && v!=4;};
+    return t.valid && !t.resident_image && !t.cube && !t.shadow && !t.alpha_kill &&
+        !(t.dimension==3 && t.levels[0].depth==1) && wrap(t.wrap_s) && wrap(t.wrap_t) && (t.dimension!=3 || wrap(t.wrap_r));
+}
+static bool dynamic_resident_sampler(){
+    static const bool enabled=[](){const char* value=std::getenv("ANYPS3_RSX_RESIDENT_SAMPLER_DYNAMIC");
+        if(value && std::strcmp(value,"0") && std::strcmp(value,"1"))throw std::runtime_error("invalid ANYPS3_RSX_RESIDENT_SAMPLER_DYNAMIC");
+        return !value || !std::strcmp(value,"1");}();
+    return enabled;
+}
+static unsigned explicit_sampler_mask(const std::vector<FpInst>& fp){
+    unsigned mask=0;for(const auto& i:fp){const unsigned op=((i.d>>24)&63)|((i.s1>>31)<<6);
+        if(op==25 || op==47)mask|=1u<<((i.d>>17)&15);}
+    return mask;
+}
 static std::optional<std::string> fragment_source_uncached(const std::vector<FpInst>& fp,const Reg& r,unsigned count,const std::array<Texture,16>& textures,bool lines=false,rsxvk::FragmentFailure* failure=nullptr){
     HostPhase phase(HostStage::source);
-    const bool packed=packed_color(r);
+    const bool packed=packed_color(r);const unsigned explicit_units=explicit_sampler_mask(fp);
     auto shade=scalar_fragment(fp,failure);if(!shade)return {};
     std::string source="#version 450\n";
     if(shade->find("subgroupQuadBroadcast")!=std::string::npos)source+="#extension GL_KHR_shader_subgroup_quad : require\n";
@@ -118,11 +150,15 @@ vec4 filter_(uint unit,uint level,vec3 uv,bool linear_,uint face,float ref){
         replace_all(text,"cube_(","cube_"+n+"(");replace_all(text,"unit",u);
         replace_all(text,"w[d+27u]",rsxvk::u(t.dimension));replace_all(text,"w[d+28u]",rsxvk::u(t.cube));replace_all(text,"w[d+29u]",rsxvk::u(t.shadow));
         if(t.dimension!=3)replace_all(text,"n<2u","n<1u");
-        // Static sampler choices must not be rediscovered through SSBO
-        // loads in every inlined tap/mip path. Dimensions/LOD/remap remain
-        // dynamic; only values present in the shader identity are folded.
+        // Live manual taps retain specialization. For implicit-only units,
+        // these three fields occur only in unused manual helper functions;
+        // keeping their descriptor loads avoids shader variants for dead code.
+        const bool manual=!implicit_sampler(t) || (explicit_units&(1u<<unit));
+        const bool dynamic=bool(t.resident_image) && dynamic_resident_sampler();
         for(const auto& field:std::vector<std::pair<unsigned,unsigned>>{{1,t.mip_count},{2,t.unnormalized},{3,t.wrap_s},{4,t.wrap_t},{5,t.min},{6,t.mag},{14,t.alpha_kill},{27,t.dimension},{28,t.cube},{29,t.shadow},{30,t.wrap_r}})
-            replace_all(text,"w[d+"+rsxvk::u(field.first)+"]",rsxvk::u(field.second));
+            if((manual || (field.first!=1 && field.first!=5 && field.first!=6)) &&
+               (!dynamic || (field.first!=2 && field.first!=3 && field.first!=4 && field.first!=30)))
+                replace_all(text,"w[d+"+rsxvk::u(field.first)+"]",rsxvk::u(field.second));
         functions+=text;
         replace_all(*shade,"gradient("+u+",b)","gradient"+n+"(a,b)");replace_all(*shade,"gradient("+u+",c)","gradient"+n+"(a,c)");
         replace_all(*shade,"gradient("+u+",dFdx(a))","gradient"+n+"(a,dFdx(a))");replace_all(*shade,"gradient("+u+",dFdy(a))","gradient"+n+"(a,dFdy(a))");
@@ -136,8 +172,7 @@ vec4 filter_(uint unit,uint level,vec3 uv,bool linear_,uint face,float ref){
     common.replace(common.find("vec4 texel_("),common.find("uint logic_(")-common.find("vec4 texel_("),functions);
     source+=common;if(packed)source+=fixed_glsl;
     for(unsigned unit=0;unit<16;++unit){const auto& t=textures[unit];
-        auto native_wrap=[](unsigned wrap){return wrap>=1 && wrap<=5 && wrap!=4;};
-        if(!t.valid || t.resident_image || t.cube || t.shadow || t.alpha_kill || (t.dimension==3 && t.levels[0].depth==1) || !native_wrap(t.wrap_s) || !native_wrap(t.wrap_t) || (t.dimension==3 && !native_wrap(t.wrap_r)))continue;
+        if(!implicit_sampler(t))continue;
         const auto n=std::to_string(unit),u=rsxvk::u(unit);
         const bool volume=t.dimension==3 && t.levels[0].depth>1;
         source+="vec4 implicit"+n+"(vec4 coord,float bias,inout bool killed){uint d=2064u+32u*"+u+",l=texture_offset(w[d]);vec3 uv=coord.xyz;\n";
@@ -266,16 +301,26 @@ void main(){C q[1];bool front=w[11]!=0u || gl_FrontFacing;
 static std::shared_ptr<const std::string> fragment_source(const std::vector<FpInst>& fp,const Reg& r,unsigned count,const std::array<Texture,16>& textures,bool lines=false,rsxvk::FragmentFailure* failure=nullptr){
     static thread_local std::vector<unsigned> key;key.assign({count,unsigned(lines),unsigned(packed_color(r)),unsigned(bool(r(0x1d60)&14u)),r(0x1d60)&64u,unsigned(float_color(r(0x208)&31u)),unsigned(rsx_layered_shaders().load(std::memory_order_relaxed))});
     unsigned mask=0;for(unsigned unit=0;unit<16;++unit)if(textures[unit].valid)mask|=1u<<unit;else if(textures[unit].null_texture)mask|=0x10000u<<unit;key.push_back(mask);
-    for(const auto& t:textures)if(t.valid)key.insert(key.end(),{unsigned(bool(t.resident_image)),t.format,t.dimension,unsigned(t.dimension==3 && t.levels[0].depth>1),unsigned(t.cube),t.shadow,unsigned(t.alpha_kill),t.wrap_s,t.wrap_t,t.wrap_r,t.mip_count,unsigned(t.unnormalized),t.min,t.mag});
-    for(const auto& i:fp)key.insert(key.end(),{i.d,i.s0,i.s1,i.s2,unsigned(i.has_constant),i.word_offset});
+    const unsigned explicit_units=explicit_sampler_mask(fp);
+    for(unsigned unit=0;unit<16;++unit){const auto& t=textures[unit];if(!t.valid)continue;
+        const bool manual=!implicit_sampler(t) || (explicit_units&(1u<<unit));
+        const bool dynamic=bool(t.resident_image) && dynamic_resident_sampler();
+        key.insert(key.end(),{unsigned(bool(t.resident_image)),t.format,t.dimension,unsigned(t.dimension==3 && t.levels[0].depth>1),unsigned(t.cube),t.shadow,unsigned(t.alpha_kill),dynamic?0u:t.wrap_s,dynamic?0u:t.wrap_t,dynamic?0u:t.wrap_r,manual?t.mip_count:0u,dynamic?0u:unsigned(t.unnormalized),manual?t.min:0u,manual?t.mag:0u});}
+    // The source reads only the instruction words of fp (never its constants). A loader structure id names exactly those words
+    // (rsxdraw::FpInst::structure); the tag word keeps the two key forms disjoint.
+    if(!fp.empty() && fp[0].structure)key.insert(key.end(),{1u,unsigned(fp.size()),unsigned(fp[0].structure),unsigned(fp[0].structure>>32)});
+    else{key.push_back(0u);for(const auto& i:fp)key.insert(key.end(),{i.d,i.s0,i.s1,i.s2,unsigned(i.has_constant),i.word_offset});}
+    // Consecutive draws mostly repeat the previous key: compare before hashing.
+    static thread_local std::vector<unsigned> last_key;static thread_local std::shared_ptr<const std::string> last_source;
+    if(last_source && key==last_key){::RsxPerfCounters::add(::RsxPerfCounters::src_fs_hits);return last_source;}
     static thread_local SourceCache<std::vector<unsigned>> cache;
-    if(auto hit=cache.find(key)){::RsxPerfCounters::add(::RsxPerfCounters::src_fs_hits);return hit;}
+    if(auto hit=cache.find(key)){::RsxPerfCounters::add(::RsxPerfCounters::src_fs_hits);last_key=key;last_source=hit;return hit;}
     ::RsxPerfCounters::add(::RsxPerfCounters::src_fs_misses);
     auto source=fragment_source_uncached(fp,r,count,textures,lines,failure);if(!source)return {};
     if(rsx_layered_shaders().load(std::memory_order_relaxed)){const auto main=source->find("void main(){");
         if(main==std::string::npos || source->find("void main(){",main+1)!=std::string::npos)throw std::runtime_error("RSX layered fragment shader template mismatch");
         source->replace(main,12,"void main(){shift=layers_>1u?shifts_[plane_in_]:shift_push_;plane=layers_>1u?plane_in_:plane_push_;");}
-    return cache.put(key,std::move(*source));
+    auto stored=cache.put(key,std::move(*source));last_key=key;last_source=stored;return stored;
 }
 // Layered MSAA planes (rsx_layered_shaders): instance n renders sample plane n
 // into layer n with its own sample shift; FS planes come from plane_out_.
@@ -550,8 +595,14 @@ struct Session {
     // completed (retire, or the synchronous flush), before its staging memory is reset. They never touch guest state.
     std::vector<std::function<void(const NativeVulkan::GraphicsBatch&)>> completions;
     double flight_ns=300000;   // EWMA of submit -> retire latency of a flight; only maintained for ANYPS3_RSX_POLL=adaptive (rsx_poll_adaptive)
-    // Three persistent mappings/command+descriptor pools; an arena cannot be
+    // flight_limit+1 persistent mappings/command+descriptor pools; an arena cannot be
     // reused until its exact timeline value completed and results retired.
+    // ANYPS3_RSX_FLIGHTS (1..8, default 2) bounds the submitted, unretired arenas.
+    static unsigned rsx_flight_limit(){static const unsigned value=[]{const char* v=std::getenv("ANYPS3_RSX_FLIGHTS");if(!v)return 2u;
+            if(v[0]<'1' || v[0]>'8' || v[1])throw std::runtime_error("ANYPS3_RSX_FLIGHTS must be an integer from 1 to 8");
+            return unsigned(v[0]-'0');}();
+        return value;}
+    const unsigned flight_limit=rsx_flight_limit();
     std::deque<Flight> flights;
     std::vector<std::unique_ptr<NativeVulkan::GraphicsBatch>> spare_batches;
     std::uint64_t async_submits=0,async_retires=0,label_waits=0,label_ready=0;
@@ -567,7 +618,7 @@ struct Session {
         // prefix (bounded) instead of paying another queue submission. An
         // idle queue receives the prefix at the usual threshold.
         if(!flights.empty() && pending.size()<std::size_t(submit_draws)*submit_extend)return;
-        if(flights.size()>=2 && spare_batches.empty())return;
+        if(flights.size()>=flight_limit && spare_batches.empty())return;
         submit_async("draw_prefix");
     }
     bool has_labels()const{if(!labels.empty())return true;for(const auto& f:flights)if(!f.labels.empty())return true;return false;}
@@ -604,7 +655,7 @@ struct Session {
     void submit_async(const char* reason,bool wait_for_arena=true){
         GuestMemory::RawYield payload(state.memory);
         if(failed)throw std::runtime_error("RSX graphics session poisoned");
-        if(!wait_for_arena){retire(false);if(flights.size()>=2 && spare_batches.empty())return;}
+        if(!wait_for_arena){retire(false);if(flights.size()>=flight_limit && spare_batches.empty())return;}
         if(!batch->recording && !batch->submitted && pending.empty() && labels.empty() && !batch->frames)return;
         // No new GPU instruction means the last queued prefix is also this
         // completion point. Do not create an empty submission just for a
@@ -624,7 +675,7 @@ struct Session {
             anyps3_ft::mark(anyps3_ft::GpuSubmit,ft_completion,pending.size(),labels.size(),anyps3_ft::pack(reason));
             std::unique_ptr<NativeVulkan::GraphicsBatch> next;
             if(!spare_batches.empty()){next=std::move(spare_batches.back());spare_batches.pop_back();}
-            else if(flights.size()<2)next=vk.graphics_batch(batch->capacity);
+            else if(flights.size()<flight_limit)next=vk.graphics_batch(batch->capacity);
             else{{PerfTimer arena_timer(fallback_stats().enabled?&fallback_stats().flush_retire_time["arena_rotation"]:nullptr);retire(true,flights.front().batch->completion);}
                 next=std::move(spare_batches.back());spare_batches.pop_back();}
             vk.graphics_move_stats(*batch,*next);
@@ -904,14 +955,6 @@ struct Session {
     struct SurfaceImage {std::shared_ptr<NativeVulkan::GraphicsImage> image;std::uint64_t use;};
     std::vector<SurfaceImage> surface_images;
     std::uint64_t surface_image_bytes=0,surface_image_hits=0,surface_image_misses=0;
-    static void release_idle_framebuffers(NativeVulkan::GraphicsBatch& b,const std::shared_ptr<NativeVulkan::GraphicsImage>& image){
-        b.sync();   // framebuffers are recorder-owned
-        for(auto it=b.framebuffers.begin();it!=b.framebuffers.end();){
-            const auto& fb=it->second;
-            if(fb.use_count()==1 && std::find(fb->images.begin(),fb->images.end(),image)!=fb->images.end())it=b.framebuffers.erase(it);
-            else ++it;
-        }
-    }
     std::shared_ptr<NativeVulkan::GraphicsImage> surface_image(VkFormat f,unsigned w,unsigned h,unsigned layers,bool depth=false){
         for(auto& e:surface_images){const auto& i=e.image;
             if(i->format!=f || i->width!=w || i->height!=h || i->layers!=layers || i->depth!=depth)continue;
@@ -920,12 +963,8 @@ struct Session {
             if(active)continue;
             for(const auto& surface:surfaces)if(surface.image==i){active=true;break;}
             if(active)continue;
-            // Framebuffer caches own handles, not pixel contents. Drop only
-            // idle cache entries; command-buffer pins, RTT views and active
-            // surfaces must still retain the image and prevent its reuse.
-            release_idle_framebuffers(*batch,i);
-            for(auto& spare:spare_batches)release_idle_framebuffers(*spare,i);
-            for(auto& flight:flights)release_idle_framebuffers(*flight.batch,i);
+            // The framebuffer cache holds images weakly (handles, not pixel contents); command-buffer pins, RTT views
+            // and active surfaces still retain the image and prevent its reuse.
             if(i.use_count()!=1)continue;
             e.use=++resource_clock;batch->pins.push_back(i);++surface_image_hits;return i;
         }
@@ -987,7 +1026,7 @@ struct Session {
         if(!entry.trusted)entry.snapshot.assign(upload,upload+size);
         entry.buffer=vk.graphics_buffer(*batch,upload,size);entry.cost=size;auto result=entry.buffer;++raw_misses;store_raw(std::move(entry),reuse);return result;
     }
-    bool observer_installed=false;
+    bool observer_installed=false;std::uint64_t observer_lifetime=0;
     GuestMemory::HostObserver previous_observer;
     explicit Session(NativeVulkan& v,RendererContext s):vk(v),state(std::move(s)),batch(v.graphics_batch()){
         if(const auto* value=std::getenv("ANYPS3_RSX_SUBMIT_DRAWS")){
@@ -1015,6 +1054,7 @@ struct Session {
         surface_watches.clear();
         previous_observer=std::move(state.memory.host_access_observer);observer_installed=true;
         state.memory.host_access_observer=[this](const void* p,std::uint64_t n,bool write){host_access(p,n,write);if(previous_observer)previous_observer(p,n,write);};
+        observer_lifetime=state.memory.host_access_observer.lifetime.load(std::memory_order_acquire);
         state.memory.host_access_observer.filtered=!previous_observer;
         state.memory.host_access_observer.supports_exact_bytes=true;
         for(auto& entry:raw_textures)if(!entry.dirty_inputs)raw_spans(entry,[&](const void* p,std::uint64_t n){watch_span(p,n,true);});
@@ -1414,7 +1454,7 @@ struct Session {
                     keep.dirty=true;keep.last_use=++resource_clock;remainders.push_back(std::move(keep));}
             }
         }
-        if(!discard){vk.graphics_device_copies(*batch,regions);
+        if(!discard){vk.graphics_device_copies(*batch,regions);NativeVulkan::VisualWhy why(vk,"rebind_merge");
             // Fully mapped destinations need no native reconstruction first.
             const bool complete=history_texels==std::uint64_t(surface.width)*surface.height*surface.samples;
             vk.graphics_unpack_upload(*batch,image,surface.format,surface.depth,t.bpp,t.pitch,surface.samples,plan->words,plan->gpu_words,nullptr,at,!complete);
@@ -1486,6 +1526,7 @@ struct Session {
         for(const auto& run:source->readback->runs)if((reinterpret_cast<std::uintptr_t>(run.data)|run.size|run.offset)&3)return false;
         for(const auto& span:surface.physical)if((span.begin|span.end)&3)return false;
         auto input=source->image;const unsigned source_samples=source->samples;const bool was_dirty=source->dirty;
+        NativeVulkan::VisualWhy why(vk,"sample_grid");
         if((input->format!=VK_FORMAT_R8G8B8A8_UNORM && input->format!=VK_FORMAT_R8G8B8A8_SRGB) || (format!=VK_FORMAT_R8G8B8A8_UNORM && format!=VK_FORMAT_R8G8B8A8_SRGB))return false;
         rtt_space(std::uint64_t(surface.width)*surface.height*(surface.samples+source_samples)*8);
         if(!discard && input->format==VK_FORMAT_R8G8B8A8_SRGB){auto raw=surface_image(VK_FORMAT_R8G8B8A8_UNORM,source->width,source->height,source_samples);vk.graphics_copy(*batch,input,raw);input=std::move(raw);}
@@ -1506,7 +1547,11 @@ struct Session {
         }
         if(!discard){
         const std::string vs="#version 450\nvoid main(){vec2 p=vec2((gl_VertexIndex<<1)&2,gl_VertexIndex&2);gl_Position=vec4(p*2.0-1.0,0,1);}";
-        const std::string fs="#version 450\nlayout(binding=17) uniform sampler2DArray src_;layout(location=0) out vec4 color_;layout(push_constant) uniform Params{vec2 extent;vec2 shift;uint plane_;layout(offset=56) vec2 raster_scale_;};void main(){vec2 u=gl_FragCoord.xy/raster_scale_;ivec2 p=ivec2(u);uint gx=uint(p.x)*"+std::to_string(surface.samples)+"u+plane_;if(gx>="+std::to_string(source->width*source_samples)+"u)discard;vec2 ratio=vec2(textureSize(src_,0).xy)/vec2("+std::to_string(source->width)+","+std::to_string(source->height)+");ivec2 q=ivec2((vec2(gx/"+std::to_string(source_samples)+"u,p.y)+fract(u))*ratio);color_=texelFetch(src_,ivec3(q,gx%"+std::to_string(source_samples)+"u),0);}";
+        // Same flattened-grid reinterpretation at native and visual extent: destination
+        // pixel X/plane maps to grid column X*Nd+plane, source pixel G/Ns, plane G%Ns.
+        // On the visual pair this is the reinterpretation of the grid the surface would
+        // have at the higher resolution (no native-cell blocks: planes stay in spatial order).
+        const std::string fs="#version 450\nlayout(binding=17) uniform sampler2DArray src_;layout(location=0) out vec4 color_;layout(push_constant) uniform Params{vec2 extent;vec2 shift;uint plane_;};void main(){ivec2 p=ivec2(gl_FragCoord.xy);uint gx=uint(p.x)*"+std::to_string(surface.samples)+"u+plane_;if(gx>=uint(textureSize(src_,0).x)*"+std::to_string(source_samples)+"u)discard;color_=texelFetch(src_,ivec3(int(gx/"+std::to_string(source_samples)+"u),p.y,int(gx%"+std::to_string(source_samples)+"u)),0);}";
         NativeVulkan::GraphicsState fixed{};fixed.scale_visual=true;fixed.width=surface.width;fixed.height=surface.height;fixed.colors=1;fixed.samples=surface.samples;fixed.color=VK_FORMAT_R8G8B8A8_UNORM;fixed.scissor={{0,0},{surface.width,surface.height}};fixed.blend[0].colorWriteMask=15;
         std::array<std::shared_ptr<NativeVulkan::GraphicsImage>,4> colors{};colors[0]=surface.image;
         std::array<std::shared_ptr<NativeVulkan::GraphicsImage>,20> inputs{};inputs[16]=input;
@@ -1618,6 +1663,7 @@ struct Session {
         surface.image=surface_image(f,width,height,samples,depth);
         for(const auto& span:surface.physical)this->guard.release(reinterpret_cast<const void*>(span.begin),span.end-span.begin);
         ++ownership_revision;
+        NativeVulkan::VisualWhy why(vk,alias?"bind_alias":"bind_fresh");
         const bool uploaded=discard || upload_surface(surface);
         if(!uploaded){const auto bpp=image_bpp(f);std::vector<std::uint8_t> bytes(std::uint64_t(width)*height*samples*bpp),stencil;
             if(depth && format==2)stencil.resize(std::uint64_t(width)*height*samples);
@@ -2153,20 +2199,27 @@ static bool clear(Session& session,unsigned mask){
 }
 } // namespace rsxgraphics
 namespace rsxdraw {
-template<class State> static std::shared_ptr<NativeVulkan::GraphicsImage> rsx_graphics_texture(State& s,unsigned offset,unsigned location,unsigned width,unsigned height,unsigned pitch,unsigned format,bool swizzled){
+template<class State> static std::shared_ptr<NativeVulkan::GraphicsImage> rsx_graphics_texture(State& s,unsigned offset,unsigned location,unsigned width,unsigned height,unsigned pitch,unsigned format,bool swizzled,bool validated_metadata){
     if(!s.rsx.graphics_session)return {};
     auto& session=*static_cast<rsxgraphics::Session*>(s.rsx.graphics_session);
     if(!session.allow_resident_textures)return {};
     const unsigned expected=format==0x85?8:format==0x84?3:format==0x9a?11:format==0x9b?12:0;
     if(!expected)return {};
+    auto candidate=[&](const auto& surface){const auto& t=surface.target;
+        if(surface.partial || surface.depth || surface.samples!=1 || surface.width!=width || surface.height!=height || surface.format!=expected ||
+           surface.image->format!=rsxgraphics::color_format(expected) ||
+           bool(t.swizzle_width)!=swizzled || (!swizzled && t.pitch!=pitch))return false;
+        if(swizzled && (t.swizzle_width!=texture_pot(width) || t.swizzle_height!=texture_pot(height)))return false;
+        return !t.tile && t.offset==t.base_offset;};
+    // The host identity of the first byte is needed only to compare it with a surface that passes every other test. A
+    // validated_metadata caller (Session::texture_metadata) holds this texture's plan decoded under the validated texture
+    // context (same maps, IO table and rights), so the translation below cannot fault there, and with observers paused it
+    // touches no guest-visible state. Other callers keep the translation (and its original error) first.
+    if(validated_metadata && std::none_of(session.surfaces.begin(),session.surfaces.end(),candidate))return {};
     GuestMemory::ObserverPause acquire(s.memory);
     const auto address=location_address(s.rsx,location,offset,1);const auto mapping=s.memory.range(address,1,false);const auto* data=range_identity(mapping,0,1);
     for(const auto& surface:session.surfaces){const auto& t=surface.target;
-        if(surface.partial || surface.depth || surface.samples!=1 || surface.width!=width || surface.height!=height || surface.format!=expected ||
-           surface.image->format!=rsxgraphics::color_format(expected) ||
-           bool(t.swizzle_width)!=swizzled || (!swizzled && t.pitch!=pitch))continue;
-        if(swizzled && (t.swizzle_width!=texture_pot(width) || t.swizzle_height!=texture_pot(height)))continue;
-        if(t.tile || t.base!=data || t.offset!=t.base_offset)continue;
+        if(!candidate(surface) || t.base!=data)continue;
         // Inactive render targets can be sampled directly. A same-draw
         // framebuffer feedback is still rejected/snapshotted by prepared().
         return surface.image;

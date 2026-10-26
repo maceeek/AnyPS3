@@ -81,6 +81,10 @@ SCENARIOS['res-exact'] = r'''
    (was_lost?reported:silent)++;
   }
   stop=true;w.join();assert(required>=100 && reported>0);
+  // Drain a final write from this writer before the next independent phase.
+  // GETLLAR does not acknowledge the old reservation-lost event; a write after
+  // the last check can otherwise leak that event into the unrelated-line phase.
+  spu_collect_events(s,t);
   std::printf("RES_STRESS reported=%u silent=%u required=%u\n",reported,silent,required);}
  // 10. Same stress against a writer that only ever touches a colliding other line: never a loss.
  {std::atomic<bool> stop{false};

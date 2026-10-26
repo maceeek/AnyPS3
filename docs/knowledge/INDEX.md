@@ -1,5 +1,9 @@
 # AnyPS3 project knowledge base
 
+[2026-10-25 higher-resolution performance milestone](experiments/2026-10-25-scale2-walking.md):
+GPU depth copies, bounded history/source caches and sampler shader reuse; original 1440p walking evidence,
+partial-suite closeout and remaining 60-FPS/zero-stutter acceptance limits.
+
 [2026-10-23 FIX7 user-reported problems](experiments/2026-10-23-fix7.md): START crash, GUI settings,
 skip intro, save-menu audio, two windows, stutter, RPCS3 patches (not adopted).
 

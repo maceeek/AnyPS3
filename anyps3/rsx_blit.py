@@ -616,6 +616,52 @@ static bool scaled_copy(PpuState& s,const Image& src,const Image& dst,unsigned s
 enum class RunsResult {done,declined,unsupported};
 static bool runs_enabled=[]{const char* v=std::getenv("ANYPS3_RSX_BLIT_RUNS");return !v || std::string(v)!="0";}();
 static std::uint64_t runs_executed=0;   // transfers planned by scaled_runs (test hook)
+// Geometry plans retain only DMA-relative offsets and interpolation weights. Never retain guest bytes, host pointers,
+// Ranges, mapping/permission decisions or observer admission: every use below re-admits against live state and reads anew.
+// The complete image/tile descriptors form the key; IO translations and local-memory bounds are checked by admit() each time.
+struct RunsPlan {
+    struct DestRun {std::uint64_t at;unsigned x,y,n;};
+    std::vector<unsigned> kx,kx1,ky,ky1;
+    std::vector<std::uint64_t> wa,wb;
+    std::vector<std::uint32_t> tap_off;
+    std::vector<DestRun> dest_runs;
+    Pieces pieces;DestPlan destination;std::size_t columns=0;
+    std::size_t bytes()const{
+        return sizeof(*this)+(kx.capacity()+kx1.capacity()+ky.capacity()+ky1.capacity())*sizeof(unsigned)+
+            (wa.capacity()+wb.capacity())*sizeof(std::uint64_t)+tap_off.capacity()*sizeof(std::uint32_t)+
+            dest_runs.capacity()*sizeof(DestRun)+pieces.items.capacity()*sizeof(Pieces::Item)+destination.runs.capacity()*sizeof(Span);
+    }
+};
+static bool runs_plan_cache_enabled=[]{const char* v=std::getenv("ANYPS3_RSX_BLIT_PLAN_CACHE");return !v || std::string(v)!="0";}();
+static thread_local std::uint64_t runs_plan_hits=0,runs_plan_misses=0;
+struct RunsPlanCache {
+    struct Entry {std::vector<std::uint64_t> key;std::shared_ptr<RunsPlan> plan;std::size_t cost;std::uint64_t used;};
+    static constexpr std::size_t max_bytes=32u<<20;
+    static inline const std::size_t max_entries=[]{const char* v=std::getenv("ANYPS3_RSX_BLIT_PLAN_ENTRIES");if(!v)return std::size_t(64);const auto n=std::stoul(v);if(!n || n>256)throw std::runtime_error("invalid plan entry limit");return std::size_t(n);}();
+    std::vector<Entry> entries;std::size_t bytes=0;std::uint64_t clock=0;
+    std::shared_ptr<RunsPlan> find(const std::vector<std::uint64_t>& key){
+        if(runs_plan_cache_enabled)for(auto& e:entries)if(e.key==key){e.used=++clock;++runs_plan_hits;return e.plan;}
+        return {};
+    }
+    void insert(std::vector<std::uint64_t> key,const std::shared_ptr<RunsPlan>& plan){
+        if(!runs_plan_cache_enabled)return;
+        const auto cost=plan->bytes()+key.capacity()*sizeof(std::uint64_t)+sizeof(Entry);
+        if(cost>max_bytes)return;
+        while(!entries.empty() && (entries.size()>=max_entries || bytes+cost>max_bytes)){
+            auto old=std::min_element(entries.begin(),entries.end(),[](const Entry& a,const Entry& b){return a.used<b.used;});
+            bytes-=old->cost;entries.erase(old);
+        }
+        entries.push_back({std::move(key),plan,cost,++clock});bytes+=cost;
+    }
+};
+static thread_local RunsPlanCache runs_plan_cache;
+static std::vector<std::uint64_t> runs_plan_key(const NativeRsx& gpu,const Image& src,const Image& dst,unsigned filter,
+    std::int64_t dx,std::int64_t dy,std::int64_t u,std::int64_t v,unsigned ox,unsigned oy,unsigned x0,unsigned y0,unsigned x1,unsigned y1){
+    std::vector<std::uint64_t> key{filter,std::uint64_t(dx),std::uint64_t(dy),std::uint64_t(u),std::uint64_t(v),ox,oy,x0,y0,x1,y1};
+    for(const auto* i:{&src,&dst})key.insert(key.end(),{i->context,i->offset,i->pitch,i->bpp,i->width,i->height,i->log_w,i->log_h,std::uint64_t(i->swizzled)});
+    for(const auto& t:gpu.tiles)key.insert(key.end(),{std::uint64_t(t.bound),t.location,t.offset,t.size,t.pitch,t.compression,t.base,t.bank,t.range_word,t.format_word});
+    return key;
+}
 static RunsResult scaled_runs(PpuState& s,const Image& src,const Image& dst,unsigned src_format,unsigned dst_format,bool raw_copy,unsigned operation,unsigned filter,
     std::int64_t dx,std::int64_t dy,std::int64_t u,std::int64_t v,unsigned ox,unsigned oy,unsigned x0,unsigned y0,unsigned x1,unsigned y1,Prepared& out){
     if(!runs_enabled || src.swizzled || dst.swizzled || x0>=x1 || y0>=y1)return RunsResult::unsupported;
@@ -623,55 +669,67 @@ static RunsResult scaled_runs(PpuState& s,const Image& src,const Image& dst,unsi
     if(out_pixels*per_pixel>(UINT64_C(1)<<22))return RunsResult::unsupported;   // the per-tap planner declines ("tap budget")
     if(dst.bpp!=dest_bpp(dst_format))return RunsResult::unsupported;
     const unsigned W=x1-x0,H=y1-y0;
-    auto clamp_to=[](std::int64_t value,std::int64_t last){return std::clamp<std::int64_t>(value,0,last);};
-    // Per output column / row: tap indices into the tapped column / row lists and the filter weights.
-    std::vector<unsigned> cols,rows,kx(W),kx1(W),ky(H),ky1(H);std::vector<std::uint64_t> wa(W),wb(H);
-    std::vector<std::uint32_t> col_value(W),col_value1(W),row_value(H),row_value1(H);
-    for(unsigned i=0;i<W;++i){const auto fx=u+std::int64_t(x0+i-ox)*dx,ix=floor_fixed(fx);
-        col_value[i]=unsigned(clamp_to(ix,src.width-1));col_value1[i]=unsigned(clamp_to(ix+1,src.width-1));wa[i]=std::uint64_t(fx-ix*1048576);
-        cols.push_back(col_value[i]);if(filter)cols.push_back(col_value1[i]);}
-    for(unsigned j=0;j<H;++j){const auto fy=v+std::int64_t(y0+j-oy)*dy,iy=floor_fixed(fy);
-        row_value[j]=unsigned(clamp_to(iy,src.height-1));row_value1[j]=unsigned(clamp_to(iy+1,src.height-1));wb[j]=std::uint64_t(fy-iy*1048576);
-        rows.push_back(row_value[j]);if(filter)rows.push_back(row_value1[j]);}
-    for(auto* list:{&cols,&rows}){std::sort(list->begin(),list->end());list->erase(std::unique(list->begin(),list->end()),list->end());}
-    const std::size_t C=cols.size(),R=rows.size();
-    if(C*R>(std::size_t(1)<<22))return RunsResult::unsupported;
-    auto index=[](const std::vector<unsigned>& list,unsigned value){return unsigned(std::lower_bound(list.begin(),list.end(),value)-list.begin());};
-    for(unsigned i=0;i<W;++i){kx[i]=index(cols,col_value[i]);kx1[i]=index(cols,col_value1[i]);}
-    for(unsigned j=0;j<H;++j){ky[j]=index(rows,row_value[j]);ky1[j]=index(rows,row_value1[j]);}
-    std::vector<std::uint32_t> tap_at(C*R);std::vector<Span> spans,dest;Pieces pieces;DestPlan plan;
-    struct DestRun {std::uint64_t at;unsigned x,y,n;};std::vector<DestRun> dest_runs;   // raster order
-    try{   // planning: no guest access
-        Image::Memo source_memo,dest_memo;
-        for(std::size_t r=0;r<R;++r){const unsigned y=rows[r];
-            for(std::size_t k=0;k<C;){const unsigned c=cols[k];
-                const unsigned n=src.run(s.rsx,c,y,cols.back()-c+1);
-                const auto base=src.locate(s.rsx,c,y,&source_memo);
-                if(n>1 && src.locate(s.rsx,c+n-1,y,&source_memo)!=base+std::uint64_t(n-1)*src.bpp)return RunsResult::unsupported;
-                for(;k<C && cols[k]<c+n;++k){const auto at=base+std::uint64_t(cols[k]-c)*src.bpp;
-                    if(at>UINT32_MAX-4)return RunsResult::unsupported;
-                    tap_at[r*C+k]=std::uint32_t(at);add_span(spans,at,src.bpp,source_slack);++batch_tap_work;}
+    auto key=runs_plan_key(s.rsx,src,dst,filter,dx,dy,u,v,ox,oy,x0,y0,x1,y1);
+    auto data=runs_plan_cache.find(key);
+    if(!data){
+        ++runs_plan_misses;data=std::make_shared<RunsPlan>();
+        auto clamp_to=[](std::int64_t value,std::int64_t last){return std::clamp<std::int64_t>(value,0,last);};
+        // Per output column / row: tap indices into the tapped column / row lists and the filter weights.
+        std::vector<unsigned> cols,rows;
+        auto& kx=data->kx;auto& kx1=data->kx1;auto& ky=data->ky;auto& ky1=data->ky1;auto& wa=data->wa;auto& wb=data->wb;
+        kx.resize(W);kx1.resize(W);ky.resize(H);ky1.resize(H);wa.resize(W);wb.resize(H);
+        std::vector<std::uint32_t> col_value(W),col_value1(W),row_value(H),row_value1(H);
+        for(unsigned i=0;i<W;++i){const auto fx=u+std::int64_t(x0+i-ox)*dx,ix=floor_fixed(fx);
+            col_value[i]=unsigned(clamp_to(ix,src.width-1));col_value1[i]=unsigned(clamp_to(ix+1,src.width-1));wa[i]=std::uint64_t(fx-ix*1048576);
+            cols.push_back(col_value[i]);if(filter)cols.push_back(col_value1[i]);}
+        for(unsigned j=0;j<H;++j){const auto fy=v+std::int64_t(y0+j-oy)*dy,iy=floor_fixed(fy);
+            row_value[j]=unsigned(clamp_to(iy,src.height-1));row_value1[j]=unsigned(clamp_to(iy+1,src.height-1));wb[j]=std::uint64_t(fy-iy*1048576);
+            rows.push_back(row_value[j]);if(filter)rows.push_back(row_value1[j]);}
+        for(auto* list:{&cols,&rows}){std::sort(list->begin(),list->end());list->erase(std::unique(list->begin(),list->end()),list->end());}
+        const std::size_t C=cols.size(),R=rows.size();data->columns=C;
+        if(C*R>(std::size_t(1)<<22))return RunsResult::unsupported;
+        auto index=[](const std::vector<unsigned>& list,unsigned value){return unsigned(std::lower_bound(list.begin(),list.end(),value)-list.begin());};
+        for(unsigned i=0;i<W;++i){kx[i]=index(cols,col_value[i]);kx1[i]=index(cols,col_value1[i]);}
+        for(unsigned j=0;j<H;++j){ky[j]=index(rows,row_value[j]);ky1[j]=index(rows,row_value1[j]);}
+        std::vector<std::uint32_t> tap_at(C*R);std::vector<Span> spans,dest;auto& pieces=data->pieces;auto& plan=data->destination;
+        auto& dest_runs=data->dest_runs;
+        try{   // planning: no guest access
+            Image::Memo source_memo,dest_memo;
+            for(std::size_t r=0;r<R;++r){const unsigned y=rows[r];
+                for(std::size_t k=0;k<C;){const unsigned c=cols[k];
+                    const unsigned n=src.run(s.rsx,c,y,cols.back()-c+1);
+                    const auto base=src.locate(s.rsx,c,y,&source_memo);
+                    if(n>1 && src.locate(s.rsx,c+n-1,y,&source_memo)!=base+std::uint64_t(n-1)*src.bpp)return RunsResult::unsupported;
+                    for(;k<C && cols[k]<c+n;++k){const auto at=base+std::uint64_t(cols[k]-c)*src.bpp;
+                        if(at>UINT32_MAX-4)return RunsResult::unsupported;
+                        tap_at[r*C+k]=std::uint32_t(at);add_span(spans,at,src.bpp,source_slack);++batch_tap_work;}
+                }
             }
+            for(unsigned y=y0;y<y1;++y)for(unsigned x=x0;x<x1;){
+                const unsigned n=dst.run(s.rsx,x,y,x1-x);const auto at=dst.locate(s.rsx,x,y,&dest_memo);
+                if(n>1 && dst.locate(s.rsx,x+n-1,y,&dest_memo)!=at+std::uint64_t(n-1)*dst.bpp)return RunsResult::unsupported;
+                if(at+std::uint64_t(n-1)*dst.bpp>UINT32_MAX-4)return RunsResult::unsupported;
+                dest_runs.push_back({at,x,y,n});dest.push_back({at,at+std::uint64_t(n)*dst.bpp});x+=n;
+            }
+            if(!pieces.build(spans,source_slack) || !plan.build(std::move(dest)))return RunsResult::declined;
+        }catch(const std::exception&){return RunsResult::unsupported;}
+        // Snapshot offset of every tap (pieces.find, with the last piece as a cursor).
+        auto& tap_off=data->tap_off;tap_off.resize(C*R);std::size_t item=0;
+        for(std::size_t t=0;t<tap_off.size();++t){const auto at=tap_at[t];
+            if(item<pieces.items.size() && at>=pieces.items[item].at && at+src.bpp<=pieces.items[item].end){tap_off[t]=std::uint32_t(pieces.items[item].offset+(at-pieces.items[item].at));continue;}
+            tap_off[t]=std::uint32_t(pieces.find(at));
+            item=std::size_t(std::upper_bound(pieces.items.begin(),pieces.items.end(),std::uint64_t(at),[](std::uint64_t value,const Pieces::Item& i){return value<i.at;})-pieces.items.begin())-1;
         }
-        for(unsigned y=y0;y<y1;++y)for(unsigned x=x0;x<x1;){
-            const unsigned n=dst.run(s.rsx,x,y,x1-x);const auto at=dst.locate(s.rsx,x,y,&dest_memo);
-            if(n>1 && dst.locate(s.rsx,x+n-1,y,&dest_memo)!=at+std::uint64_t(n-1)*dst.bpp)return RunsResult::unsupported;
-            if(at+std::uint64_t(n-1)*dst.bpp>UINT32_MAX-4)return RunsResult::unsupported;
-            dest_runs.push_back({at,x,y,n});dest.push_back({at,at+std::uint64_t(n)*dst.bpp});x+=n;
-        }
-        if(!pieces.build(spans,source_slack) || !plan.build(std::move(dest)))return RunsResult::declined;
-    }catch(const std::exception&){return RunsResult::unsupported;}
+        runs_plan_cache.insert(std::move(key),data);
+    }
+    const auto& pieces=data->pieces;const auto& plan=data->destination;
+    const auto& kx=data->kx;const auto& kx1=data->kx1;const auto& ky=data->ky;const auto& ky1=data->ky1;
+    const auto& wa=data->wa;const auto& wb=data->wb;const auto& tap_off=data->tap_off;const auto& dest_runs=data->dest_runs;
+    const auto C=data->columns;
     out=Prepared{};std::vector<GuestMemory::Range> sources;
     if(!admit(s,src.context,pieces.intervals(),false,false,&sources) || !admit(s,dst.context,plan.runs,true,true,&out.targets))return RunsResult::declined;
     if(stability_probe)stability_probe(0);
     out.runs=plan.runs;auto& snapshot=out.snapshot;auto& bytes=out.bytes;read_pieces(pieces,sources,snapshot);
-    // Snapshot offset of every tap (pieces.find, with the last piece as a cursor).
-    std::vector<std::uint32_t> tap_off(C*R);std::size_t item=0;
-    for(std::size_t t=0;t<tap_off.size();++t){const auto at=tap_at[t];
-        if(item<pieces.items.size() && at>=pieces.items[item].at && at+src.bpp<=pieces.items[item].end){tap_off[t]=std::uint32_t(pieces.items[item].offset+(at-pieces.items[item].at));continue;}
-        tap_off[t]=std::uint32_t(pieces.find(at));
-        item=std::size_t(std::upper_bound(pieces.items.begin(),pieces.items.end(),std::uint64_t(at),[](std::uint64_t value,const Pieces::Item& i){return value<i.at;})-pieces.items.begin())-1;
-    }
     bytes.resize(out_pixels*dst.bpp);std::size_t used=0;
     struct Pending {std::uint64_t at;std::size_t offset,size;};std::vector<Pending> pending;pending.reserve(dest_runs.size());
     {   // colours in raster order (the reference's order); zero-alpha pixels of SRCCOPY_AND are not written
@@ -759,6 +817,109 @@ static bool scaled_batch(PpuState& s,const Image& src,const Image& dst,unsigned 
     for(std::size_t i=0;i<where.size();++i)out.chunks.push_back({where[i],bytes.data()+i*dst.bpp,dst.bpp});
     return true;
 }
+#ifdef ANYPS3_RSX_VK
+// Complete nearest copies whose source bytes already live in a D24S8 image.
+// No bind_target here: a source read must not request write permission or mark
+// reservations. Pure fresh mappings and the current tile are checked each time.
+static bool scaled_depth_gpu(PpuState& s,const Image& src,const Image& dst,unsigned dx,unsigned dy){
+    const char* setting=std::getenv("ANYPS3_RSX_GPU_SCALED_DEPTH");
+    if(setting && std::strcmp(setting,"0") && std::strcmp(setting,"1"))throw std::runtime_error("invalid ANYPS3_RSX_GPU_SCALED_DEPTH");
+    if(setting && !std::strcmp(setting,"0"))return false;
+    if(!s.rsx.graphics_session || src.context!=0xfeed0000 || dst.context!=0xfeed0000 ||
+       src.bpp!=4 || dst.bpp!=4 || src.swizzled || dst.swizzled || dst.pitch!=dst.width*4)return false;
+    auto& session=*static_cast<rsxgraphics::Session*>(s.rsx.graphics_session);auto& m=s.memory;
+    auto decline=[](const char* why){if(rsxgraphics::fallback_stats().enabled)++rsxgraphics::fallback_stats().paths[std::string("scaled_depth_decline_")+why];return false;};
+    for(unsigned attempt=0;attempt<2;++attempt){
+        StableScope stability;if(!stable_scope(m,stability))return false;
+        if(!session.observer_installed || session.previous_observer ||
+           m.host_access_observer.lifetime.load(std::memory_order_acquire)!=session.observer_lifetime)return decline("observer");
+        std::optional<GuestMemory::ObserverPause> pause;pause.emplace(m);
+        auto target=[&](const Image& image,bool write,rsxdraw::Target& t){
+            const auto span=std::uint64_t(image.height-1)*image.pitch+image.width*4ull;
+            if(!image.width || !image.height || image.offset%4 || image.pitch%4 || image.pitch<image.width*4 || span>UINT32_MAX)return false;
+            t.offset=t.base_offset=image.offset;t.pitch=image.pitch;t.bpp=4;
+            std::uint64_t bytes=span;
+            for(const auto& tile:s.rsx.tiles)if(tile.bound && tile.location==0 && image.offset<std::uint64_t(tile.offset)+tile.size && tile.offset<image.offset+span){
+                if(write || t.tile || image.offset<tile.offset || image.offset+span>std::uint64_t(tile.offset)+tile.size || tile.pitch!=image.pitch)return false;
+                if(tile.compression!=0 && tile.compression!=7 && (tile.compression<9 || tile.compression>12))return false;
+                t.tile=&tile;t.base_offset=tile.offset;bytes=tile.size;
+            }
+            try{const auto ea=address(s.rsx,image.context,t.base_offset,bytes);
+                auto range=m.range(ea,unsigned(bytes),false,false);
+                if(write)range=m.range(ea,unsigned(bytes),true,false);
+                if(range.parts.size()!=1)return false;
+                t.mapping=std::make_shared<GuestMemory::Range>(std::move(range));t.base=t.mapping->parts[0].data;
+            }catch(const std::runtime_error&){return false;} // pure admission only; no callbacks or GPU work
+            const auto& part=t.mapping->parts[0];
+            if(session.label_overlap(part.data,part.size) || m.raw_cpu_dirty_interested(part.data,part.size,write))return false;
+            if(m.concurrent() && m.page_broker.enabled.load(std::memory_order_acquire) && !m.page_broker.owner_unclaimed(part.data,part.size))return false;
+            for(const auto* guard=GuestMemory::HostGuard::head;guard;guard=guard->next)
+                if(guard!=&session.guard && guard->touches_any(part.data,part.size))return false;
+            if(write){
+                if(m.concurrent()){
+                    auto found=m.parallel->backings.find(part.owner.get());if(found==m.parallel->backings.end())return false;
+                    auto backing=found->second.lock();if(!backing)return false;
+                    const auto first=(part.data-part.owner->data())/128,last=(part.data-part.owner->data()+part.size-1)/128;
+                    for(auto i=first;i<=last;++i)if(backing->tracked[i].load(std::memory_order_acquire))return false;
+                }else{const auto first=reinterpret_cast<std::uintptr_t>(part.data)/128,last=(reinterpret_cast<std::uintptr_t>(part.data)+part.size-1)/128;
+                    for(auto line=first;line<=last;++line)if(m.write_versions.find_line(line))return false;}
+            }
+            return true;
+        };
+        rsxdraw::Target from,to;if(!target(src,false,from) || !target(dst,true,to))return decline("mapping_interest");
+        const auto a=reinterpret_cast<std::uintptr_t>(from.base),c=reinterpret_cast<std::uintptr_t>(to.base);
+        if(a<c+to.mapping->size && c<a+from.mapping->size)return decline("alias");
+        std::size_t source=SIZE_MAX,destination=SIZE_MAX;
+        for(std::size_t i=0;i<session.surfaces.size();++i){const auto& surface=session.surfaces[i];
+            if(surface.same(from,src.width,src.height,1,2,true)){
+                if(source!=SIZE_MAX || surface.partial || !surface.protectable || !surface.exposed.empty() || !surface.image || surface.image->format!=VK_FORMAT_D24_UNORM_S8_UINT)return decline("source_layout");
+                if(from.tile){const auto& old=*surface.target.tile;const auto& tile=*from.tile;
+                    if(old.bound!=tile.bound || old.location!=tile.location || old.compression!=tile.compression || old.base!=tile.base || old.range_word!=tile.range_word || old.format_word!=tile.format_word)return decline("tile_changed");}
+                source=i;
+            }
+            if(surface.overlaps(to.base,to.mapping->size)){
+                if(destination!=SIZE_MAX || !surface.same(to,dst.width,dst.height,1,2,true) || surface.partial ||
+                   !surface.protectable || !surface.exposed.empty() || !surface.image || surface.image->format!=VK_FORMAT_D24_UNORM_S8_UINT)return decline("destination_layout");
+                destination=i;
+            }
+        }
+        if(source==SIZE_MAX)return decline("source_missing");
+        for(std::size_t i=0;i<session.surfaces.size();++i)if(i!=source && session.surfaces[i].overlaps(from.base,from.mapping->size))return decline("source_alias");
+        auto& vk=session.vk;const auto scale=vk.graphics_render_scale;
+        const auto factor=scale>1?1+scale*scale:1;
+        const auto required=vk.graphics_scaled_depth_budget(src.width,src.height,dst.width,dst.height);
+        if(required>session.batch->capacity || (std::uint64_t(dst.width)*scale-1)*dx>UINT32_MAX ||
+           (std::uint64_t(dst.height)*scale-1)*dy>UINT32_MAX)return decline("size");
+        if(session.batch->used+required>session.batch->capacity){
+            if(attempt)return decline("capacity");
+            // Submission/recycling can wait. Drop metadata before it and redo
+            // every admission/identity test afterwards; never reuse these pins.
+            pause.reset();if(stability.owns_lock())stability.unlock();session.submit_async("scaled_depth_capacity");continue;
+        }
+        std::optional<rsxgraphics::Surface> created;
+        if(destination==SIZE_MAX){
+            if(session.surfaces.size()>=64)return decline("surface_budget");
+            std::uint64_t resident=0;for(const auto& surface:session.surfaces)resident+=surface.image->memory_bytes;
+            if(resident+std::uint64_t(dst.width)*dst.height*4*factor>256*1024*1024ull*factor)return decline("surface_budget");
+            created.emplace(rsxgraphics::Surface{to,dst.width,dst.height,1,2,true,false,{},{}});
+            session.prepare_protection(*created);
+            if(!created->protectable || !created->exposed.empty())return decline("destination_protection");
+            created->image=session.surface_image(VK_FORMAT_D24_UNORM_S8_UINT,dst.width,dst.height,1,true);
+        }
+        const auto input=session.surfaces[source].image;
+        auto& output=created?*created:session.surfaces[destination];
+        if(!vk.graphics_scaled_depth_bytes(*session.batch,input,output.image,dx,dy))return decline("device_bounds");
+        // The destination now owns the copied bytes. CPU/texture consumers use
+        // the same dirty-image watches and flush path as an ordinary RSX draw.
+        output.target.mapping=to.mapping;output.target.base=to.base;output.last_use=++session.resource_clock;
+        session.dirty_surface(output);
+        if(created){session.surfaces.push_back(std::move(*created));session.refresh_surface_watches();}
+        if(rsxgraphics::fallback_stats().enabled)++rsxgraphics::fallback_stats().paths["scaled_depth_gpu"];
+        return true;
+    }
+    return false;
+}
+#endif
 static void scaled(PpuState& s,unsigned point){
     auto& gpu=s.rsx;
     const auto clip=state(gpu,0xc30c),out=state(gpu,0xc314);
@@ -792,6 +953,27 @@ static void scaled(PpuState& s,unsigned point){
     const std::int64_t u=std::int64_t(point&0xffff)*65536-(origin==1?524288:0);
     const std::int64_t v=std::int64_t(point>>16)*65536-(origin==1?524288:0);
 #ifdef ANYPS3_RSX_VK
+    if(operation==3 && !filter && dx>0 && dy>0 && u==0 && v==0 && src_format==3 && dst_format==10 &&
+       ox==0 && oy==0 && x0==0 && y0==0 && x1==ow && y1==oh && scaled_depth_gpu(s,src,dst,unsigned(dx),unsigned(dy))){
+        ::RsxPerfCounters::add(::RsxPerfCounters::blit_calls);::RsxPerfCounters::add(::RsxPerfCounters::blit_gpu);
+        ::RsxPerfCounters::add(::RsxPerfCounters::blit_pixels,std::uint64_t(ow)*oh);return;
+    }
+    // Bounded, opt-in metadata only. Identify the real resident layout before adding a GPU scaled-copy path.
+    static const unsigned surface_trace_limit=[]{const char* v=std::getenv("ANYPS3_RSX_BLIT_SURFACE_TRACE");if(!v)return 0u;
+        char* end=nullptr;const auto n=std::strtoul(v,&end,0);if(!*v || *end || n>128)throw std::runtime_error("invalid ANYPS3_RSX_BLIT_SURFACE_TRACE");return unsigned(n);}();
+    static const std::uint64_t surface_trace_offset=[]{const char* v=std::getenv("ANYPS3_RSX_BLIT_SURFACE_OFFSET");if(!v)return UINT64_MAX;
+        char* end=nullptr;const auto n=std::strtoull(v,&end,0);if(!*v || *end || n>UINT32_MAX)throw std::runtime_error("invalid ANYPS3_RSX_BLIT_SURFACE_OFFSET");return std::uint64_t(n);}();
+    static unsigned surface_traces=0;
+    if(surface_traces<surface_trace_limit && gpu.graphics_session && (surface_trace_offset==UINT64_MAX || src.offset==surface_trace_offset)){
+        ++surface_traces;const auto& resident=static_cast<rsxgraphics::Session*>(gpu.graphics_session)->surfaces;
+        std::fprintf(stderr,"BLIT_SURFACES event=%u src_ctx=%08x src_offset=%u src_pitch=%u src_width=%u src_height=%u dst_ctx=%08x dst_offset=%u dst_pitch=%u dst_width=%u dst_height=%u op=%u filter=%u dx=%lld dy=%lld count=%zu\n",
+            surface_traces,src.context,src.offset,src.pitch,src.width,src.height,dst.context,dst.offset,dst.pitch,dst.width,dst.height,operation,filter,(long long)dx,(long long)dy,resident.size());
+        unsigned shown=0;for(const auto& surface:resident){if(shown++==256){std::fprintf(stderr,"BLIT_SURFACES truncated\n");break;}const auto& t=surface.target;
+            std::fprintf(stderr,"BLIT_SURFACE event=%u offset=%u base_offset=%u pitch=%u bpp=%u width=%u height=%u samples=%u format=%u depth=%d tiled=%d tile_offset=%u tile_pitch=%u tile_size=%u dirty=%d partial=%d image_format=%u visual=%d words=%zu runs=%zu\n",
+                surface_traces,t.offset,t.base_offset,t.pitch,t.bpp,surface.width,surface.height,surface.samples,surface.format,int(surface.depth),int(bool(t.tile)),
+                t.tile?t.tile->offset:0,t.tile?t.tile->pitch:0,t.tile?t.tile->size:0,int(surface.dirty),int(surface.partial),surface.image?unsigned(surface.image->format):0,
+                int(surface.image && surface.image->visual),surface.readback?surface.readback->words.size():0,surface.readback?surface.readback->runs.size():0);}
+    }
     if(gpu.graphics_session && operation==3 && !filter && dx==1048576 && dy==1048576 && u==0 && v==0 && !dst.swizzled &&
        ox==0 && oy==0 && x0==0 && y0==0 && x1==ow && y1==oh && ow==src.width && oh==src.height &&
        ((src_format==3 && dst_format==10) || (src_format==7 && dst_format==4))){
@@ -812,8 +994,8 @@ static void scaled(PpuState& s,unsigned point){
             bool tiled=false;
             for(const auto& tile:gpu.tiles)if(tile.bound && (tile.location==location(src.context) || tile.location==location(dst.context)))tiled=true;
             ++calls;pixels+=std::uint64_t(x1-x0)*(y1-y0);filtered+=filter!=0;if(tiled){++tiled_calls;tiled_pixels+=std::uint64_t(x1-x0)*(y1-y0);}
-            if(calls%120==0)std::fprintf(stderr,"BLIT_STATS calls=%llu pixels=%llu tile_location_calls=%llu tile_location_pixels=%llu filtered=%llu rows_path=%llu\n",
-                (unsigned long long)calls,(unsigned long long)pixels,(unsigned long long)tiled_calls,(unsigned long long)tiled_pixels,(unsigned long long)filtered,(unsigned long long)rows_executed);
+            if(calls%120==0)std::fprintf(stderr,"BLIT_STATS calls=%llu pixels=%llu tile_location_calls=%llu tile_location_pixels=%llu filtered=%llu rows_path=%llu plan_hits=%llu plan_misses=%llu plan_entries=%zu plan_bytes=%zu\n",
+                (unsigned long long)calls,(unsigned long long)pixels,(unsigned long long)tiled_calls,(unsigned long long)tiled_pixels,(unsigned long long)filtered,(unsigned long long)rows_executed,(unsigned long long)runs_plan_hits,(unsigned long long)runs_plan_misses,runs_plan_cache.entries.size(),runs_plan_cache.bytes);
         }
         static unsigned traced=0;
         if(trace && traced++<300){

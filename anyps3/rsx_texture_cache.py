@@ -11,6 +11,10 @@ MEMBERS = r'''
     struct PlanKeyHash {std::size_t operator()(const std::array<unsigned,4>& k)const{
         std::uint64_t h=UINT64_C(0xcbf29ce484222325);for(const auto w:k){h^=w;h*=UINT64_C(0x100000001b3);h^=h>>29;}return std::size_t(h);}};
     std::unordered_map<std::array<unsigned,4>,MetadataEntry,PlanKeyHash> texture_plans;
+    // Per unit, the entry of the last lookup: consecutive draws mostly sample the same registers. Element references of an
+    // unordered_map survive insertion/rehash; every erase/clear of texture_plans bumps the generation, which drops all memos.
+    struct MetadataMemo {std::array<unsigned,4> key{};MetadataEntry* entry=nullptr;std::uint64_t generation=0;};
+    std::array<MetadataMemo,16> metadata_memo{};std::uint64_t texture_plans_generation=1;
     struct PlanEntry {std::shared_ptr<TexturePlan> plan;std::uint64_t used;};
     std::unordered_map<std::array<unsigned,4>,PlanEntry,PlanKeyHash> layout_plans;
     std::uint64_t layout_plan_bytes=0,layout_clock=0;
@@ -30,7 +34,7 @@ MEMBERS = r'''
         for(auto v:state.rsx.io_flags)context_scratch.push_back(v);
         for(const auto& t:state.rsx.tiles){context_scratch.insert(context_scratch.end(),{t.bound,t.location,t.offset,t.size,t.pitch,t.compression,t.base,t.bank,t.range_word,t.format_word});}
         for(const auto& r:state.maps)context_scratch.insert(context_scratch.end(),{r.base,r.flags,r.identity,reinterpret_cast<std::uintptr_t>(r.bytes.get()),reinterpret_cast<std::uintptr_t>(r.bytes->data()),r.bytes->size()});
-        if(context_scratch!=texture_context){texture_plans.clear();layout_plans.clear();target_cache.entries.clear();texture_plan_bytes=layout_plan_bytes=0;texture_context=context_scratch;}
+        if(context_scratch!=texture_context){texture_plans.clear();++texture_plans_generation;layout_plans.clear();target_cache.entries.clear();texture_plan_bytes=layout_plan_bytes=0;texture_context=context_scratch;}
         context_validated=true;
     }
     Texture texture_metadata(unsigned unit,bool context_validated=false){
@@ -38,6 +42,10 @@ MEMBERS = r'''
         if(!context_validated)validate_texture_context();
         const Reg r{state.rsx};const unsigned base=0x1a00+32*unit;
         const std::array<unsigned,4> key{r(base),r(base+4),r(base+0x18),r(0x1840+4*unit)};
+        auto& memo=metadata_memo[unit];
+        MetadataEntry* entry=memo.entry && memo.generation==texture_plans_generation && memo.key==key?memo.entry:nullptr;
+        if(entry){++texture_metadata_hits;if(fallback_stats().enabled)++fallback_stats().paths["texture_metadata_hit"];if(host_stats().enabled)++host_stats().texture_plan_hit;}
+        else{
         auto found=texture_plans.find(key);
         if(found==texture_plans.end()){
             // Address/format/dimensions/pitch determine the physical plan.
@@ -56,18 +64,20 @@ MEMBERS = r'''
             const auto cost=t.plan->runs.size()*sizeof(TexturePlan::Run)+t.levels.size()*sizeof(TextureLevel);
             while(!texture_plans.empty() && (texture_plans.size()>=texture_cache_entries || texture_plan_bytes+cost>64*1024*1024)){
                 auto old=std::min_element(texture_plans.begin(),texture_plans.end(),[](const auto& a,const auto& b){return a.second.used<b.second.used;});
-                const auto& texture=old->second.texture;texture_plan_bytes-=texture.plan->runs.size()*sizeof(TexturePlan::Run)+texture.levels.size()*sizeof(TextureLevel);texture_plans.erase(old);}
+                const auto& texture=old->second.texture;texture_plan_bytes-=texture.plan->runs.size()*sizeof(TexturePlan::Run)+texture.levels.size()*sizeof(TextureLevel);texture_plans.erase(old);++texture_plans_generation;}
             // One oversized plan remains usable for this draw, but is not
             // retained in the metadata map after the next cache miss.
             texture_plan_bytes+=cost;
             found=texture_plans.emplace(key,MetadataEntry{std::move(t),++layout_clock}).first;++texture_metadata_misses;if(fallback_stats().enabled)++fallback_stats().paths["texture_metadata_miss"];
         }else{++texture_metadata_hits;if(fallback_stats().enabled)++fallback_stats().paths["texture_metadata_hit"];if(host_stats().enabled)++host_stats().texture_plan_hit;}
-        found->second.used=++layout_clock;
-        auto t=found->second.texture;configure_texture_sampling(t,r,unit);
+        entry=&found->second;memo={key,entry,texture_plans_generation};
+        }
+        entry->used=++layout_clock;
+        auto t=entry->texture;configure_texture_sampling(t,r,unit);
         const auto format=r(base+4),filter=r(base+0x14);
         const auto& level=static_cast<const Texture&>(t).levels[0];
         if(!t.cube && t.dimension==2 && t.mip_count==1 && !level.border && !(filter>>28))
-            t.resident_image=rsx_graphics_texture(state,r(base),(format&3)-1,level.width,level.height,level.pitch,t.format,t.swizzled);
+            t.resident_image=rsx_graphics_texture(state,r(base),(format&3)-1,level.width,level.height,level.pitch,t.format,t.swizzled,true);
         if(!t.resident_image && !t.cube && t.dimension==2 && t.mip_count==1 && !level.border && !(filter>>28))
             t.resident_image=rtt_image(t,r(base),(format&3)-1);
         return t;

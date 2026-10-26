@@ -50,8 +50,12 @@ static void upload_cache(){
  assert(near_argb(s.memory.load(0xc0100000,4),0xff774466));assert(session.raw_misses==3);
  repeat_draw(s);session.flush(false);
  // Inactive resident render target is a texture without a snapshot copy.
- auto image=rsxdraw::rsx_graphics_texture(s,0x100000,0,32,16,128,0x85,false);
+ auto image=rsxdraw::rsx_graphics_texture(s,0x100000,0,32,16,128,0x85,false,false);
  assert(image && image==session.surfaces.back().image);
+ // The validated-metadata shortcut finds the same surface and rejects a mismatching extent or address like the full test.
+ assert(rsxdraw::rsx_graphics_texture(s,0x100000,0,32,16,128,0x85,false,true)==image);
+ assert(!rsxdraw::rsx_graphics_texture(s,0x100000,0,16,16,128,0x85,false,true) && !rsxdraw::rsx_graphics_texture(s,0x100000,0,16,16,128,0x85,false,false));
+ assert(!rsxdraw::rsx_graphics_texture(s,0x100100,0,32,16,128,0x85,false,true) && !rsxdraw::rsx_graphics_texture(s,0x100100,0,32,16,128,0x85,false,false));
  // An alias-compute commit bypasses the observer; it must invalidate uploads.
  auto& R=s.rsx.registers;R[0x210]=R[0x214]=0x2000;R[0xa74]=R[0xa70]=1;R[0xa6c]=0x207;
  fpword(s,0,(1u<<24)|(15u<<9)|1u);fpword(s,1,2u|(0xe4u<<9)|(7u<<18));fpword(s,2,0);fpword(s,3,0);
@@ -168,7 +172,7 @@ static void menu_benchmark(unsigned draws,unsigned frames){
  // Warm up pipelines and uploads outside measured frames.
  rsx_execute_draw(s);session.flush(false);
  const auto compile0=s.rsx.renderer->compile_stats;
- const double upload0=session.batch->upload_ms,draw0=session.batch->draw_ms,download0=session.batch->download_ms,wait0=session.batch->wait_ms,pipeline0=session.batch->pipeline_ms,record0=session.batch->record_ms;
+ const double upload0=session.batch->upload_ms,draw0=session.batch->draw_ms,download0=session.batch->download_ms,wait0=session.batch->wait_ms;
  rsxdraw::host_stats().select(rsxdraw::HostStage::idle);rsxdraw::host_stats().ns.fill(0);
  auto thread_ns=[](){timespec value{};if(clock_gettime(CLOCK_THREAD_CPUTIME_ID,&value))throw std::runtime_error("thread CPU clock failed");return std::uint64_t(value.tv_sec)*1000000000u+value.tv_nsec;};
  double cpu_ns=0,thread_cpu_ns=0;const auto start=std::chrono::steady_clock::now();
@@ -184,7 +188,7 @@ static void menu_benchmark(unsigned draws,unsigned frames){
  const auto compile1=s.rsx.renderer->compile_stats;
  assert(compile1.shader_modules==compile0.shader_modules && compile1.graphics_pipelines==compile0.graphics_pipelines && compile1.compute_pipelines==compile0.compute_pipelines && compile1.spirv_compiles==compile0.spirv_compiles);
  std::printf("MENU_COMPILE modules=%llu graphics_pipelines=%llu compute_pipelines=%llu spirv_compiles=%llu cpu_ms_per_frame=%.3f thread_cpu_ms_per_frame=%.3f\n",(unsigned long long)(compile1.shader_modules-compile0.shader_modules),(unsigned long long)(compile1.graphics_pipelines-compile0.graphics_pipelines),(unsigned long long)(compile1.compute_pipelines-compile0.compute_pipelines),(unsigned long long)(compile1.spirv_compiles-compile0.spirv_compiles),cpu_ns/(frames*1.e6),thread_cpu_ns/(frames*1.e6));
- std::printf("MENU_BENCH draws=%u frames=%u cpu_us_per_draw=%.3f wall_fps=%.3f seconds=%.6f raw_hits=%llu raw_misses=%llu raw_upload_bytes=%llu submissions=%llu descriptor_hits=%llu descriptor_misses=%llu framebuffer_hits=%llu framebuffer_misses=%llu upload_ms=%.3f draw_ms=%.3f download_ms=%.3f wait_ms=%.3f pipeline_ms=%.3f record_ms=%.3f\n",draws,frames,cpu_ns/(double(draws)*frames*1000),frames/seconds,seconds,(unsigned long long)session.raw_hits,(unsigned long long)session.raw_misses,(unsigned long long)session.raw_bytes,(unsigned long long)session.batch->submissions,(unsigned long long)session.batch->descriptor_hits,(unsigned long long)session.batch->descriptor_misses,(unsigned long long)session.batch->framebuffer_hits,(unsigned long long)session.batch->framebuffer_misses,session.batch->upload_ms-upload0,session.batch->draw_ms-draw0,session.batch->download_ms-download0,session.batch->wait_ms-wait0,session.batch->pipeline_ms-pipeline0,session.batch->record_ms-record0);
+ std::printf("MENU_BENCH draws=%u frames=%u cpu_us_per_draw=%.3f wall_fps=%.3f seconds=%.6f raw_hits=%llu raw_misses=%llu raw_upload_bytes=%llu submissions=%llu descriptor_hits=%llu descriptor_misses=%llu framebuffer_hits=%llu framebuffer_misses=%llu upload_ms=%.3f draw_ms=%.3f download_ms=%.3f wait_ms=%.3f\n",draws,frames,cpu_ns/(double(draws)*frames*1000),frames/seconds,seconds,(unsigned long long)session.raw_hits,(unsigned long long)session.raw_misses,(unsigned long long)session.raw_bytes,(unsigned long long)session.batch->submissions,(unsigned long long)session.batch->descriptor_hits,(unsigned long long)session.batch->descriptor_misses,(unsigned long long)session.batch->framebuffer_hits,(unsigned long long)session.batch->framebuffer_misses,session.batch->upload_ms-upload0,session.batch->draw_ms-draw0,session.batch->download_ms-download0,session.batch->wait_ms-wait0);
  s.rsx.graphics_session=nullptr;
 }
 int main(int argc,char** argv){try{

@@ -9,6 +9,28 @@ from tests.test_rsx_graphics import native_source as graphics_source
 from tests.test_rsx_vk import LIBRARIES
 
 MAIN = r'''
+static void source_working_set_(){
+ unsetenv("ANYPS3_RSX_SOURCE_CACHE_ENTRIES");unsetenv("ANYPS3_RSX_SOURCE_CACHE_MB");
+ rsxgraphics::SourceCache<std::vector<unsigned>> cache;
+ for(unsigned i=0;i<600;++i)cache.put({i},std::string(40000,char('a'+i%26))+std::to_string(i));
+ // Two traversals of a moving scene's working set must return the original immutable owners.
+ auto first=cache.find({0});assert(first);
+ for(unsigned repeat=0;repeat<2;++repeat)for(unsigned i=0;i<600;++i){auto value=cache.find({i});
+  assert(value && *value==std::string(40000,char('a'+i%26))+std::to_string(i));}
+ assert(cache.find({0})==first);
+ setenv("ANYPS3_RSX_SOURCE_CACHE_ENTRIES","8",1);setenv("ANYPS3_RSX_SOURCE_CACHE_MB","1",1);
+ rsxgraphics::SourceCache<std::vector<unsigned>> small;
+ auto held=small.put({0},"held by a queued draw");
+ for(unsigned i=1;i<=8;++i)small.put({i},std::to_string(i));
+ assert(!small.find({0}) && *held=="held by a queued draw");
+ for(unsigned i=9;i<20;++i){small.put({i},std::string(300000,char(i)));assert(small.entries.size()<=8 && small.bytes<=1024*1024);}
+ assert(!small.find({9}) && small.find({19}) && *small.find({19})==std::string(300000,char(19)));
+ auto huge=small.put({20},std::string(2*1024*1024,'x'));assert(huge->size()==2*1024*1024 && !small.find({20}));
+ for(const auto* invalid:{"0","-1","4097","2x"}){setenv("ANYPS3_RSX_SOURCE_CACHE_ENTRIES",invalid,1);bool failed=false;
+  try{rsxgraphics::SourceCache<std::vector<unsigned>> bad;}catch(const std::runtime_error&){failed=true;}assert(failed);}
+ unsetenv("ANYPS3_RSX_SOURCE_CACHE_ENTRIES");unsetenv("ANYPS3_RSX_SOURCE_CACHE_MB");
+ std::puts("PASS shader source working set, immutable owners, entry/byte limits and invalid budgets");
+}
 static void sparse_indices_(){
  setenv("ANYPS3_RSX_BACKEND","gpu",1);
  for(unsigned type:{0u,1u}){
@@ -161,7 +183,7 @@ static void device_sequence_(){
  for(unsigned y=0;y<8;++y)for(unsigned x=0;x<8;++x)assert(near_argb(s.memory.load(0xc0100000+y*32+x*4,4),0x80ff8040));
  std::puts("PASS fixed device topology for all six array primitives, odd strips, range boundaries, exact bounds and actual draw");
 }
-int main(){try{sparse_indices_();state_blocks_();queued_constants_();inverse_upload_();image_pool_();upload_bits_();device_sequence_();}catch(const std::exception& e){std::fprintf(stderr,"FAIL %s\n",e.what());return 1;}}
+int main(){try{source_working_set_();sparse_indices_();state_blocks_();queued_constants_();inverse_upload_();image_pool_();upload_bits_();device_sequence_();}catch(const std::exception& e){std::fprintf(stderr,"FAIL %s\n",e.what());return 1;}}
 '''
 
 def native_source():

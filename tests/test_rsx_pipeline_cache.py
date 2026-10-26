@@ -53,6 +53,15 @@ static void stable_and_disk(bool warm,bool rejected=false){
  else assert(vk.compile_stats.spirv_compiles==3);
  std::printf("PASS stable keys modules=%llu pipelines=%llu spirv_compiles=%llu disk_hits=%llu\n",(unsigned long long)vk.compile_stats.shader_modules,(unsigned long long)vk.compile_stats.graphics_pipelines,(unsigned long long)vk.compile_stats.spirv_compiles,(unsigned long long)vk.compile_stats.spirv_disk_hits);
 }
+// Exercise the compiler's Vulkan 1.1 / SPIR-V 1.3 target without requiring subgroup hardware.
+// The extension selects that target; the independent output remains an ordinary compute operation.
+static void version13(bool warm){
+ NativeVulkan vk;std::vector<unsigned> words(257);
+ const std::string source="#version 450\n#extension GL_EXT_multiview : enable\nlayout(local_size_x=64) in;layout(std430,binding=0) buffer D{uint w[];};void main(){uint i=gl_GlobalInvocationID.x;if(i<257u)w[i]=i*11u+5u;}";
+ vk.compute(source,words,5);for(unsigned i=0;i<257;++i)assert(words[i]==i*11+5);
+ assert(vk.compile_stats.spirv_compiles==(warm?0u:1u));assert(vk.compile_stats.spirv_disk_hits==(warm?1u:0u));
+ std::puts(warm?"PASS version13 warm no compilation":"PASS version13 cold compiled once");
+}
 static void stencil_oracle(){
  NativeVulkan vk;auto b=vk.graphics_batch(1024*1024);auto s=simple_state();s.depth=VK_FORMAT_D24_UNORM_S8_UINT;s.z.stencilTestEnable=true;
  for(auto* f:{&s.z.front,&s.z.back}){f->compareOp=VK_COMPARE_OP_ALWAYS;f->passOp=VK_STENCIL_OP_REPLACE;f->failOp=f->depthFailOp=VK_STENCIL_OP_KEEP;f->compareMask=255;f->writeMask=255;f->reference=0xa5;}
@@ -88,7 +97,7 @@ static void bounded(unsigned keys){
   auto fs=std::make_shared<const std::string>(std::move(text)),vs=std::make_shared<const std::string>(simple_vs);
   std::vector<unsigned> data(16);data[0]=i;vk.graphics_draw(*b,s,images,{},*vs,*fs,data,3,sample_positions,0,0,0,1,{},0,UINT64_MAX,{},vs,fs);
   expected.push_back({vk.graphics_transfer(*b,image,VK_IMAGE_ASPECT_COLOR_BIT,4),i,key});
-  assert(vk.graphics_cache_size()<=8 && b->framebuffers.size()<=4);
+  assert(vk.graphics_cache_size()<=8 && vk.graphics_framebuffer_cache_size()<=4);
   if(i%16==15)finish();
  }
  finish();assert(vk.compile_stats.pipeline_evictions>=keys-8 && vk.compile_stats.module_evictions>=keys-4);
@@ -199,7 +208,8 @@ static void disk_bound(unsigned keys){
  std::printf("PASS disk bound %u keys files=%llu peak_files=%llu peak_bytes=%llu compiles=%llu\n",keys,(unsigned long long)files,(unsigned long long)peak_files,(unsigned long long)peak_bytes,(unsigned long long)vk.compile_stats.spirv_compiles);
 }
 int main(int argc,char** argv){try{
- if(argc>1 && std::string(argv[1])=="disk_bound")disk_bound(std::stoul(argv[2]));
+ if(argc>1 && std::string(argv[1])=="version13")version13(argc>2 && std::string(argv[2])=="warm");
+ else if(argc>1 && std::string(argv[1])=="disk_bound")disk_bound(std::stoul(argv[2]));
  else if(argc>1 && std::string(argv[1])=="persist")persist(std::stoul(argv[2]));
  else if(argc>1 && std::string(argv[1])=="save_retry")save_retry();
  else if(argc>1 && std::string(argv[1])=="working_set")default_working_set(argc>2?std::stoul(argv[2]):300);
@@ -235,6 +245,24 @@ class PipelineCacheTests(unittest.TestCase):
                 return result.stdout
             run()
             self.assertIn('spirv_compiles=0 disk_hits=3', run('warm'))
+            original_root = env['ANYPS3_CACHE_ROOT']
+            env['ANYPS3_CACHE_ROOT'] = str(root / 'version13')
+            self.assertIn('cold compiled once', run('version13'))
+            spv_file = next((root / 'version13/vk').glob('spv-*.bin'))
+            blob = bytearray(spv_file.read_bytes())
+            code_offset = 24 + struct.unpack_from('<Q', blob, 16)[0]
+            self.assertEqual(struct.unpack_from('<I', blob, code_offset + 4)[0], 0x00010300)
+            self.assertIn('warm no compilation', run('version13', 'warm'))
+            # A checksummed, wrong-version payload must still be rejected and replaced.
+            struct.pack_into('<I', blob, code_offset + 4, 0x00010000)
+            checksum = 14695981039346656037
+            for byte in blob[16:]:
+                checksum = ((checksum ^ byte) * 1099511628211) & ((1 << 64) - 1)
+            struct.pack_into('<Q', blob, 8, checksum)
+            spv_file.write_bytes(blob)
+            self.assertIn('cold compiled once', run('version13'))
+            self.assertIn('warm no compilation', run('version13', 'warm'))
+            env['ANYPS3_CACHE_ROOT'] = original_root
             pipeline_file = next((root / 'cache/vk').glob('pipeline-*.bin'))
             blob = bytearray(pipeline_file.read_bytes())
             # Correct checksum, incompatible vendor: reject before calling Vulkan.

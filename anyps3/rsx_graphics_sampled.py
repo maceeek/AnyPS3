@@ -14,13 +14,18 @@ MEMBERS = r'''
         // share a protected host page with a resident surface.
         const auto signature=sampled_key(key,t.plan?static_cast<const void*>(t.plan.get()):t.untiled?t.storage:source,size,t.storage_size);
         auto matches=[&](const RawTexture& e){return e.image && e.key==key && (t.plan?e.plan==t.plan:e.origin==(t.untiled?t.storage:source)) && e.origin_size==t.storage_size && e.size==size;};
-        bool snapshot_read=false;
+        bool snapshot_read=false;RawTexture* first_match=nullptr;
         {const auto range=sampled_entries.equal_range(signature);
-        for(auto it=range.first;it!=range.second;++it){const auto& entry=raw_textures[raw_positions.at(it->second)];if(!entry.trusted && matches(entry)){snapshot_read=true;break;}}}
-        if(snapshot_read){if(t.plan){for(const auto& run:t.plan->runs)state.memory.notify_host(run.data,run.size,false);}
-            else state.memory.notify_host(source,size,false);}
-        const auto range=sampled_entries.equal_range(signature);
         for(auto it=range.first;it!=range.second;++it){auto& entry=raw_textures[raw_positions.at(it->second)];if(!matches(entry))continue;
+            if(!first_match){first_match=&entry;}
+            if(!entry.trusted){snapshot_read=true;break;}}}
+        if(snapshot_read){first_match=nullptr;if(t.plan){for(const auto& run:t.plan->runs)state.memory.notify_host(run.data,run.size,false);}
+            else state.memory.notify_host(source,size,false);}
+        // Without a notification nothing ran since the scan above, so its first match is the entry a second scan would select.
+        // A notification may synchronize and move entries: then the scan is repeated.
+        if(!first_match){const auto range=sampled_entries.equal_range(signature);
+            for(auto it=range.first;it!=range.second;++it){auto& entry=raw_textures[raw_positions.at(it->second)];if(matches(entry)){first_match=&entry;break;}}}
+        if(first_match){auto& entry=*first_match;
             const bool invalid=raw_dirty(entry);
             bool same=!invalid && entry.trusted;
             if(!same && !invalid && t.plan){same=true;for(const auto& run:t.plan->runs){std::vector<std::uint8_t> bytes;
@@ -32,7 +37,7 @@ MEMBERS = r'''
             if(same){if(fallback_stats().enabled)++fallback_stats().paths["texture_hit"];++raw_hits;entry.last_use=++resource_clock;return entry.image;}
             if(entry.dirty_inputs){reuse=entry.id;dirty=entry.dirty_inputs;reusable_image=entry.image;}
             else erase_raw(&entry-raw_textures.data(),"snapshot_mismatch");
-            break;}
+            }
         }
         // Cache hits do not copy level vectors or allocate a temporary key.
         Texture t=supplied;

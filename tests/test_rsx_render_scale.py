@@ -45,15 +45,17 @@ static void raster_oracle(unsigned raster,unsigned samples,bool paired=false){
  std::array<std::shared_ptr<NativeVulkan::GraphicsImage>,4> images{native};
  if(paired){
   const auto used=b->used;const auto queries=b->visibility_count;const auto draws=vk.graphics_draws;
-  for(bool reuse:{false,true}){
-   b->used=b->capacity-(reuse?512:1024);const auto before=b->used;bool refused=false;
-   try{vk.graphics_draw(*b,s,images,{},vs,fs,data,3,positions,0,0,0,1,{},0,reuse?0:UINT64_MAX);}
-   catch(const std::runtime_error& e){refused=std::string(e.what()).find("before recording")!=std::string::npos;}
-   assert(refused && b->used==before && b->visibility_count==queries && vk.graphics_draws==draws);
-  }
+  // The visual half reads the native slice: a pair needs exactly one slice. Less space refuses the native half
+  // before anything is recorded.
+  b->used=b->capacity-512;const auto before=b->used;bool refused=false;
+  try{vk.graphics_draw(*b,s,images,{},vs,fs,data,3,positions);}
+  catch(const std::runtime_error& e){refused=std::string(e.what()).find("staging exhausted")!=std::string::npos;}
+  assert(refused && b->used==before && b->visibility_count==queries && vk.graphics_draws==draws && vk.graphics_visual_draws==0);
   b->used=used;
  }
+ const auto slice_from=b->used;
  vk.graphics_draw(*b,s,images,{},vs,fs,data,3,positions);
+ assert(b->used-slice_from<data.size()*4+256);   // one aligned slice for the native/visual pair (two would exceed it)
  const auto before=vk.graphics_transfer(*b,native,VK_IMAGE_ASPECT_COLOR_BIT,4);
  if(!paired){s.raster_width=s.raster_height=raster;images[0]=visual;
  vk.graphics_draw(*b,s,images,{},vs,fs,data,3,positions);}
@@ -152,7 +154,7 @@ static void alias_detail_oracle(){
   const unsigned at=((plane*16+y)*16+x)*4;visual[at]=x;visual[at+1]=y;visual[at+2]=80+plane;visual[at+3]=255;}
  vk.graphics_transfer(*session.batch,original,VK_IMAGE_ASPECT_COLOR_BIT,4,native.data());
  vk.graphics_transfer(*session.batch,original->visual,VK_IMAGE_ASPECT_COLOR_BIT,4,visual.data());session.dirty_surface(src);
- // Actual Session texture conversion expands sample planes into native texels.
+ // Actual Session texture conversion flattens the visual sample planes like the guest grid.
  r[0x1a00]=0x100000;r[0x1a04]=0x0001a529;r[0x1a08]=0x00030303;r[0x1a0c]=0x80000000;
  r[0x1a10]=0xaae4;r[0x1a14]=0x01010000;r[0x1a18]=(16u<<16)|8;r[0x1840]=256;
  auto converted=session.texture_metadata(0).resident_image;assert(converted && converted->visual);
@@ -170,7 +172,8 @@ static void alias_detail_oracle(){
   for(const auto& path:rsxgraphics::fallback_stats().paths)std::fprintf(stderr,"path %s=%llu\n",path.first.c_str(),(unsigned long long)path.second);
   throw std::runtime_error("visual sample-grid roundtrip mismatch");}
  for(unsigned y=0;y<16;++y)for(unsigned x=0;x<32;++x){
-  const unsigned cell=x/2,plane=cell%2,source_x=2*(cell/2)+x%2;
+  // Visual grid column x of a 2-sample surface rendered at 16 px: pixel x/2, sample x%2.
+  const unsigned plane=x%2,source_x=x/2;
   const auto* expected=visual.data()+((plane*16+y)*16+source_x)*4;
   const auto* actual=reinterpret_cast<const float*>(bytes+rtt)+(y*32+x)*4;
   for(unsigned c=0;c<4;++c)assert(std::fabs(actual[c]-expected[c]/255.f)<1.e-6f);
@@ -179,8 +182,48 @@ static void alias_detail_oracle(){
  session.flush(false);gpu.graphics_session=nullptr;unsetenv("ANYPS3_RENDER_SCALE");
  std::puts("PASS scaled typed RTT and sample-grid roundtrip retain every subpixel and native byte");
 }
+// Converted texture of one surface; at scale 2 the visual companion carries `fine` (2x extent),
+// the native image `coarse`. Returns the converted visual (scale 2) or native (scale 1) texels.
+static std::vector<float> convert_surface(unsigned scale,bool depth,unsigned size,const std::vector<std::uint32_t>& coarse,const std::vector<std::uint32_t>& fine){
+ setenv("ANYPS3_RENDER_SCALE",scale==2?"2":"1",1);
+ PpuState s;setup_draw(s,8,8,256,false);auto& gpu=s.rsx;auto& r=gpu.registers;
+ gpu.renderer=std::make_unique<NativeVulkan>();auto& vk=*gpu.renderer;
+ rsxgraphics::Session session(vk,s);session.observe();gpu.graphics_session=&session;
+ const unsigned bpp=depth?2:1;
+ auto target=rsxdraw::bind_target(s,0xfeed0000,0x100000,size*bpp,size,size,bpp,depth?size:0,depth?size:0);
+ auto& surface=session.bind(target,size,size,1,depth?1:9,depth);auto image=surface.image;
+ auto put=[&](const std::shared_ptr<NativeVulkan::GraphicsImage>& to,const std::vector<std::uint32_t>& v){
+  if(depth){std::vector<std::uint16_t> h(v.begin(),v.end());vk.graphics_transfer(*session.batch,to,VK_IMAGE_ASPECT_DEPTH_BIT,2,h.data());}
+  else vk.graphics_transfer(*session.batch,to,VK_IMAGE_ASPECT_COLOR_BIT,4,v.data());};
+ put(image,coarse);if(scale==2){assert(image->visual);put(image->visual,fine);}
+ session.dirty_surface(surface);
+ // Unit 0: swizzled DEPTH16 (0x92) or linear B8 (0x81|LN), 2D, one level.
+ r[0x1a00]=0x100000;r[0x1a04]=depth?0x00019229u:0x0001a129u;r[0x1a08]=0x00030303;r[0x1a0c]=0x80000000;r[0x1a10]=0xaae4;r[0x1a14]=0x01010000;r[0x1a18]=(size<<16)|size;r[0x1840]=size*bpp;
+ auto converted=session.texture_metadata(0).resident_image;assert(converted);
+ const auto result=scale==2?converted->visual:converted;assert(result && result->width==size*scale);
+ const auto at=vk.graphics_transfer(*session.batch,result,VK_IMAGE_ASPECT_COLOR_BIT,16);vk.graphics_finish(*session.batch);
+ const auto* f=reinterpret_cast<const float*>(static_cast<const char*>(session.batch->map)+at);
+ std::vector<float> out(f,f+std::size_t(result->width)*result->height*4);
+ session.flush(false);gpu.graphics_session=nullptr;unsetenv("ANYPS3_RENDER_SCALE");
+ return out;
+}
+// Swizzled shadow-map style depth (same Morton extent, origin 0) and packed B8 targets:
+// the visual conversion of an 8x8 surface whose visual companion holds 16x16 values must equal
+// the native (scale 1) conversion of a 16x16 surface holding those values.
+static void typed_visual_oracle(){
+ for(bool depth:{true,false}){
+  std::vector<std::uint32_t> fine(256),coarse(64);
+  for(unsigned i=0;i<256;++i)fine[i]=depth?(0x1000u+i*0xa7u)&0xffffu:(i*37u+11u)&255u;
+  for(unsigned i=0;i<64;++i)coarse[i]=depth?0x0100u+i:200u-i;
+  const auto actual=convert_surface(2,depth,8,coarse,fine),expected=convert_surface(1,depth,16,fine,fine);
+  assert(actual.size()==expected.size());
+  for(std::size_t i=0;i<actual.size();++i)if(actual[i]!=expected[i]){
+   std::fprintf(stderr,"typed visual depth=%d texel=%zu actual=%a expected=%a\n",int(depth),i/4,actual[i],expected[i]);throw std::runtime_error("typed visual conversion lost subpixels");}
+  std::printf("PASS typed visual RTT %s keeps every visual subpixel\n",depth?"swizzled DEPTH16":"packed B8");
+ }
+}
 static void dual_oracle(){
- setenv("ANYPS3_RSX_FALLBACK_STATS","1",1);alias_detail_oracle();
+ setenv("ANYPS3_RSX_FALLBACK_STATS","1",1);alias_detail_oracle();typed_visual_oracle();
  for(unsigned samples:{1u,2u,4u})raster_oracle(16,samples,true);
  for(unsigned mode:{0u,1u,8u,14u,17u,22u,24u}){
   PpuState native,scaled;setup_draw(native,32,16,128,false);setup_draw(scaled,32,16,128,false);customize(native,mode);customize(scaled,mode);
@@ -241,4 +284,5 @@ class RenderScaleTests(unittest.TestCase):
    self.assertNotIn('Validation Error',result.stdout+result.stderr)
    self.assertNotIn('Validation Warning',result.stdout+result.stderr)
    self.assertEqual(result.stdout.count('PASS dual'),7,result.stdout)
+   self.assertEqual(result.stdout.count('PASS typed visual RTT'),2,result.stdout)
    print(result.stdout,flush=True)

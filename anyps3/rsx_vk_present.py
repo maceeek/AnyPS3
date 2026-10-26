@@ -44,7 +44,7 @@ private:
             unsigned n=0;if(!extensions(window,&n,nullptr))fail("instance extensions");
             std::vector<const char*> names(n);if(!extensions(window,&n,names.data()))fail("instance extensions");return names;
         }
-        void poll(){vk.graphics_host->invoke([&]{poll_host();});}
+        void poll(){VkCallTimer t(VcHostPoll);vk.graphics_host->invoke([&]{poll_host();});}
         void poll_host(){
             pump();alignas(void*) unsigned char event[128]{};int count;
             for(unsigned type:{0x100u,0x200u}){
@@ -173,6 +173,9 @@ public:
     void graphics_present(GraphicsBatch& b,const std::shared_ptr<GraphicsImage>& image,unsigned w,unsigned h,bool vsync,bool async=false){b.sync();
         if(!graphics_wsi)throw std::runtime_error("Vulkan presentation was not initialized");
         b.pins.push_back(image);
+        if(image->visual && graphics_visual_trace()){static std::uint64_t presents=0;
+            if(presents++%120==0)std::fprintf(stderr,"RENDER_SCALE_PRESENT presents=%llu native=%ux%u taint=%s\n",(unsigned long long)presents,image->width,image->height,graphics_visual_taint_names(image->visual->visual_taint).c_str());}
+        ++graphics_visual_epoch;
         if(image->visual)graphics_wsi->display(b,image->visual,image->visual->width,image->visual->height,vsync,async);
         else graphics_wsi->display(b,image,w,h,vsync,async);
     }

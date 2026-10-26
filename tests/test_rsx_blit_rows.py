@@ -730,8 +730,50 @@ static void analytic_two_claims(){
  for(unsigned i=1;i<4;++i)if(unsigned(m.load(0xc0001000+i,1))!=0x20+i)throw std::runtime_error("two claims: destination row 0 not written");
  std::puts("PASS a deferred fallback waiting for a claim does not hold the metadata lock (second claim proceeds)");
 }
+// Warm geometry must never retain pixels, mappings or observer admission from an earlier invocation/state.
+static void analytic_plan_cache(){
+ rsxblit::runs_plan_cache={};rsxblit::runs_plan_cache_enabled=true;
+ PpuState a,b;setup(a);setup(b);
+ Case c{};c.src_format=3;c.dst_format=10;c.origin=2;c.op=3;
+ c.w=64;c.h=16;c.src_pitch=256;c.ow=c.cw=32;c.oh=c.ch=8;c.dst_pitch=128;
+ c.dx=c.dy=0x200000;c.src_offset=0x10000;c.dst_offset=0x20000;
+ c.src_tile=true;c.src_tile_pitch=256;c.src_tile_size=0x10000;
+ auto compare=[&](const Case& value,unsigned seed){fill(a,b,seed);const auto x=run(a,value),y=run_ref(b,value);
+  if(x!=y || dump(a)!=dump(b))throw std::runtime_error("cached geometry differs from frozen oracle seed="+std::to_string(seed));};
+ compare(c,901);const auto hits=rsxblit::runs_plan_hits;
+ compare(c,902);assert(rsxblit::runs_plan_hits==hits+1); // same layout, new contents
+ // Change one descriptor at a time so another changed key field cannot mask a missing invalidation.
+ {auto changed=c;changed.src_tile_bank=1;compare(changed,903);}
+ {auto changed=c;changed.filter=1;compare(changed,904);}
+ {auto changed=c;changed.point=3;compare(changed,905);}
+ {auto changed=c;changed.dx=0x180000;compare(changed,906);}
+ {auto changed=c;changed.cx=2;changed.cw=29;compare(changed,907);}
+ {auto changed=c;changed.src_pitch=512;compare(changed,908);}
+ for(unsigned n=0;n<68;++n){auto changed=c;changed.point=n*7;changed.src_tile_bank=n%4;changed.filter=n%2;
+  compare(changed,910+n);compare(changed,930+n);assert(rsxblit::runs_plan_cache.entries.size()<=64 && rsxblit::runs_plan_cache.bytes<=32u*1024*1024);}
+ const auto before_evicted=rsxblit::runs_plan_misses;compare(c,1000);assert(rsxblit::runs_plan_misses>before_evicted);
+ // The same relative coordinates refer to new IO memory after a remap; a missing IO page still faults on a warm hit.
+ c.src_tile=false;c.src_io=true;c.src_offset=0x100000;c.op=0;
+ compare(c,950);auto io_hits=rsxblit::runs_plan_hits;
+ c.io1=1;compare(c,951);assert(rsxblit::runs_plan_hits>io_hits);
+ c.io1=2;compare(c,952);
+ // Observers installed only AFTER warming must still run, and their exact error must propagate.
+ c.src_io=false;c.src_offset=0x10000;compare(c,960);
+ for(auto* state:{&a,&b}){state->memory.host_access_observer=[](const void*,std::uint64_t,bool){throw std::runtime_error("new observer");};}
+ const auto ea=run(a,c),eb=run_ref(b,c);assert(ea=="new observer" && ea==eb);
+ a.memory.host_access_observer={};b.memory.host_access_observer={};
+ // VRAM bounds are live even for an existing geometry key.
+ a.rsx.local_size=b.rsx.local_size=0x20000;
+ assert(run(a,c)==run_ref(b,c));assert(!run(a,c).empty());
+ // An individually over-budget plan cannot evict or be retained; limits count allocated capacities.
+ auto large=std::make_shared<rsxblit::RunsPlan>();large->tap_off.resize((32u<<20)/sizeof(std::uint32_t));
+ const auto count=rsxblit::runs_plan_cache.entries.size(),retained=rsxblit::runs_plan_cache.bytes;
+ rsxblit::runs_plan_cache.insert({123456789},large);
+ assert(rsxblit::runs_plan_cache.entries.size()==count && rsxblit::runs_plan_cache.bytes==retained);
+ std::puts("PASS warm blit geometry rechecks contents, tile state, IO remaps, observers, VRAM bounds and cache limits");
+}
 int main(){
- try{analytic();analytic_layouts();analytic_alias();analytic_alias_raster();analytic_observer();analytic_growing_interest();analytic_broker();analytic_guard();analytic_sparse();analytic_remap();analytic_stability();analytic_two_claims();analytic_level_shapes();differential_runs(false);differential_runs(true);differential(false);std::puts("PASS row-wise equals per-pixel (serial)");differential(true);std::puts("PASS row-wise equals per-pixel (concurrent)");}
+ try{analytic_plan_cache();analytic();analytic_layouts();analytic_alias();analytic_alias_raster();analytic_observer();analytic_growing_interest();analytic_broker();analytic_guard();analytic_sparse();analytic_remap();analytic_stability();analytic_two_claims();analytic_level_shapes();differential_runs(false);differential_runs(true);differential(false);std::puts("PASS row-wise equals per-pixel (serial)");differential(true);std::puts("PASS row-wise equals per-pixel (concurrent)");}
  catch(const std::exception& e){std::fprintf(stderr,"FAIL %s\n",e.what());return 1;}
 }
 '''
@@ -756,7 +798,7 @@ class RsxBlitRowsTests(unittest.TestCase):
                 env['VK_DRIVER_FILES'] = str(lavapipe)
             run = subprocess.run([str(root / 'blit')], capture_output=True, text=True, env=env, timeout=300)
             self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
-            self.assertEqual(run.stdout.count('PASS '), 17, run.stdout)
+            self.assertEqual(run.stdout.count('PASS '), 18, run.stdout)
 
 
 if __name__ == '__main__':

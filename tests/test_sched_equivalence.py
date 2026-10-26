@@ -206,7 +206,9 @@ static void mutate(PpuState& s,Rng& r){
     case 0:s.kernel.semaphores[r.below(4)].value=r.below(2);break;
     case 1:{auto& q=s.events.queues[r.below(3)];if(r.below(2))q.data.send({1,2,3,4});else q.data.clear();break;}
     case 2:s.kernel.mutexes[r.below(3)].owner=r.below(2)?0:9;break;
-    case 3:for(auto& t:s.ppu_threads)if(t.wait_kind && r.below(3)==0)t.wait_deadline=1;break;
+    // b4547ab predates timed semaphore support (4d8b6a9). Keep the frozen reference intact;
+    // semaphore expiry/availability is independently checked in test_scheduler_idle_deadline.py.
+    case 3:for(auto& t:s.ppu_threads)if(t.wait_kind && r.below(3)==0){if(t.wait_kind!=2)t.wait_deadline=1;}break;
     case 4:s.sync_ext.flags[r.below(2)].pattern=r.next()&0xf;break;
     case 5:{auto& l=s.sync_ext.rwlocks[r.below(2)];l.writer=r.below(2)?0:3;l.readers=r.below(2);break;}
     case 6:{auto& t=s.ppu_threads[1+r.below(s.ppu_threads.size()-1)];if(!t.wait_kind)t.returned=r.below(2);break;}
@@ -268,7 +270,7 @@ int main(){
         for(unsigned step=0;step<60;++step){
             mutate(a,ra);mutate(b,rb);
             const bool active_blocked=ra.below(10)==0;rb.below(10);
-            if(active_blocked){a.wait_kind=2;a.wait_id=0x96000000u;b.wait_kind=2;b.wait_id=0x96000000u;}
+            if(active_blocked){a.wait_deadline=b.wait_deadline=0;a.wait_timed_out=b.wait_timed_out=false;a.wait_kind=2;a.wait_id=0x96000000u;b.wait_kind=2;b.wait_id=0x96000000u;}
             // A blocked active context needs another runnable one for the (non-sleeping) mandatory pass; otherwise skip it.
             bool mandatory=false;
             if(active_blocked){bool other=false;for(const auto& t:a.ppu_threads)other|=t.thread_id!=a.thread_id && !t.wait_kind && !t.returned;mandatory=other;

@@ -598,3 +598,30 @@ See knowledge/experiments/2026-10-23-render-scale.md.
 2026-10-23 FIX7: START crash = untimed-only semaphore wait (fixed, 810); pause blur needs texture-feedback GPU path
 (fast2/fix7-pause, unbuilt). GUI toggles/keys/skip intro; save-menu audio + two windows (fast2/fix7-audio); stutter =
 CPU scaled blits (fast2/fix7-stutter). See knowledge/experiments/2026-10-23-fix7.md.
+
+
+2026-10-25: resumed higher-resolution walking performance work from merged main 124b7d4. Baseline native blit/Vulkan/cache checks pass; fresh build 870 compiling. Geometry-only blit-plan cache candidate under validation; no new game FPS result. See [record](knowledge/experiments/2026-10-25-scale2-walking.md).
+
+2026-10-25 follow-up: first merged/candidate 1440p walking diagnostic 871 measured 23.23 FPS over the whole walk (concurrent suite, not acceptance), exact original PT_LOAD/no STOP. Isolated fixes verify SPIR-V 1.3 disk-cache reuse and removal of eight-entry blit-plan thrashing (11 plans/transfer); native/Vulkan tests pass, game builds 873/874 pending. See `docs/knowledge/experiments/2026-10-25-scale2-walking.md`. Goal remains 60 FPS at higher resolution without movement shader stutter.
+
+- 2026-10-25: scale-2 walking diagnostic 871layoutdiag1 reached original Great Clock (26.22 FPS with concurrent build/suite; not acceptance). CPU samples motivated isolated history-geometry reuse; candidate 875 passes NVIDIA native/subpixel checks in both modes and detects fixed-hash/word-map regressions. Frozen 875 queued after 873/874; original game bytes and installed release unchanged. [Evidence](knowledge/experiments/2026-10-25-scale2-walking.md).
+
+- 2026-10-25: timestamped CPU samples locate ~200 samples of history planning inside several 236–368-ms walking frames. Frozen candidate 876 coalesces exact adjacent rows before sorting; independent 675,840-texel benchmark drops cold planning from ~53 ms to ~4.2 ms, all four-mode NVIDIA image tests pass. Build 873 completed; game diagnostic verifies blit hits/cache rejection fix, full walk pending. [Evidence](knowledge/experiments/2026-10-25-scale2-walking.md).
+
+- 2026-10-25: 873cache64diag1 completed at 1440p, 24.81 FPS whole walk under concurrent load, exact original PT_LOAD/no STOP. Verified >99.7% blit-plan hits and zero shader-cache rejection, but ten measured-window shader compiles and substantial CPU-blit/readback cost remain. 874 built; 875 building / 876 queued. Goal remains open. [Evidence](knowledge/experiments/2026-10-25-scale2-walking.md).
+
+- 2026-10-25: 875historydiag1 verifies history/source-cache reuse, 25.73 FPS at 1440p under concurrent load; warmed GLSL compile zero but compiler samples remain during first movement. 876 cold planner and 877 bounded source-surface diagnostics built; 877 game run live. Two pre-existing feedback-oracle failures corrected in isolated tests and mutation-checked; root suite still running. [Evidence](knowledge/experiments/2026-10-25-scale2-walking.md).
+
+- 2026-10-25: walk 877 verified at 1440p / 29.151 FPS under suite load, exact original segments/no STOP; shader compilation persists during movement. Identified tiled D24S8→packed-byte scaled copies. Isolated GPU primitive 878 passes exact native/scaled image oracles; direct depth-output variant 879 passes 18 exact image cases plus chained GPU consumption/capacity rejection, not wired into game yet. [Evidence](knowledge/experiments/2026-10-25-scale2-walking.md).
+
+- 2026-10-25: candidate 880 GPU depth-copy ownership passes exact image/coherence tests and is compiling from a frozen snapshot; baseline 871 finishes with seven explained test failures, retained in full. Root integrates the tested runtime and fixture corrections. Five of six newly compiled 877 fragment shaders traced to unused sampler specialization; isolated 881 tests in progress. No new FPS or zero-stutter acceptance. See [walking record](knowledge/experiments/2026-10-25-scale2-walking.md).
+
+- 2026-10-25: candidate 881 passes shader-identity and actual GPU color/counter tests plus graphics/cache regression tests. Implicit filter/mip changes reuse shaders; default source cache retains the measured working set. Frozen build queued after 880; full 1071-test integrated suite started. No new game FPS result yet.
+
+2026-10-25: Process-local traces of original 1440p movement identify a 1498-ms frame with 672-ms GLSL work and 519-ms pipeline creation. All 40 newly cached sources match older identities after the tested 881/882 sampler-state changes. Isolated 882 passes independent resident colors (32 cases per mode) and broader graphics tests; game builds and root 881 suite remain live. No 60-FPS or zero-stutter claim. See [walking record](knowledge/experiments/2026-10-25-scale2-walking.md#882-resident-state-reuse-and-exact-compiler-traces).
+
+2026-10-25: Build 880 original 1440p walk verified: 34.889 FPS under concurrent jobs, no STOP/exact PT_LOAD; GPU depth-copy path active, warmed CPU blits 0.689 s / 84 readbacks (earlier diagnostic 13.872 s / 1890). Eleven movement GLSL compiles remain. 881 built/verified and running; 882 building, root suite active. Goal not achieved. [Evidence](knowledge/experiments/2026-10-25-scale2-walking.md#880-real-game-result-881-compiled).
+
+2026-10-25 closeout requested by user: commit performance milestone through verified build 882; original 1440p whole walk 31.154 FPS, five first-use GLSL compiles, exact PT_LOAD/no STOP. Full suite intentionally stopped at 603/1071 tests (four skips, no completed failures), final-source full validation pending. All own jobs closed; 60 FPS/zero-stutter goal not achieved. [Closeout](knowledge/experiments/2026-10-25-scale2-walking.md#milestone-closeout-requested-by-user).
+
+2026-10-25 evening HIRES wave: 1440p walking baseline 882 = 33.15 FPS (720p 44.68); 1440p image was 720p-derived (MSAA sample-grid layout bug, fixed on hires/integ, unmeasured). Per-draw CPU and Vulkan cost cuts merged, unmeasured; build 960 queued. See knowledge/experiments/2026-10-25-hires-wave.md.

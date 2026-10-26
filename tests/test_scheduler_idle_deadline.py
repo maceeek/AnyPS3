@@ -52,6 +52,7 @@ struct PpuState : PpuContext {
  struct {std::vector<Semaphore> semaphores;std::vector<Mutex> mutexes;} kernel;
  struct Group {std::uint64_t id=0,join_cause=0;unsigned state=0;};
  struct {std::vector<Group> groups;} spu;
+ struct {struct {std::vector<unsigned> parked;} vsh_ui;} settings;
  GuestMemory memory;std::set<std::uint64_t> mutexes;
  std::vector<PpuContext> ppu_threads;
  bool module_loading=false,reschedule=false;unsigned execution=0;
@@ -69,6 +70,7 @@ static unsigned audio_calls=0,spu_calls=0,rsx_calls=0;
 static PpuState* running=nullptr;
 static std::vector<std::uint64_t> sleeps;
 static std::uint64_t sync_ext_now(){return clock_us;}
+static void sysutil_park_service(PpuState&){}
 static void audio_run(PpuState&){++audio_calls;}
 static bool spu_run(PpuState&,unsigned){++spu_calls;return false;}
 static bool rsx_run(PpuState&,unsigned){
@@ -124,11 +126,20 @@ int main(){
   s.wait_deadline=s.ppu_threads[0].wait_deadline=1030;ppu_schedule(s,true);
   assert(sleeps==std::vector<std::uint64_t>{30} && s.thread_id==1 && s.wait_timed_out);
   assert(!s.sync_ext.waits.at(1).done);}
+ // Semaphore deadlines were added after this fixture: independently pin expiry and availability.
+ {PpuState s;reset(s,false,0,false);s.kernel.semaphores.push_back({7,0});
+  s.wait_kind=s.ppu_threads[0].wait_kind=2;s.wait_id=s.ppu_threads[0].wait_id=7;
+  s.wait_deadline=s.ppu_threads[0].wait_deadline=1030;ppu_schedule(s,true);
+  assert(sleeps==std::vector<std::uint64_t>{30} && s.thread_id==1 && s.wait_timed_out && !s.wait_kind);}
+ {PpuState s;reset(s,false,0,false);s.kernel.semaphores.push_back({7,1});
+  s.wait_kind=s.ppu_threads[0].wait_kind=2;s.wait_id=s.ppu_threads[0].wait_id=7;
+  s.wait_deadline=s.ppu_threads[0].wait_deadline=999;ppu_schedule(s,true);
+  assert(sleeps.empty() && s.thread_id==1 && !s.wait_timed_out && !s.wait_kind);}
  {PpuState s;reset(s,false,0,false);bool stopped=false;
   try{ppu_schedule(s,true);}catch(const std::runtime_error&){stopped=true;}
   assert(stopped && sleeps.empty());}
  assert(audio_calls && spu_calls && rsx_calls);
- std::puts("PASS 11 scheduler deadline/audio/expiry/peer cases");
+ std::puts("PASS 13 scheduler deadline/audio/expiry/peer cases");
 }
 '''
 
@@ -154,7 +165,7 @@ class SchedulerIdleDeadlineTests(unittest.TestCase):
             self.assertEqual(build.returncode,0,build.stderr)
             run = subprocess.run([str(root/'scheduler')],capture_output=True,text=True,timeout=5)
             self.assertEqual(run.returncode,0,run.stderr)
-            self.assertIn('PASS 11 scheduler',run.stdout)
+            self.assertIn('PASS 13 scheduler',run.stdout)
 
 
 if __name__ == '__main__':
