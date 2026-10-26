@@ -602,6 +602,8 @@ CPU scaled blits (fast2/fix7-stutter). See knowledge/experiments/2026-10-23-fix7
 
 2026-10-25: resumed higher-resolution walking performance work from merged main 124b7d4. Baseline native blit/Vulkan/cache checks pass; fresh build 870 compiling. Geometry-only blit-plan cache candidate under validation; no new game FPS result. See [record](knowledge/experiments/2026-10-25-scale2-walking.md).
 
+2026-10-25 cleanup (two rounds): local/ratchet 169 → 88 GB after Codex 871–883 (old build binaries, bundles, duplicates, scratch caches, object cache before 10-23; logs/rings zstd-compressed; source snapshots except 472/706/805/820/860/870 archived in local/ratchet/archive/). CURRENT/HANDOFF sections before 2026-10-21 moved to knowledge/history/. See knowledge/CURRENT.md.
+
 2026-10-25 follow-up: first merged/candidate 1440p walking diagnostic 871 measured 23.23 FPS over the whole walk (concurrent suite, not acceptance), exact original PT_LOAD/no STOP. Isolated fixes verify SPIR-V 1.3 disk-cache reuse and removal of eight-entry blit-plan thrashing (11 plans/transfer); native/Vulkan tests pass, game builds 873/874 pending. See `docs/knowledge/experiments/2026-10-25-scale2-walking.md`. Goal remains 60 FPS at higher resolution without movement shader stutter.
 
 - 2026-10-25: scale-2 walking diagnostic 871layoutdiag1 reached original Great Clock (26.22 FPS with concurrent build/suite; not acceptance). CPU samples motivated isolated history-geometry reuse; candidate 875 passes NVIDIA native/subpixel checks in both modes and detects fixed-hash/word-map regressions. Frozen 875 queued after 873/874; original game bytes and installed release unchanged. [Evidence](knowledge/experiments/2026-10-25-scale2-walking.md).
