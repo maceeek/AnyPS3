@@ -169,18 +169,22 @@ static void typeless_depth(unsigned samples){
  r[0x1a00]=0x500000;r[0x1a04]=0x0001a529;r[0x1a08]=0x00030303;r[0x1a0c]=0x80000000;r[0x1a10]=0xaae4;r[0x1a14]=0x01010000;r[0x1a18]=((8*samples)<<16)|8;r[0x1840]=8*samples*4;
  const auto aspects=vk.graphics_visual_aspect_copies;
  auto converted=session.texture_metadata(0).resident_image;assert(converted && converted->visual && vk.graphics_visual_aspect_copies==aspects+2);
- const auto offset=vk.graphics_transfer(*session.batch,converted->visual,VK_IMAGE_ASPECT_COLOR_BIT,16);vk.graphics_finish(*session.batch);
+ // RTT fast path (ANYPS3_RENDER_SCALE_RTT_FAST, default on): an R8G8B8A8_UNORM visual output holds the bytes exactly.
+ const bool fast=converted->visual->format==VK_FORMAT_R8G8B8A8_UNORM;
+ const auto offset=vk.graphics_transfer(*session.batch,converted->visual,VK_IMAGE_ASPECT_COLOR_BIT,fast?4:16);vk.graphics_finish(*session.batch);
  const auto* pixels=reinterpret_cast<const float*>(static_cast<const char*>(session.batch->map)+offset);
+ const auto* bytes=static_cast<const unsigned char*>(session.batch->map)+offset;
  const unsigned cw=16*samples;
  for(unsigned y=0;y<16;++y)for(unsigned x=0;x<cw;++x){
   // Visual grid column x of the level is visual pixel x/samples, plane x%samples (surface rendered at 16x16).
   const unsigned plane=x%samples,i=(plane*vh+y)*vw+x/samples;
   const std::uint32_t v=((words[i]&0xffffffu)<<8)|stencil[i];
   const unsigned expected[4]={(v>>16)&255,(v>>8)&255,v&255,v>>24};
+  if(fast){for(unsigned c=0;c<4;++c)if(bytes[(y*cw+x)*4+c]!=expected[c]){std::fprintf(stderr,"typeless fast samples=%u x=%u y=%u c=%u actual=%u expected=%u\n",samples,x,y,c,bytes[(y*cw+x)*4+c],expected[c]);throw std::runtime_error("typeless depth visual mismatch");}continue;}
   for(unsigned c=0;c<4;++c)if(!normalized_byte(pixels[(y*cw+x)*4+c],expected[c])){std::fprintf(stderr,"typeless samples=%u x=%u y=%u c=%u actual=%a expected=%a\n",samples,x,y,c,pixels[(y*cw+x)*4+c],double(expected[c])/255.0);throw std::runtime_error("typeless depth visual mismatch");}
  }
  session.flush(false);s.rsx.graphics_session=nullptr;unsetenv("ANYPS3_RENDER_SCALE");
- std::printf("PASS history typeless-depth samples=%u visual depth/stencil subpixels decoded\n",samples);
+ std::printf("PASS history typeless-depth samples=%u visual depth/stencil subpixels decoded (fast %d)\n",samples,int(fast));
 }
 int main(){try{
  // Fallback statistics latch on first use; enable them before any session.

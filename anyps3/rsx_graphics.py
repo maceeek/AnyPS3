@@ -89,7 +89,42 @@ static unsigned explicit_sampler_mask(const std::vector<FpInst>& fp){
         if(op==25 || op==47)mask|=1u<<((i.d>>17)&15);}
     return mask;
 }
-static std::optional<std::string> fragment_source_uncached(const std::vector<FpInst>& fp,const Reg& r,unsigned count,const std::array<Texture,16>& textures,bool lines=false,rsxvk::FragmentFailure* failure=nullptr){
+// Register-driven fragment discards of the Vulkan fragment epilogue. A bit is clear only when the draw's registers make
+// that discard impossible for every fragment: window clip (w[8], one bit per present 0x2c0/0x2c4 pair), polygon stipple
+// (0x147c==0), alpha test (0x304 bit 0 clear), multisample control (0x1d7c: sample-mask bits 16..19 for planes 0..3 all
+// set and alpha-to-coverage bit 4 clear; reset value 0xffff0000). ANYPS3_RSX_FS_STATIC_DISCARD=0 keeps every test in the
+// shader (run-time evaluation, the previous text).
+// ANYPS3_RSX_LAZY_VISIBILITY=1: draws with ZPASS counting off (0x17cc==0) record no occlusion query (see the main draw).
+// Default 0 keeps a query per sample pass of every draw (the host statistic draw.pixels counts all draws).
+static bool rsx_lazy_visibility(){
+    static const bool on=[]{const char* v=std::getenv("ANYPS3_RSX_LAZY_VISIBILITY");
+        if(v && std::strcmp(v,"0") && std::strcmp(v,"1")){throw std::runtime_error("invalid ANYPS3_RSX_LAZY_VISIBILITY");}
+        return v && !std::strcmp(v,"1");}();
+    return on;
+}
+enum FragmentDiscard:unsigned {FragmentDiscardWindow=1,FragmentDiscardStipple=2,FragmentDiscardAlpha=4,FragmentDiscardCoverage=8,FragmentDiscardAll=15};
+static bool fragment_static_discard(){
+    static const bool on=[]{const char* v=std::getenv("ANYPS3_RSX_FS_STATIC_DISCARD");
+        if(v && std::strcmp(v,"0") && std::strcmp(v,"1")){throw std::runtime_error("invalid ANYPS3_RSX_FS_STATIC_DISCARD");}
+        return !v || !std::strcmp(v,"1");}();
+    return on;
+}
+// width/height (when non-zero) are the draw's native raster extent: every fragment has pixel coordinates in
+// [0,width)x[0,height) (raster_scale_ maps visual fragments back), so an inclusive window clip (0x2bc bit 0 clear) with
+// one present window covering that whole extent never discards.
+static unsigned fragment_discard_state(const Reg& r,unsigned width=0,unsigned height=0){
+    if(!fragment_static_discard())return FragmentDiscardAll;
+    unsigned state=0;bool windows=false,covered=false;
+    for(unsigned i=0;i<8;++i)if(r.gpu.registers.count(0x2c0+8*i) && r.gpu.registers.count(0x2c4+8*i)){windows=true;
+        const unsigned h=r(0x2c0+8*i),v=r(0x2c4+8*i);
+        covered=covered || (width && height && (h&65535)==0 && (h>>16)>=width-1 && (v&65535)==0 && (v>>16)>=height-1);}
+    if(windows && ((r(0x2bc)&1) || !covered))state|=FragmentDiscardWindow;
+    if(r(0x147c)!=0)state|=FragmentDiscardStipple;
+    if(r(0x304)&1)state|=FragmentDiscardAlpha;
+    const unsigned aa=r.get(0x1d7c,0xffff0000);if(((aa>>16)&15)!=15 || (aa&16))state|=FragmentDiscardCoverage;
+    return state;
+}
+static std::optional<std::string> fragment_source_uncached(const std::vector<FpInst>& fp,const Reg& r,unsigned count,const std::array<Texture,16>& textures,bool lines=false,rsxvk::FragmentFailure* failure=nullptr,unsigned discard_state=FragmentDiscardAll){
     HostPhase phase(HostStage::source);
     const bool packed=packed_color(r);const unsigned explicit_units=explicit_sampler_mask(fp);
     auto shade=scalar_fragment(fp,failure);if(!shade)return {};
@@ -108,6 +143,14 @@ static std::optional<std::string> fragment_source_uncached(const std::vector<FpI
     const auto result_end=pattern.find("\n}",result_begin);
     std::string functions="vec4 textureResult(uint unit,vec4 c,inout bool killed){uint d=2064u+32u*unit;\n"+pattern.substr(result_begin,result_end-result_begin)+"\n}\n";
     pattern.replace(result_begin,result_end-result_begin," return textureResult(unit,c,killed);");
+    // Texture alpha kill (descriptor word 14 = Texture::alpha_kill of the same draw, a fragment_source key field): with
+    // static discards the per-unit flag is a constant mask, so a draw without alpha-kill units has no reachable discard.
+    if(fragment_static_discard()){
+        unsigned kill_mask=0;for(unsigned unit=0;unit<16;++unit)if(textures[unit].valid && textures[unit].alpha_kill)kill_mask|=1u<<unit;
+        const std::string dynamic_kill="if(w[d+14u]!=0u && result.a<0.000001)";
+        if(functions.find(dynamic_kill)==std::string::npos)throw std::runtime_error("RSX fragment alpha-kill template mismatch");
+        replace_all(functions,dynamic_kill,"if((("+rsxvk::u(kill_mask)+">>unit)&1u)!=0u && result.a<0.000001)");
+    }
     for(unsigned unit=0;unit<16;++unit)if(textures[unit].valid){
         const auto n=std::to_string(unit),u=rsxvk::u(unit);const auto& t=textures[unit];
         const bool volume=t.dimension==3 && t.levels[0].depth>1;
@@ -253,13 +296,21 @@ void main(){C q[1];bool front=w[11]!=0u || gl_FrontFacing;
  // scalar output
  if(q[0].killed)discard;
  uvec2 pixel=uvec2((gl_FragCoord.xy/raster_scale_));bool inside=false;
- for(uint i=0u;i<8u;++i)if((w[8]&(1u<<i))!=0u){uint h=R(0x2c0u+8u*i),v=R(0x2c4u+8u*i);
+)GLSL";
+    // Register-driven discards (fragment_discard_state): a test that the draw's registers make impossible is not emitted, so
+    // a shader without KIL/alpha-kill/depth output keeps early depth/stencil testing on the host GPU. Each omitted block
+    // is a no-op for exactly the register values in the key (same R() values the block would read at run time).
+    if(discard_state&FragmentDiscardWindow)source+=R"GLSL( for(uint i=0u;i<8u;++i)if((w[8]&(1u<<i))!=0u){uint h=R(0x2c0u+8u*i),v=R(0x2c4u+8u*i);
   inside=inside || (pixel.x>=(h&65535u) && pixel.x<=(h>>16u) && pixel.y>=(v&65535u) && pixel.y<=(v>>16u));}
  if(w[8]!=0u && ((R(0x2bcu)&1u)!=0u?inside:!inside))discard;
- if(w[11]==0u && R(0x147cu)!=0u && (R(0x1480u+4u*(pixel.y&31u))&(1u<<(pixel.x&31u)))==0u)discard;
- vec4 c=rd(q[0],0u,(R(0x1d60u)&0x40u)==0u);
- if((R(0x304u)&1u)!=0u && !cmp(R(0x308u),cpu_clamp(c,vec4(0),vec4(1)).a,float(R(0x30cu)&255u)/255.0))discard;
- // NV4097_SET_ANTI_ALIASING_CONTROL 0x1d7c (RPCS3 ffba2bf0 rsx_decode.h:4010-4028): bit 0 enable (no effect in
+)GLSL";
+    if(discard_state&FragmentDiscardStipple)source+=R"GLSL( if(w[11]==0u && R(0x147cu)!=0u && (R(0x1480u+4u*(pixel.y&31u))&(1u<<(pixel.x&31u)))==0u)discard;
+)GLSL";
+    source+=R"GLSL( vec4 c=rd(q[0],0u,(R(0x1d60u)&0x40u)==0u);
+)GLSL";
+    if(discard_state&FragmentDiscardAlpha)source+=R"GLSL( if((R(0x304u)&1u)!=0u && !cmp(R(0x308u),cpu_clamp(c,vec4(0),vec4(1)).a,float(R(0x30cu)&255u)/255.0))discard;
+)GLSL";
+    if(discard_state&FragmentDiscardCoverage)source+=R"GLSL( // NV4097_SET_ANTI_ALIASING_CONTROL 0x1d7c (RPCS3 ffba2bf0 rsx_decode.h:4010-4028): bit 0 enable (no effect in
  // RPCS3 graphics_pipeline_state.hpp:199-212), bit 4 alpha-to-coverage, bit 8 alpha-to-one, bits 16-31 sample mask.
  // Each pass renders one sample (plane). The coverage pattern is implementation-defined (Vulkan/GL; RPCS3 emulates
  // it stochastically): derived ordered pattern, round(alpha*samples) samples on average via a 4x4 Bayer offset.
@@ -298,8 +349,9 @@ void main(){C q[1];bool front=w[11]!=0u || gl_FrontFacing;
     replace_all(source,"d=2064u+32u*","d=48u+32u*");
     return source+"}\n";
 }
-static std::shared_ptr<const std::string> fragment_source(const std::vector<FpInst>& fp,const Reg& r,unsigned count,const std::array<Texture,16>& textures,bool lines=false,rsxvk::FragmentFailure* failure=nullptr){
-    static thread_local std::vector<unsigned> key;key.assign({count,unsigned(lines),unsigned(packed_color(r)),unsigned(bool(r(0x1d60)&14u)),r(0x1d60)&64u,unsigned(float_color(r(0x208)&31u)),unsigned(rsx_layered_shaders().load(std::memory_order_relaxed))});
+static std::shared_ptr<const std::string> fragment_source(const std::vector<FpInst>& fp,const Reg& r,unsigned count,const std::array<Texture,16>& textures,bool lines=false,rsxvk::FragmentFailure* failure=nullptr,unsigned width=0,unsigned height=0){
+    static thread_local std::vector<unsigned> key;const unsigned discard_state=fragment_discard_state(r,width,height);
+    key.assign({count,unsigned(lines),unsigned(packed_color(r)),unsigned(bool(r(0x1d60)&14u)),r(0x1d60)&64u,unsigned(float_color(r(0x208)&31u)),unsigned(rsx_layered_shaders().load(std::memory_order_relaxed)),discard_state});
     unsigned mask=0;for(unsigned unit=0;unit<16;++unit)if(textures[unit].valid)mask|=1u<<unit;else if(textures[unit].null_texture)mask|=0x10000u<<unit;key.push_back(mask);
     const unsigned explicit_units=explicit_sampler_mask(fp);
     for(unsigned unit=0;unit<16;++unit){const auto& t=textures[unit];if(!t.valid)continue;
@@ -316,7 +368,7 @@ static std::shared_ptr<const std::string> fragment_source(const std::vector<FpIn
     static thread_local SourceCache<std::vector<unsigned>> cache;
     if(auto hit=cache.find(key)){::RsxPerfCounters::add(::RsxPerfCounters::src_fs_hits);last_key=key;last_source=hit;return hit;}
     ::RsxPerfCounters::add(::RsxPerfCounters::src_fs_misses);
-    auto source=fragment_source_uncached(fp,r,count,textures,lines,failure);if(!source)return {};
+    auto source=fragment_source_uncached(fp,r,count,textures,lines,failure,discard_state);if(!source)return {};
     if(rsx_layered_shaders().load(std::memory_order_relaxed)){const auto main=source->find("void main(){");
         if(main==std::string::npos || source->find("void main(){",main+1)!=std::string::npos)throw std::runtime_error("RSX layered fragment shader template mismatch");
         source->replace(main,12,"void main(){shift=layers_>1u?shifts_[plane_in_]:shift_push_;plane=layers_>1u?plane_in_:plane_push_;");}
@@ -1820,6 +1872,14 @@ template<class Vertex> static bool prepared(Session& session,const std::vector<s
     phase.next(HostStage::g_state);
     const bool packed=packed_color(r),srgb=!packed && r(0x1fec);
     NativeVulkan::GraphicsState fixed;fixed.scale_visual=true;fixed.width=width;fixed.height=height;fixed.samples=samples;fixed.colors=count;fixed.color=packed?VK_FORMAT_R32_UINT:color_format(r(0x208)&31,srgb);
+    // A draw's occlusion count is consumed only by ZPASS reports (Pending::report, from 0x17cc). With lazy visibility a draw
+    // with ZPASS counting off records no query: guest-visible reports and predicates are unchanged; only the host statistic
+    // draw.pixels then excludes such draws.
+    fixed.visibility=!rsx_lazy_visibility() || r(0x17cc)!=0;
+    // Plane-independent fragment work (visual MSAA, NativeVulkan::graphics_ms_*): 2 samples at the standard 2x positions, no
+    // 0x1d7c sample mask/alpha-to-coverage (the only per-plane fragment test, fragment_discard_state), no packed history
+    // (read per plane), no line/point coverage emulation.
+    {const unsigned control=r.get(0x1d7c,0xffff0000);fixed.ms_ok=!alias && !point && !lines && !packed && aa==3 && ((control>>16)&15)==15 && !(control&16);}
     if(!alias && (count && !vk.graphics_format(fixed.color)))return attempt.reject("device_color_format");
     if(depth.base)fixed.depth=((r(0x208)>>5)&7)==1?VK_FORMAT_D16_UNORM:VK_FORMAT_D24_UNORM_S8_UINT;
     if(!alias && (fixed.depth!=VK_FORMAT_UNDEFINED && !vk.graphics_format(fixed.depth,true)))return attempt.reject("device_depth_format");
@@ -1859,7 +1919,7 @@ template<class Vertex> static bool prepared(Session& session,const std::vector<s
     phase.next(HostStage::g_shaders);
     rsxvk::FragmentFailure failure;std::shared_ptr<const std::string> fs;
     if(alias){auto source=rsxvk::fragment(fp,true,false,&failure);if(source)fs=std::make_shared<const std::string>(std::move(*source));}
-    else fs=fragment_source(fp,r,count,textures,lines!=nullptr,&failure);
+    else fs=fragment_source(fp,r,count,textures,lines!=nullptr,&failure,width,height);
     if(fs && !vk.graphics_quad_operations() && fs->find("subgroupQuadBroadcast")!=std::string::npos)return attempt.reject("device_fragment_quad_operations");
     if(!fs){if(attempt.stats.enabled)attempt.stats.detail("fragment_program",fragment_failure(fp,failure,r));return attempt.reject("fragment_program");}
     auto& data=session.draw_data;if(alias)session.serialize_registers(data,width,height);else session.serialize_draw_registers(data,width,height);

@@ -158,7 +158,10 @@ static void alias_detail_oracle(){
  r[0x1a00]=0x100000;r[0x1a04]=0x0001a529;r[0x1a08]=0x00030303;r[0x1a0c]=0x80000000;
  r[0x1a10]=0xaae4;r[0x1a14]=0x01010000;r[0x1a18]=(16u<<16)|8;r[0x1840]=256;
  auto converted=session.texture_metadata(0).resident_image;assert(converted && converted->visual);
- const auto rtt=vk.graphics_transfer(*session.batch,converted->visual,VK_IMAGE_ASPECT_COLOR_BIT,16);
+ // Visual fast path (default; ANYPS3_RENDER_SCALE_RTT_FAST=0 disables): R8G8B8A8_UNORM visual output with exact bytes.
+ const char* fast_env=std::getenv("ANYPS3_RENDER_SCALE_RTT_FAST");const bool fast=!fast_env || !std::strcmp(fast_env,"1");
+ assert(fast==(converted->visual->format==VK_FORMAT_R8G8B8A8_UNORM) && vk.graphics_visual_rtt_fast==(fast?1u:0u));
+ const auto rtt=vk.graphics_transfer(*session.batch,converted->visual,VK_IMAGE_ASPECT_COLOR_BIT,fast?4:16);
  // Retained right-hand remainder must survive 2->1->2 with all subpixels.
  auto small=session.bind(narrow,8,8,1,8,false).image;
  const auto reduced=vk.graphics_transfer(*session.batch,small->visual,VK_IMAGE_ASPECT_COLOR_BIT,4);
@@ -175,12 +178,13 @@ static void alias_detail_oracle(){
   // Visual grid column x of a 2-sample surface rendered at 16 px: pixel x/2, sample x%2.
   const unsigned plane=x%2,source_x=x/2;
   const auto* expected=visual.data()+((plane*16+y)*16+source_x)*4;
-  const auto* actual=reinterpret_cast<const float*>(bytes+rtt)+(y*32+x)*4;
-  for(unsigned c=0;c<4;++c)assert(std::fabs(actual[c]-expected[c]/255.f)<1.e-6f);
+  if(fast)assert(std::memcmp(bytes+rtt+(y*32+x)*4,expected,4)==0);
+  else{const auto* actual=reinterpret_cast<const float*>(bytes+rtt)+(y*32+x)*4;
+   for(unsigned c=0;c<4;++c)assert(std::fabs(actual[c]-expected[c]/255.f)<1.e-6f);}
   if(x<16)assert(std::memcmp(bytes+reduced+(y*16+x)*4,expected,4)==0);
  }
  session.flush(false);gpu.graphics_session=nullptr;unsetenv("ANYPS3_RENDER_SCALE");
- std::puts("PASS scaled typed RTT and sample-grid roundtrip retain every subpixel and native byte");
+ std::printf("PASS scaled typed RTT and sample-grid roundtrip retain every subpixel and native byte (visual fast %d)\n",fast?1:0);
 }
 // Converted texture of one surface; at scale 2 the visual companion carries `fine` (2x extent),
 // the native image `coarse`. Returns the converted visual (scale 2) or native (scale 1) texels.
@@ -222,6 +226,70 @@ static void typed_visual_oracle(){
   std::printf("PASS typed visual RTT %s keeps every visual subpixel\n",depth?"swizzled DEPTH16":"packed B8");
  }
 }
+// Typeless D24S8 surface sampled as linear A8R8G8B8 (0x85): converted texture of an 8x8 surface whose visual
+// companion holds 16x16 depth/stencil values (scale 2) or of a 16x16 surface holding them (scale 1).
+static std::vector<float> convert_typeless_depth(unsigned scale,unsigned size,const std::vector<std::uint32_t>& depth,const std::vector<std::uint8_t>& stencil,
+  const std::vector<std::uint32_t>& fine_depth,const std::vector<std::uint8_t>& fine_stencil,std::uint64_t* drawn=nullptr){
+ setenv("ANYPS3_RENDER_SCALE",scale==2?"2":"1",1);
+ PpuState s;setup_draw(s,8,8,256,false);auto& gpu=s.rsx;auto& r=gpu.registers;
+ gpu.renderer=std::make_unique<NativeVulkan>();auto& vk=*gpu.renderer;
+ rsxgraphics::Session session(vk,s);session.observe();gpu.graphics_session=&session;
+ auto target=rsxdraw::bind_target(s,0xfeed0000,0x100000,size*4,size,size,4);
+ auto& surface=session.bind(target,size,size,1,2,true);auto image=surface.image;assert(image->format==VK_FORMAT_D24_UNORM_S8_UINT);
+ // Native first: each native upload rebuilds the companion, then the companion receives its own values.
+ vk.graphics_transfer(*session.batch,image,VK_IMAGE_ASPECT_DEPTH_BIT,4,depth.data());
+ vk.graphics_transfer(*session.batch,image,VK_IMAGE_ASPECT_STENCIL_BIT,1,stencil.data());
+ if(scale==2){assert(image->visual);
+  vk.graphics_transfer(*session.batch,image->visual,VK_IMAGE_ASPECT_DEPTH_BIT,4,fine_depth.data());
+  vk.graphics_transfer(*session.batch,image->visual,VK_IMAGE_ASPECT_STENCIL_BIT,1,fine_stencil.data());}
+ session.dirty_surface(surface);
+ r[0x1a00]=0x100000;r[0x1a04]=0x0001a529;r[0x1a08]=0x00030303;r[0x1a0c]=0x80000000;r[0x1a10]=0xaae4;r[0x1a14]=0x01010000;r[0x1a18]=(size<<16)|size;r[0x1840]=size*4;
+ auto converted=session.texture_metadata(0).resident_image;assert(converted);
+ const auto result=scale==2?converted->visual:converted;assert(result && result->width==size*scale);
+ // The visual fast path writes R8G8B8A8_UNORM (bytes, returned as byte/255); the generic decoder R32G32B32A32_SFLOAT.
+ const bool bytes=result->format==VK_FORMAT_R8G8B8A8_UNORM;
+ const char* fast_env=std::getenv("ANYPS3_RENDER_SCALE_RTT_FAST");
+ assert(bytes==(scale==2 && (!fast_env || !std::strcmp(fast_env,"1"))) && vk.graphics_visual_rtt_fast==(bytes?1u:0u));
+ const auto at=vk.graphics_transfer(*session.batch,result,VK_IMAGE_ASPECT_COLOR_BIT,bytes?4:16);vk.graphics_finish(*session.batch);
+ std::vector<float> out(std::size_t(result->width)*result->height*4);
+ if(bytes){const auto* b=static_cast<const std::uint8_t*>(session.batch->map)+at;for(std::size_t i=0;i<out.size();++i)out[i]=float(b[i])/255.f;}
+ else{const auto* f=reinterpret_cast<const float*>(static_cast<const char*>(session.batch->map)+at);std::copy(f,f+out.size(),out.begin());}
+ if(drawn)*drawn=vk.graphics_visual_aspect_drawn;
+ session.flush(false);gpu.graphics_session=nullptr;unsetenv("ANYPS3_RENDER_SCALE");
+ return out;
+}
+// The visual typeless-depth words (depth and stencil aspects of the visual companion) must be the bytes of the visual
+// values: scale-2 conversion of 8x8 == scale-1 conversion of 16x16 with the companion's values. Covers 0, 0xffffff,
+// values around 2^23 (largest unorm24 -> float rounding step) and every stencil bit.
+static void typeless_depth_visual_oracle(){
+ std::vector<std::uint32_t> fine(256),coarse(64);std::vector<std::uint8_t> fine_s(256),coarse_s(64);
+ const std::uint32_t edges[]={0u,1u,2u,0x7fffffu,0x800000u,0x800001u,0xfffffeu,0xffffffu,0x7ffffeu,0x400000u,0x3fffffu,0xabcdefu};
+ for(unsigned i=0;i<256;++i){fine[i]=i<12?edges[i]:(0x9e3779u*i+0x51u)&0xffffffu;fine_s[i]=std::uint8_t(i*29u+7u);}
+ for(unsigned i=0;i<64;++i){coarse[i]=0x123456u+i;coarse_s[i]=std::uint8_t(200u-i);}
+ std::uint64_t drawn=0;
+ const auto actual=convert_typeless_depth(2,8,coarse,coarse_s,fine,fine_s,&drawn),expected=convert_typeless_depth(1,16,fine,fine_s,fine,fine_s);
+ assert(actual.size()==expected.size() && actual.size()==16*16*4);
+ const char* mode=std::getenv("ANYPS3_RENDER_SCALE_ASPECT_DRAW");const bool draws=!mode || !std::strcmp(mode,"1");
+ assert(draws?drawn==2:drawn==0);
+ // Converted texel -> guest word (A8R8G8B8 bytes, big-endian: word = d24<<8 | stencil).
+ auto word=[](const std::vector<float>& v,unsigned t){auto byte=[&](unsigned c){const float x=v[t*4+c]*255.f;const auto b=unsigned(std::lround(x));
+   if(std::fabs(x-float(b))>1e-3f || b>255){throw std::runtime_error("typeless depth visual texel is not a byte");}
+   return b;};
+  return (byte(3)<<24)|(byte(0)<<16)|(byte(1)<<8)|byte(2);};
+ unsigned off_by_one=0;
+ for(unsigned t=0;t<256;++t){
+  const std::uint32_t want=(fine[t]<<8)|fine_s[t],got=word(actual,t);
+  if(word(expected,t)!=want)throw std::runtime_error("scale-1 typeless depth reference differs from the stored values");
+  // Stencil bits are exact on both paths. The copy path is byte-exact; the draw path reads the visual depth through a
+  // float sampler (display-only image): exact where the device converts unorm24 correctly rounded (RTX 4070 SUPER),
+  // at most one unit of 2^-24 otherwise (lavapipe).
+  const long delta=long(got>>8)-long(want>>8);
+  if((got&255u)!=(want&255u) || (draws?(delta<-1 || delta>1):delta!=0)){
+   std::fprintf(stderr,"typeless depth visual texel=%u word actual=%08x expected=%08x\n",t,got,want);throw std::runtime_error("typeless depth visual words differ from the visual values");}
+  off_by_one+=delta!=0;
+ }
+ std::printf("PASS typeless depth visual words %s (aspect draws=%llu, depth off by one unit: %u of 256)\n",draws?"draw":"copy",(unsigned long long)drawn,off_by_one);
+}
 static void dual_oracle(){
  setenv("ANYPS3_RSX_FALLBACK_STATS","1",1);alias_detail_oracle();typed_visual_oracle();
  for(unsigned samples:{1u,2u,4u})raster_oracle(16,samples,true);
@@ -239,7 +307,7 @@ static void dual_oracle(){
  }
  unsetenv("ANYPS3_RENDER_SCALE");
 }
-int main(int argc,char**){try{if(argc>3){dual_oracle();}else if(argc>2){texture_oracle(false);texture_oracle(true);}else if(argc>1){for(unsigned size:{12u,16u})for(unsigned input:{0u,1u})generated_oracle(size,input);}
+int main(int argc,char**){try{if(argc>4){typeless_depth_visual_oracle();}else if(argc>3){dual_oracle();}else if(argc>2){texture_oracle(false);texture_oracle(true);}else if(argc>1){for(unsigned size:{12u,16u})for(unsigned input:{0u,1u})generated_oracle(size,input);}
  else{scissor_oracle();for(unsigned size:{12u,16u})for(unsigned samples:{1u,2u,4u})raster_oracle(size,samples);}}
  catch(const std::exception& e){std::fprintf(stderr,"SCALE TEST STOP %s\n",e.what());return 1;}}
 '''
@@ -285,4 +353,23 @@ class RenderScaleTests(unittest.TestCase):
    self.assertNotIn('Validation Warning',result.stdout+result.stderr)
    self.assertEqual(result.stdout.count('PASS dual'),7,result.stdout)
    self.assertEqual(result.stdout.count('PASS typed visual RTT'),2,result.stdout)
+   self.assertIn('(visual fast 1)',result.stdout)
    print(result.stdout,flush=True)
+
+   env.update(ANYPS3_RENDER_SCALE_RTT_FAST='0')
+   result=subprocess.run([str(root/'test'),'dual','native','bytes'],capture_output=True,text=True,env=env,timeout=180)
+   self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+   self.assertNotIn('Validation Error',result.stdout+result.stderr)
+   self.assertNotIn('Validation Warning',result.stdout+result.stderr)
+   self.assertEqual(result.stdout.count('PASS dual'),7,result.stdout)
+   self.assertIn('(visual fast 0)',result.stdout)
+   print(result.stdout,flush=True)
+
+   for draw,fast in (('1','1'),('0','1'),('1','0')):
+    env.update(ANYPS3_RENDER_SCALE_ASPECT_DRAW=draw,ANYPS3_RENDER_SCALE_RTT_FAST=fast)
+    result=subprocess.run([str(root/'test'),'typeless','depth','visual','words'],capture_output=True,text=True,env=env,timeout=180)
+    self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+    self.assertNotIn('Validation Error',result.stdout+result.stderr)
+    self.assertNotIn('Validation Warning',result.stdout+result.stderr)
+    self.assertEqual(result.stdout.count('PASS typeless depth visual words'),1,result.stdout)
+    print(result.stdout,flush=True)
