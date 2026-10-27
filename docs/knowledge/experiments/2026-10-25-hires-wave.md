@@ -189,3 +189,19 @@ match) and can be measured directly with `work/hires2s/measure-walk-103{4,5}.sh`
 test_host_observer_incremental, test_rsx_visual_msaa, test_rsx_render_scale, test_rsx_pipeline, test_rsx_graphics,
 test_rsx_visual_history, test_rsx_vk_submit: OK (187.7 s); lavapipe — test_rsx_render_scale, test_rsx_visual_history,
 test_rsx_pipeline, test_rsx_visual_msaa: OK (106.0 s). Logs/script `local/ratchet/work/hires2-merge/`. Full suite not run.
+
+**Stutter attribution (HIRES2-S instance 5, from full rings 960wf2s2/960wf2s1 and marks runs 1031sm1/960sm2/960sm2s1;
+tools `work/hires2s/tools/hitch_marks.py`, `marks_worst.py`; outputs `work/hires2s/ana/`).** Hitches repeat with the
+walker loop, at both scales (scale 2 enlarges A and B); pipeline creation is ruled out.
+- **A — RSX worker CPU, 80–160 ms frames with only ~360 draws:** at scale 2 ~55 ms is Vulkan device-memory alloc/free:
+  the 384 MB cache in `rsx_vk_resources.py` holds only ~4 of the 86/64 MB visual images and reuses exact sizes only, so
+  frees evict others via vkFreeMemory (single calls up to 16.8 ms) and new allocations miss. The other 60–100 ms sit in
+  the parent `fifo` stage outside every instrumented sub-stage (needs a sampled profile of hitch windows).
+- **B — GPU in texture-streaming frames, 130–160 ms (scale 2) / 80–280 ms (scale 1):** every GPU operation ~10× slower
+  (native draws 20–29 µs vs 2, visual 38 vs 4.3, pass begins 38–150 µs), coinciding with ~240 new device-memory
+  allocations per frame. Cause unknown (hypotheses: first touch of new memory, GPU clock drop).
+- **C — guest main thread, ~140 ms frames, 4–5 per 80 s:** the main thread runs 90–144 ms with no block event and no GPU
+  output (1031a2 frames 456, 580, 1457, 2358).
+Cheapest next test: `ANYPS3_RSX_MEMORY_CACHE_MB=1536` vs default, scale-2 full ring, `hitch_marks.py`.
+1034 GPU busy 14.50 / 13.94 ms (1034a1 cold: 113 SPIR-V compiles) vs 1031c1 15.58 ms — ~1.1–1.6 ms less GPU, same FPS
+(the frame is limited by the CPU chain at ~40 FPS).

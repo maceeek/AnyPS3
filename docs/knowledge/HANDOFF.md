@@ -51,7 +51,12 @@ verified HIRES2 evidence (`local/ratchet/work/hires2{w,s}/RESULT.md` exist only 
    - shader constants read through a storage buffer with dependent loads → uniform-buffer layout (exact; image tests);
    - native render-pass begin costs 12.6 µs vs 1.55 µs visual (1031sm1): read the code for per-begin framebuffer/image
      work, load ops and barriers; propose a fix with a test.
-5. **Design note only (user decision pending): horizontal scale 8/3** so 1440p shows 2560 genuine columns (today the
+5. **Stutter class A/B (Vulkan device memory, testable on lavapipe):** the 384 MB memory cache in
+   `rsx_vk_resources.py` reuses exact-size blocks only and holds ~4 visual images at scale 2; frees evict via
+   vkFreeMemory (up to 16.8 ms per call) and ~240 new allocations occur in streaming frames. Implement sub-allocation
+   from large blocks (size classes / a buddy or linear allocator per memory type) with bounded, deferred frees off the
+   worker's critical path; unit-test aliasing/lifetime with fences and the allocation counts.
+6. **Design note only (user decision pending): horizontal scale 8/3** so 1440p shows 2560 genuine columns (today the
    960×704 scene renders at 1920×1408 and is resampled 4:3). Describe what anisotropic visual companions would change
    (sample grid, typed RTT, history copies, presentation) and the expected GPU cost.
 
