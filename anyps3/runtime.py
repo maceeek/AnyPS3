@@ -238,8 +238,11 @@ struct GuestMemory {
             std::array<std::unique_ptr<PageBits>,512> cells{};
             std::array<std::atomic<PageBits*>,512> visible_cells{};
             std::map<unsigned,std::map<WatchKey,unsigned>> byte_watches;
+            // Writer-only: an upper bound of end-begin over the keys present on each page since it last held none (never shrinks
+            // while the page is watched). A key overlapping bytes [a,b) then begins in [a-reach,b): watch() scans only those.
+            std::array<std::uint16_t,512> reach{};
             Node()=default;
-            Node(const Node& o):byte_watches(o.byte_watches){for(unsigned i=0;i<512;++i){
+            Node(const Node& o):byte_watches(o.byte_watches),reach(o.reach){for(unsigned i=0;i<512;++i){
                 if(o.children[i])children[i]=std::make_unique<Node>(*o.children[i]);
                 visible_children[i].store(children[i].get());
                 if(o.cells[i])cells[i]=std::make_unique<PageBits>(*o.cells[i]);
@@ -336,15 +339,36 @@ struct GuestMemory {
                 const auto index=page&511;
                 const WatchKey key{unsigned(std::max(at,page<<12)-(page<<12)),unsigned(std::min(at+n,(page+1)<<12)-(page<<12)),polling};
                 auto& ranges=node->byte_watches[index];
-                if(add){auto& count=ranges[key];if(count==~0u)throw std::runtime_error("host observer watch overflow");++count;}
-                else{auto entry=ranges.find(key);if(entry==ranges.end())continue;if(!--entry->second)ranges.erase(entry);}
+                // The bitmaps are the union of the page's keys (sync: of its non-polling keys) and count is the sum of the key
+                // counts. Incremental update with the same result as a rebuild from every key: an added key ORs its own mask into
+                // its words; a removed key recomputes only its own words, from the keys that can overlap them (begin within reach).
+                bool vanished=false;
+                if(add){const auto* existing=node->cells[index].get();
+                    if(existing && existing->count.load(std::memory_order_relaxed)==~0u)throw std::runtime_error("host observer watch overflow");
+                    auto& count=ranges[key];if(count==~0u)throw std::runtime_error("host observer watch overflow");++count;
+                    node->reach[index]=std::max<std::uint16_t>(node->reach[index],std::uint16_t(std::get<1>(key)-std::get<0>(key)));}
+                else{auto entry=ranges.find(key);if(entry==ranges.end())continue;if(!--entry->second){ranges.erase(entry);vanished=true;}}
                 if(!node->cells[index]){node->cells[index]=std::make_unique<PageBits>();node->visible_cells[index].store(node->cells[index].get(),std::memory_order_release);}
-                auto& cell=*node->cells[index];std::array<std::uint64_t,64> all{},sync{};unsigned total=0;
-                for(const auto& range:ranges){if(range.second>~0u-total)throw std::runtime_error("host observer watch overflow");total+=range.second;
-                    const auto first=std::get<0>(range.first),end=std::get<1>(range.first);const bool poll=std::get<2>(range.first);
-                    for(unsigned word=first>>6;word<=((end-1)>>6);++word){const auto begin=word==(first>>6)?first&63:0,finish=word==((end-1)>>6)?((end-1)&63)+1:64;
-                        const auto mask=(~UINT64_C(0)<<begin)&(~UINT64_C(0)>>(64-finish));all[word]|=mask;if(!poll)sync[word]|=mask;}}
-                for(unsigned word=0;word<64;++word){cell.all[word].store(all[word],std::memory_order_release);cell.sync[word].store(sync[word],std::memory_order_release);}
+                auto& cell=*node->cells[index];
+                const unsigned total=cell.count.load(std::memory_order_relaxed)+(add?1u:~0u);   // +1 / -1 (a present key was removed)
+                const unsigned first=std::get<0>(key),end=std::get<1>(key),low=first>>6,high=(end-1)>>6;
+                auto word_mask=[](unsigned word,unsigned a,unsigned b){   // bits of byte span [a,b) inside 64-byte word `word`
+                    const unsigned begin=word==(a>>6)?a&63:0,finish=word==((b-1)>>6)?((b-1)&63)+1:64;
+                    return (~UINT64_C(0)<<begin)&(~UINT64_C(0)>>(64-finish));};
+                if(add){for(unsigned word=low;word<=high;++word){const auto mask=word_mask(word,first,end);
+                    const auto a=cell.all[word].load(std::memory_order_relaxed);if((a|mask)!=a)cell.all[word].store(a|mask,std::memory_order_release);
+                    if(!std::get<2>(key)){const auto y=cell.sync[word].load(std::memory_order_relaxed);if((y|mask)!=y)cell.sync[word].store(y|mask,std::memory_order_release);}}}
+                else if(vanished){
+                    std::array<std::uint64_t,64> all{},sync{};
+                    const unsigned from=low*64>node->reach[index]?low*64-node->reach[index]:0;
+                    for(auto it=ranges.lower_bound(WatchKey{from,0u,false});it!=ranges.end() && std::get<0>(it->first)<(high+1)*64;++it){
+                        const auto a=std::get<0>(it->first),b=std::get<1>(it->first);if(b<=low*64)continue;
+                        for(unsigned word=std::max(a>>6,low);word<=std::min((b-1)>>6,high);++word){const auto mask=word_mask(word,a,b);all[word]|=mask;if(!std::get<2>(it->first))sync[word]|=mask;}}
+                    for(unsigned word=low;word<=high;++word){
+                        if(cell.all[word].load(std::memory_order_relaxed)!=all[word])cell.all[word].store(all[word],std::memory_order_release);
+                        if(cell.sync[word].load(std::memory_order_relaxed)!=sync[word])cell.sync[word].store(sync[word],std::memory_order_release);}
+                }
+                if(ranges.empty())node->reach[index]=0;
                 cell.count.store(total,std::memory_order_release);
                 if(total)pages[page]=total;else pages.erase(page);
                 if(page_summary)page_summary(page,total!=0);
