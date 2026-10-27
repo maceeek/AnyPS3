@@ -89,7 +89,24 @@ static unsigned explicit_sampler_mask(const std::vector<FpInst>& fp){
         if(op==25 || op==47)mask|=1u<<((i.d>>17)&15);}
     return mask;
 }
-static std::optional<std::string> fragment_source_uncached(const std::vector<FpInst>& fp,const Reg& r,unsigned count,const std::array<Texture,16>& textures,bool lines=false,rsxvk::FragmentFailure* failure=nullptr){
+// Register-driven fragment discards of the Vulkan fragment epilogue. A bit is clear only when the draw's registers make
+// that discard impossible for every fragment: window clip (w[8], one bit per present 0x2c0/0x2c4 pair), polygon stipple
+// (0x147c==0), alpha test (0x304 bit 0 clear), multisample control (0x1d7c: sample-mask bits 16..19 for planes 0..3 all
+// set and alpha-to-coverage bit 4 clear; reset value 0xffff0000). ANYPS3_RSX_FS_STATIC_DISCARD=0 keeps every test in the
+// shader (run-time evaluation, the previous text).
+enum FragmentDiscard:unsigned {FragmentDiscardWindow=1,FragmentDiscardStipple=2,FragmentDiscardAlpha=4,FragmentDiscardCoverage=8,FragmentDiscardAll=15};
+static bool fragment_static_discard(){static const bool on=[]{const char* v=std::getenv("ANYPS3_RSX_FS_STATIC_DISCARD");
+    if(v && std::strcmp(v,"0") && std::strcmp(v,"1"))throw std::runtime_error("invalid ANYPS3_RSX_FS_STATIC_DISCARD");return !v || !std::strcmp(v,"1");}();return on;}
+static unsigned fragment_discard_state(const Reg& r){
+    if(!fragment_static_discard())return FragmentDiscardAll;
+    unsigned state=0;
+    for(unsigned i=0;i<8;++i)if(r.gpu.registers.count(0x2c0+8*i) && r.gpu.registers.count(0x2c4+8*i))state|=FragmentDiscardWindow;
+    if(r(0x147c)!=0)state|=FragmentDiscardStipple;
+    if(r(0x304)&1)state|=FragmentDiscardAlpha;
+    const unsigned aa=r.get(0x1d7c,0xffff0000);if(((aa>>16)&15)!=15 || (aa&16))state|=FragmentDiscardCoverage;
+    return state;
+}
+static std::optional<std::string> fragment_source_uncached(const std::vector<FpInst>& fp,const Reg& r,unsigned count,const std::array<Texture,16>& textures,bool lines=false,rsxvk::FragmentFailure* failure=nullptr,unsigned discard_state=FragmentDiscardAll){
     HostPhase phase(HostStage::source);
     const bool packed=packed_color(r);const unsigned explicit_units=explicit_sampler_mask(fp);
     auto shade=scalar_fragment(fp,failure);if(!shade)return {};
@@ -253,13 +270,21 @@ void main(){C q[1];bool front=w[11]!=0u || gl_FrontFacing;
  // scalar output
  if(q[0].killed)discard;
  uvec2 pixel=uvec2((gl_FragCoord.xy/raster_scale_));bool inside=false;
- for(uint i=0u;i<8u;++i)if((w[8]&(1u<<i))!=0u){uint h=R(0x2c0u+8u*i),v=R(0x2c4u+8u*i);
+)GLSL";
+    // Register-driven discards (fragment_discard_state): a test that the draw's registers make impossible is not emitted, so
+    // a shader without KIL/alpha-kill/depth output keeps early depth/stencil testing on the host GPU. Each omitted block
+    // is a no-op for exactly the register values in the key (same R() values the block would read at run time).
+    if(discard_state&FragmentDiscardWindow)source+=R"GLSL( for(uint i=0u;i<8u;++i)if((w[8]&(1u<<i))!=0u){uint h=R(0x2c0u+8u*i),v=R(0x2c4u+8u*i);
   inside=inside || (pixel.x>=(h&65535u) && pixel.x<=(h>>16u) && pixel.y>=(v&65535u) && pixel.y<=(v>>16u));}
  if(w[8]!=0u && ((R(0x2bcu)&1u)!=0u?inside:!inside))discard;
- if(w[11]==0u && R(0x147cu)!=0u && (R(0x1480u+4u*(pixel.y&31u))&(1u<<(pixel.x&31u)))==0u)discard;
- vec4 c=rd(q[0],0u,(R(0x1d60u)&0x40u)==0u);
- if((R(0x304u)&1u)!=0u && !cmp(R(0x308u),cpu_clamp(c,vec4(0),vec4(1)).a,float(R(0x30cu)&255u)/255.0))discard;
- // NV4097_SET_ANTI_ALIASING_CONTROL 0x1d7c (RPCS3 ffba2bf0 rsx_decode.h:4010-4028): bit 0 enable (no effect in
+)GLSL";
+    if(discard_state&FragmentDiscardStipple)source+=R"GLSL( if(w[11]==0u && R(0x147cu)!=0u && (R(0x1480u+4u*(pixel.y&31u))&(1u<<(pixel.x&31u)))==0u)discard;
+)GLSL";
+    source+=R"GLSL( vec4 c=rd(q[0],0u,(R(0x1d60u)&0x40u)==0u);
+)GLSL";
+    if(discard_state&FragmentDiscardAlpha)source+=R"GLSL( if((R(0x304u)&1u)!=0u && !cmp(R(0x308u),cpu_clamp(c,vec4(0),vec4(1)).a,float(R(0x30cu)&255u)/255.0))discard;
+)GLSL";
+    if(discard_state&FragmentDiscardCoverage)source+=R"GLSL( // NV4097_SET_ANTI_ALIASING_CONTROL 0x1d7c (RPCS3 ffba2bf0 rsx_decode.h:4010-4028): bit 0 enable (no effect in
  // RPCS3 graphics_pipeline_state.hpp:199-212), bit 4 alpha-to-coverage, bit 8 alpha-to-one, bits 16-31 sample mask.
  // Each pass renders one sample (plane). The coverage pattern is implementation-defined (Vulkan/GL; RPCS3 emulates
  // it stochastically): derived ordered pattern, round(alpha*samples) samples on average via a 4x4 Bayer offset.
@@ -299,7 +324,8 @@ void main(){C q[1];bool front=w[11]!=0u || gl_FrontFacing;
     return source+"}\n";
 }
 static std::shared_ptr<const std::string> fragment_source(const std::vector<FpInst>& fp,const Reg& r,unsigned count,const std::array<Texture,16>& textures,bool lines=false,rsxvk::FragmentFailure* failure=nullptr){
-    static thread_local std::vector<unsigned> key;key.assign({count,unsigned(lines),unsigned(packed_color(r)),unsigned(bool(r(0x1d60)&14u)),r(0x1d60)&64u,unsigned(float_color(r(0x208)&31u)),unsigned(rsx_layered_shaders().load(std::memory_order_relaxed))});
+    static thread_local std::vector<unsigned> key;const unsigned discard_state=fragment_discard_state(r);
+    key.assign({count,unsigned(lines),unsigned(packed_color(r)),unsigned(bool(r(0x1d60)&14u)),r(0x1d60)&64u,unsigned(float_color(r(0x208)&31u)),unsigned(rsx_layered_shaders().load(std::memory_order_relaxed)),discard_state});
     unsigned mask=0;for(unsigned unit=0;unit<16;++unit)if(textures[unit].valid)mask|=1u<<unit;else if(textures[unit].null_texture)mask|=0x10000u<<unit;key.push_back(mask);
     const unsigned explicit_units=explicit_sampler_mask(fp);
     for(unsigned unit=0;unit<16;++unit){const auto& t=textures[unit];if(!t.valid)continue;
@@ -316,7 +342,7 @@ static std::shared_ptr<const std::string> fragment_source(const std::vector<FpIn
     static thread_local SourceCache<std::vector<unsigned>> cache;
     if(auto hit=cache.find(key)){::RsxPerfCounters::add(::RsxPerfCounters::src_fs_hits);last_key=key;last_source=hit;return hit;}
     ::RsxPerfCounters::add(::RsxPerfCounters::src_fs_misses);
-    auto source=fragment_source_uncached(fp,r,count,textures,lines,failure);if(!source)return {};
+    auto source=fragment_source_uncached(fp,r,count,textures,lines,failure,discard_state);if(!source)return {};
     if(rsx_layered_shaders().load(std::memory_order_relaxed)){const auto main=source->find("void main(){");
         if(main==std::string::npos || source->find("void main(){",main+1)!=std::string::npos)throw std::runtime_error("RSX layered fragment shader template mismatch");
         source->replace(main,12,"void main(){shift=layers_>1u?shifts_[plane_in_]:shift_push_;plane=layers_>1u?plane_in_:plane_push_;");}

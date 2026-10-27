@@ -354,6 +354,35 @@ static void graphics_nonfinite_position(){
  }
  std::puts("PASS non-finite vertex position discards only its triangle on GPU and CPU");
 }
+// Register-driven discards are specialised per draw (fragment_discard_state). Text: with reset registers the epilogue has
+// no discard at all (early depth testing stays possible); each enabling register brings back exactly its own test.
+// Pixels: one fragment program alternates alpha test NEVER / off / NEVER / GREATER-than-0x7f (alpha 0x80 passes) over a
+// sentinel surface; every step must see its own variant (cache key), oracle = sentinel kept or 0x80ff8040 written.
+static void graphics_static_discard(){
+ using namespace rsxdraw;
+ auto text=[](void(*edit)(PpuState&)){PpuState s;setup_draw(s,8,8,32,false);edit(s);const Reg r{s.rsx};auto fp=load_fragment_program(s,r);
+  std::array<Texture,16> textures{};auto fs=fragment_source(fp,r,1,textures);if(!fs)throw std::runtime_error("static discard: no source");return *fs;};
+ auto count=[](const std::string& t,const char* what){std::size_t n=0,at=0;while((at=t.find(what,at))!=std::string::npos){++n;++at;}return n;};
+ const auto plain=text([](PpuState&){});
+ if(count(plain,"discard")!=1 || count(plain,"if(q[0].killed)discard;")!=1)throw std::runtime_error("static discard: reset registers keep a run-time discard");
+ struct Case{void(*edit)(PpuState&);const char* marker;};
+ const Case cases[]={{[](PpuState& s){s.rsx.registers[0x304]=1;},"R(0x304u)"},{[](PpuState& s){s.rsx.registers[0x147c]=1;},"R(0x147cu)"},
+  {[](PpuState& s){s.rsx.registers[0x2c0]=1;s.rsx.registers[0x2c4]=1;},"R(0x2bcu)"},{[](PpuState& s){s.rsx.registers[0x1d7c]=0xfffe0000;},"R(0x1d7cu)"},
+  {[](PpuState& s){s.rsx.registers[0x1d7c]=0xffff0010;},"R(0x1d7cu)"}};
+ for(const auto& c:cases){const auto t=text(c.edit);if(count(t,c.marker)<1 || count(t,"discard")<2)throw std::runtime_error(std::string("static discard: missing test ")+c.marker);}
+ // A lone 0x2c0 (no 0x2c4 pair) leaves w[8]==0: no window test; alpha-to-one only (0x1d7c bit 8) needs no coverage test.
+ if(count(text([](PpuState& s){s.rsx.registers[0x2c0]=1;}),"discard")!=1)throw std::runtime_error("static discard: unpaired window register");
+ if(count(text([](PpuState& s){s.rsx.registers[0x1d7c]=0xffff0100;}),"discard")!=1)throw std::runtime_error("static discard: alpha-to-one");
+ const unsigned funcs[]={0x200,0,0x200,0x204}; // NEVER, off, NEVER, GREATER (ref 0x7f < alpha 0x80)
+ const std::uint32_t expect[]={0x12345678,0x80ff8040,0x12345678,0x80ff8040};
+ for(unsigned step=0;step<4;++step){auto s=std::make_unique<PpuState>();setup_draw(*s,8,8,32,false);auto& R=s->rsx.registers;
+  if(funcs[step]){R[0x304]=1;R[0x308]=funcs[step];R[0x30c]=0x7f;}
+  for(unsigned i=0;i<64;++i)s->memory.store(0xc0100000+i*4,4,0x12345678);
+  setenv("ANYPS3_RSX_BACKEND","gpu",1);rsx_execute_draw(*s);if(s->rsx.renderer->graphics_draws!=1)throw std::runtime_error("static discard: no HW draw");
+  for(unsigned i=0;i<64;++i){const auto v=s->memory.load(0xc0100000+i*4,4);
+   if(expect[step]==0x12345678?v!=0x12345678:!near_argb(v,expect[step]))throw std::runtime_error("static discard: step "+std::to_string(step)+" pixel "+std::to_string(i)+" value "+std::to_string(v));}}
+ std::puts("PASS static register discards: reset epilogue has no discard, each register restores its test, alpha variants keyed");
+}
 static void graphics_fifo(){
  PpuState s;setup_draw(s,32,16,128,false);auto& gpu=s.rsx;auto& R=gpu.registers;auto& m=s.memory;
  m.map(0x60000000,0x1000,6,nullptr,0);m.map(0x80000000,0x10000,6,nullptr,0);
@@ -383,7 +412,7 @@ static void graphics_fifo(){
 int main(int argc,char** argv){try{
  setenv("ANYPS3_RSX_GPU_FALLBACK","1",1);
  if(argc>1 && std::string(argv[1])=="probe"){NativeVulkan vk;return 0;}
- graphics_differential();graphics_formats();graphics_fallback();graphics_coherence();graphics_sample_edges();graphics_mrt();graphics_fifo();graphics_depth_compare();graphics_texture_layout_reinterpret();graphics_dynamic_constants();graphics_vertex_feedback_fallback();graphics_fragment_feedback_snapshot();graphics_fragment_feedback_resident();graphics_descriptor_budget();graphics_aa_control();graphics_null_texture();graphics_nonfinite_position();
+ graphics_differential();graphics_formats();graphics_fallback();graphics_coherence();graphics_sample_edges();graphics_mrt();graphics_fifo();graphics_depth_compare();graphics_texture_layout_reinterpret();graphics_dynamic_constants();graphics_vertex_feedback_fallback();graphics_fragment_feedback_snapshot();graphics_fragment_feedback_resident();graphics_descriptor_budget();graphics_aa_control();graphics_static_discard();graphics_null_texture();graphics_nonfinite_position();
 }catch(const std::exception& e){std::fprintf(stderr,"FAIL %s\n",e.what());return 1;}}
 '''
 
@@ -408,3 +437,4 @@ class GraphicsTests(unittest.TestCase):
             self.assertNotIn('Validation Warning',result.stdout+result.stderr)
             self.assertEqual(result.stdout.count('FORMAT f='),20)
             self.assertIn('PASS non-finite vertex position discards only its triangle',result.stdout)
+            self.assertIn('PASS static register discards',result.stdout)
