@@ -102,3 +102,29 @@ The goal (stable 60 FPS at 1440p, no stutter) remains **unmet**: the RSX worker 
 1-vblank frames are only 41 %.
 
 **Queued at 19:12 (detached):** `local/ratchet/work/hiresI/ab-960.sh` runs alternating QUIET scale-2 walks 882q2, 960q2, 882q3, 960q3 (long-deadline walker) behind the still-running HIRES-B A/B `work/hiresB/ab-921.sh`; results in `local/ratchet/walking-RUN.json`, logs `work/hiresI/run-RUN.out`. Evaluate these first in the next session.
+
+## Alternating A/B evaluated (2026-10-27, coordinator)
+
+**Verified** (`local/ratchet/walking-RUN.json`, QUIET, scale 2 walking, long-deadline walker): 882q2 34.46 / 882q3 34.72
+FPS (rsx_worker 14.5 / 14.3 ms) vs 960q2 35.75 / 960q3 37.06 (12.8 / 11.8 ms); with 960q1 35.77 the integration gains
+~+2 FPS and ~2 ms worker time. gpu_wait rises 2.7 → 3.3–3.6 ms. HIRES-B A/B at scale 1: 921a2s1 43.10 vs 882hb1s1 /
+882hb2s1 42.24 / 42.89 (worker 11.6 vs 12.2 / 11.9); scale 2: 921a1s2 36.54 vs 882hb1s2 36.12. **921a1s1 is invalid as a
+walking result**: `entire_walk` is null — the walker did not move, and that stationary run held 59.93 FPS, 100 % one-vblank
+(main_ppu 10.9, rsx_worker 10.7 ms). **Derived:** standing still is at 60 at scale 1; walking misses because heavy frames
+(~1800–2100 draws) exceed the vblank on the RSX worker. Goal still unmet; HIRES2 wave started with two agents
+(rules `local/ratchet/work/COMMON-HIRES2.md`: W = worker throughput builds 1000–1029, S = scale-2 overhead / GPU / image
+builds 1030–1059).
+
+## HIRES2 interim (2026-10-27 ~19:40, coordinator; details in `local/ratchet/work/hires2{w,s}/RESULT.md`)
+
+- **Verified (HIRES2-S):** at scale 2 the GPU is busy ~19.3 ms per walking frame on 960 (scale 1 ~7.5 ms), so the GPU
+  alone caps scale 2 below 60. Build 1031 (= 960 + visual typeless aspect by a draw 9912280 + static fragment discards)
+  walked at 39.91 FPS with GPU 15.52 ms/frame (run 1031a1, single run; alternating repeats queued). Draws ~7.1 ms,
+  non-draw GPU work (GENERAL layouts, LOAD/STORE passes, ~250 full barriers/frame, conversions) ~8 ms.
+- **Verified (HIRES2-S, parity check over whole frames):** no comb and no block replication at scale 2. **Derived:** the
+  2560×1440 output is the game's 960×704 scene rendered at 1920×1408 and resampled 4:3 horizontally (as the original
+  resamples 960→1280); full 2560-column detail would need a horizontal scale of 8/3.
+- **Verified (HIRES2-W, full ring 960wf2s1):** heavy walking views (~1800–2400 draws) keep the RSX worker busy
+  ~20–22 ms at scale 1 (≈2.9 ms + 9.1 µs/draw) and the main guest thread runs ~14.8 ms inside the same work span — both
+  are critical. HOST_PROFILE overhead ~3 %; SMT placement and recorder spin refuted as levers. d6eeb7e (incremental
+  HostObserver bitmaps, exact, tested) is in build 1001, A/B in progress.

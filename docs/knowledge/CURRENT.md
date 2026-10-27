@@ -1,5 +1,13 @@
 # Current state and goal
 
+## HIRES2 wave — 2026-10-27 (in progress; goal NOT reached)
+
+Main f92681c = build 960 (snapshot verified file-identical). A/B: 960 scale-2 walking 35.75–37.06 FPS vs 882 34.46–34.72;
+scale-1 walking ~43 FPS; stationary scale 1 already 60 FPS. Two Opus agents: HIRES2-W (RSX worker per-draw throughput,
+`work/hires2w`, builds 1000–1029) and HIRES2-S (scale-2 overhead, GPU, stutter, image check, `work/hires2s`, builds
+1030–1059). Rules/baseline: `local/ratchet/work/COMMON-HIRES2.md`. Record:
+[HIRES wave](experiments/2026-10-25-hires-wave.md#alternating-ab-evaluated-2026-10-27-coordinator).
+
 ## HIRES wave: true 1440p at a stable 60 FPS — 2026-10-25 evening (goal NOT reached)
 
 Baseline 882 walking (QUIET): 1440p 33.15 FPS / rsx_worker 16.1 ms; 720p 44.68 FPS / 10.6 ms — the RSX worker's
