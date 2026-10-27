@@ -180,13 +180,14 @@ MEMBERS = r'''
                 ((surface.depth && ((surface.format==1 && texture.format==0x92) || (surface.format==2 && (texture.format==0x90 || visual_depth)))) ||
                  (!surface.depth && expected && expected==surface.format) || packed_b8);
             // Visual fast path (display-only half; the native half below is unchanged): a linear A8R8G8B8 (0x85) read of an
-            // A8R8G8B8 colour target or of a typeless D24S8 target with the same pitch, without SNORM, is per texel the
+            // A8R8G8B8 colour target or of a typeless D24S8 target with the same pitch, without SNORM (the decoder converts only
+            // when features bit 0 and a signed_mask bit 0..3 are set), is per texel the
             // visual source texel at sample-grid position (x+ox, y+oy) (raw_byte's address math reduces to that because
             // `covered` keeps every row inside one target row and origin is texel aligned). Its 8-bit channels are k/255,
             // so an R8G8B8A8_UNORM visual output holds them exactly (the decoder's output was R32G32B32A32_SFLOAT).
             // ANYPS3_RENDER_SCALE_RTT_FAST=0 keeps the generic decoder for the visual half too.
             const bool fast_visual=visual_typed && rtt_visual_fast() && vk.graphics_render_scale>1 && texture.format==0x85 && !texture.swizzled && !target.swizzle_width &&
-                level.pitch==target.pitch && target.bpp==4 && !(texture.features&1) && origin>=0 && unsigned(origin)%4==0 &&
+                level.pitch==target.pitch && target.bpp==4 && !((texture.features&1) && (texture.signed_mask&15)) && origin>=0 && unsigned(origin)%4==0 &&
                 ((!surface.depth && surface.format==8 && sampling_image->format==VK_FORMAT_R8G8B8A8_UNORM && sampling_image->visual) || (typeless_depth && visual_depth));
             const VkFormat visual_format=fast_visual?VK_FORMAT_R8G8B8A8_UNORM:VK_FORMAT_R32G32B32A32_SFLOAT;
             auto image=view.image;
