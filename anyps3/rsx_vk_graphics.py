@@ -55,11 +55,15 @@ public:
         VkFormat format;unsigned width,height,layers;
         bool depth;std::uint64_t memory_bytes=0;
         std::shared_ptr<GraphicsImage> visual;
+        // Sampled stencil-aspect array view of a depth/stencil image (graphics_stencil_input), owned here. An input alias
+        // sets `borrowed` to the image whose view it presents: the alias keeps that image alive and never destroys the view.
+        VkImageView stencil_array_view=VK_NULL_HANDLE;std::shared_ptr<GraphicsImage> borrowed;
         std::uint64_t visual_taint=0,visual_taint_epoch=0; // ANYPS3_RENDER_SCALE_TRACE lineage: reconstruction reasons reaching this visual image this frame
         GraphicsImage(NativeVulkan* o,VkFormat f,unsigned w,unsigned h,unsigned l,bool d):owner(o),format(f),width(w),height(h),layers(l),depth(d){}
         ~GraphicsImage(){if(sampler)vkDestroySampler(owner->device,sampler,nullptr);
             for(auto v:views)vkDestroyImageView(owner->device,v,nullptr);
-            if(array_view)vkDestroyImageView(owner->device,array_view,nullptr);
+            if(array_view && !borrowed)vkDestroyImageView(owner->device,array_view,nullptr);
+            if(stencil_array_view)vkDestroyImageView(owner->device,stencil_array_view,nullptr);
             if(attachment_array)vkDestroyImageView(owner->device,attachment_array,nullptr);
             if(image)vkDestroyImage(owner->device,image,nullptr);
             if(memory)vkFreeMemory(owner->device,memory,nullptr);
@@ -135,7 +139,7 @@ public:
         VkQueryPool busy_queries=VK_NULL_HANDLE;
         VkQueryPool occlusion=VK_NULL_HANDLE;unsigned visibility_count=0;std::vector<std::uint64_t> visibility;
         VkQueryPool queries=VK_NULL_HANDLE;unsigned query_count=0,timestamp_bits=0;float timestamp_period=0;
-        std::vector<unsigned> phases;std::vector<const GraphicsPipeline*> phase_pipelines;
+        std::vector<unsigned> phases;std::vector<const GraphicsPipeline*> phase_pipelines;std::vector<unsigned char> phase_visual;
         // Diagnostic (ANYPS3_RSX_VK_MARKS=1): BOTTOM_OF_PIPE timestamp chain; the time between two marks is attributed to the
         // kind of the later mark (GraphicsMark). Serializes the pipeline at every mark: attribution, not a performance mode.
         VkQueryPool marks=VK_NULL_HANDLE;unsigned mark_count=0;std::vector<unsigned> mark_kinds;
@@ -291,13 +295,13 @@ private:
     }
     enum GraphicsMark:unsigned {MarkStart,MarkDraw,MarkPassBegin,MarkPassEnd,MarkBarrier,MarkCopyBuffer,MarkCopyImage,MarkDispatch,MarkClear,MarkFill,MarkTail,MarkOther,MarkCount};
     // Call sites that issue copies/dispatches/barriers tag themselves (GraphicsSite) so the marks attribute them per site.
-    enum GraphicsSiteId:unsigned {SiteNone,SiteTexUpload,SiteSurfaceCopy,SiteTransfer,SiteUnpack,SitePack,SiteAspect,SiteDecode,SiteRawBuffer,SiteDeviceUpload,SitePredicate,SitePresent,SiteClear,SiteDeviceCopies,SiteCount};
+    enum GraphicsSiteId:unsigned {SiteNone,SiteTexUpload,SiteSurfaceCopy,SiteTransfer,SiteUnpack,SitePack,SiteAspect,SiteDecode,SiteRawBuffer,SiteDeviceUpload,SitePredicate,SitePresent,SiteClear,SiteDeviceCopies,SiteVisual,SiteCount};
     static unsigned& graphics_last_kind(){static thread_local unsigned kind=MarkOther;return kind;}
     static unsigned& graphics_site_ref(){static thread_local unsigned site=SiteNone;return site;}
     struct GraphicsSite{unsigned previous;explicit GraphicsSite(unsigned s):previous(graphics_site_ref()){graphics_site_ref()=s;}~GraphicsSite(){graphics_site_ref()=previous;}};
     static void graphics_mark(GraphicsBatch& b,unsigned kind){
         if(!b.marks || b.mark_count>=4096)return;
-        vkCmdWriteTimestamp(b.command,VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,b.marks,b.mark_count++);b.mark_kinds.push_back(graphics_site_ref()*16+kind);
+        vkCmdWriteTimestamp(b.command,VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,b.marks,b.mark_count++);b.mark_kinds.push_back((b.replaying_visual?unsigned(SiteVisual):graphics_site_ref())*16+kind);  // visual replays (incl. their planes) are one site
     }
     static void graphics_replay_planes(GraphicsBatch& b){
         for(unsigned plane=1;plane<b.plane_count;++plane){
@@ -503,21 +507,22 @@ public:
     bool graphics_vertex_fetch()const{return graphics_features.shaderClipDistance && graphics_features.vertexPipelineStoresAndAtomics;}
     bool graphics_float64()const{return graphics_features.shaderFloat64;}
     // ANYPS3_RSX_VK_PROFILE: GPU time per draw by fragment/vertex shader text.
-    struct DrawProfile {double ms=0;std::uint64_t draws=0;std::size_t vs_bytes=0,fs_bytes=0;std::string fs_head;};
+    struct DrawProfile {double ms=0;std::uint64_t draws=0;std::size_t vs_bytes=0,fs_bytes=0;std::string fs_head;bool visual=false;};
     std::unordered_map<std::string,DrawProfile> draw_profile;std::uint64_t draw_profile_draws=0;
-    void draw_profile_add(const GraphicsPipeline& p,double ms){
+    // Native and visual halves of a pair share the pipeline; they are profiled as separate rows (key prefix N/V).
+    void draw_profile_add(const GraphicsPipeline& p,double ms,bool visual=false){
         if(!p.vs_source || !p.fs_source)return;
-        auto& e=draw_profile[*p.vs_source+'\0'+*p.fs_source];e.ms+=ms;++e.draws;e.vs_bytes=p.vs_source->size();e.fs_bytes=p.fs_source->size();
+        auto& e=draw_profile[std::string(visual?"V":"N")+*p.vs_source+'\0'+*p.fs_source];e.ms+=ms;++e.draws;e.vs_bytes=p.vs_source->size();e.fs_bytes=p.fs_source->size();e.visual=visual;
         if(++draw_profile_draws%20000==0)draw_profile_print();
     }
     void draw_profile_print(){
-        std::vector<const DrawProfile*> rows;double total=0;for(const auto& e:draw_profile){rows.push_back(&e.second);total+=e.second.ms;}
+        std::vector<const DrawProfile*> rows;double total=0,visual_ms=0;std::uint64_t visual_draws=0;for(const auto& e:draw_profile){rows.push_back(&e.second);total+=e.second.ms;if(e.second.visual){visual_ms+=e.second.ms;visual_draws+=e.second.draws;}}
         std::sort(rows.begin(),rows.end(),[](const auto* a,const auto* c){return a->ms>c->ms;});
-        std::fprintf(stderr,"RSX VK DRAW PROFILE draws=%llu shaders=%zu total_ms=%.3f\n",(unsigned long long)draw_profile_draws,rows.size(),total);
+        std::fprintf(stderr,"RSX VK DRAW PROFILE draws=%llu shaders=%zu total_ms=%.3f visual_draws=%llu visual_ms=%.3f\n",(unsigned long long)draw_profile_draws,rows.size(),total,(unsigned long long)visual_draws,visual_ms);
         for(std::size_t i=0;i<rows.size() && i<20;++i){const auto& e=*rows[i];
             for(const auto& kv:draw_profile)if(&kv.second==rows[i]){
-                std::fprintf(stderr,"RSX VK DRAW PROFILE rank=%zu ms=%.3f draws=%llu us_per_draw=%.2f vs_bytes=%zu fs_bytes=%zu fs_hash=%016zx\n",i,e.ms,(unsigned long long)e.draws,1000*e.ms/std::max<std::uint64_t>(1,e.draws),e.vs_bytes,e.fs_bytes,std::hash<std::string>{}(kv.first));
-                if(const char* dir=std::getenv("ANYPS3_RSX_VK_PROFILE_DIR")){char name[64];std::snprintf(name,sizeof(name),"/shader-%016zx.glsl",std::hash<std::string>{}(kv.first));
+                std::fprintf(stderr,"RSX VK DRAW PROFILE rank=%zu ms=%.3f draws=%llu us_per_draw=%.2f vs_bytes=%zu fs_bytes=%zu visual=%d fs_hash=%016zx\n",i,e.ms,(unsigned long long)e.draws,1000*e.ms/std::max<std::uint64_t>(1,e.draws),e.vs_bytes,e.fs_bytes,int(e.visual),std::hash<std::string>{}(kv.first.substr(1)));
+                if(const char* dir=std::getenv("ANYPS3_RSX_VK_PROFILE_DIR")){char name[64];std::snprintf(name,sizeof(name),"/shader-%016zx.glsl",std::hash<std::string>{}(kv.first.substr(1)));
                     if(FILE* f=std::fopen((std::string(dir)+name).c_str(),"w")){std::fwrite(kv.first.data(),1,kv.first.size(),f);std::fclose(f);}}
                 break;}}
     }
@@ -737,7 +742,46 @@ public:
         else {vkCmdCopyImageToBuffer(b.command,image->image,VK_IMAGE_LAYOUT_GENERAL,b.buffer,1,&copy);b.download_bytes+=bytes;}
         graphics_stamp(b,0,true);b.pins.push_back(image);if(data)graphics_visual_sync(b,image,"transfer");return at;
     }
-    std::uint64_t graphics_visual_aspect_copies=0;
+    std::uint64_t graphics_visual_aspect_copies=0,graphics_visual_aspect_drawn=0;
+    // ANYPS3_RENDER_SCALE_ASPECT_DRAW=0 restores the visual buffer round trip (A/B and test switch); default 1.
+    static bool graphics_visual_aspect_draws(){static const bool value=[]{const char* v=std::getenv("ANYPS3_RENDER_SCALE_ASPECT_DRAW");
+            if(v && std::strcmp(v,"0") && std::strcmp(v,"1")){throw std::runtime_error("invalid ANYPS3_RENDER_SCALE_ASPECT_DRAW");}
+            return !v || !std::strcmp(v,"1");}();
+        return value;}
+    // An input alias presenting the stencil aspect of a D24S8 image as its sampled array view (usampler2DArray).
+    std::shared_ptr<GraphicsImage> graphics_stencil_input(const std::shared_ptr<GraphicsImage>& image){
+        if(!image->depth || image->format!=VK_FORMAT_D24_UNORM_S8_UINT)throw std::runtime_error("RSX stencil input requires D24S8");
+        if(!image->stencil_array_view){VkImageViewCreateInfo vi{};vi.sType=VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;vi.image=image->image;vi.viewType=VK_IMAGE_VIEW_TYPE_2D_ARRAY;vi.format=image->format;
+            vi.subresourceRange={VK_IMAGE_ASPECT_STENCIL_BIT,0,1,0,image->layers};check(vkCreateImageView(device,&vi,nullptr,&image->stencil_array_view),"graphics stencil input view");}
+        auto alias=std::make_shared<GraphicsImage>(this,image->format,image->width,image->height,image->layers,true);
+        alias->array_view=image->stencil_array_view;alias->borrowed=image;alias->memory_bytes=0;return alias;
+    }
+    // Visual half of a one-word typeless reinterpretation. The visual image is display-only (never guest-visible; native
+    // bytes keep the exact copy path), so one draw per plane reads the visual source through a sampled view and writes the
+    // word image directly instead of the S*S-sized buffer round trip (two copies, two full barriers). Depth words carry
+    // the 24-bit depth in the low bits like the copied D24 depth aspect (consumers mask 0xffffff); float source -> 24-bit
+    // integer goes through binary64 where available. Stencil and R32 float bits are exact.
+    void graphics_visual_aspect_draw(GraphicsBatch& b,const std::shared_ptr<GraphicsImage>& source,VkImageAspectFlags aspect,const std::shared_ptr<GraphicsImage>& result){
+        const bool stencil=aspect==VK_IMAGE_ASPECT_STENCIL_BIT,depth=aspect==VK_IMAGE_ASPECT_DEPTH_BIT;
+        if(result->width!=source->width || result->height!=source->height || result->layers!=source->layers || result->visual || source->visual ||
+           result->format!=(stencil?VK_FORMAT_R8_UINT:VK_FORMAT_R32_UINT) || (!stencil && !depth && source->format!=VK_FORMAT_R32_SFLOAT))
+            throw std::runtime_error("RSX visual aspect draw layout");
+        static const auto vs=std::make_shared<const std::string>("#version 450\nvoid main(){vec2 p=vec2((gl_VertexIndex<<1)&2,gl_VertexIndex&2);gl_Position=vec4(p*2.0-1.0,0,1);}");
+        auto text=[](const char* sampler,const char* out,const char* value){return std::make_shared<const std::string>(std::string("#version 450\nlayout(binding=17) uniform ")+sampler+
+            " src_;layout(location=0) out "+out+" o;layout(push_constant) uniform Params{vec2 extent;vec2 shift;uint plane_;};\nvoid main(){ivec3 p=ivec3(ivec2(gl_FragCoord.xy),int(plane_));"+value+"}\n");};
+        static const auto fs_depth64=text("sampler2DArray","uint","o=uint(round(double(clamp(texelFetch(src_,p,0).r,0.0,1.0))*16777215.0lf));");
+        static const auto fs_depth32=text("sampler2DArray","uint","o=uint(round(clamp(texelFetch(src_,p,0).r,0.0,1.0)*16777215.0));");
+        static const auto fs_stencil=text("usampler2DArray","uint","o=texelFetch(src_,p,0).r&255u;");
+        static const auto fs_float=text("sampler2DArray","uint","o=floatBitsToUint(texelFetch(src_,p,0).r);");
+        const auto& fs=stencil?fs_stencil:depth?(graphics_float64()?fs_depth64:fs_depth32):fs_float;
+        GraphicsState s{};s.visual_pass=true;s.width=result->width;s.height=result->height;s.colors=1;s.samples=result->layers;s.color=result->format;
+        s.scissor={{0,0},{result->width,result->height}};s.blend[0].colorWriteMask=15;
+        std::array<std::shared_ptr<GraphicsImage>,4> colors{};colors[0]=result;
+        std::array<std::shared_ptr<GraphicsImage>,20> inputs{};inputs[16]=stencil?graphics_stencil_input(source):source;
+        const std::array<std::array<float,2>,4> positions{{{.5f,.5f},{.5f,.5f},{.5f,.5f},{.5f,.5f}}};
+        const std::vector<unsigned> data(16,0);
+        graphics_draw(b,s,colors,{},*vs,*fs,data,3,positions,0,0,0,1,inputs,0,UINT64_MAX,{},vs,fs);
+    }
     std::shared_ptr<GraphicsImage> graphics_aspect_image(GraphicsBatch& b,const std::shared_ptr<GraphicsImage>& source,VkImageAspectFlags aspect,const std::shared_ptr<GraphicsImage>& destination={},std::shared_ptr<GraphicsBuffer>* scratch=nullptr){b.sync();
         GraphicsSite site(SiteAspect);
         const bool depth=source->depth && source->format==VK_FORMAT_D24_UNORM_S8_UINT && (aspect==VK_IMAGE_ASPECT_DEPTH_BIT || aspect==VK_IMAGE_ASPECT_STENCIL_BIT);
@@ -754,7 +798,7 @@ public:
         // reinterpreted the same way after the native bytes (16-byte aligned).
         // Several words per texel would interleave subpixels; those rebuild.
         const bool visual=words==1 && source->visual && result->visual && graphics_render_scale>1;
-        const auto visual_at=(bytes+15)&~UINT64_C(15),total=visual?visual_at+bytes*graphics_render_scale*graphics_render_scale:bytes;
+        const auto visual_at=(bytes+15)&~UINT64_C(15),total=visual && !graphics_visual_aspect_draws()?visual_at+bytes*graphics_render_scale*graphics_render_scale:bytes;
         // A device-local transfer buffer permits byte-preserving depth/color
         // reinterpretation without an illegal cross-aspect vkCmdCopyImage,
         // normalized float reconstruction or any host-visible staging/read.
@@ -770,10 +814,12 @@ public:
         vkCmdCopyImageToBuffer(b.command,source->image,VK_IMAGE_LAYOUT_GENERAL,transfer->buffer,1,&copy);graphics_barrier(b);
         copy.imageSubresource.aspectMask=VK_IMAGE_ASPECT_COLOR_BIT;copy.imageExtent.width=result->width;
         vkCmdCopyBufferToImage(b.command,transfer->buffer,result->image,VK_IMAGE_LAYOUT_GENERAL,1,&copy);graphics_barrier(b);
-        if(visual){copy.bufferOffset=visual_at;copy.imageSubresource.aspectMask=aspect;copy.imageExtent={source->visual->width,source->visual->height,1};
+        if(visual){
+            if(graphics_visual_aspect_draws()){graphics_visual_aspect_draw(b,source->visual,aspect,result->visual);++graphics_visual_aspect_drawn;}
+            else{copy.bufferOffset=visual_at;copy.imageSubresource.aspectMask=aspect;copy.imageExtent={source->visual->width,source->visual->height,1};
             vkCmdCopyImageToBuffer(b.command,source->visual->image,VK_IMAGE_LAYOUT_GENERAL,transfer->buffer,1,&copy);graphics_barrier(b);
             copy.imageSubresource.aspectMask=VK_IMAGE_ASPECT_COLOR_BIT;
-            vkCmdCopyBufferToImage(b.command,transfer->buffer,result->visual->image,VK_IMAGE_LAYOUT_GENERAL,1,&copy);graphics_barrier(b);
+            vkCmdCopyBufferToImage(b.command,transfer->buffer,result->visual->image,VK_IMAGE_LAYOUT_GENERAL,1,&copy);graphics_barrier(b);}
             graphics_visual_taint(*result->visual,source->visual->visual_taint,true);++graphics_visual_aspect_copies;}
         b.buffer_pins.push_back(transfer);b.pins.push_back(source);b.pins.push_back(result);if(!visual)graphics_visual_sync(b,result,"aspect");return result;
     }
@@ -1077,7 +1123,7 @@ public:
             }else ++b.render_pass_reuses;
             // A framebuffer change may replay older visual draws. Open this
             // draw's timestamp pair only after their pairs have been closed.
-            if(!layer){graphics_stamp(b,1);if(b.queries){b.phase_pipelines.resize(b.phases.size(),nullptr);b.phase_pipelines.back()=&p;}}
+            if(!layer){graphics_stamp(b,1);if(b.queries){b.phase_pipelines.resize(b.phases.size(),nullptr);b.phase_pipelines.back()=&p;b.phase_visual.resize(b.phases.size(),0);b.phase_visual.back()=s.visual_pass;}}
             // One query per sample pass; sum at the ownership boundary.
             if(query!=UINT_MAX)vkCmdBeginQuery(b.command,b.occlusion,query+layer,graphics_features.occlusionQueryPrecise?VK_QUERY_CONTROL_PRECISE_BIT:0);
             if(b.bound_graphics_pipeline!=p.pipeline){vkCmdBindPipeline(b.command,VK_PIPELINE_BIND_POINT_GRAPHICS,p.pipeline);b.bound_graphics_pipeline=p.pipeline;++b.pipeline_binds;}
@@ -1393,9 +1439,9 @@ public:
             if(!b.coherent){VkMappedMemoryRange r{};r.sType=VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;r.memory=b.memory;r.size=VK_WHOLE_SIZE;check(vkInvalidateMappedMemoryRanges(device,1,&r),"graphics invalidate");}
             if(b.queries && b.query_count){std::vector<std::uint64_t> values(b.query_count);check(vkGetQueryPoolResults(device,b.queries,0,b.query_count,values.size()*8,values.data(),8,VK_QUERY_RESULT_64_BIT),"graphics query results");
                 const auto mask=b.timestamp_bits>=64?UINT64_MAX:((UINT64_C(1)<<b.timestamp_bits)-1);
-                if(b.phase_pipelines.size()<b.phases.size())b.phase_pipelines.resize(b.phases.size(),nullptr);
+                b.phase_pipelines.resize(std::max(b.phase_pipelines.size(),b.phases.size()),nullptr);b.phase_visual.resize(std::max(b.phase_visual.size(),b.phases.size()),0);
                 for(unsigned i=0;i<b.phases.size();++i){const double ms=double((values[2*i+1]-values[2*i])&mask)*b.timestamp_period/1e6;
-                    if(b.phases[i]==1 && b.phase_pipelines[i])draw_profile_add(*b.phase_pipelines[i],ms);
+                    if(b.phases[i]==1 && b.phase_pipelines[i])draw_profile_add(*b.phase_pipelines[i],ms,b.phase_visual[i]);
                     if(b.phases[i]==0)b.upload_ms+=ms;else if(b.phases[i]==1)b.draw_ms+=ms;else b.download_ms+=ms;}}
             if(b.busy_queries){std::uint64_t ticks[3]{};check(vkGetQueryPoolResults(device,b.busy_queries,0,transfer_queue?2:3,sizeof(ticks),ticks,8,VK_QUERY_RESULT_64_BIT),"graphics busy results");
                 // Non-async: ticks[2]-ticks[0] is the in-queue prelude. Async: busy_ns is the graphics-queue time of the batch and
@@ -1412,7 +1458,7 @@ public:
                     check(vkGetQueryPoolResults(device,b.marks,0,b.mark_count,stamps.size()*8,stamps.data(),8,VK_QUERY_RESULT_64_BIT),"graphics mark results");
                     if(std::getenv("ANYPS3_RSX_VK_MARKS_TRACE") && graphics_completed_batches>=300 && graphics_completed_batches<330){
                         static const char* const names[]={"start","draw","pass_begin","pass_end","barrier","copy_buffer","copy_image","dispatch","clear","fill","tail","other"};
-                        static const char* const sites[]={"-","tex_upload","surface_copy","transfer","unpack","pack","aspect","decode","raw_buffer","device_upload","predicate","present","clear","device_copies"};
+                        static const char* const sites[]={"-","tex_upload","surface_copy","transfer","unpack","pack","aspect","decode","raw_buffer","device_upload","predicate","present","clear","device_copies","visual"};
                         std::fprintf(stderr,"TRACE batch=%llu marks=%u prelude_ns=%llu busy_ns=%llu\n",(unsigned long long)graphics_completed_batches,b.mark_count,(unsigned long long)prelude_batch_ns,(unsigned long long)(double((ticks[1]-ticks[0])&busy_mask)*b.timestamp_period));
                         unsigned run=0;unsigned long long runns=0;unsigned last=UINT_MAX;
                         for(unsigned i=1;i<=b.mark_count;++i){
@@ -1426,7 +1472,7 @@ public:
                     graphics_mark_ns[MarkStart]+=std::uint64_t(double((stamps[0]-ticks[2])&busy_mask)*b.timestamp_period);++graphics_mark_count[MarkStart];}
                 if(b.frames){std::fprintf(stderr,"PERF GPU busy_ns=%llu frames=%llu batches=%llu timeline=%llu prelude_ns=%llu\n",(unsigned long long)graphics_busy_ns,(unsigned long long)graphics_profile_frames,(unsigned long long)graphics_completed_batches,(unsigned long long)b.completion,(unsigned long long)graphics_prelude_ns);
                     if(b.marks){static const char* const names[]={"start","draw","pass_begin","pass_end","barrier","copy_buffer","copy_image","dispatch","clear","fill","tail","other"};
-                        static const char* const sites[]={"-","tex_upload","surface_copy","transfer","unpack","pack","aspect","decode","raw_buffer","device_upload","predicate","present","clear","device_copies"};
+                        static const char* const sites[]={"-","tex_upload","surface_copy","transfer","unpack","pack","aspect","decode","raw_buffer","device_upload","predicate","present","clear","device_copies","visual"};
                         std::fprintf(stderr,"PERF GPU_MARKS frames=%llu",(unsigned long long)graphics_profile_frames);
                         for(unsigned k=0;k<graphics_mark_ns.size();++k){if(!graphics_mark_count[k])continue;
                             std::fprintf(stderr," %s:%s=%llu/%llu",sites[std::min<unsigned>(k/16,SiteCount-1)],names[std::min<unsigned>(k%16,MarkOther)],(unsigned long long)graphics_mark_ns[k],(unsigned long long)graphics_mark_count[k]);}
@@ -1493,7 +1539,7 @@ public:
         check(vkResetDescriptorPool(device,b.descriptors,0),"graphics reset descriptors");
         for(std::size_t i=0;i<b.overflow_used;++i){check(vkResetDescriptorPool(device,b.overflow_descriptors[i],0),"graphics reset descriptors");}
         if(!b.visual_jobs.empty())throw std::runtime_error("RSX pending visual draws at batch reset");
-        b.overflow_used=0;b.used=0;b.status_offsets.clear();b.visual_status_offsets.clear();b.paired_status_offsets.clear();b.uploads.clear();b.active_framebuffer=VK_NULL_HANDLE;b.completion=0;b.frames=0;b.descriptor_cache.clear();b.signal=VK_NULL_HANDLE;b.visibility_count=0;b.visibility.clear();b.query_count=0;b.phases.clear();b.phase_pipelines.clear();
+        b.overflow_used=0;b.used=0;b.status_offsets.clear();b.visual_status_offsets.clear();b.paired_status_offsets.clear();b.uploads.clear();b.active_framebuffer=VK_NULL_HANDLE;b.completion=0;b.frames=0;b.descriptor_cache.clear();b.signal=VK_NULL_HANDLE;b.visibility_count=0;b.visibility.clear();b.query_count=0;b.phases.clear();b.phase_pipelines.clear();b.phase_visual.clear();
         b.bound_graphics_pipeline=VK_NULL_HANDLE;b.dynamic_valid=false;b.state_versions.fill(0);b.state_offsets.fill(0);
 
     }
