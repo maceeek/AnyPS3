@@ -938,6 +938,11 @@ public:
     // any other access expands it back into the planes first (graphics_ms_expand: one full-screen pass per plane; depth by
     // gl_FragDepth, stencil by a REPLACE of a known cleared value or 8 bit-plane draws, since the NVIDIA driver has no
     // VK_EXT_shader_stencil_export). Default 0 (planes only).
+    // ANYPS3_RENDER_SCALE_SWITCH_REPLAY=1: a native framebuffer switch replays the queued visual halves first (former order).
+    static bool graphics_native_switch_replay(){static const bool value=[]{const char* v=std::getenv("ANYPS3_RENDER_SCALE_SWITCH_REPLAY");
+            if(v && std::strcmp(v,"0") && std::strcmp(v,"1")){throw std::runtime_error("invalid ANYPS3_RENDER_SCALE_SWITCH_REPLAY");}
+            return v && !std::strcmp(v,"1");}();
+        return value;}
     static bool graphics_visual_msaa(){static const bool value=[]{const char* v=std::getenv("ANYPS3_RENDER_SCALE_MSAA");
             if(v && std::strcmp(v,"0") && std::strcmp(v,"1")){throw std::runtime_error("invalid ANYPS3_RENDER_SCALE_MSAA");}
             return v && !std::strcmp(v,"1");}();
@@ -1302,7 +1307,10 @@ public:
             // count and formats. Draw order is kept within each plane; planes
             // are distinct images and may be recorded as runs (PlaneDraw).
             if(b.active_framebuffer!=framebuffer){
-                graphics_end_pass(b);
+                // A native framebuffer switch keeps queued visual halves queued (graphics_native_switch_replay): they touch
+                // only visual images, immutable slices and buffers that only frontend commands rewrite, and every frontend
+                // command still replays them first (graphics_end_pass). Fewer native/visual alternations, longer visual runs.
+                if(!s.visual_pass && !b.replaying_visual && !graphics_native_switch_replay())graphics_close_pass_only(b);else graphics_end_pass(b);
                 vkCmdBeginRenderPass(b.command,&pass,VK_SUBPASS_CONTENTS_INLINE);graphics_mark(b,MarkPassBegin);
                 b.active_framebuffer=framebuffer;++b.render_passes;::RsxPerfCounters::add(::RsxPerfCounters::render_passes);
             }else ++b.render_pass_reuses;
