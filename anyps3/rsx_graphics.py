@@ -94,6 +94,14 @@ static unsigned explicit_sampler_mask(const std::vector<FpInst>& fp){
 // (0x147c==0), alpha test (0x304 bit 0 clear), multisample control (0x1d7c: sample-mask bits 16..19 for planes 0..3 all
 // set and alpha-to-coverage bit 4 clear; reset value 0xffff0000). ANYPS3_RSX_FS_STATIC_DISCARD=0 keeps every test in the
 // shader (run-time evaluation, the previous text).
+// ANYPS3_RSX_LAZY_VISIBILITY=1: draws with ZPASS counting off (0x17cc==0) record no occlusion query (see the main draw).
+// Default 0 keeps a query per sample pass of every draw (the host statistic draw.pixels counts all draws).
+static bool rsx_lazy_visibility(){
+    static const bool on=[]{const char* v=std::getenv("ANYPS3_RSX_LAZY_VISIBILITY");
+        if(v && std::strcmp(v,"0") && std::strcmp(v,"1")){throw std::runtime_error("invalid ANYPS3_RSX_LAZY_VISIBILITY");}
+        return v && !std::strcmp(v,"1");}();
+    return on;
+}
 enum FragmentDiscard:unsigned {FragmentDiscardWindow=1,FragmentDiscardStipple=2,FragmentDiscardAlpha=4,FragmentDiscardCoverage=8,FragmentDiscardAll=15};
 static bool fragment_static_discard(){
     static const bool on=[]{const char* v=std::getenv("ANYPS3_RSX_FS_STATIC_DISCARD");
@@ -1864,6 +1872,10 @@ template<class Vertex> static bool prepared(Session& session,const std::vector<s
     phase.next(HostStage::g_state);
     const bool packed=packed_color(r),srgb=!packed && r(0x1fec);
     NativeVulkan::GraphicsState fixed;fixed.scale_visual=true;fixed.width=width;fixed.height=height;fixed.samples=samples;fixed.colors=count;fixed.color=packed?VK_FORMAT_R32_UINT:color_format(r(0x208)&31,srgb);
+    // A draw's occlusion count is consumed only by ZPASS reports (Pending::report, from 0x17cc). With lazy visibility a draw
+    // with ZPASS counting off records no query: guest-visible reports and predicates are unchanged; only the host statistic
+    // draw.pixels then excludes such draws.
+    fixed.visibility=!rsx_lazy_visibility() || r(0x17cc)!=0;
     if(!alias && (count && !vk.graphics_format(fixed.color)))return attempt.reject("device_color_format");
     if(depth.base)fixed.depth=((r(0x208)>>5)&7)==1?VK_FORMAT_D16_UNORM:VK_FORMAT_D24_UNORM_S8_UINT;
     if(!alias && (fixed.depth!=VK_FORMAT_UNDEFINED && !vk.graphics_format(fixed.depth,true)))return attempt.reject("device_depth_format");

@@ -19,6 +19,8 @@ public:
         // into a larger attachment without changing guest viewport constants.
         unsigned raster_width=0,raster_height=0;
         bool scale_visual=false,visual_pass=false;
+        // false: this native draw allocates no occlusion queries (its pixel count is never consumed: ZPASS counting off).
+        bool visibility=true;
         VkFormat color=VK_FORMAT_R8G8B8A8_UNORM,depth=VK_FORMAT_UNDEFINED;
         std::array<VkPipelineColorBlendAttachmentState,4> blend{};
         VkPipelineDepthStencilStateCreateInfo z{};
@@ -339,12 +341,19 @@ private:
             b.visual_jobs.clear();b.replaying_visual=false;
         }catch(...){b.replaying_visual=false;b.failed=true;throw;}
     }
+    // ANYPS3_RSX_BARRIER_HOST=1 keeps the former HOST stage/HOST_WRITE source in every graphics barrier. Default 0: every host
+    // write a batch's commands read (staging, uploads) happens before its vkQueueSubmit, and the submission itself makes those
+    // writes visible to the device (Vulkan host write ordering guarantee); no graphics path writes host memory a recorded
+    // command consumes after submission. The GPU-GPU part of the barrier is unchanged.
+    static bool graphics_barrier_host(){static const bool host=[]{const char* v=std::getenv("ANYPS3_RSX_BARRIER_HOST");
+        if(v && std::strcmp(v,"0") && std::strcmp(v,"1"))throw std::runtime_error("invalid ANYPS3_RSX_BARRIER_HOST");return v && !std::strcmp(v,"1");}();return host;}
     static void graphics_barrier(GraphicsBatch& b){
         graphics_end_pass(b);graphics_mark(b,graphics_last_kind());graphics_last_kind()=MarkOther;
+        const bool host=graphics_barrier_host();
         VkMemoryBarrier m{};m.sType=VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-        m.srcAccessMask=VK_ACCESS_MEMORY_WRITE_BIT|VK_ACCESS_MEMORY_READ_BIT|VK_ACCESS_HOST_WRITE_BIT;
+        m.srcAccessMask=VK_ACCESS_MEMORY_WRITE_BIT|VK_ACCESS_MEMORY_READ_BIT|(host?VK_ACCESS_HOST_WRITE_BIT:0);
         m.dstAccessMask=VK_ACCESS_MEMORY_READ_BIT|VK_ACCESS_MEMORY_WRITE_BIT;
-        vkCmdPipelineBarrier(b.command,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT|VK_PIPELINE_STAGE_HOST_BIT,
+        vkCmdPipelineBarrier(b.command,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT|(host?VK_PIPELINE_STAGE_HOST_BIT:0),
             VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,0,1,&m,0,nullptr,0,nullptr);graphics_mark(b,MarkBarrier);
     }
     void graphics_begin(GraphicsBatch& b){
@@ -1052,7 +1061,10 @@ public:
         }
         auto& b=*j.batch;auto& p=*j.pipeline;const auto& s=j.s;const auto& colors=j.colors;const auto& depth=j.depth;const auto& textures=j.textures;const auto& raw_textures=j.raw_textures;
         const unsigned raster_width=s.raster_width?s.raster_width:s.width,raster_height=s.raster_height?s.raster_height:s.height;
-        const auto scissor=graphics_raster_scissor(s);
+        // DIAGNOSTIC ONLY (ANYPS3_DIAG_VISUAL_NO_RASTER=1): visual halves get an empty scissor, so their vertex work, state and
+        // pass structure stay and no fragment is produced (wrong image). Measures the fragment share of the visual cost.
+        static const bool diag_no_raster=[]{const char* v=std::getenv("ANYPS3_DIAG_VISUAL_NO_RASTER");return v && !std::strcmp(v,"1");}();
+        auto scissor=graphics_raster_scissor(s);if(diag_no_raster && s.visual_pass)scissor.extent={0,0};
         const auto& positions=j.positions;const float bias_constant=j.bias_constant,bias_slope=j.bias_slope,min_bounds=j.min_bounds,max_bounds=j.max_bounds;
         const unsigned vertices=j.vertices,first_vertex=j.first_vertex,query=j.query,passes=j.passes;const bool layered=j.layered,multiview=j.multiview,defer_planes=j.defer_planes;
         const std::uint64_t at=j.at,range=j.range;
@@ -1215,15 +1227,16 @@ public:
         for(const auto& image:textures)if(image)b.pins.push_back(image);
         for(const auto& raw:raw_textures)if(raw)b.buffer_pins.push_back(raw);
         if(reuse==UINT64_MAX)b.uploads.push_back({at,at,bytes});
-        if(!s.visual_pass && b.visibility_count+s.samples>1024)throw std::runtime_error("RSX graphics visibility budget");
-        const auto query=s.visual_pass?UINT_MAX:b.visibility_count++;::RsxPerfCounters::add(::RsxPerfCounters::draw_layers,s.samples);
+        const bool counted=!s.visual_pass && s.visibility;
+        if(counted && b.visibility_count+s.samples>1024)throw std::runtime_error("RSX graphics visibility budget");
+        const auto query=counted?b.visibility_count++:UINT_MAX;::RsxPerfCounters::add(::RsxPerfCounters::draw_layers,s.samples);
         // Layered: every sample plane is one instance of a single draw into
         // a layered framebuffer. Per plane the primitive order is unchanged;
         // planes are distinct layers, so their relative order is unobservable.
         // DIAGNOSTIC ONLY (ANYPS3_DIAG_VISUAL_PLANE0=1): visual halves draw sample plane 0 only, so planes >=1 of every visual
         // MSAA image keep stale pixels (wrong image). Measures the GPU cost of the visual planes >=1; never in a game run.
         static const bool diag_plane0=[]{const char* v=std::getenv("ANYPS3_DIAG_VISUAL_PLANE0");return v && !std::strcmp(v,"1");}();
-        const unsigned passes=layered?1:(diag_plane0 && s.visual_pass?1u:s.samples);graphics_last_queries=multiview?s.samples:passes;
+        const unsigned passes=layered?1:(diag_plane0 && s.visual_pass?1u:s.samples);graphics_last_queries=counted?(multiview?s.samples:passes):0u;
         // Plane runs (GraphicsBatch::PlaneDraw): planes >=1 of a per-plane draw
         // are recorded after plane 0's pass. ANYPS3_RSX_PLANE_RUNS=0 records
         // every plane immediately (one pass switch per plane).
@@ -1231,7 +1244,7 @@ public:
             if(v && std::strcmp(v,"0") && std::strcmp(v,"1")){throw std::runtime_error("invalid ANYPS3_RSX_PLANE_RUNS");}
             return !v || !std::strcmp(v,"1");}();
         const bool defer_planes=plane_runs && passes>1;
-        if(!s.visual_pass)b.visibility_count+=(multiview?s.samples:passes)-1;
+        if(counted)b.visibility_count+=(multiview?s.samples:passes)-1;
         // Keep the existing logical readback accounting at record time. The
         // submit combines these requests; it does not create new requests.
         b.status_offsets.push_back(at+28);b.download_bytes+=4;

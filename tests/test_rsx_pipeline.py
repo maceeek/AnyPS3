@@ -49,6 +49,22 @@ static void query_(){
  assert(s.memory.load(0xc0020000,8)>0 && s.memory.load(0xc0021000,8)>s.memory.load(0xc0020000,8));
  session.flush();s.rsx.graphics_session=nullptr;s.rsx.graphics_owner.reset();std::puts("PASS report snapshots across submissions/reset retain fixed 64-pixel prefixes and BE timestamp/status");
 }
+static void visibility_(){
+ // ZPASS counting off for the first draw, on for the second: the report counts only the second draw's 64 pixels in both
+ // modes. With ANYPS3_RSX_LAZY_VISIBILITY=1 the uncounted draw records no occlusion query (and draw.pixels skips it).
+ const bool lazy=rsxgraphics::rsx_lazy_visibility();
+ PpuState s;setup_draw(s,8,8,32,false);s.rsx.registers[0x17cc]=0;s.rsx.registers[0x1a8]=0xfeed0000;
+ s.rsx.renderer=std::make_unique<NativeVulkan>();rsxgraphics::Session session(*s.rsx.renderer,s);session.observe();s.rsx.graphics_session=&session;
+ s.rsx.graphics_owner=std::shared_ptr<void>(&session,[](void*){});setenv("ANYPS3_RSX_BACKEND","gpu",1);
+ rsx_execute_draw(s);assert(session.batch->visibility_count==(lazy?0u:1u));
+ s.rsx.registers[0x17cc]=1;s.rsx.draw.primitive=8;s.rsx.draw.ranges={{0,4}};rsx_execute_draw(s);assert(session.batch->visibility_count==(lazy?1u:2u));
+ rsx_get_report(s,0x01020000);s.rsx.registers[0x17cc]=0;s.rsx.draw.primitive=8;s.rsx.draw.ranges={{0,4}};rsx_execute_draw(s);
+ rsx_get_report(s,0x01021000);session.flush();
+ assert(s.memory.load(0xc0020008,4)==64 && s.memory.load(0xc0021008,4)==64 && s.rsx.report_values[0]==64);
+ assert(s.rsx.draw.pixels==(lazy?64u:192u));
+ s.rsx.graphics_session=nullptr;s.rsx.graphics_owner.reset();
+ std::printf("PASS ZPASS-off draws do not count into reports (lazy visibility %d)\n",lazy?1:0);
+}
 static void empty_prefix_(){
  PpuState s;setup_draw(s,8,8,32,false);s.rsx.registers[0x17cc]=1;s.rsx.registers[0x1a8]=0xfeed0000;
  s.rsx.renderer=std::make_unique<NativeVulkan>();rsxgraphics::Session session(*s.rsx.renderer,s);session.observe();s.rsx.graphics_session=&session;s.rsx.graphics_owner=std::shared_ptr<void>(&session,[](void*){});
@@ -159,7 +175,9 @@ static void packed_leases_(){
  assert(s.memory.load(0x81010030,4)==0xdeadbeef);assert(s.memory.reservation_token(0x81010000,4)!=data && s.memory.reservation_token(0x81010080,4)==padding);
  s.rsx.graphics_session=nullptr;std::puts("PASS packed readback uses parallel lease writes with alias versions and untouched row padding");
 }
-int main(){try{setenv("ANYPS3_RSX_VK_PROFILE","1",1);registers_();prefix_();query_();empty_prefix_();ring_();error_();flip_();streaming_();leases_();packed_leases_();}catch(const std::exception& e){std::fprintf(stderr,"FAIL %s\n",e.what());return 1;}}
+int main(int argc,char**){try{setenv("ANYPS3_RSX_VK_PROFILE","1",1);
+ if(argc>1){query_();empty_prefix_();streaming_();visibility_();return 0;}  // second run: ANYPS3_RSX_LAZY_VISIBILITY=1
+ registers_();prefix_();query_();visibility_();empty_prefix_();ring_();error_();flip_();streaming_();leases_();packed_leases_();}catch(const std::exception& e){std::fprintf(stderr,"FAIL %s\n",e.what());return 1;}}
 '''
 
 def native_source():
@@ -180,4 +198,11 @@ class PipelineTests(unittest.TestCase):
             self.assertEqual(result.returncode,0,result.stdout+result.stderr)
             self.assertNotIn('Validation Error',result.stdout+result.stderr)
             self.assertNotIn('Validation Warning',result.stdout+result.stderr)
-            self.assertEqual(result.stdout.count('PASS '),10)
+            self.assertEqual(result.stdout.count('PASS '),11)
+            self.assertIn('lazy visibility 0',result.stdout)
+            result=subprocess.run([str(root/'test'),'lazy'],env=dict(env,ANYPS3_RSX_LAZY_VISIBILITY='1'),capture_output=True,text=True,timeout=180)
+            self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+            self.assertNotIn('Validation Error',result.stdout+result.stderr)
+            self.assertNotIn('Validation Warning',result.stdout+result.stderr)
+            self.assertEqual(result.stdout.count('PASS '),4)
+            self.assertIn('lazy visibility 1',result.stdout)
