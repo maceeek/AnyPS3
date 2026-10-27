@@ -361,7 +361,9 @@ static void graphics_nonfinite_position(){
 static void graphics_static_discard(){
  using namespace rsxdraw;
  auto text=[](void(*edit)(PpuState&)){PpuState s;setup_draw(s,8,8,32,false);edit(s);const Reg r{s.rsx};auto fp=load_fragment_program(s,r);
-  std::array<Texture,16> textures{};auto fs=rsxgraphics::fragment_source(fp,r,1,textures);if(!fs)throw std::runtime_error("static discard: no source");return *fs;};
+  std::array<Texture,16> textures{};
+  if(s.rsx.registers.count(0x1a0c) && (s.rsx.registers[0x1a0c]>>31))textures[0]=decode_texture(s,r,0);
+  auto fs=rsxgraphics::fragment_source(fp,r,1,textures);if(!fs)throw std::runtime_error("static discard: no source");return *fs;};
  auto count=[](const std::string& t,const char* what){std::size_t n=0,at=0;while((at=t.find(what,at))!=std::string::npos){++n;++at;}return n;};
  const auto plain=text([](PpuState&){});
  if(count(plain,"discard")!=1 || count(plain,"if(q[0].killed)discard;")!=1)throw std::runtime_error("static discard: reset registers keep a run-time discard");
@@ -373,6 +375,10 @@ static void graphics_static_discard(){
  // A lone 0x2c0 (no 0x2c4 pair) leaves w[8]==0: no window test; alpha-to-one only (0x1d7c bit 8) needs no coverage test.
  if(count(text([](PpuState& s){s.rsx.registers[0x2c0]=1;}),"discard")!=1)throw std::runtime_error("static discard: unpaired window register");
  if(count(text([](PpuState& s){s.rsx.registers[0x1d7c]=0xffff0100;}),"discard")!=1)throw std::runtime_error("static discard: alpha-to-one");
+ // Texture alpha kill (0x1a0c bit 2): the textureResult kill test is a constant per-unit mask, 0 without alpha kill.
+ if(count(text([](PpuState& s){texture_fp(s);}),"if(((0u>>unit)&1u)!=0u && result.a<0.000001)")!=1)throw std::runtime_error("static discard: texture without alpha kill");
+ if(count(text([](PpuState& s){texture_fp(s);s.rsx.registers[0x1a0c]|=4;}),"if(((1u>>unit)&1u)!=0u && result.a<0.000001)")!=1)throw std::runtime_error("static discard: texture alpha kill unit 0");
+ if(count(text([](PpuState& s){texture_fp(s);}),"w[d+14u]")!=0)throw std::runtime_error("static discard: run-time alpha kill flag left");
  const unsigned funcs[]={0x200,0,0x200,0x204}; // NEVER, off, NEVER, GREATER (ref 0x7f < alpha 0x80)
  const std::uint32_t expect[]={0x12345678,0x80ff8040,0x12345678,0x80ff8040};
  for(unsigned step=0;step<4;++step){auto s=std::make_unique<PpuState>();setup_draw(*s,8,8,32,false);auto& R=s->rsx.registers;

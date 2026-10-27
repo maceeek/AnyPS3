@@ -129,6 +129,14 @@ static std::optional<std::string> fragment_source_uncached(const std::vector<FpI
     const auto result_end=pattern.find("\n}",result_begin);
     std::string functions="vec4 textureResult(uint unit,vec4 c,inout bool killed){uint d=2064u+32u*unit;\n"+pattern.substr(result_begin,result_end-result_begin)+"\n}\n";
     pattern.replace(result_begin,result_end-result_begin," return textureResult(unit,c,killed);");
+    // Texture alpha kill (descriptor word 14 = Texture::alpha_kill of the same draw, a fragment_source key field): with
+    // static discards the per-unit flag is a constant mask, so a draw without alpha-kill units has no reachable discard.
+    if(fragment_static_discard()){
+        unsigned kill_mask=0;for(unsigned unit=0;unit<16;++unit)if(textures[unit].valid && textures[unit].alpha_kill)kill_mask|=1u<<unit;
+        const std::string dynamic_kill="if(w[d+14u]!=0u && result.a<0.000001)";
+        if(functions.find(dynamic_kill)==std::string::npos)throw std::runtime_error("RSX fragment alpha-kill template mismatch");
+        replace_all(functions,dynamic_kill,"if((("+rsxvk::u(kill_mask)+">>unit)&1u)!=0u && result.a<0.000001)");
+    }
     for(unsigned unit=0;unit<16;++unit)if(textures[unit].valid){
         const auto n=std::to_string(unit),u=rsxvk::u(unit);const auto& t=textures[unit];
         const bool volume=t.dimension==3 && t.levels[0].depth>1;
