@@ -361,7 +361,7 @@ static void graphics_nonfinite_position(){
 static void graphics_static_discard(){
  using namespace rsxdraw;
  auto text=[](void(*edit)(PpuState&)){PpuState s;setup_draw(s,8,8,32,false);edit(s);const Reg r{s.rsx};auto fp=load_fragment_program(s,r);
-  std::array<Texture,16> textures{};auto fs=fragment_source(fp,r,1,textures);if(!fs)throw std::runtime_error("static discard: no source");return *fs;};
+  std::array<Texture,16> textures{};auto fs=rsxgraphics::fragment_source(fp,r,1,textures);if(!fs)throw std::runtime_error("static discard: no source");return *fs;};
  auto count=[](const std::string& t,const char* what){std::size_t n=0,at=0;while((at=t.find(what,at))!=std::string::npos){++n;++at;}return n;};
  const auto plain=text([](PpuState&){});
  if(count(plain,"discard")!=1 || count(plain,"if(q[0].killed)discard;")!=1)throw std::runtime_error("static discard: reset registers keep a run-time discard");

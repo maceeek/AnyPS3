@@ -95,8 +95,12 @@ static unsigned explicit_sampler_mask(const std::vector<FpInst>& fp){
 // set and alpha-to-coverage bit 4 clear; reset value 0xffff0000). ANYPS3_RSX_FS_STATIC_DISCARD=0 keeps every test in the
 // shader (run-time evaluation, the previous text).
 enum FragmentDiscard:unsigned {FragmentDiscardWindow=1,FragmentDiscardStipple=2,FragmentDiscardAlpha=4,FragmentDiscardCoverage=8,FragmentDiscardAll=15};
-static bool fragment_static_discard(){static const bool on=[]{const char* v=std::getenv("ANYPS3_RSX_FS_STATIC_DISCARD");
-    if(v && std::strcmp(v,"0") && std::strcmp(v,"1"))throw std::runtime_error("invalid ANYPS3_RSX_FS_STATIC_DISCARD");return !v || !std::strcmp(v,"1");}();return on;}
+static bool fragment_static_discard(){
+    static const bool on=[]{const char* v=std::getenv("ANYPS3_RSX_FS_STATIC_DISCARD");
+        if(v && std::strcmp(v,"0") && std::strcmp(v,"1")){throw std::runtime_error("invalid ANYPS3_RSX_FS_STATIC_DISCARD");}
+        return !v || !std::strcmp(v,"1");}();
+    return on;
+}
 static unsigned fragment_discard_state(const Reg& r){
     if(!fragment_static_discard())return FragmentDiscardAll;
     unsigned state=0;
