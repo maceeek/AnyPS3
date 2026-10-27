@@ -128,3 +128,64 @@ builds 1030–1059).
   ~20–22 ms at scale 1 (≈2.9 ms + 9.1 µs/draw) and the main guest thread runs ~14.8 ms inside the same work span — both
   are critical. HOST_PROFILE overhead ~3 %; SMT placement and recorder spin refuted as levers. d6eeb7e (incremental
   HostObserver bitmaps, exact, tested) is in build 1001, A/B in progress.
+
+## HIRES2 wave result (2026-10-27 evening, coordinator Claude Opus 5.5, agents Opus 5.5 high; goal NOT reached)
+
+Branch `claude/hires2-wave` = main f92681c + `fast2/hires2w` (HIRES2-W, 2 instances) + `fast2/hires2s` (HIRES2-S,
+5 instances; each instance started fresh from its predecessor's RESULT.md at ~300k context). Full evidence and commands:
+`local/ratchet/work/hires2w/RESULT.md`, `local/ratchet/work/hires2s/RESULT.md`. A power outage at 16:53 invalidated runs
+960wf1s1 and 960sm1 (`work/hires2{w,s}/INTERRUPTED.txt`).
+
+**Verified, decision-grade (QUIET, alternating, scale 2 walking, walker walked, no STOP, PT_LOAD exact):**
+
+| build | content | runs | FPS | GPU busy ms/frame |
+| --- | --- | --- | --- | --- |
+| 960 | main f92681c | 960sa1 / 960sa2 | 37.27 / 35.89 | 18.64 / 19.29 |
+| 1031 | 960 + 9912280 (visual typeless aspect by a draw) + static fragment discards | 1031a1 / 1031a2 | 39.91 / 40.58 | 15.52 / 15.32 |
+
+1001 (960 + d6eeb7e incremental HostObserver bitmaps) is neutral at both scales (scale 1: 45.46 / 44.56 vs 43.69 / 44.65;
+scale 2: 37.09 / 37.36 vs 37.61 / 37.28; µs/draw unchanged).
+
+**Verified diagnostics:**
+- GPU split at scale 2 (1031sm1, 15.65 ms): visual draws 7.26 (1692/frame), native draws 2.80, native render-pass begins
+  1.02 (12.6 µs each vs 1.55 µs visual, unexplained), copies ~2.3, ~250 barriers ~0.6. The second visual sample plane
+  costs 2.3 ms (DIAGNOSTIC 1032d1 plane-0-only 13.17 ms / 41.38 FPS vs 1032d0 15.49 / 38.65).
+- Multiview / layered visual planes do not help (960sx1 20.83 ms, 960sx2 19.39 ms GPU).
+- Image: no comb and no block replication over whole frames at scale 2 (`work/hires2s/tools/parity.py`); the 2560×1440
+  output is the 960×704 scene rendered at 1920×1408 and resampled 4:3 horizontally (full 2560-column detail would need a
+  horizontal scale of 8/3 — a user decision).
+- CPU critical path at scale 1 (full ring 960wf2s1): heavy views (~1800–2400 draws) keep the RSX worker busy ~20–22 ms
+  (≈2.9 ms + 9.1 µs/draw, flat profile, no item > 7 %) while the main guest thread runs ~14.8 ms in the same work span;
+  the guest never runs ahead past the flip. Main guest thread profile (1000p1): ~26 % spin-waiting for SPU jobs
+  (delay 0x666068 17.5 %, job flag 0x5564d4 5.6 %, engine counter 0x696c10 3.0 %) ≈ 3.9 ms/heavy frame (derived from
+  sample shares); 57 % translated page code; dispatcher ~6.5 %; no observer faults/mprotect.
+- Refuted: HOST_PROFILE distortion (~3 %), SMT/CPU placement, recorder spin, discards blocking early-Z as a big lever,
+  pipeline compiles as the cause of the 140–180 ms walking hitches (46 ms of pipeline creation in all of 1031a2).
+
+**Merged but NOT measured in the game** (each exact or gated; targeted Vulkan tests pass, see RESULT.md):
+fast RGBA8 visual half of A8R8G8B8 typed-RTT reads (b1f45eb + fix 737da5f, default on; build 1034), graphics barriers
+without HOST bits (2b61b53, default; `ANYPS3_RSX_BARRIER_HOST=1` restores), lazy visibility queries (default off),
+window-clip drop e9e5110 (build 1033), visual 2× MSAA working images (a57960b, `ANYPS3_RENDER_SCALE_MSAA=1`, default off;
+NVIDIA test bit-identical colour/stencil vs plane-by-plane), native switch keeps visual halves queued (782abef, default;
+`ANYPS3_RENDER_SCALE_SWITCH_REPLAY=1` restores), unrolled GuestMemory atomic copy (cf7a6ef, build 1002).
+
+**Late runs before the queue was stopped (verified, QUIET, walked, no STOP, PT_LOAD exact; single pairs — not decisions):**
+
+| run | build | scale | FPS | rsx_worker / main_ppu / gpu_wait ms | draws/frame |
+| --- | --- | --- | --- | --- | --- |
+| 1034a1 / 1034a2 | 1034 = 1033 + fast RGBA8 visual RTT + barriers without HOST + lazy-visibility (off) | 2 | 38.19 / 40.43 | 13.20 / 11.20 / 1.53 · 11.62 / 10.50 / 1.63 | 1082 / 960 |
+| 1031c1 | 1031 | 2 | 40.14 | 11.55 / 10.50 / 2.01 | 953 |
+| 1002a1s1 | 1002 = 1001 + cf7a6ef unrolled atomic copy | 1 | 41.53 | 13.73 / 13.78 / 0.35 | 950 |
+| 960a3s1 | 960 | 1 | 46.72 | 9.74 / 10.19 / 0.58 | 833 |
+
+1034 is about level with 1031 (gpu_wait ~0.4 ms lower). **Open, must be resolved before merging to main:** 1002a1s1 is
+much slower than 960a3s1 on both threads; it overlapped a CPU-heavy `wallsplit.py` analysis (unpinned Python) and is
+probably disturbed, but a regression from cf7a6ef is not excluded — repeat 1002 vs 960 alternating at scale 1.
+The queue was stopped at 21:18 on the user's instruction: 960a4s1 and 1031c2 are cut short (INVALID); 1034e1/l1/n1 and all
+1035 runs (visual 2× MSAA on/off, switch replay) never started. Builds 1034 and 1035 are compiled (rc=0, source hashes
+match) and can be measured directly with `work/hires2s/measure-walk-103{4,5}.sh`.
+
+**Merged-tree tests (verified, branch `claude/hires2-wave` at ae9e1bd + docs):** NVIDIA — test_atomic_copy_unrolled,
+test_host_observer_incremental, test_rsx_visual_msaa, test_rsx_render_scale, test_rsx_pipeline, test_rsx_graphics,
+test_rsx_visual_history, test_rsx_vk_submit: OK (187.7 s); lavapipe — test_rsx_render_scale, test_rsx_visual_history,
+test_rsx_pipeline, test_rsx_visual_msaa: OK (106.0 s). Logs/script `local/ratchet/work/hires2-merge/`. Full suite not run.

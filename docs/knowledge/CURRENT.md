@@ -1,12 +1,16 @@
 # Current state and goal
 
-## HIRES2 wave — 2026-10-27 (in progress; goal NOT reached)
+## HIRES2 wave — 2026-10-27 evening (goal NOT reached; branch `claude/hires2-wave`)
 
-Main f92681c = build 960 (snapshot verified file-identical). A/B: 960 scale-2 walking 35.75–37.06 FPS vs 882 34.46–34.72;
-scale-1 walking ~43 FPS; stationary scale 1 already 60 FPS. Two Opus agents: HIRES2-W (RSX worker per-draw throughput,
-`work/hires2w`, builds 1000–1029) and HIRES2-S (scale-2 overhead, GPU, stutter, image check, `work/hires2s`, builds
-1030–1059). Rules/baseline: `local/ratchet/work/COMMON-HIRES2.md`. Record:
-[HIRES wave](experiments/2026-10-25-hires-wave.md#alternating-ab-evaluated-2026-10-27-coordinator).
+1440p walking: build 1031 holds **39.91 / 40.58 FPS** vs 960 (= main f92681c) 37.27 / 35.89 (QUIET, alternating), GPU
+15.4 vs 19.0 ms/frame. Scale 1 walks at ~44 FPS; standing still is 60 at scale 1. **Remaining blockers (verified):**
+(1) CPU critical path in heavy views (~2000 draws): RSX worker ~20–22 ms (≈2.9 ms + 9.1 µs/draw, flat profile) and
+the main guest thread ~14.8 ms, of which ~3.9 ms is spin-waiting for SPU jobs; (2) GPU at scale 2 ~15.4 ms (visual
+draws 7.3, second sample plane 2.3, native pass begins 1.0, copies 2.3). Merged but unmeasured in the game: fast RGBA8
+visual RTT + barriers without HOST bits (1034: about level with 1031 in one pair), native-switch replay change, visual 2×
+MSAA (default off; build 1035 compiled, not measured), unrolled atomic copy (1002: one disturbed-looking slower run —
+re-measure before merging to main).
+Record, tables and next actions: [HIRES2 wave](experiments/2026-10-25-hires-wave.md#hires2-wave-result-2026-10-27-evening-coordinator-claude-opus-55-agents-opus-55-high-goal-not-reached).
 
 ## HIRES wave: true 1440p at a stable 60 FPS — 2026-10-25 evening (goal NOT reached)
 

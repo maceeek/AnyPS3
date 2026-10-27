@@ -1,5 +1,24 @@
 # Handoff to the next instance
 
+## HIRES2 wave — 2026-10-27 evening (ended on user instruction; goal NOT reached)
+
+Read the top of [CURRENT.md](CURRENT.md) and the
+[HIRES2 record](experiments/2026-10-25-hires-wave.md#hires2-wave-result-2026-10-27-evening-coordinator-claude-opus-55-agents-opus-55-high-goal-not-reached).
+Branch `claude/hires2-wave` merges `fast2/hires2w` + `fast2/hires2s` into main f92681c (no overlapping files). Rules
+for the agents: `local/ratchet/work/COMMON-HIRES2.md`; agent handoffs (with exact commands and tools):
+`local/ratchet/work/hires2w/RESULT.md` (instance 2 section), `local/ratchet/work/hires2s/RESULT.md` (instance 5 section).
+On the user's instruction all queued detached builds/runs were stopped at session end; runs cut short are invalid
+(listed in the record). No agent, build or game run is live.
+
+First next actions: (0) repeat 1002 vs 960 alternating at scale 1 (1002a1s1 looked slower, probably disturbed — must be
+resolved before merging cf7a6ef to main) and measure the already-built 1035 (MSAA on/off) vs 1031; (1) build the merged branch as one integration build and measure it alternating with 1031 at scale 2
+(QUIET, `work/hires2s/measure-walk-*.sh` pattern), then with `ANYPS3_RENDER_SCALE_MSAA=1`; (2) main-thread SPU-job wait
+(~3.9 ms/heavy frame): analyse `work/hires2w/tools/wallsplit.py 1000w1s1` (what the SPU lanes run while thread 1 spins; a first attempt
+under `timeout 1500` produced no output — run it without the timeout, redirected to `work/hires2w/logs/`);
+(3) RSX worker heavy frames 21 ms → ≤ 13 ms (ranked cuts in hires2w/RESULT.md, or a front/back thread split);
+(4) GPU at scale 2: second sample plane via MSAA, native pass-begin cost; (5) attribute the 140–180 ms walking hitches
+with a full frame ring (not pipeline compiles). Open user decision: horizontal scale 8/3 for full 2560-column detail.
+
 ## HIRES wave: true 1440p at a stable 60 FPS — 2026-10-25 evening (goal NOT reached)
 
 Baseline 882 walking (QUIET): 1440p 33.15 FPS / rsx_worker 16.1 ms; 720p 44.68 FPS / 10.6 ms — the RSX worker's
