@@ -1220,7 +1220,10 @@ public:
         // Layered: every sample plane is one instance of a single draw into
         // a layered framebuffer. Per plane the primitive order is unchanged;
         // planes are distinct layers, so their relative order is unobservable.
-        const unsigned passes=layered?1:s.samples;graphics_last_queries=multiview?s.samples:passes;
+        // DIAGNOSTIC ONLY (ANYPS3_DIAG_VISUAL_PLANE0=1): visual halves draw sample plane 0 only, so planes >=1 of every visual
+        // MSAA image keep stale pixels (wrong image). Measures the GPU cost of the visual planes >=1; never in a game run.
+        static const bool diag_plane0=[]{const char* v=std::getenv("ANYPS3_DIAG_VISUAL_PLANE0");return v && !std::strcmp(v,"1");}();
+        const unsigned passes=layered?1:(diag_plane0 && s.visual_pass?1u:s.samples);graphics_last_queries=multiview?s.samples:passes;
         // Plane runs (GraphicsBatch::PlaneDraw): planes >=1 of a per-plane draw
         // are recorded after plane 0's pass. ANYPS3_RSX_PLANE_RUNS=0 records
         // every plane immediately (one pass switch per plane).
