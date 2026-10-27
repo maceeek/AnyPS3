@@ -372,6 +372,15 @@ static void graphics_static_discard(){
   {[](PpuState& s){s.rsx.registers[0x2c0]=1;s.rsx.registers[0x2c4]=1;},"R(0x2bcu)"},{[](PpuState& s){s.rsx.registers[0x1d7c]=0xfffe0000;},"R(0x1d7cu)"},
   {[](PpuState& s){s.rsx.registers[0x1d7c]=0xffff0010;},"R(0x1d7cu)"}};
  for(const auto& c:cases){const auto t=text(c.edit);if(count(t,c.marker)<1 || count(t,"discard")<2)throw std::runtime_error(std::string("static discard: missing test ")+c.marker);}
+ // Window coverage (raster 8x8): an inclusive window covering [0,7]x[0,7] never discards; one pixel short, an exclusive
+ // window, or an unknown extent keep the test.
+ auto window=[&](unsigned h,unsigned v,unsigned type,unsigned w_,unsigned h_){PpuState s;setup_draw(s,8,8,32,false);auto& R=s.rsx.registers;R[0x2c0]=h;R[0x2c4]=v;R[0x2bc]=type;
+  const Reg r{s.rsx};auto fp=load_fragment_program(s,r);std::array<Texture,16> textures{};auto fs=rsxgraphics::fragment_source(fp,r,1,textures,false,nullptr,w_,h_);
+  if(!fs){throw std::runtime_error("static discard: no source");}
+  return count(*fs,"R(0x2bcu)");};
+ if(window(7u<<16,7u<<16,0,8,8)!=0 || window(4095u<<16,4095u<<16,0,8,8)!=0)throw std::runtime_error("static discard: covering window kept");
+ if(window(6u<<16,7u<<16,0,8,8)!=1 || window(7u<<16,6u<<16,0,8,8)!=1 || window((7u<<16)|1u,7u<<16,0,8,8)!=1)throw std::runtime_error("static discard: partial window dropped");
+ if(window(7u<<16,7u<<16,1,8,8)!=1 || window(7u<<16,7u<<16,0,0,0)!=1)throw std::runtime_error("static discard: exclusive/unknown window dropped");
  // A lone 0x2c0 (no 0x2c4 pair) leaves w[8]==0: no window test; alpha-to-one only (0x1d7c bit 8) needs no coverage test.
  if(count(text([](PpuState& s){s.rsx.registers[0x2c0]=1;}),"discard")!=1)throw std::runtime_error("static discard: unpaired window register");
  if(count(text([](PpuState& s){s.rsx.registers[0x1d7c]=0xffff0100;}),"discard")!=1)throw std::runtime_error("static discard: alpha-to-one");

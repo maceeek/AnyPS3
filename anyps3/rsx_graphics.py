@@ -101,10 +101,16 @@ static bool fragment_static_discard(){
         return !v || !std::strcmp(v,"1");}();
     return on;
 }
-static unsigned fragment_discard_state(const Reg& r){
+// width/height (when non-zero) are the draw's native raster extent: every fragment has pixel coordinates in
+// [0,width)x[0,height) (raster_scale_ maps visual fragments back), so an inclusive window clip (0x2bc bit 0 clear) with
+// one present window covering that whole extent never discards.
+static unsigned fragment_discard_state(const Reg& r,unsigned width=0,unsigned height=0){
     if(!fragment_static_discard())return FragmentDiscardAll;
-    unsigned state=0;
-    for(unsigned i=0;i<8;++i)if(r.gpu.registers.count(0x2c0+8*i) && r.gpu.registers.count(0x2c4+8*i))state|=FragmentDiscardWindow;
+    unsigned state=0;bool windows=false,covered=false;
+    for(unsigned i=0;i<8;++i)if(r.gpu.registers.count(0x2c0+8*i) && r.gpu.registers.count(0x2c4+8*i)){windows=true;
+        const unsigned h=r(0x2c0+8*i),v=r(0x2c4+8*i);
+        covered=covered || (width && height && (h&65535)==0 && (h>>16)>=width-1 && (v&65535)==0 && (v>>16)>=height-1);}
+    if(windows && ((r(0x2bc)&1) || !covered))state|=FragmentDiscardWindow;
     if(r(0x147c)!=0)state|=FragmentDiscardStipple;
     if(r(0x304)&1)state|=FragmentDiscardAlpha;
     const unsigned aa=r.get(0x1d7c,0xffff0000);if(((aa>>16)&15)!=15 || (aa&16))state|=FragmentDiscardCoverage;
@@ -335,8 +341,8 @@ void main(){C q[1];bool front=w[11]!=0u || gl_FrontFacing;
     replace_all(source,"d=2064u+32u*","d=48u+32u*");
     return source+"}\n";
 }
-static std::shared_ptr<const std::string> fragment_source(const std::vector<FpInst>& fp,const Reg& r,unsigned count,const std::array<Texture,16>& textures,bool lines=false,rsxvk::FragmentFailure* failure=nullptr){
-    static thread_local std::vector<unsigned> key;const unsigned discard_state=fragment_discard_state(r);
+static std::shared_ptr<const std::string> fragment_source(const std::vector<FpInst>& fp,const Reg& r,unsigned count,const std::array<Texture,16>& textures,bool lines=false,rsxvk::FragmentFailure* failure=nullptr,unsigned width=0,unsigned height=0){
+    static thread_local std::vector<unsigned> key;const unsigned discard_state=fragment_discard_state(r,width,height);
     key.assign({count,unsigned(lines),unsigned(packed_color(r)),unsigned(bool(r(0x1d60)&14u)),r(0x1d60)&64u,unsigned(float_color(r(0x208)&31u)),unsigned(rsx_layered_shaders().load(std::memory_order_relaxed)),discard_state});
     unsigned mask=0;for(unsigned unit=0;unit<16;++unit)if(textures[unit].valid)mask|=1u<<unit;else if(textures[unit].null_texture)mask|=0x10000u<<unit;key.push_back(mask);
     const unsigned explicit_units=explicit_sampler_mask(fp);
@@ -1897,7 +1903,7 @@ template<class Vertex> static bool prepared(Session& session,const std::vector<s
     phase.next(HostStage::g_shaders);
     rsxvk::FragmentFailure failure;std::shared_ptr<const std::string> fs;
     if(alias){auto source=rsxvk::fragment(fp,true,false,&failure);if(source)fs=std::make_shared<const std::string>(std::move(*source));}
-    else fs=fragment_source(fp,r,count,textures,lines!=nullptr,&failure);
+    else fs=fragment_source(fp,r,count,textures,lines!=nullptr,&failure,width,height);
     if(fs && !vk.graphics_quad_operations() && fs->find("subgroupQuadBroadcast")!=std::string::npos)return attempt.reject("device_fragment_quad_operations");
     if(!fs){if(attempt.stats.enabled)attempt.stats.detail("fragment_program",fragment_failure(fp,failure,r));return attempt.reject("fragment_program");}
     auto& data=session.draw_data;if(alias)session.serialize_registers(data,width,height);else session.serialize_draw_registers(data,width,height);
