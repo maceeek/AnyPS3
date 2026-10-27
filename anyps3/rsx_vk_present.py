@@ -116,6 +116,7 @@ private:
             for(auto& semaphore:present_ready)check(vkCreateSemaphore(vk.device,&sem,nullptr,&semaphore),"present image semaphore");
         }
         void display(GraphicsBatch& b,const std::shared_ptr<GraphicsImage>& source,unsigned w,unsigned h,bool sync,bool async){b.sync();
+            vk.graphics_ms_planes(b,source.get());
             configure(w,h,sync);poll();unsigned index=0;
             VkFormatProperties source_properties{};vkGetPhysicalDeviceFormatProperties(vk.physical,source->format,&source_properties);
             if(!(source_properties.optimalTilingFeatures&VK_FORMAT_FEATURE_BLIT_SRC_BIT))throw std::runtime_error("Vulkan scanout image does not support blit source");

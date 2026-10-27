@@ -1876,6 +1876,10 @@ template<class Vertex> static bool prepared(Session& session,const std::vector<s
     // with ZPASS counting off records no query: guest-visible reports and predicates are unchanged; only the host statistic
     // draw.pixels then excludes such draws.
     fixed.visibility=!rsx_lazy_visibility() || r(0x17cc)!=0;
+    // Plane-independent fragment work (visual MSAA, NativeVulkan::graphics_ms_*): 2 samples at the standard 2x positions, no
+    // 0x1d7c sample mask/alpha-to-coverage (the only per-plane fragment test, fragment_discard_state), no packed history
+    // (read per plane), no line/point coverage emulation.
+    {const unsigned control=r.get(0x1d7c,0xffff0000);fixed.ms_ok=!alias && !point && !lines && !packed && aa==3 && ((control>>16)&15)==15 && !(control&16);}
     if(!alias && (count && !vk.graphics_format(fixed.color)))return attempt.reject("device_color_format");
     if(depth.base)fixed.depth=((r(0x208)>>5)&7)==1?VK_FORMAT_D16_UNORM:VK_FORMAT_D24_UNORM_S8_UINT;
     if(!alias && (fixed.depth!=VK_FORMAT_UNDEFINED && !vk.graphics_format(fixed.depth,true)))return attempt.reject("device_depth_format");
