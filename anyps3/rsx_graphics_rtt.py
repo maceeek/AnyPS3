@@ -31,6 +31,9 @@ MEMBERS = r'''
     using RttCoverKey=std::array<std::uint64_t,7>;
     struct RttCoverHash {std::size_t operator()(const RttCoverKey& key)const{std::size_t h=0;for(auto v:key)h=(h*1099511628211ull)^v;return h;}};
     std::unordered_map<RttCoverKey,bool,RttCoverHash> rtt_cover_memo;
+    static bool rtt_visual_fast(){static const bool on=[]{const char* v=std::getenv("ANYPS3_RENDER_SCALE_RTT_FAST");
+        if(v && std::strcmp(v,"0") && std::strcmp(v,"1")){throw std::runtime_error("invalid ANYPS3_RENDER_SCALE_RTT_FAST");}
+        return !v || !std::strcmp(v,"1");}();return on;}
     bool rtt_rows_covered(std::uint64_t origin,std::uint64_t pitch,std::uint64_t row_bytes,unsigned rows,std::uint64_t target_pitch,unsigned source_height,unsigned source_width){
         const RttCoverKey key{origin,pitch,row_bytes,rows,target_pitch,source_height,source_width};
         const auto found=rtt_cover_memo.find(key);if(found!=rtt_cover_memo.end())return found->second;
@@ -160,7 +163,6 @@ MEMBERS = r'''
             if(typeless_float){sampling_image=vk.graphics_aspect_image(*batch,surface.image,VK_IMAGE_ASPECT_COLOR_BIT,view.sampling,&view.color_transfer);reason("float_typeless");}
             if(typeless_depth){sampling_image=vk.graphics_aspect_image(*batch,surface.image,VK_IMAGE_ASPECT_DEPTH_BIT,view.sampling,&view.color_transfer);stencil_image=vk.graphics_aspect_image(*batch,surface.image,VK_IMAGE_ASPECT_STENCIL_BIT,view.stencil,&view.stencil_transfer);reason("depth_typeless");}
             if(surface.image->format==VK_FORMAT_R8G8B8A8_SRGB){sampling_image=view.sampling?view.sampling:vk.graphics_image(*batch,VK_FORMAT_R8G8B8A8_UNORM,surface.width,surface.height,surface.samples);vk.graphics_copy(*batch,surface.image,sampling_image);reason("srgb_bytecopy");}
-            auto image=view.image?view.image:vk.graphics_image(*batch,VK_FORMAT_R32G32B32A32_SFLOAT,level.width,level.height,1);
             // A visual texel must correspond to one complete source texel.
             // Byte-shifted aliases retain the exact native decoder below.
             // Typeless depth samples word images whose companions graphics_aspect_image
@@ -177,6 +179,19 @@ MEMBERS = r'''
                 origin%target.bpp==0 && target.pitch%target.bpp==0 && level.pitch%target.bpp==0 &&
                 ((surface.depth && ((surface.format==1 && texture.format==0x92) || (surface.format==2 && (texture.format==0x90 || visual_depth)))) ||
                  (!surface.depth && expected && expected==surface.format) || packed_b8);
+            // Visual fast path (display-only half; the native half below is unchanged): a linear A8R8G8B8 (0x85) read of an
+            // A8R8G8B8 colour target or of a typeless D24S8 target with the same pitch, without SNORM, is per texel the
+            // visual source texel at sample-grid position (x+ox, y+oy) (raw_byte's address math reduces to that because
+            // `covered` keeps every row inside one target row and origin is texel aligned). Its 8-bit channels are k/255,
+            // so an R8G8B8A8_UNORM visual output holds them exactly (the decoder's output was R32G32B32A32_SFLOAT).
+            // ANYPS3_RENDER_SCALE_RTT_FAST=0 keeps the generic decoder for the visual half too.
+            const bool fast_visual=visual_typed && rtt_visual_fast() && vk.graphics_render_scale>1 && texture.format==0x85 && !texture.swizzled && !target.swizzle_width &&
+                level.pitch==target.pitch && target.bpp==4 && !(texture.features&1) && origin>=0 && unsigned(origin)%4==0 &&
+                ((!surface.depth && surface.format==8 && sampling_image->format==VK_FORMAT_R8G8B8A8_UNORM && sampling_image->visual) || (typeless_depth && visual_depth));
+            const VkFormat visual_format=fast_visual?VK_FORMAT_R8G8B8A8_UNORM:VK_FORMAT_R32G32B32A32_SFLOAT;
+            auto image=view.image;
+            if(image && image->visual && image->visual->format!=visual_format)image.reset();
+            if(!image)image=vk.graphics_image(*batch,VK_FORMAT_R32G32B32A32_SFLOAT,level.width,level.height,1,false,true,visual_format);
             if(NativeVulkan::graphics_visual_trace() && vk.graphics_render_scale>1){
                 static std::vector<std::array<unsigned,12>> seen;
                 const std::array<unsigned,12> key{texture.format,level.width,level.height,level.pitch,surface.format,surface.width,surface.height,surface.samples,target.pitch,unsigned(bool(target.tile)),unsigned(visual_typed),unsigned(typeless_float)|unsigned(typeless_depth)<<1|unsigned(block)<<2|unsigned(texture.swizzled)<<3};
@@ -224,12 +239,32 @@ MEMBERS = r'''
             view.fs=std::make_shared<const std::string>(std::move(fs));view.data=std::move(data);
             }
             static const auto vs=std::make_shared<const std::string>("#version 450\nvoid main(){vec2 p=vec2((gl_VertexIndex<<1)&2,gl_VertexIndex&2);gl_Position=vec4(p*2.0-1.0,0,1);}");
-            NativeVulkan::GraphicsState fixed{};fixed.scale_visual=visual_typed;fixed.width=level.width;fixed.height=level.height;fixed.colors=1;fixed.samples=1;fixed.color=VK_FORMAT_R32G32B32A32_SFLOAT;
+            NativeVulkan::GraphicsState fixed{};fixed.scale_visual=visual_typed && !fast_visual;fixed.visual_external=fast_visual;fixed.width=level.width;fixed.height=level.height;fixed.colors=1;fixed.samples=1;fixed.color=VK_FORMAT_R32G32B32A32_SFLOAT;
             fixed.scissor={{0,0},{level.width,level.height}};fixed.blend[0].colorWriteMask=15;
             std::array<std::shared_ptr<NativeVulkan::GraphicsImage>,4> colors{};colors[0]=image;
             std::array<std::shared_ptr<NativeVulkan::GraphicsImage>,20> inputs{};inputs[16]=sampling_image;inputs[17]=stencil_image;
             const std::array<std::array<float,2>,4> positions{{{.5f,.5f},{0,0},{0,0},{0,0}}};
             vk.graphics_draw(*batch,fixed,colors,{},*vs,*view.fs,view.data,3,positions,0,0,0,1,inputs,0,UINT64_MAX,{},vs,view.fs);
+            if(fast_visual){
+                // Same visual_xyl mapping as the generic visual decoder (surface extent from w[9..10]); the colour case is
+                // the decoder's round(clamp(c)*255)/255, the depth case its d24<<8|stencil word split into A8R8G8B8 bytes.
+                static const std::string head="#version 450\nlayout(std430,binding=0) readonly buffer Data{uint w[];};\nlayout(location=0) out vec4 color_;\nlayout(push_constant) uniform Visual{layout(offset=56) vec2 raster_scale_;};\n";
+                static const std::string xyl="ivec3 visual_xyl(uvec2 g){vec2 ratio=vec2(textureSize(src_,0).xy)/vec2(w[9],w[10]);uvec2 n=uvec2(w[3],w[4]),G=uvec2((vec2(g)+fract(gl_FragCoord.xy/raster_scale_))*ratio);uvec2 c=G/n,l=G%n;return ivec3(c,int(l.y*n.x+l.x));}\n"
+                    "ivec3 at_(){vec2 xy=gl_FragCoord.xy/raster_scale_;return visual_xyl(uvec2(uint(int(xy.x)),uint(int(xy.y)))+uvec2(w[5],w[6]));}\n";
+                static const auto fs_color=std::make_shared<const std::string>(head+"layout(binding=17) uniform sampler2DArray src_;\n"+xyl+
+                    "void main(){color_=vec4(uvec4(round(clamp(texelFetch(src_,at_(),0),0,1)*255.0)))/255.0;}\n");
+                static const auto fs_depth=std::make_shared<const std::string>(head+"layout(binding=17) uniform usampler2DArray src_;\nlayout(binding=18) uniform usampler2DArray stencil_;\n"+xyl+
+                    "void main(){ivec3 p=at_();uint v=((texelFetch(src_,p,0).r&0xffffffu)<<8u)|(texelFetch(stencil_,p,0).r&255u);color_=vec4(uvec4((v>>16u)&255u,(v>>8u)&255u,v&255u,v>>24u))/255.0;}\n");
+                std::vector<unsigned> vdata(16,0);vdata[3]=nx;vdata[4]=ny;vdata[5]=(unsigned(origin)%target.pitch)/4;vdata[6]=unsigned(origin)/target.pitch;vdata[9]=surface.width;vdata[10]=surface.height;
+                const auto scale=vk.graphics_render_scale;
+                NativeVulkan::GraphicsState v{};v.visual_pass=true;v.width=level.width;v.height=level.height;v.raster_width=level.width*scale;v.raster_height=level.height*scale;
+                v.colors=1;v.samples=1;v.color=VK_FORMAT_R8G8B8A8_UNORM;v.scissor={{0,0},{level.width,level.height}};v.blend[0].colorWriteMask=15;
+                std::array<std::shared_ptr<NativeVulkan::GraphicsImage>,4> visual_colors{};visual_colors[0]=image->visual;
+                std::array<std::shared_ptr<NativeVulkan::GraphicsImage>,20> visual_inputs{};visual_inputs[16]=sampling_image->visual;if(typeless_depth)visual_inputs[17]=stencil_image->visual;
+                const auto& fs=typeless_depth?fs_depth:fs_color;
+                vk.graphics_draw(*batch,v,visual_colors,{},*vs,*fs,vdata,3,positions,0,0,0,1,visual_inputs,0,UINT64_MAX,{},vs,fs);
+                ++vk.graphics_visual_rtt_fast;
+            }
             view.plan=texture.plan;view.source=surface.image;view.image=image;view.generation=surface.generation;view.last_use=++resource_clock;
             view.format=texture.format;view.signed_mask=texture.signed_mask;view.features=texture.features;view.shadow=texture.shadow;
             view.layout=surface.readback;view.origin=origin;view.sampling=std::move(sampling_image);view.stencil=std::move(stencil_image);

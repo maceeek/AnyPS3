@@ -158,7 +158,10 @@ static void alias_detail_oracle(){
  r[0x1a00]=0x100000;r[0x1a04]=0x0001a529;r[0x1a08]=0x00030303;r[0x1a0c]=0x80000000;
  r[0x1a10]=0xaae4;r[0x1a14]=0x01010000;r[0x1a18]=(16u<<16)|8;r[0x1840]=256;
  auto converted=session.texture_metadata(0).resident_image;assert(converted && converted->visual);
- const auto rtt=vk.graphics_transfer(*session.batch,converted->visual,VK_IMAGE_ASPECT_COLOR_BIT,16);
+ // Visual fast path (default; ANYPS3_RENDER_SCALE_RTT_FAST=0 disables): R8G8B8A8_UNORM visual output with exact bytes.
+ const char* fast_env=std::getenv("ANYPS3_RENDER_SCALE_RTT_FAST");const bool fast=!fast_env || !std::strcmp(fast_env,"1");
+ assert(fast==(converted->visual->format==VK_FORMAT_R8G8B8A8_UNORM) && vk.graphics_visual_rtt_fast==(fast?1u:0u));
+ const auto rtt=vk.graphics_transfer(*session.batch,converted->visual,VK_IMAGE_ASPECT_COLOR_BIT,fast?4:16);
  // Retained right-hand remainder must survive 2->1->2 with all subpixels.
  auto small=session.bind(narrow,8,8,1,8,false).image;
  const auto reduced=vk.graphics_transfer(*session.batch,small->visual,VK_IMAGE_ASPECT_COLOR_BIT,4);
@@ -175,12 +178,13 @@ static void alias_detail_oracle(){
   // Visual grid column x of a 2-sample surface rendered at 16 px: pixel x/2, sample x%2.
   const unsigned plane=x%2,source_x=x/2;
   const auto* expected=visual.data()+((plane*16+y)*16+source_x)*4;
-  const auto* actual=reinterpret_cast<const float*>(bytes+rtt)+(y*32+x)*4;
-  for(unsigned c=0;c<4;++c)assert(std::fabs(actual[c]-expected[c]/255.f)<1.e-6f);
+  if(fast)assert(std::memcmp(bytes+rtt+(y*32+x)*4,expected,4)==0);
+  else{const auto* actual=reinterpret_cast<const float*>(bytes+rtt)+(y*32+x)*4;
+   for(unsigned c=0;c<4;++c)assert(std::fabs(actual[c]-expected[c]/255.f)<1.e-6f);}
   if(x<16)assert(std::memcmp(bytes+reduced+(y*16+x)*4,expected,4)==0);
  }
  session.flush(false);gpu.graphics_session=nullptr;unsetenv("ANYPS3_RENDER_SCALE");
- std::puts("PASS scaled typed RTT and sample-grid roundtrip retain every subpixel and native byte");
+ std::printf("PASS scaled typed RTT and sample-grid roundtrip retain every subpixel and native byte (visual fast %d)\n",fast?1:0);
 }
 // Converted texture of one surface; at scale 2 the visual companion carries `fine` (2x extent),
 // the native image `coarse`. Returns the converted visual (scale 2) or native (scale 1) texels.
@@ -242,9 +246,14 @@ static std::vector<float> convert_typeless_depth(unsigned scale,unsigned size,co
  r[0x1a00]=0x100000;r[0x1a04]=0x0001a529;r[0x1a08]=0x00030303;r[0x1a0c]=0x80000000;r[0x1a10]=0xaae4;r[0x1a14]=0x01010000;r[0x1a18]=(size<<16)|size;r[0x1840]=size*4;
  auto converted=session.texture_metadata(0).resident_image;assert(converted);
  const auto result=scale==2?converted->visual:converted;assert(result && result->width==size*scale);
- const auto at=vk.graphics_transfer(*session.batch,result,VK_IMAGE_ASPECT_COLOR_BIT,16);vk.graphics_finish(*session.batch);
- const auto* f=reinterpret_cast<const float*>(static_cast<const char*>(session.batch->map)+at);
- std::vector<float> out(f,f+std::size_t(result->width)*result->height*4);
+ // The visual fast path writes R8G8B8A8_UNORM (bytes, returned as byte/255); the generic decoder R32G32B32A32_SFLOAT.
+ const bool bytes=result->format==VK_FORMAT_R8G8B8A8_UNORM;
+ const char* fast_env=std::getenv("ANYPS3_RENDER_SCALE_RTT_FAST");
+ assert(bytes==(scale==2 && (!fast_env || !std::strcmp(fast_env,"1"))) && vk.graphics_visual_rtt_fast==(bytes?1u:0u));
+ const auto at=vk.graphics_transfer(*session.batch,result,VK_IMAGE_ASPECT_COLOR_BIT,bytes?4:16);vk.graphics_finish(*session.batch);
+ std::vector<float> out(std::size_t(result->width)*result->height*4);
+ if(bytes){const auto* b=static_cast<const std::uint8_t*>(session.batch->map)+at;for(std::size_t i=0;i<out.size();++i)out[i]=float(b[i])/255.f;}
+ else{const auto* f=reinterpret_cast<const float*>(static_cast<const char*>(session.batch->map)+at);std::copy(f,f+out.size(),out.begin());}
  if(drawn)*drawn=vk.graphics_visual_aspect_drawn;
  session.flush(false);gpu.graphics_session=nullptr;unsetenv("ANYPS3_RENDER_SCALE");
  return out;
@@ -344,10 +353,20 @@ class RenderScaleTests(unittest.TestCase):
    self.assertNotIn('Validation Warning',result.stdout+result.stderr)
    self.assertEqual(result.stdout.count('PASS dual'),7,result.stdout)
    self.assertEqual(result.stdout.count('PASS typed visual RTT'),2,result.stdout)
+   self.assertIn('(visual fast 1)',result.stdout)
    print(result.stdout,flush=True)
 
-   for draw in ('1','0'):
-    env.update(ANYPS3_RENDER_SCALE_ASPECT_DRAW=draw)
+   env.update(ANYPS3_RENDER_SCALE_RTT_FAST='0')
+   result=subprocess.run([str(root/'test'),'dual','native','bytes'],capture_output=True,text=True,env=env,timeout=180)
+   self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+   self.assertNotIn('Validation Error',result.stdout+result.stderr)
+   self.assertNotIn('Validation Warning',result.stdout+result.stderr)
+   self.assertEqual(result.stdout.count('PASS dual'),7,result.stdout)
+   self.assertIn('(visual fast 0)',result.stdout)
+   print(result.stdout,flush=True)
+
+   for draw,fast in (('1','1'),('0','1'),('1','0')):
+    env.update(ANYPS3_RENDER_SCALE_ASPECT_DRAW=draw,ANYPS3_RENDER_SCALE_RTT_FAST=fast)
     result=subprocess.run([str(root/'test'),'typeless','depth','visual','words'],capture_output=True,text=True,env=env,timeout=180)
     self.assertEqual(result.returncode,0,result.stdout+result.stderr)
     self.assertNotIn('Validation Error',result.stdout+result.stderr)

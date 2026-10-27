@@ -21,6 +21,8 @@ public:
         bool scale_visual=false,visual_pass=false;
         // false: this native draw allocates no occlusion queries (its pixel count is never consumed: ZPASS counting off).
         bool visibility=true;
+        // true: the caller records this native draw's visual half itself (no paired draw, no native->visual sync).
+        bool visual_external=false;
         VkFormat color=VK_FORMAT_R8G8B8A8_UNORM,depth=VK_FORMAT_UNDEFINED;
         std::array<VkPipelineColorBlendAttachmentState,4> blend{};
         VkPipelineDepthStencilStateCreateInfo z{};
@@ -346,7 +348,8 @@ private:
     // writes visible to the device (Vulkan host write ordering guarantee); no graphics path writes host memory a recorded
     // command consumes after submission. The GPU-GPU part of the barrier is unchanged.
     static bool graphics_barrier_host(){static const bool host=[]{const char* v=std::getenv("ANYPS3_RSX_BARRIER_HOST");
-        if(v && std::strcmp(v,"0") && std::strcmp(v,"1"))throw std::runtime_error("invalid ANYPS3_RSX_BARRIER_HOST");return v && !std::strcmp(v,"1");}();return host;}
+        if(v && std::strcmp(v,"0") && std::strcmp(v,"1")){throw std::runtime_error("invalid ANYPS3_RSX_BARRIER_HOST");}
+        return v && !std::strcmp(v,"1");}();return host;}
     static void graphics_barrier(GraphicsBatch& b){
         graphics_end_pass(b);graphics_mark(b,graphics_last_kind());graphics_last_kind()=MarkOther;
         const bool host=graphics_barrier_host();
@@ -611,8 +614,10 @@ public:
         if(value[0]<'1' || value[0]>'4' || value[1])throw std::runtime_error("ANYPS3_RENDER_SCALE must be an integer from 1 to 4");
         return unsigned(value[0]-'0');
     }
-    std::uint64_t graphics_image_creations=0;
-    std::shared_ptr<GraphicsImage> graphics_image(GraphicsBatch& b,VkFormat f,unsigned w,unsigned h,unsigned layers,bool depth=false,bool pair=true){b.sync();
+    std::uint64_t graphics_image_creations=0,graphics_visual_rtt_fast=0;
+    // visual_format: the visual companion's format when it differs from the native one (display-only images whose visual
+    // half is written by its own draws, e.g. an 8-bit conversion output); VK_FORMAT_UNDEFINED = same format.
+    std::shared_ptr<GraphicsImage> graphics_image(GraphicsBatch& b,VkFormat f,unsigned w,unsigned h,unsigned layers,bool depth=false,bool pair=true,VkFormat visual_format=VK_FORMAT_UNDEFINED){b.sync();
         if(!w || !h || !layers || layers>4 || !graphics_format(f,depth))throw std::runtime_error("unsupported graphics image format/extent");
         ++graphics_image_creations;auto image=std::make_shared<GraphicsImage>(this,f,w,h,layers,depth);
         VkImageCreateInfo ii{};ii.sType=VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;ii.imageType=VK_IMAGE_TYPE_2D;ii.format=f;ii.extent={w,h,1};ii.mipLevels=1;ii.arrayLayers=layers;
@@ -633,7 +638,7 @@ public:
             const auto scale=graphics_render_scale;
             if(w>graphics_properties.limits.maxImageDimension2D/scale || h>graphics_properties.limits.maxImageDimension2D/scale)
                 throw std::runtime_error("RSX visual image exceeds device limit");
-            image->visual=graphics_image(b,f,w*scale,h*scale,layers,depth,false);
+            image->visual=graphics_image(b,visual_format!=VK_FORMAT_UNDEFINED?visual_format:f,w*scale,h*scale,layers,depth,false);
             // Parent cache accounting includes the paired allocation. Batch
             // pins may conservatively count it again; never undercount it.
             image->memory_bytes+=image->visual->memory_bytes;
@@ -1259,7 +1264,7 @@ public:
         job->query=query;job->passes=passes;job->layered=layered;job->multiview=multiview;job->defer_planes=defer_planes;job->at=at;job->range=range;
         job->indexed=data.size()>15 && data[15]==1;job->index_offset=job->indexed?std::uint64_t(data[13])*4:0;
         if(asynchronous){b.pending_jobs.fetch_add(1,std::memory_order_relaxed);recorder_publish();}else graphics_record_draw(*job);
-        if(!s.visual_pass && !s.raster_width && graphics_render_scale>1){
+        if(!s.visual_pass && !s.raster_width && graphics_render_scale>1 && !s.visual_external){
             if(s.scale_visual){
                 auto scaled=s;scaled.visual_pass=true;scaled.raster_width=s.width*graphics_render_scale;scaled.raster_height=s.height*graphics_render_scale;
                 std::array<std::shared_ptr<GraphicsImage>,4> visual_colors{};
