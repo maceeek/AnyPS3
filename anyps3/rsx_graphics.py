@@ -687,7 +687,7 @@ struct Session {
             if(status&2)throw std::runtime_error("RSX FP execution budget exhausted; no guest commit");
             if(status)throw std::runtime_error("RSX graphics shader error; no guest commit");}
     }
-    void retire_work(NativeVulkan::GraphicsBatch& b,const std::vector<Pending>& work,const std::shared_ptr<std::vector<std::uint64_t>>& results,std::vector<Label>& completed_labels,unsigned report_floor){
+    void retire_work(NativeVulkan::GraphicsBatch& b,const std::vector<Pending>& work,const std::shared_ptr<std::vector<std::uint64_t>>& results,std::vector<Label>& completed_labels,unsigned report_floor=0){
         validate_pending(b,work);*results=b.visibility;
         for(std::size_t n=0;n<work.size();++n){const auto& p=work[n];std::uint64_t count=0;for(unsigned i=0;i<p.count;++i)count+=b.visibility.at(p.first+i);
             state.rsx.draw.pixels+=count;if(p.report && n>=report_floor)state.rsx.report_values[0]+=count;}

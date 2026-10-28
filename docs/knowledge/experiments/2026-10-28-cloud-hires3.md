@@ -97,6 +97,26 @@ up to 3840×1408. Those words are frozen with `view.fs` (`view.data` is written 
 now; the visual-typed pattern replacement runs first. `test_rsx_rtt` passes with literals on and off, a wrong pitch literal
 fails it, `test_rsx_render_scale` passes.
 
+## Regression suite (lavapipe, cloud container)
+
+**Verified:** full run on the final tree (1a37cdb + docs; 202 modules, 904 tests, 4 skips; 4 parallel modules,
+`ANYPS3_REQUIRE_VULKAN=1`), logs in the session scratchpad only. 18 modules failed; 17 of them fail identically on the
+untouched base 95756e2 re-run under the same conditions, so they are **not** regressions of this round:
+- environment: `test_sample_profile`, `test_sample_profile_integration`, `test_spudyn_profile`, `test_spuperf2_capture` (need
+  tools under `local/`), `test_present_window` (SDL offscreen driver without Vulkan), `test_program`, `test_services` (30 s
+  compile timeouts under load), `test_ppu_fp_lazy`, `test_ppuperf3`, `test_rsx_residency`, `test_savedata_vsh` (GCC 13
+  `-Werror` diagnostics / assert macro);
+- same assertion on base: `test_rsx_fp_cache` (constant_rewrites), `test_rsx_sampler_identity` and
+  `test_rsx_resident_sampler` (source identity), `test_rsx_perf_decode` (special_lanes), `test_rsx_pipeline_cache`
+  (read-only save not failing — the container runs as root), `test_rsx_drain_bound` (guarded-read bracket off by one clear,
+  without the FIFO window; timing under a loaded 4-vCPU host).
+  These deserve a look on the PC (they may also fail there with GCC 15/NVIDIA or be container artifacts).
+- **One regression, fixed:** `test_rsx_gpu_status` calls `Session::retire_work` with the old signature; the report floor
+  parameter now defaults to 0 (every draw counts). Re-run passes, together with deferred_labels, constant_chunks,
+  memory_pool, rsx2_draw, rtt, recorder; the pool-forced heavy set (hook, 8 MiB blocks: render_scale, visual_history,
+  pipeline, graphics, vk_submit, recorder, rsx2_draw, visual_msaa, vk_resident, rtt, alias_flow, deferred_labels) passes on
+  the final pool code.
+
 ## Synthetic measurements (cloud container, noisy 4 vCPU; diagnostic, not game evidence)
 
 - **Draw path, instructions per draw** (`bench/rsx_draw_bench.py` scenario 3 two textures, `ANYPS3_RSX_RECORDER=1`,

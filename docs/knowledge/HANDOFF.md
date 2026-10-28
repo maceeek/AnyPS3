@@ -4,7 +4,7 @@
 
 Branch `ccr-8139488c-79xg7b` (pushed; based on main 95756e2). Read the
 [record](experiments/2026-10-28-cloud-hires3.md): device-memory pool, DrawJob borrowed pointers, report floors,
-vertex-constant chunks, typed-RTT literals, `bench/rsx_fifo_bench.py`. Cloud items done from the 2026-10-27 list: 1 (suite,
+vertex-constant chunks, typed-RTT literals, `bench/rsx_fifo_bench.py`. Cloud items done from the 2026-10-27 list: 1 (suite: 17 pre-existing failures also on base, 1 regression fixed;
 see record), 2 (three of the five per-draw cuts; FIFO decode measured and left unchanged), 5 (pool). Not started: 3
 (two-thread worker; the record adds the derived constraint that a decode-only front saves ~1 µs/draw), 4 (visual MSAA load
 path, constants via UBO, pass-begin cost — finding documented), 6 (horizontal 8/3). No process of this round is live.
