@@ -60,7 +60,8 @@ recorder, rsx2_draw, visual_msaa, vk_resident, rtt, alias_flow, memory_pool.
 **Derived (unmeasured):** at 1440p the pool removes the driver alloc/free calls from streaming frames; HIRES2's class-A
 ~55 ms of vkAllocate/vkFree per hitch should disappear. Class B (every GPU op ~10× slower with ~240 new allocations per
 frame) is consistent with first-touch cost of new device memory; if so the pool also removes it (hypothesis; distinguishing
-test below). Memory cost: up to one 256 MiB block of fragmentation per memory type plus ≤ 384 MiB retained empty blocks.
+test below). Memory cost: up to one 256 MiB block of fragmentation per memory type, plus retained empty pool blocks
+(≤ max(`ANYPS3_RSX_MEMORY_CACHE_MB`, one block)) on top of the exact recycler's own ≤ `ANYPS3_RSX_MEMORY_CACHE_MB`.
 
 ### 2. DrawJob borrows pinned resources
 
@@ -133,6 +134,27 @@ fails it, `test_rsx_render_scale` passes.
   graphics_draw). Ordering rules that follow from the source read: GET may only be published up to the back's completed
   position; every guest-visible action (labels, reports, semaphore release/acquire, REF, flips, events, host requests)
   drains the back first; a release that targets the command buffer drains before further decode. Not prototyped.
+
+## Design note: horizontal scale 8/3 (cloud item 6; user decision pending)
+
+**Verified source facts:** the render scale is one integer `NativeVulkan::graphics_render_scale` used for both axes:
+visual companions are `width*scale × height*scale` (`graphics_image` pair creation, `graphics_visual_history` extent checks
+`visual->width==width*scale`), visual draws set `raster_width/height = width/height*scale`, history/merge copies scale
+native `VkImageCopy` regions by the same integer, typed-RTT visual reads map a native grid texel to an S-wide block
+(`visual_xyl`), and every cache budget scales by `1+scale²`.
+
+**Derived consequences of a horizontal factor 8/3 (vertical 2):**
+- Native texel edges stop coinciding with visual pixels (3 native columns = 8 visual columns). Every exact block copy
+  (alias merge / equal-footprint rebind history, native→visual sync, sample-grid rebinds) becomes a resampling step or must
+  be restricted to 3-column-aligned spans; the history planner's whole-texel guarantee no longer holds per texel.
+- The MSAA sample-grid rule `G = X·nx + sample` scaled by an integer would need a rational mapping; the game's 2× diagonal
+  resolve reads the grid as ARGB8, so the visual grid must stay plane-ordered or the comb artifact returns (HIRES-A).
+- Presentation would then be 1:1 at 2560 columns (no 4:3 horizontal resample) — the visible gain.
+- GPU cost: visual pixels ×4/3 versus scale 2 (2560×1408 instead of 1920×1408): visual draws ~7.3 → ~9.7 ms/frame at
+  1440p walking (1031sm1 split), memory ×4/3 for visual images.
+- Smallest viable step: separate `scale_x`/`scale_y` in `NativeVulkan` (all integer paths keep `scale_x==scale_y`), then a
+  rational `scale_x` only for the visual raster and presentation, with native↔visual copies falling back to the native
+  reconstruction for non-aligned spans (counted per reason like `PERF RENDER_SCALE_SYNC`).
 
 ## Not done / limits
 

@@ -629,3 +629,7 @@ CPU scaled blits (fast2/fix7-stutter). See knowledge/experiments/2026-10-23-fix7
 2026-10-25 evening HIRES wave: 1440p walking baseline 882 = 33.15 FPS (720p 44.68); 1440p image was 720p-derived (MSAA sample-grid layout bug, fixed on hires/integ, unmeasured). Per-draw CPU and Vulkan cost cuts merged, unmeasured; build 960 queued. See knowledge/experiments/2026-10-25-hires-wave.md.
 
 - 2026-10-27: HIRES2 wave (two Opus agents, fresh instances per ~300k context; power outage at 16:53). 1440p walking 1031 39.91/40.58 FPS vs main 37.27/35.89, GPU 15.4 vs 19.0 ms; remaining blockers RSX worker (~21 ms heavy frames), main guest thread (~14.8 ms, ~3.9 ms SPU-job wait) and scale-2 GPU (~15.4 ms). Goal open. Branch `claude/hires2-wave`. [Record](knowledge/experiments/2026-10-25-hires-wave.md).
+
+- 2026-10-28: cloud round HIRES3 (no game/GPU): device-memory pool for the 1440p alloc/free hitches, three exact per-draw CPU
+  cuts and typed-RTT literals on branch `ccr-8139488c-79xg7b`, lavapipe-tested with mutation checks; nothing measured in the
+  game. [Record](knowledge/experiments/2026-10-28-cloud-hires3.md).

@@ -1,5 +1,19 @@
 # Handoff to the next instance
 
+## Cloud round HIRES3 — 2026-10-28 (cloud container; goal NOT reached, nothing measured in the game)
+
+Branch `ccr-8139488c-79xg7b` (pushed; based on main 95756e2). Read the
+[record](experiments/2026-10-28-cloud-hires3.md): device-memory pool, DrawJob borrowed pointers, report floors,
+vertex-constant chunks, typed-RTT literals, `bench/rsx_fifo_bench.py`. Cloud items done from the 2026-10-27 list: 1 (suite,
+see record), 2 (three of the five per-draw cuts; FIFO decode measured and left unchanged), 5 (pool). Not started: 3
+(two-thread worker; the record adds the derived constraint that a decode-only front saves ~1 µs/draw), 4 (visual MSAA load
+path, constants via UBO, pass-begin cost — finding documented), 6 (horizontal 8/3). No process of this round is live.
+
+First next actions on the real PC: (1) one integration build of the branch; QUIET alternating 1440p walks against
+1031/1034; the same binary with `ANYPS3_RSX_MEMORY_POOL=0`; (2) full frame ring + `hitch_marks.py` to see whether stutter
+classes A/B disappear (B persisting refutes the first-touch hypothesis); (3) scale-1 walks for rsx_worker ms/frame and
+µs/draw; (4) `ANYPS3_RSX_RTT_LITERALS=0/1` with `ANYPS3_RSX_VK_MARKS`.
+
 ## HIRES2 wave — 2026-10-27 evening (ended on user instruction; goal NOT reached)
 
 Read the top of [CURRENT.md](CURRENT.md) and the

@@ -1,5 +1,21 @@
 # Current state and goal
 
+## Cloud round HIRES3 — 2026-10-28 (cloud container: no game, no NVIDIA; branch `ccr-8139488c-79xg7b`)
+
+Source-level changes on top of main 95756e2, each with a native lavapipe test (independent oracle) and mutation checks;
+**no game build, run or FPS figure** — the PC must build and measure alternating QUIET runs.
+- **Device-memory pool** (HIRES2 stutter class A, possibly B): device-local allocations become ranges of 256 MiB blocks
+  (best fit, coalescing, size index); no driver alloc/free in streaming frames. A/B: `ANYPS3_RSX_MEMORY_POOL=0`.
+  Lavapipe (test hook): 64 ranges from 7 driver allocations vs 68, byte-identical guest output.
+- **Worker CPU cuts (exact):** DrawJob borrows batch-pinned resources (no cross-thread refcount traffic); RESET_REPORT/ZPASS
+  reports scan only draws since the last reset (was O(draws in flight) per report); vertex-constant refresh skips unchanged
+  128-word chunks; typed-RTT decoder addressing as shader literals (`ANYPS3_RSX_RTT_LITERALS=0` for A/B).
+- **Measured synthetically:** plain FIFO decode ~1 µs per draw in the game's memory configuration; the FIFO window is slower
+  (refuted as a default). **Found:** every render pass carries full external dependencies (each pass switch drains the GPU);
+  hazard tracking would not help the native→visual→native case (documented, not changed).
+Record: [cloud HIRES3](experiments/2026-10-28-cloud-hires3.md). First next action on the PC: one integration build, alternating
+QUIET 1440p walks vs 1031/1034 and the same binary with `ANYPS3_RSX_MEMORY_POOL=0`, plus a full ring with `hitch_marks.py`.
+
 ## HIRES2 wave — 2026-10-27 evening (goal NOT reached; branch `claude/hires2-wave`)
 
 1440p walking: build 1031 holds **39.91 / 40.58 FPS** vs 960 (= main f92681c) 37.27 / 35.89 (QUIET, alternating), GPU

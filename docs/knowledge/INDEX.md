@@ -9,6 +9,8 @@ Latest state and handoff: the top sections of [CURRENT.md](CURRENT.md) and [HAND
 
 Each record describes its own snapshot, not the current runtime.
 
+- 2026-10-28 [cloud round HIRES3](experiments/2026-10-28-cloud-hires3.md): device-memory pool (stutter), per-draw CPU cuts
+  (DrawJob pointers, report floors, constant chunks), typed-RTT literals, FIFO decode bench; lavapipe tests only, no game run.
 - 2026-10-25 [higher-resolution performance milestone](experiments/2026-10-25-scale2-walking.md): GPU depth copies,
   bounded history/source caches and sampler shader reuse; original 1440p walking evidence, partial-suite closeout and
   remaining 60-FPS/zero-stutter acceptance limits.
