@@ -10,9 +10,18 @@ template<class T,std::size_t N> class RsxShaderArray {
     mutable std::uint64_t generation=1;
     bool exposed=false;
 public:
+    // Explicit writes also bump the version of their 128-element chunk, so a consumer can skip comparing unchanged
+    // chunks. Valid only while the array was never mutably borrowed (exposed()) and for the same identity (a copy or
+    // assignment gets a new one).
+    static constexpr std::size_t chunk=128,chunk_count=(N+chunk-1)/chunk;
+private:
+    std::array<std::uint64_t,chunk_count> chunk_versions{};
+    static std::uint64_t next_identity(){static std::atomic<std::uint64_t> next{1};return next.fetch_add(1,std::memory_order_relaxed);}
+public:
+    std::uint64_t identity=next_identity();
     RsxShaderArray()=default;
     RsxShaderArray(const RsxShaderArray& other):values(other.values){}
-    RsxShaderArray& operator=(const RsxShaderArray& other){if(this!=&other){values=other.values;++generation;}return *this;}
+    RsxShaderArray& operator=(const RsxShaderArray& other){if(this!=&other){values=other.values;++generation;identity=next_identity();}return *this;}
     constexpr std::size_t size()const{return N;}
     const T* data()const{return values.data();}
     T* data(){exposed=true;return values.data();}
@@ -20,11 +29,13 @@ public:
     T& operator[](std::size_t i){exposed=true;return values[i];}
     auto begin()const{return values.begin();}auto end()const{return values.end();}
     auto begin(){exposed=true;return values.begin();}auto end(){exposed=true;return values.end();}
-    void write(std::size_t i,T value){if(values.at(i)!=value){values[i]=value;++generation;}}
+    void write(std::size_t i,T value){if(values.at(i)!=value){values[i]=value;++generation;++chunk_versions[i/chunk];}}
     std::uint64_t version()const{
         if(exposed && std::memcmp(observed.data(),values.data(),sizeof(values))){observed=values;++generation;}
         return generation;
     }
+    bool borrowed()const{return exposed;}
+    std::uint64_t chunk_version(std::size_t c)const{return chunk_versions[c];}
 };
 
 struct RsxRegisters {

@@ -964,6 +964,7 @@ struct Session {
     static constexpr unsigned constant_chunk_words=128,constant_chunks=(468*4+constant_chunk_words-1)/constant_chunk_words;
     std::array<std::uint64_t,constant_chunks+1> constant_chunk_versions{};std::uint64_t constant_chunk_clock=0;
     std::array<unsigned,16> constant_table{};std::uint64_t constant_table_version=0;const void* constant_table_batch=nullptr;
+    std::array<std::uint64_t,constant_chunks> constants_chunk_seen{};std::uint64_t constants_identity=0;
     void refresh_vertex_constants(){
         constexpr unsigned words=468*4;
         const auto& gpu=std::as_const(state.rsx);
@@ -972,7 +973,14 @@ struct Session {
             const bool fresh=vertex_constants_cache.size()!=words+468,masks=fresh || constants_versions[1]!=versions[1];
             constants_versions=versions;++vertex_constants_version;
             if(fresh)vertex_constants_cache.assign(words+468,0);
+            // A chunk whose write version is unchanged (same never-borrowed bank) holds the cached words: skip its compare.
+            static_assert(decltype(gpu.transform_constants)::chunk==constant_chunk_words,"constant chunks follow the bank's write chunks");
+            const bool tracked=!fresh && !gpu.transform_constants.borrowed() && constants_identity==gpu.transform_constants.identity;
+            constants_identity=gpu.transform_constants.identity;
             for(unsigned c=0;c<constant_chunks;++c){const unsigned first=c*constant_chunk_words,n=std::min(constant_chunk_words,words-first);
+                const auto seen=gpu.transform_constants.chunk_version(c);
+                if(tracked && constants_chunk_seen[c]==seen)continue;
+                constants_chunk_seen[c]=seen;
                 const auto* source=gpu.transform_constants.data()+first;auto* cached=vertex_constants_cache.data()+first;
                 if(fresh || std::memcmp(source,cached,n*sizeof(unsigned))){std::copy_n(source,n,cached);constant_chunk_versions[c]=++constant_chunk_clock;}}
             if(masks){std::copy_n(gpu.transform_constants_written.begin(),words,vertex_constants_written.begin());
