@@ -88,7 +88,30 @@ static void reports_(){
  assert(s.memory.load(0xc0020048,4)==0);
  s.rsx.graphics_owner.reset();std::puts("PASS deferred report prefix survives reset/new draw, fixed visibility and BE timestamp/status");
 }
-int main(){try{labels(false);labels(true);label_write_and_alias();immediate_();reports_();}catch(const std::exception& e){std::fprintf(stderr,"FAIL %s\n",e.what());return 1;}}
+// RESET_REPORT across flights: the attributed draws are those issued after the last reset, whether they sit in submitted
+// flights or in the current batch. Independent expectation: every draw is the same full-surface 8x8 quad, so it passes 64
+// samples, and a ZPASS report counts 64 per attributed draw.
+static void reports_across_flights_(){
+ PpuState s;setup_draw(s,8,8,32,false);s.rsx.registers[0x17cc]=1;s.rsx.registers[0x1a8]=0xfeed0000;
+ s.rsx.renderer=std::make_unique<NativeVulkan>();rsxgraphics::Session session(*s.rsx.renderer,s);session.observe();s.rsx.graphics_session=&session;
+ s.rsx.graphics_owner=std::shared_ptr<void>(&session,[](void*){});setenv("ANYPS3_RSX_BACKEND","gpu",1);
+ auto draw=[&]{s.rsx.draw.primitive=8;s.rsx.draw.ranges={{0,4}};rsx_execute_draw(s);};
+ auto reset=[&]{rsx_graphics_reset_report(s,1);s.rsx.report_values[0]=0;};   // as the 0x17c8 method does
+ auto report=[&](unsigned slot){rsx_get_report(s,0x01020000u+0x100u+slot*16u);};
+ draw();session.submit_async("test");draw();report(0);            // 2 draws, one in a flight: 128
+ reset();draw();session.submit_async("test");draw();report(1);    // only the 2 draws after the reset: 128
+ draw();reset();report(2);                                         // the draw before the reset is not attributed: 0
+ draw();report(3);                                                 // 64
+ session.submit_async("test");draw();reset();draw();draw();report(4);   // 128
+ s.rsx.graphics_session=nullptr;session.leave_fifo();session.flush(false);
+ const unsigned expect[]={128,128,0,64,128};
+ for(unsigned i=0;i<5;++i){const auto got=s.memory.load(0xc0020108u+i*16u,4);
+  if(got!=expect[i])throw std::runtime_error("report "+std::to_string(i)+" = "+std::to_string(got)+", expected "+std::to_string(expect[i]));}
+ // The cumulative counter (retire_work) also counts only the draws since the last reset: the last two.
+ if(s.rsx.report_values[0]!=128)throw std::runtime_error("report counter "+std::to_string(s.rsx.report_values[0])+", expected 128");
+ s.rsx.graphics_owner.reset();std::puts("PASS reports after resets count exactly the draws since the reset, in flights and in the current batch");
+}
+int main(){try{labels(false);labels(true);label_write_and_alias();immediate_();reports_();reports_across_flights_();}catch(const std::exception& e){std::fprintf(stderr,"FAIL %s\n",e.what());return 1;}}
 '''
 def native_source():
     return graphics_source().split('int main(int argc,char** argv)')[0] + MAIN
@@ -104,4 +127,4 @@ class DeferredLabelsTests(unittest.TestCase):
             p=subprocess.run([str(root/'test')],env=env,capture_output=True,text=True,timeout=120)
             self.assertEqual(p.returncode,0,p.stdout+p.stderr)
             self.assertNotIn('Validation Error',p.stdout+p.stderr);self.assertNotIn('Validation Warning',p.stdout+p.stderr)
-            self.assertEqual(p.stdout.count('PASS '),5)
+            self.assertEqual(p.stdout.count('PASS '),6)

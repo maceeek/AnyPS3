@@ -560,8 +560,8 @@ static void rsx_graphics_reset_report(PpuState& s,unsigned value){
     auto* session=static_cast<rsxgraphics::Session*>(s.rsx.graphics_session?s.rsx.graphics_session:s.rsx.graphics_owner.get());
     // Pending visibility still contributes to lifetime pixel statistics, but
     // pre-reset draws must never reappear in the newly cleared report counter.
-    if(session && value==1){for(auto& p:session->pending)p.report=false;
-        for(auto& flight:session->flights)for(auto& p:flight.pending)p.report=false;}
+    if(session && value==1){session->pending_report_floor=unsigned(session->pending.size());
+        for(auto& flight:session->flights)flight.report_floor=unsigned(flight.pending.size());}
     if(rsxgraphics::fallback_stats().enabled)++rsxgraphics::fallback_stats().paths["report_reset_deferred"];
 }
 #endif

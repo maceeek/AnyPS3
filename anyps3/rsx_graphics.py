@@ -642,7 +642,12 @@ struct Session {
         std::shared_ptr<std::vector<std::uint64_t>> results;
         std::chrono::steady_clock::time_point submitted{};
         std::vector<std::function<void(const NativeVulkan::GraphicsBatch&)>> completions{};
+        unsigned report_floor=0;   // see pending_report_floor
     };
+    // RESET_REPORT clears the report attribution of every pending draw issued before it. Draws are only appended, so the
+    // attributed ones are exactly [report_floor, size) with Pending::report set: a reset moves the floors (O(flights))
+    // instead of rewriting every entry, and a report scans only the draws since the last reset.
+    unsigned pending_report_floor=0;
     // Host-only consumers of bytes that the GPU writes into the current batch (asynchronous frame capture): run once that batch
     // completed (retire, or the synchronous flush), before its staging memory is reset. They never touch guest state.
     std::vector<std::function<void(const NativeVulkan::GraphicsBatch&)>> completions;
@@ -682,10 +687,10 @@ struct Session {
             if(status&2)throw std::runtime_error("RSX FP execution budget exhausted; no guest commit");
             if(status)throw std::runtime_error("RSX graphics shader error; no guest commit");}
     }
-    void retire_work(NativeVulkan::GraphicsBatch& b,const std::vector<Pending>& work,const std::shared_ptr<std::vector<std::uint64_t>>& results,std::vector<Label>& completed_labels){
+    void retire_work(NativeVulkan::GraphicsBatch& b,const std::vector<Pending>& work,const std::shared_ptr<std::vector<std::uint64_t>>& results,std::vector<Label>& completed_labels,unsigned report_floor){
         validate_pending(b,work);*results=b.visibility;
-        for(const auto& p:work){std::uint64_t count=0;for(unsigned i=0;i<p.count;++i)count+=b.visibility.at(p.first+i);
-            state.rsx.draw.pixels+=count;if(p.report)state.rsx.report_values[0]+=count;}
+        for(std::size_t n=0;n<work.size();++n){const auto& p=work[n];std::uint64_t count=0;for(unsigned i=0;i<p.count;++i)count+=b.visibility.at(p.first+i);
+            state.rsx.draw.pixels+=count;if(p.report && n>=report_floor)state.rsx.report_values[0]+=count;}
         publish_labels(completed_labels);
     }
     void retire(bool wait,std::uint64_t through=UINT64_MAX){
@@ -697,7 +702,7 @@ struct Session {
                 if(!vk.graphics_collect(*flight.batch,wait))break;}
             anyps3_ft::mark(anyps3_ft::GpuRetire,flight.batch->completion,flight.pending.size(),wait?1:0,flight.labels.size());
             anyps3_ft::current_completion=flight.batch->completion;
-            retire_work(*flight.batch,flight.pending,flight.results,flight.labels);
+            retire_work(*flight.batch,flight.pending,flight.results,flight.labels,flight.report_floor);
             for(auto& completion:flight.completions)completion(*flight.batch);
             if(rsx_poll_adaptive())flight_ns=0.8*flight_ns+0.2*double(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-flight.submitted).count());
             vk.graphics_reset(*flight.batch);vk.graphics_move_stats(*flight.batch,*batch);
@@ -731,8 +736,8 @@ struct Session {
             else{{PerfTimer arena_timer(fallback_stats().enabled?&fallback_stats().flush_retire_time["arena_rotation"]:nullptr);retire(true,flights.front().batch->completion);}
                 next=std::move(spare_batches.back());spare_batches.pop_back();}
             vk.graphics_move_stats(*batch,*next);
-            flights.push_back({std::move(batch),std::move(pending),std::move(labels),std::move(query_results),rsx_poll_adaptive()?std::chrono::steady_clock::now():std::chrono::steady_clock::time_point{},std::move(completions)});
-            batch=std::move(next);pending.clear();labels.clear();completions.clear();query_results=std::make_shared<std::vector<std::uint64_t>>();++async_submits;
+            flights.push_back({std::move(batch),std::move(pending),std::move(labels),std::move(query_results),rsx_poll_adaptive()?std::chrono::steady_clock::now():std::chrono::steady_clock::time_point{},std::move(completions),pending_report_floor});
+            batch=std::move(next);pending.clear();pending_report_floor=0;labels.clear();completions.clear();query_results=std::make_shared<std::vector<std::uint64_t>>();++async_submits;
         }catch(...){failed=true;throw;}
     }
     bool label_page_overlap(const Label& label,const void* pointer,std::uint64_t size)const{
@@ -803,8 +808,8 @@ struct Session {
         Label report{mapping,address,type,16,true,active,stats,state.rsx.report_values[0],{}};
         // Snapshot attribution now: RESET_REPORT may clear the live pending
         // flags later, but cannot change an already issued report's prefix.
-        for(const auto& flight:flights)for(const auto& p:flight.pending)if(p.report)report.queries.push_back({flight.results,p.first,p.count});
-        for(const auto& p:pending)if(p.report)report.queries.push_back({query_results,p.first,p.count});
+        for(const auto& flight:flights)for(std::size_t n=flight.report_floor;n<flight.pending.size();++n){const auto& p=flight.pending[n];if(p.report)report.queries.push_back({flight.results,p.first,p.count});}
+        for(std::size_t n=pending_report_floor;n<pending.size();++n){const auto& p=pending[n];if(p.report)report.queries.push_back({query_results,p.first,p.count});}
         labels.push_back(std::move(report));watch_poll(part.data,16,true);++ownership_revision;
         if(fallback_stats().enabled){++fallback_stats().paths["report_deferred"];std::ostringstream detail;detail<<"address=0x"<<std::hex<<address<<" type="<<type<<" pc=0x"<<state.pc;fallback_stats().detail("report_producer",detail.str());}
         return true;
@@ -1201,7 +1206,7 @@ struct Session {
             if(stats.enabled)stats.flush_readbacks[reason]+=reads.size();
             if(!reads.empty()){::RsxPerfCounters::add(::RsxPerfCounters::readback_flushes);::RsxPerfCounters::add(::RsxPerfCounters::readback_surfaces,reads.size());}
             vk.graphics_finish(*batch);
-            retire_work(*batch,pending,query_results,labels);pending.clear();
+            retire_work(*batch,pending,query_results,labels,pending_report_floor);pending.clear();pending_report_floor=0;
             for(auto& completion:completions)completion(*batch);
             completions.clear();
             query_results=std::make_shared<std::vector<std::uint64_t>>();
