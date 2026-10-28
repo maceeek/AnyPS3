@@ -87,17 +87,22 @@ static std::vector<std::uint8_t> memory_rounds_(bool recycle,std::uint64_t& reus
  }
  reuses=counter(RsxPerfCounters::vk_memory_reuses)-before;s.rsx.graphics_session=nullptr;return all;
 }
-static void direct_reuse_(int mode,std::uint64_t& reuses,bool& cacheable){   // mode 0: limit 0, 1: limit 64 MB, 2: variable unset (default must be restored)
+// mode 0: limit 0 (recycler and pool off), 1: limit 64 MB, 2: variable unset (default must be restored). `reuses` = 1 when the
+// second identical allocation was served without a driver allocation (pool range or exact recycled block), else 0.
+static void direct_reuse_(int mode,std::uint64_t& reuses,bool& cacheable){
  if(mode==2)unsetenv("ANYPS3_RSX_MEMORY_CACHE_MB");else setenv("ANYPS3_RSX_MEMORY_CACHE_MB",mode==1?"64":"0",1);
  PpuState s;setup_draw(s,8,8,64,false);s.rsx.renderer=std::make_unique<NativeVulkan>();auto& vk=*s.rsx.renderer;
  rsxgraphics::Session session(vk,s);session.observe();s.rsx.graphics_session=&session;
+ // Recycled/pooled memory types: device-local-only, plus HOST_COHERENT ones under the pool test hook.
+ const bool hook=std::getenv("ANYPS3_RSX_MEMORY_POOL_TYPES")!=nullptr;
  cacheable=false;for(std::uint32_t i=0;i<vk.memory.memoryTypeCount;++i){const auto f=vk.memory.memoryTypes[i].propertyFlags;
-  cacheable|=(f&VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) && !(f&VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT);}
+  cacheable|=((f&VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) && !(f&VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)) || (hook && (f&VK_MEMORY_PROPERTY_HOST_COHERENT_BIT));}
  auto make=[&]{auto image=vk.graphics_image(*session.batch,VK_FORMAT_R8G8B8A8_UNORM,64,64,1);session.flush();return image;};
- auto first=make();const auto before=counter(RsxPerfCounters::vk_memory_reuses);
- first.reset();                      // the GPU is idle (flush waited): the block returns to the recycler
- auto second=make();                 // identical size/type: served from the recycler
- reuses=counter(RsxPerfCounters::vk_memory_reuses)-before;second.reset();s.rsx.graphics_session=nullptr;
+ auto first=make();
+ first.reset();                      // the GPU is idle (flush waited): the memory returns to the pool/recycler
+ const auto before=counter(RsxPerfCounters::vk_memory_allocs);
+ auto second=make();                 // identical size/type: served without a driver allocation
+ reuses=counter(RsxPerfCounters::vk_memory_allocs)==before?1:0;second.reset();s.rsx.graphics_session=nullptr;
 }
 static void memory_reuse_(){
  std::uint64_t off_reuses=0,on_reuses=0;bool off_cacheable=false,on_cacheable=false;
@@ -109,6 +114,7 @@ static void memory_reuse_(){
  std::printf("INFO memory cacheable=%d reuses=%llu\n",int(on_cacheable),(unsigned long long)on_reuses);
  // Deterministic reuse: a retired device-local image block is handed to the next identical allocation (cacheable
  // devices only), never when the recycler is off; lavapipe has no device-local-only memory type (reported).
+ // The pool and the recycler both count: `reuses` is "no driver allocation for the second image".
  std::uint64_t enabled_reuses=0,disabled_reuses=0,default_reuses=0;bool c1=false,c2=false,c3=false;
  direct_reuse_(1,enabled_reuses,c1);direct_reuse_(0,disabled_reuses,c2);direct_reuse_(2,default_reuses,c3);   // 0 then unset: the singleton must not keep the 0
  assert(disabled_reuses==0);
