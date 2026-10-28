@@ -31,6 +31,9 @@ MEMBERS = r'''
     using RttCoverKey=std::array<std::uint64_t,7>;
     struct RttCoverHash {std::size_t operator()(const RttCoverKey& key)const{std::size_t h=0;for(auto v:key)h=(h*1099511628211ull)^v;return h;}};
     std::unordered_map<RttCoverKey,bool,RttCoverHash> rtt_cover_memo;
+    static bool rtt_literals(){static const bool on=[]{const char* v=std::getenv("ANYPS3_RSX_RTT_LITERALS");
+        if(v && std::strcmp(v,"0") && std::strcmp(v,"1")){throw std::runtime_error("invalid ANYPS3_RSX_RTT_LITERALS");}
+        return !v || !std::strcmp(v,"1");}();return on;}
     static bool rtt_visual_fast(){static const bool on=[]{const char* v=std::getenv("ANYPS3_RENDER_SCALE_RTT_FAST");
         if(v && std::strcmp(v,"0") && std::strcmp(v,"1")){throw std::runtime_error("invalid ANYPS3_RENDER_SCALE_RTT_FAST");}
         return !v || !std::strcmp(v,"1");}();return on;}
@@ -229,6 +232,12 @@ MEMBERS = r'''
                 default:reason("source_format");return {};
             }
             if(!typeless_float && (surface.depth || packed || (surface.format!=11 && surface.format!=12)))fs+="return (v>>(8u*(w[2]-1u-byte_)))&255u;}\n";
+            // The view's addressing words (data[1..6] below: pitch, bpp, sample grid, swizzle extents) are fixed for the life of
+            // view.fs, so they become literals: raw_byte's per-byte div/mod by them compile to multiplies/shifts. Same values,
+            // same results. ANYPS3_RSX_RTT_LITERALS=0 keeps the buffer reads (A/B).
+            if(visual_typed)replace_all(fs,"ivec3(x/w[3],y/w[4],layer)","visual_xyl(uvec2(x,y))");   // before the literals change the pattern
+            if(rtt_literals()){const unsigned literal[]={target.pitch,target.bpp,nx,ny,texture_pot(target.swizzle_width*(target.bpp/std::min(target.bpp,4u))),texture_pot(target.swizzle_height)};
+                for(unsigned i=0;i<6;++i)replace_all(fs,"w["+std::to_string(i+1)+"]",rsxvk::u(literal[i]));}
             fs+=R"RTT(
 ''' + RAW_GLSL + r'''
 )RTT";
