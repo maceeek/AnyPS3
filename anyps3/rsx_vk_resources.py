@@ -28,7 +28,7 @@ public:
         const auto device=c.devices.find(d);if(device==c.devices.end())return report;
         std::map<const void*,std::vector<std::pair<VkDeviceSize,VkDeviceSize>>> live;
         for(const auto& [key,sub]:c.subs)if(sub->device==d){(void)key;live[sub->block].push_back({sub->offset,sub->size});}
-        for(const auto& [type,pool]:device->second.pools)for(const auto& block:pool.blocks){(void)type;
+        for(const auto& [type,pool]:device->second.pools){std::size_t indexed=0;(void)type;for(const auto& block:pool.blocks){
             auto ranges=live[block.get()];VkDeviceSize used=0;for(const auto& r:ranges)used+=r.second;
             if(ranges.size()!=block->live || used!=block->used)throw std::runtime_error("pool block live/used count mismatch");
             for(auto it=block->free.begin();it!=block->free.end();++it){ranges.push_back(*it);
@@ -36,7 +36,10 @@ public:
             std::sort(ranges.begin(),ranges.end());VkDeviceSize at=0;
             for(const auto& r:ranges){if(r.first!=at || !r.second)throw std::runtime_error("pool block ranges overlap or leave a hole");at+=r.second;}
             if(at!=block->size)throw std::runtime_error("pool block ranges do not cover the block");
+            for(const auto& [offset,size]:block->free)if(!pool.by_size.count({size,reinterpret_cast<std::uintptr_t>(block.get()),offset}))throw std::runtime_error("pool size index misses a free range");
+            indexed+=block->free.size();
             ++report.blocks;report.empty_blocks+=!block->live;report.live+=block->live;report.free_ranges+=block->free.size();report.used+=block->used;report.reserved+=block->size;}
+            if(indexed!=pool.by_size.size())throw std::runtime_error("pool size index holds stale ranges");}
         VkDeviceSize all_empty=0;for(const auto& [dev,state]:c.devices)for(const auto& [type,pool]:state.pools)for(const auto& block:pool.blocks){(void)dev;(void)type;if(!block->live)all_empty+=block->size;}
         if(all_empty!=c.pool_empty)throw std::runtime_error("pool retained empty bytes mismatch");
         return report;
@@ -154,8 +157,14 @@ private:
     // never created, so a flush/invalidate of a pool handle is an explicit stop.
     struct MemoryCache {
         struct Free {VkDevice device;std::uint32_t type;VkDeviceSize size;VkDeviceMemory memory;std::uint64_t stamp;};
-        struct Block {VkDeviceMemory memory=VK_NULL_HANDLE;VkDeviceSize size=0,used=0;std::map<VkDeviceSize,VkDeviceSize> free;unsigned live=0;void* map=nullptr;};
-        struct Pool {std::vector<std::unique_ptr<Block>> blocks;};
+        struct Pool;
+        struct Block {VkDeviceMemory memory=VK_NULL_HANDLE;VkDeviceSize size=0,used=0;std::map<VkDeviceSize,VkDeviceSize> free;unsigned live=0;void* map=nullptr;Pool* pool=nullptr;};
+        // by_size indexes every free range of every block as (size, block address, offset): best fit is a lower_bound.
+        struct Pool {std::vector<std::unique_ptr<Block>> blocks;std::set<std::tuple<VkDeviceSize,std::uintptr_t,VkDeviceSize>> by_size;};
+        static void free_add(Block& b,VkDeviceSize offset,VkDeviceSize size){b.free[offset]=size;b.pool->by_size.insert({size,reinterpret_cast<std::uintptr_t>(&b),offset});}
+        static std::map<VkDeviceSize,VkDeviceSize>::iterator free_remove(Block& b,std::map<VkDeviceSize,VkDeviceSize>::iterator it){
+            b.pool->by_size.erase({it->second,reinterpret_cast<std::uintptr_t>(&b),it->first});return b.free.erase(it);}
+        static void free_drop_block(Block& b){for(const auto& [offset,size]:b.free)b.pool->by_size.erase({size,reinterpret_cast<std::uintptr_t>(&b),offset});b.free.clear();}
         struct Sub {VkDevice device;std::uint32_t type;Block* block;VkDeviceSize offset,size,requested;};
         struct Device {std::uint32_t recycle=0,pool=0;VkDeviceSize granularity=1,block=UINT64_C(256)<<20;std::map<std::uint32_t,Pool> pools;};
         std::mutex mutex;std::vector<Free> free;std::map<std::pair<std::uint64_t,std::uint64_t>,std::pair<std::uint32_t,VkDeviceSize>> live;   // key (VkDevice, VkDeviceMemory): handles are only unique per device
@@ -205,19 +214,19 @@ private:
     static MemoryCache::Sub* pool_sub(MemoryCache& c,VkDevice d,VkDeviceMemory memory){
         const auto it=c.subs.find(resource_id(memory));return it!=c.subs.end() && it->second->device==d?it->second.get():nullptr;
     }
-    // Best fit over every block of the pool; a new block when nothing fits. Caller holds the mutex.
+    // Best fit over every block of the pool (size index); a new block when nothing fits. Caller holds the mutex.
     static VkResult pool_allocate(MemoryCache& c,VkDevice d,MemoryCache::Device& device,std::uint32_t type,VkDeviceSize requested,VkDeviceSize alignment,VkDeviceMemory* out){
         const auto granularity=device.granularity;
         const auto align=std::max(alignment?alignment:1,granularity);
         if(align&(align-1))return VK_ERROR_FEATURE_NOT_PRESENT;   // not a power of two: leave it to the driver
         const auto size=(requested+granularity-1)/granularity*granularity;
         auto& pool=device.pools[type];
-        MemoryCache::Block* best=nullptr;VkDeviceSize best_offset=0,best_waste=UINT64_MAX;
-        for(auto& block:pool.blocks)for(const auto& [offset,length]:block->free){
+        // Smallest free range that holds the aligned request (ranges are granularity aligned; larger alignments may skip some).
+        MemoryCache::Block* best=nullptr;VkDeviceSize best_offset=0;
+        for(auto it=pool.by_size.lower_bound({size,0,0});it!=pool.by_size.end();++it){const auto [length,block,offset]=*it;
             const auto at=(offset+align-1)&~(align-1);
             if(at+size>offset+length)continue;
-            const auto waste=length-size;
-            if(waste<best_waste){best_waste=waste;best=block.get();best_offset=at;if(!waste)break;}
+            best=reinterpret_cast<MemoryCache::Block*>(block);best_offset=at;break;
         }
         if(!best){
             VkMemoryAllocateInfo ai{};ai.sType=VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;ai.allocationSize=device.block;ai.memoryTypeIndex=type;
@@ -227,14 +236,14 @@ private:
             if(c.subs.count(resource_id(block->memory))){::vkFreeMemory(d,block->memory,nullptr);throw std::runtime_error("Vulkan device memory handle collides with a pool range");}
             ::RsxPerfCounters::add(::RsxPerfCounters::vk_memory_allocs);::RsxPerfCounters::add(::RsxPerfCounters::vk_pool_blocks);
             resource_stats().add("device_memory_blocks",resource_id(block->memory),ai.allocationSize);
-            block->size=ai.allocationSize;block->free[0]=ai.allocationSize;c.pool_empty+=block->size;
+            block->size=ai.allocationSize;block->pool=&pool;MemoryCache::free_add(*block,0,ai.allocationSize);c.pool_empty+=block->size;
             best=block.get();best_offset=0;pool.blocks.push_back(std::move(block));
         }
         // Split the chosen free range around [best_offset, best_offset+size).
         auto range=best->free.upper_bound(best_offset);--range;
-        const auto start=range->first,end=range->first+range->second;best->free.erase(range);
-        if(best_offset>start)best->free[start]=best_offset-start;
-        if(best_offset+size<end)best->free[best_offset+size]=end-best_offset-size;
+        const auto start=range->first,end=range->first+range->second;MemoryCache::free_remove(*best,range);
+        if(best_offset>start)MemoryCache::free_add(*best,start,best_offset-start);
+        if(best_offset+size<end)MemoryCache::free_add(*best,best_offset+size,end-best_offset-size);
         if(!best->live++)c.pool_empty-=best->size;
         best->used+=size;
         auto sub=std::make_unique<MemoryCache::Sub>(MemoryCache::Sub{d,type,best,best_offset,size,requested});
@@ -246,9 +255,9 @@ private:
     static void pool_release(MemoryCache& c,MemoryCache::Sub& sub){
         auto& block=*sub.block;auto offset=sub.offset,size=sub.size;
         auto next=block.free.lower_bound(offset);
-        if(next!=block.free.end() && next->first==offset+size){size+=next->second;next=block.free.erase(next);}
-        if(next!=block.free.begin()){auto previous=std::prev(next);if(previous->first+previous->second==offset){offset=previous->first;size+=previous->second;block.free.erase(previous);}}
-        block.free[offset]=size;block.used-=sub.size;
+        if(next!=block.free.end() && next->first==offset+size){size+=next->second;next=MemoryCache::free_remove(block,next);}
+        if(next!=block.free.begin()){auto previous=std::prev(next);if(previous->first+previous->second==offset){offset=previous->first;size+=previous->second;MemoryCache::free_remove(block,previous);}}
+        MemoryCache::free_add(block,offset,size);block.used-=sub.size;
         if(--block.live)return;
         c.pool_empty+=block.size;
         auto& pool=c.devices.at(sub.device).pools.at(sub.type);
@@ -256,7 +265,7 @@ private:
             auto victim=std::find_if(pool.blocks.begin(),pool.blocks.end(),[](const auto& b){return !b->live;});
             if(victim==pool.blocks.end())break;
             c.pool_empty-=(*victim)->size;resource_stats().remove("device_memory_blocks",resource_id((*victim)->memory));
-            if((*victim)->map){::vkUnmapMemory(sub.device,(*victim)->memory);}
+            MemoryCache::free_drop_block(**victim);if((*victim)->map){::vkUnmapMemory(sub.device,(*victim)->memory);}
             {VkCallTimer t(VcFree);::RsxPerfCounters::add(::RsxPerfCounters::vk_memory_frees);::vkFreeMemory(sub.device,(*victim)->memory,nullptr);}
             if(victim->get()==&block){pool.blocks.erase(victim);break;}
             pool.blocks.erase(victim);
@@ -298,7 +307,7 @@ private:
         const auto device=c.devices.find(d);if(device==c.devices.end())return;
         for(auto& [type,pool]:device->second.pools){(void)type;
             for(auto it=pool.blocks.begin();it!=pool.blocks.end();){auto& block=**it;if(block.live){++it;continue;}
-                c.pool_empty-=block.size;resource_stats().remove("device_memory_blocks",resource_id(block.memory));if(block.map){::vkUnmapMemory(d,block.memory);}
+                c.pool_empty-=block.size;resource_stats().remove("device_memory_blocks",resource_id(block.memory));MemoryCache::free_drop_block(block);if(block.map){::vkUnmapMemory(d,block.memory);}
                 ::RsxPerfCounters::add(::RsxPerfCounters::vk_memory_frees);::vkFreeMemory(d,block.memory,nullptr);it=pool.blocks.erase(it);}}
     }
     static void vkFreeMemory(VkDevice d,VkDeviceMemory object,const VkAllocationCallbacks* a){
