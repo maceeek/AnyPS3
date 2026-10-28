@@ -55,7 +55,7 @@ public:
         return {{int(x),int(y)},{right-x,bottom-y}};
     }
     struct GraphicsPipeline;
-    struct GraphicsImage {
+    struct GraphicsImage : std::enable_shared_from_this<GraphicsImage> {
         NativeVulkan* owner;
         VkSampler sampler=VK_NULL_HANDLE;
         VkImage image=VK_NULL_HANDLE;VkDeviceMemory memory=VK_NULL_HANDLE;
@@ -124,16 +124,20 @@ public:
     struct GraphicsPush{float width,height,x,y;unsigned plane,layers;float shifts[8];float raster_scale[2];};
     static_assert(offsetof(GraphicsPush,raster_scale)==56 && sizeof(GraphicsPush)==64);
     struct GraphicsBatch;
+    // Images and buffers are borrowed: graphics_draw pins every one of them in the batch (GraphicsBatch::pins/buffer_pins)
+    // before the job is published, and the pins are released only by graphics_reset/~GraphicsBatch after b.sync(), i.e.
+    // after the recorder has recorded the job (also for visual jobs queued in the batch). Owning copies here cost two
+    // atomic reference-count operations per non-null slot and draw half, on two threads.
     struct DrawJob {
         GraphicsBatch* batch=nullptr;std::shared_ptr<GraphicsPipeline> pipeline;GraphicsState s;
-        std::array<std::shared_ptr<GraphicsImage>,4> colors;std::shared_ptr<GraphicsImage> depth;
-        std::array<std::shared_ptr<GraphicsImage>,20> textures;std::array<std::shared_ptr<GraphicsBuffer>,16> raw_textures;
+        std::array<GraphicsImage*,4> colors{};GraphicsImage* depth=nullptr;
+        std::array<GraphicsImage*,20> textures{};std::array<GraphicsBuffer*,16> raw_textures{};
         std::array<std::array<float,2>,4> positions{};
         float bias_constant=0,bias_slope=0,min_bounds=0,max_bounds=1;
         unsigned vertices=0,first_vertex=0,query=0,passes=1;bool indexed=false,layered=false,multiview=false,defer_planes=false;
         std::uint64_t at=0,range=0,index_offset=0;
         std::shared_ptr<GraphicsPipeline> ms_pipeline;   // set: this visual half may draw into its attachments' MSAA working images
-        void reset(){batch=nullptr;pipeline.reset();ms_pipeline.reset();depth.reset();for(auto& x:colors)x.reset();for(auto& x:textures)x.reset();for(auto& x:raw_textures)x.reset();}
+        void reset(){batch=nullptr;pipeline.reset();ms_pipeline.reset();depth=nullptr;colors={};textures={};raw_textures={};}
     };
     struct GraphicsBatch {
         NativeVulkan* owner;
@@ -1288,8 +1292,8 @@ public:
             if(found!=graphics_framebuffers.end() && !found->second->live()){graphics_framebuffers.erase(found);found=graphics_framebuffers.end();}
             if(found!=graphics_framebuffers.end()){framebuffer=found->second->handle;found->second->last_use=++recorder_clock;b.framebuffer_pins.push_back(found->second);++b.framebuffer_hits;}
             else{check(vkCreateFramebuffer(device,&fi,nullptr,&framebuffer),"graphics framebuffer");auto entry=std::make_shared<typename GraphicsBatch::Framebuffer>();entry->owner=this;entry->handle=framebuffer;entry->last_use=++recorder_clock;entry->pipeline=ms_mode?j.ms_pipeline:j.pipeline;
-                for(unsigned i=0;i<s.colors;++i)entry->images.push_back(ms_mode?colors[i]->ms:colors[i]);
-                if(depth)entry->images.push_back(ms_mode?depth->ms:depth);
+                for(unsigned i=0;i<s.colors;++i)entry->images.push_back(ms_mode?std::weak_ptr<GraphicsImage>(colors[i]->ms):colors[i]->weak_from_this());
+                if(depth)entry->images.push_back(ms_mode?std::weak_ptr<GraphicsImage>(depth->ms):depth->weak_from_this());
                 if(graphics_framebuffers.size()>=framebuffer_limit){
                     for(auto it=graphics_framebuffers.begin();it!=graphics_framebuffers.end();){if(!it->second->live())it=graphics_framebuffers.erase(it);else ++it;}
                     if(graphics_framebuffers.size()>=framebuffer_limit)graphics_framebuffers.erase(lru_entry(graphics_framebuffers));}
@@ -1450,7 +1454,9 @@ public:
         std::optional<DrawJob> inline_job;DrawJob* job=asynchronous?&recorder_slot():&inline_job.emplace();
         const bool pair=!s.visual_pass && !s.raster_width && s.scale_visual && graphics_render_scale>1;
         if(pair)paired=pipeline;
-        job->batch=&b;job->pipeline=std::move(pipeline);job->ms_pipeline=std::move(ms_pipeline);job->s=s;job->colors=colors;job->depth=depth;job->textures=textures;job->raw_textures=raw_textures;job->positions=positions;
+        job->batch=&b;job->pipeline=std::move(pipeline);job->ms_pipeline=std::move(ms_pipeline);job->s=s;
+        for(unsigned i=0;i<4;++i)job->colors[i]=i<s.colors?colors[i].get():nullptr;   // only the attachments are pinned (and read)
+        job->depth=depth.get();for(unsigned u=0;u<20;++u)job->textures[u]=textures[u].get();for(unsigned u=0;u<16;++u)job->raw_textures[u]=raw_textures[u].get();job->positions=positions;
         job->bias_constant=bias_constant;job->bias_slope=bias_slope;job->min_bounds=min_bounds;job->max_bounds=max_bounds;job->vertices=vertices;job->first_vertex=first_vertex;
         job->query=query;job->passes=passes;job->layered=layered;job->multiview=multiview;job->defer_planes=defer_planes;job->at=at;job->range=range;
         job->indexed=data.size()>15 && data[15]==1;job->index_offset=job->indexed?std::uint64_t(data[13])*4:0;
