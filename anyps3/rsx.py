@@ -689,6 +689,7 @@ static void rsx_fifo_values(NativeRsx& gpu,GuestMemory& m,std::uint32_t at,unsig
 // GET read after it implies), 0 of 5 without; not root-caused (WARMUP4, 2026-10-21), so the default stays the per-packet path.
 static bool rsx_fifo_window=[]{const char* v=std::getenv("ANYPS3_RSX_FIFO_WINDOW");return v && std::string(v)=="1";}();
 static std::uint64_t rsx_fifo_window_fills=0;   // test hook
+static bool rsx_fifo_pair=[]{const char* v=std::getenv("ANYPS3_RSX_FIFO_PAIR");if(v && std::strcmp(v,"0") && std::strcmp(v,"1"))throw std::runtime_error("invalid ANYPS3_RSX_FIFO_PAIR");return !v || std::strcmp(v,"0");}();
 // Whether touching host bytes [data,data+size) could have an effect besides the bytes (same conditions as rsxblit::observable).
 static bool rsx_fifo_bytes_observable(GuestMemory& m,const std::uint8_t* data,unsigned size){
     if(m.host_access_observer && (m.host_access_observer.interested(data,size) || m.raw_cpu_dirty_interested(data,size,false)))return true;
@@ -745,7 +746,16 @@ static bool rsx_run_impl(PpuState& s,unsigned budget,bool idle_poll=false){
         if((get|put)&3)throw std::runtime_error("unaligned RSX FIFO position");
         if(get==put){publish();return progress;}
         if(!in_window(get,4))window_fill(get);
-        const auto header=in_window(get,4)?window.words[(get-window.base)/4]:static_cast<std::uint32_t>(m.load(rsx_address(gpu,get),4));
+        // Paired read: the header and the word after it are both published ([GET,PUT) holds >= 8 bytes) and on one 4 KiB guest
+        // page (one mapping, no fault the single header load would not raise): one 8-byte admission instead of two 4-byte ones.
+        // The second word is the first value of a method packet with count >= 1, which the per-word path reads next anyway before
+        // anything executes; for any other header it is a published command word read early and unused. ANYPS3_RSX_FIFO_PAIR=0
+        // (also a test hook: rsx_fifo_pair) restores separate loads.
+        std::uint32_t header,paired=0;bool have_pair=false;
+        if(in_window(get,4))header=window.words[(get-window.base)/4];
+        else{const auto address=rsx_address(gpu,get);
+            if(rsx_fifo_pair && get<put && put-get>=8 && (address&0xfff)<=0xff8){const auto both=m.load(address,8);header=std::uint32_t(both>>32);paired=std::uint32_t(both);have_pair=true;}
+            else header=static_cast<std::uint32_t>(m.load(address,4));}
         std::uint32_t next=get+4;
         if((header&0xe0000003)==0x20000000 || (header&0xe0000003)==1){
             next=header&((header&1)?0xfffffffc:0x1ffffffc);
@@ -791,6 +801,7 @@ static bool rsx_run_impl(PpuState& s,unsigned budget,bool idle_poll=false){
                     }
                 }
                 if(in_window(get+4,std::uint64_t(count)*4))std::copy_n(window.words+(get+4-window.base)/4,count,values);
+                else if(have_pair){window.valid=false;values[0]=paired;if(count>1)rsx_fifo_values(gpu,m,get+8,count-1,values+1);}
                 else{window.valid=false;rsx_fifo_values(gpu,m,get+4,count,values);}
                 const auto& plain=rsx_plain_table();
                 for(unsigned i=gpu.packet_index;i<count;++i){

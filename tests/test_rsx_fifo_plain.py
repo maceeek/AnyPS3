@@ -197,7 +197,52 @@ static void window_claimed_page(){
  if(services[0]!=1 || regs[0][3]!=0x13 || regs[0][4]==0x14)throw std::runtime_error("claimed page: the failure did not stop at the first packet on the claimed page");
  std::puts("PASS a claimed page inside the window range is serviced only by the per-word path (first coherence failure propagates)");
 }
-int main(){try{extracted_are_special();plain_set();equal_paths();window_release_into_fifo();window_callbacks();window_claimed_page();}catch(const std::exception& e){std::fprintf(stderr,"FAIL %s\n",e.what());return 1;}}
+// Paired header/value reads (rsx_fifo_pair): ~3000 plain packets of 1..9 words (incrementing and not) from an offset just below a
+// 4 KiB page end, consumed in PUT kicks at random word positions (often inside a packet). Independent expectation: every register
+// holds the last value the stream assigns it, GET stops at a packet boundary <= PUT, and (serial memory, filtered observer on the
+// word at PUT) the consumer never reads at or beyond PUT. Runs with pairing on and off, serial and as a renderer thread on
+// concurrent memory with the page broker (the game's configuration).
+static void paired_reads(){
+ std::vector<std::uint32_t> plain;for(std::uint32_t reg=0x200;reg<0x2000;reg+=4)if(rsx_plain_table()[reg>>2] && rsx_method_class(reg)==1)plain.push_back(reg);
+ auto all_plain=[&](std::uint32_t reg,unsigned n){for(unsigned i=0;i<n;++i)if(!rsx_plain_table()[(reg+4*i)>>2])return false;return true;};
+ for(int concurrent=0;concurrent<2;++concurrent)for(bool pair:{true,false}){
+  rsx_fifo_pair=pair;rsx_fifo_window=false;
+  PpuState s;setup_fifo(s);auto& gpu=s.rsx;auto& m=s.memory;gpu.device=0x70000000;
+  std::uint32_t r=4321;std::vector<std::uint32_t> words,starts;std::map<std::uint32_t,std::uint32_t> expect;
+  for(unsigned k=0;k<3000;++k){
+   const unsigned n=1+lcg(r)%9;const bool increment=n==1 || lcg(r)%4;std::uint32_t reg;
+   do{reg=plain[lcg(r)%plain.size()];}while(increment && !all_plain(reg,n));
+   starts.push_back(unsigned(words.size()));words.push_back((n<<18)|(increment?0u:0x40000000u)|reg);
+   for(unsigned i=0;i<n;++i){const auto v=lcg(r)|1u;words.push_back(v);expect[increment?reg+4*i:reg]=v;}
+  }
+  starts.push_back(unsigned(words.size()));words.push_back(0);   // a count-0 header ends the stream: its successor lies at PUT
+  const std::uint32_t base=0x20ff4;std::uint32_t at=base;for(auto w:words){put(s,at,w);at+=4;}
+  const std::uint32_t end=at;put(s,end,0xffffffffu);   // never a valid header: must not be consumed
+  std::vector<std::uint32_t> kicks;for(std::uint32_t p=base;p<end;){p+=4*(1+lcg(r)%23);kicks.push_back(std::min(p,end));}
+  m.store(gpu.dma+0x44,4,base);m.store(gpu.dma+0x40,4,base);
+  bool beyond=false;std::uint32_t watched=0;
+  auto host=[&](std::uint32_t offset){return host_byte(s,0x70000000+offset);};
+  auto consume=[&]{
+   for(const auto p:kicks){
+    if(!concurrent){watched=p;m.host_access_observer=[&](const void* q,std::uint64_t n,bool){const auto* w=host(watched);if(static_cast<const std::uint8_t*>(q)<w+4 && w<static_cast<const std::uint8_t*>(q)+n)beyond=true;};
+     m.host_access_observer.filtered=true;m.host_access_observer.watch(host(p),4);}
+    m.store(gpu.dma+0x40,4,p);(void)rsx_run_impl(s,1000000);
+    if(!concurrent)m.host_access_observer={};
+    const auto get=std::uint32_t(m.load(gpu.dma+0x44,4));
+    if(get>p || (get!=end && !std::binary_search(starts.begin(),starts.end(),(get-base)/4)) || p-get>=4*10)throw std::runtime_error("GET "+std::to_string(get)+" is not the last packet boundary before PUT "+std::to_string(p));
+   }};
+  if(!concurrent)consume();
+  else{m.enable_concurrency();m.enable_page_broker();std::exception_ptr error;
+   std::thread worker([&]{try{m.renderer_thread=std::this_thread::get_id();m.renderer_enabled=true;consume();}catch(...){error=std::current_exception();}});
+   worker.join();m.renderer_enabled=false;if(error)std::rethrow_exception(error);}
+  if(beyond)throw std::runtime_error(std::string("pair=")+(pair?"1":"0")+": the consumer read the word at PUT");
+  if(m.load(gpu.dma+0x44,4)!=end)throw std::runtime_error("consumer did not reach the end");
+  for(const auto& [reg,v]:expect)if(rsx_reg(gpu,reg)!=v)throw std::runtime_error(std::string("pair=")+(pair?"1":"0")+" concurrent="+std::to_string(concurrent)+": register "+std::to_string(reg)+" = "+std::to_string(rsx_reg(gpu,reg))+" expected "+std::to_string(v));
+ }
+ rsx_fifo_pair=true;rsx_fifo_window=true;
+ std::puts("PASS paired header/value reads: 3000 packets across page ends and mid-packet PUT kicks, serial and renderer thread, never past PUT");
+}
+int main(){try{extracted_are_special();plain_set();equal_paths();window_release_into_fifo();window_callbacks();window_claimed_page();paired_reads();}catch(const std::exception& e){std::fprintf(stderr,"FAIL %s\n",e.what());return 1;}}
 '''
 
 
@@ -243,7 +288,7 @@ class RsxFifoPlainTests(unittest.TestCase):
             env = dict(os.environ, ANYPS3_VK_DEVICE='lavapipe', VK_DRIVER_FILES='/usr/share/vulkan/icd.d/lvp_icd.json')
             result = subprocess.run([str(root / 'test')], env=env, capture_output=True, text=True, timeout=300)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            self.assertEqual(result.stdout.count('PASS '), 6, result.stdout)
+            self.assertEqual(result.stdout.count('PASS '), 7, result.stdout)
 
 
 if __name__ == '__main__':
