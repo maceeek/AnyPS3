@@ -29,13 +29,21 @@ MEMBERS = r'''
         if(state.coordinator_maps)state.maps=state.memory.regions;
         // Regions can be mutated directly. Compare exact mapping identities,
         // rights and lengths before reusing a validated plan, never just a hash.
-        context_scratch.clear();context_scratch.push_back(state.rsx.local_size);
-        for(auto v:state.rsx.io)context_scratch.push_back(v);
-        for(auto v:state.rsx.io_flags)context_scratch.push_back(v);
-        for(const auto& t:state.rsx.tiles){context_scratch.insert(context_scratch.end(),{t.bound,t.location,t.offset,t.size,t.pitch,t.compression,t.base,t.bank,t.range_word,t.format_word});}
-        for(const auto& r:state.maps)context_scratch.insert(context_scratch.end(),{r.base,r.flags,r.identity,reinterpret_cast<std::uintptr_t>(r.bytes.get()),reinterpret_cast<std::uintptr_t>(r.bytes->data()),r.bytes->size()});
-        if(context_scratch!=texture_context){texture_plans.clear();++texture_plans_generation;layout_plans.clear();target_cache.entries.clear();texture_plan_bytes=layout_plan_bytes=0;texture_context=context_scratch;}
+        // The unchanged case (every FIFO turn) compares the word sequence in place; only a difference rebuilds the copy.
+        std::size_t at=0;bool same=true;
+        texture_context_words([&](std::uint64_t v){if(same && (at>=texture_context.size() || texture_context[at]!=v))same=false;++at;});
+        if(!same || at!=texture_context.size()){
+            context_scratch.clear();texture_context_words([&](std::uint64_t v){context_scratch.push_back(v);});
+            texture_plans.clear();++texture_plans_generation;layout_plans.clear();target_cache.entries.clear();texture_plan_bytes=layout_plan_bytes=0;texture_context=context_scratch;}
         context_validated=true;
+    }
+    // The validated texture context as one word sequence, in a fixed order.
+    template<class F> void texture_context_words(F&& f)const{
+        f(state.rsx.local_size);
+        for(auto v:state.rsx.io)f(v);
+        for(auto v:state.rsx.io_flags)f(v);
+        for(const auto& t:state.rsx.tiles)for(std::uint64_t v:{std::uint64_t(t.bound),std::uint64_t(t.location),std::uint64_t(t.offset),std::uint64_t(t.size),std::uint64_t(t.pitch),std::uint64_t(t.compression),std::uint64_t(t.base),std::uint64_t(t.bank),std::uint64_t(t.range_word),std::uint64_t(t.format_word)})f(v);
+        for(const auto& r:state.maps)for(std::uint64_t v:{std::uint64_t(r.base),std::uint64_t(r.flags),std::uint64_t(r.identity),std::uint64_t(reinterpret_cast<std::uintptr_t>(r.bytes.get())),std::uint64_t(reinterpret_cast<std::uintptr_t>(r.bytes->data())),std::uint64_t(r.bytes->size())})f(v);
     }
     Texture texture_metadata(unsigned unit,bool context_validated=false){
         if(fallback_stats().enabled)++fallback_stats().paths["texture_metadata"];

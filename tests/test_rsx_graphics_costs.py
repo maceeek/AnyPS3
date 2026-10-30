@@ -91,7 +91,31 @@ static void session_backend_(){
  s.rsx.draw.ranges={{0,4}};bool rejected=false;try{rsx_execute_draw(s);}catch(const std::runtime_error&){rejected=true;}assert(rejected);setenv("ANYPS3_RSX_BACKEND","gpu",1);
  std::puts("PASS admitted Session backend and independent standalone environment validation");
 }
-int main(){try{target_tracking_();raw_pages_();pipeline_pins_();draw_reads_();draw_read_coherence_();session_backend_();}catch(const std::exception& e){std::fprintf(stderr,"FAIL %s\n",e.what());return 1;}}
+// Texture-context validation (once per FIFO turn): the cached plans are dropped (generation bump) exactly when one of its inputs
+// changed since the last validation: local size, an IO page or its flags, a tile field, a mapping's base/rights/identity/backing.
+// Independent expectation: +1 per changed validation, +0 for an unchanged one, and none while the FIFO scope holds it validated.
+static void texture_context_(){
+ PpuState s;setup_draw(s,8,8,32,false);NativeVulkan vk;rsxgraphics::Session session(vk,s);
+ auto& g=s.rsx;session.validate_texture_context();
+ std::uint64_t expect=session.texture_plans_generation;
+ auto check=[&](bool changed,const char* what){session.context_validated=false;session.validate_texture_context();expect+=changed;
+  if(session.texture_plans_generation!=expect)throw std::runtime_error(std::string("texture context ")+what+": generation "+std::to_string(session.texture_plans_generation)+" expected "+std::to_string(expect));};
+ check(false,"unchanged");check(false,"unchanged again");
+ const auto io=g.io[3];g.io[3]=0x81000000;check(true,"io page");check(false,"io page kept");g.io[3]=io;check(true,"io page restored");
+ g.io_flags[5]^=1;check(true,"io flags");g.io_flags[5]^=1;check(true,"io flags restored");
+ g.tiles[2].pitch+=64;check(true,"tile pitch");g.tiles[14].bound=!g.tiles[14].bound;check(true,"last tile bound");
+ g.local_size-=0x1000;check(true,"local size");check(false,"local size kept");
+ s.memory.regions.push_back({0x81000000,6,std::make_shared<GuestBacking>(0x1000)});check(true,"added mapping");
+ s.memory.regions.back().flags=2;check(true,"mapping rights");
+ s.memory.regions.back().bytes=std::make_shared<GuestBacking>(0x1000);check(true,"mapping backing");check(false,"mapping kept");
+ s.memory.regions.pop_back();check(true,"removed mapping");
+ // Inside a FIFO scope the validated context is reused without a check.
+ session.fifo_context=true;session.context_validated=false;session.validate_texture_context();
+ g.io[7]=0x81000000;session.validate_texture_context();if(session.texture_plans_generation!=expect)throw std::runtime_error("validated FIFO context was re-checked");
+ session.fifo_context=false;check(true,"io page after the FIFO scope");
+ std::puts("PASS texture context validation drops plans exactly when an input changed");
+}
+int main(){try{texture_context_();target_tracking_();raw_pages_();pipeline_pins_();draw_reads_();draw_read_coherence_();session_backend_();}catch(const std::exception& e){std::fprintf(stderr,"FAIL %s\n",e.what());return 1;}}
 '''
 
 def native_source():
@@ -106,4 +130,4 @@ class GraphicsCostsTests(unittest.TestCase):
             self.assertEqual(result.returncode,0,result.stdout+result.stderr)
             result=subprocess.run([str(binary)],env=dict(os.environ,LP_NUM_THREADS='4'),capture_output=True,text=True,timeout=180)
             self.assertEqual(result.returncode,0,result.stdout+result.stderr)
-            self.assertEqual(result.stdout.count('PASS '),6,result.stdout)
+            self.assertEqual(result.stdout.count('PASS '),7,result.stdout)

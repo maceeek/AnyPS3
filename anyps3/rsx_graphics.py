@@ -662,6 +662,9 @@ struct Session {
     const unsigned flight_limit=rsx_flight_limit();
     std::deque<Flight> flights;
     std::vector<std::unique_ptr<NativeVulkan::GraphicsBatch>> spare_batches;
+    // Emptied label/pending vectors of retired flights: a submit moves the current ones into its flight, so without reuse every
+    // FIFO turn regrows them (Label moves on each reallocation). Only capacity is recycled; a pooled vector is always empty.
+    std::vector<std::vector<Label>> label_pool;std::vector<std::vector<Pending>> pending_pool;
     std::uint64_t async_submits=0,async_retires=0,label_waits=0,label_ready=0;
     unsigned submit_draws=64,submit_extend=4;
     void kick_draws(){
@@ -706,6 +709,8 @@ struct Session {
             for(auto& completion:flight.completions)completion(*flight.batch);
             if(rsx_poll_adaptive())flight_ns=0.8*flight_ns+0.2*double(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-flight.submitted).count());
             vk.graphics_reset(*flight.batch);vk.graphics_move_stats(*flight.batch,*batch);
+            if(flight.labels.empty() && flight.labels.capacity() && label_pool.size()<4)label_pool.push_back(std::move(flight.labels));
+            if(flight.pending.capacity() && pending_pool.size()<4){flight.pending.clear();pending_pool.push_back(std::move(flight.pending));}
             spare_batches.push_back(std::move(flight.batch));flights.pop_front();++async_retires;
         }}catch(...){failed=true;throw;}
     }
@@ -738,6 +743,8 @@ struct Session {
             vk.graphics_move_stats(*batch,*next);
             flights.push_back({std::move(batch),std::move(pending),std::move(labels),std::move(query_results),rsx_poll_adaptive()?std::chrono::steady_clock::now():std::chrono::steady_clock::time_point{},std::move(completions),pending_report_floor});
             batch=std::move(next);pending.clear();pending_report_floor=0;labels.clear();completions.clear();query_results=std::make_shared<std::vector<std::uint64_t>>();++async_submits;
+            if(!label_pool.empty()){labels=std::move(label_pool.back());label_pool.pop_back();}
+            if(!pending_pool.empty()){pending=std::move(pending_pool.back());pending_pool.pop_back();}
         }catch(...){failed=true;throw;}
     }
     bool label_page_overlap(const Label& label,const void* pointer,std::uint64_t size)const{
@@ -805,12 +812,13 @@ struct Session {
         const auto& part=mapping.parts[0];GuestMemory::HostGuard probe(false);const bool safe=probe.add(part.data,16,*part.owner);probe.spans.clear();if(!safe)return false;
         for(const auto& surface:surfaces)if(surface.overlaps(part.data,16))return false;
         if(labels.size()>=256)submit_async("label_capacity");
-        Label report{mapping,address,type,16,true,active,stats,state.rsx.report_values[0],{}};
+        const auto* data=part.data;
+        Label report{std::move(mapping),address,type,16,true,active,stats,state.rsx.report_values[0],{}};
         // Snapshot attribution now: RESET_REPORT may clear the live pending
         // flags later, but cannot change an already issued report's prefix.
         for(const auto& flight:flights)for(std::size_t n=flight.report_floor;n<flight.pending.size();++n){const auto& p=flight.pending[n];if(p.report)report.queries.push_back({flight.results,p.first,p.count});}
         for(std::size_t n=pending_report_floor;n<pending.size();++n){const auto& p=pending[n];if(p.report)report.queries.push_back({query_results,p.first,p.count});}
-        labels.push_back(std::move(report));watch_poll(part.data,16,true);++ownership_revision;
+        labels.push_back(std::move(report));watch_poll(data,16,true);++ownership_revision;
         if(fallback_stats().enabled){++fallback_stats().paths["report_deferred"];std::ostringstream detail;detail<<"address=0x"<<std::hex<<address<<" type="<<type<<" pc=0x"<<state.pc;fallback_stats().detail("report_producer",detail.str());}
         return true;
     }
