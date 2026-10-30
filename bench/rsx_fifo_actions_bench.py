@@ -15,7 +15,10 @@ counters of the worker and main threads after WARM frames and dumps both after t
 the worker thread (the file whose profile holds rsx_run_impl) is steady-state cost only.
 
 Usage: python3 bench/rsx_fifo_actions_bench.py [-o OUT_DIR] [--no-run] [CXXFLAGS...]
-The binary takes key=value arguments: frames= warm= units= reports= backend= frontend= surfaces= zcull= turns= draw_every=
+The binary takes key=value arguments: frames= warm= units= reports= backend= frontend= surfaces= zcull= turns= draw_every= indexed=
+indexed=1 makes each drawing unit game-shaped: an indexed triangle list (1200 BE16 indices in local memory over a 20x20 vertex
+grid with positions and UVs in IO memory) with a sampled texture and the fragment program in local memory, all read by the
+draw from concurrent guest memory (the draw bench uses a non-concurrent GuestMemory).
 and prints ns/frame (wall, lavapipe included) and the worker-relevant counters.
 """
 import argparse
@@ -40,7 +43,7 @@ MAIN = r'''
 #define BENCH_DUMP() do{}while(0)
 #endif
 static const std::uint32_t BASE=0x20000,IO=0x70000000,REPORTS=0x80000000;
-struct Config {unsigned frames=6,warm=2,units=2000,reports=230,backend=16,frontend=8,surfaces=32,zcull=8,turns=32,draw_every=0;};
+struct Config {unsigned frames=6,warm=2,units=2000,reports=230,backend=16,frontend=8,surfaces=32,zcull=8,turns=32,draw_every=0,indexed=0;};
 struct Stream {
  PpuState& s;std::uint32_t at=BASE;std::vector<std::uint32_t> turn_ends;
  std::vector<std::pair<std::uint32_t,std::uint32_t>> values;   // (IO offset of a semaphore value word, base value)
@@ -67,8 +70,11 @@ static void build(Stream& st,const Config& c){
   st.method(0x1680,{R[0x1680],R[0x1684]});st.method(0x1740,{R[0x1740],R[0x1744]});     // vertex arrays as configured
   st.method(0x8e4,{R[0x8e4]});st.method(0x1d60,{R[0x1d60]});
   st.method(0x310,{n&1});st.method(0x324,{0x01010101u});st.method(0xa74,{0});
-  st.method(0x1808,{8});
-  if(c.draw_every && n%c.draw_every==0)st.method(0x1814,{3u<<24});
+  st.method(0x1808,{c.indexed?5u:8u});
+  if(c.draw_every && n%c.draw_every==0){
+   if(c.indexed){st.method(0x181c,{0x4000,0x10});   // 1200 indices: five DRAW_INDEX_ARRAY words (one packet each: an incrementing packet would write 0x1828..0x1834)
+    for(const auto w:{255u<<24,256u|(255u<<24),512u|(255u<<24),768u|(255u<<24),1024u|(175u<<24)})st.method(0x1824,{w});}
+   else st.method(0x1814,{3u<<24});}
   st.method(0x1808,{0});
   if(query)st.method(0x1800,{(1u<<24)|((report++%2048)*16)});
   if(every(n,c.backend,c.units)){st.method(0x1d6c,{0x100u+(backend%32)*16});st.release(0x1d70,0x01000000u*(backend%32+1));++backend;}
@@ -83,9 +89,17 @@ int main(int argc,char** argv){try{
   const auto k=a.substr(0,eq);const unsigned v=unsigned(std::stoul(a.substr(eq+1)));
   if(k=="frames")c.frames=v;else if(k=="warm")c.warm=v;else if(k=="units")c.units=v;else if(k=="reports")c.reports=v;else if(k=="backend")c.backend=v;
   else if(k=="frontend")c.frontend=v;else if(k=="surfaces")c.surfaces=v;else if(k=="zcull")c.zcull=v;else if(k=="turns")c.turns=v;else if(k=="draw_every")c.draw_every=v;
+  else if(k=="indexed")c.indexed=v;
   else throw std::runtime_error("unknown argument "+k);}
  setenv("ANYPS3_RSX_BACKEND","gpu",1);setenv("ANYPS3_RSX_WORKER","0",1);setenv("ANYPS3_SPU_THREADS","0",1);
  PpuState s;setup_draw(s,8,8,32,false);auto& g=s.rsx;auto& m=s.memory;
+ if(c.indexed){   // the draw bench's indexed_mesh data (scenario 4), scaled to the 8x8 target
+  texture_fp(s);auto bits=[](float f){std::uint32_t w;std::memcpy(&w,&f,4);return w;};
+  for(unsigned v=0;v<400;++v){const float x=float(v%20)*0.4f,y=float(v/20)*0.4f;
+   const float p[4]={x,y,0.25f,1.f};for(unsigned k=0;k<4;++k)m.store(0x70002000+v*16+k*4,4,bits(p[k]));
+   for(unsigned k=0;k<2;++k)m.store(0x70004000+v*8+k*4,4,bits(k?y/8.f:x/8.f));}
+  g.registers[0x1684]=0x80004000;   // UV array
+  for(unsigned t=0;t<400;++t){const unsigned a=(t*7)%380,idx[3]={a,a+1,a+20};for(unsigned k=0;k<3;++k)m.store(0xc0004000+(t*3+k)*2,2,idx[k]);}}
  m.map(0x70010000,0xf0000,6,nullptr,0);m.map(REPORTS,0x10000,6,nullptr,0);
  g.dma=0x70008000;g.reports=REPORTS;g.fifo_enabled=true;g.draw.primitive=0;g.draw.ranges.clear();
  g.registers[0x8c0]=8u<<16;g.registers[0x8c4]=8u<<16;
@@ -100,7 +114,7 @@ int main(int argc,char** argv){try{
     (void)rsx_worker_request(s,1u<<30);if(std::chrono::steady_clock::now()>until)throw std::runtime_error("FIFO did not reach PUT");std::this_thread::yield();}}
   w.queue->drain();};
  for(unsigned f=0;f<c.warm;++f)frame(f);
- const auto packets=g.commands;
+ const auto packets=g.commands;const auto draws=g.draw.draws;
  // Callgrind counters are per thread: zero and dump on the RSX owner (worker) thread itself, and on this thread.
  w.queue->call(RsxOwnerQueue::Kind::HostAccess,[]{BENCH_ZERO();});BENCH_ZERO();const auto t0=std::chrono::steady_clock::now();
  for(unsigned f=0;f<c.frames;++f)frame(c.warm+f);
@@ -124,6 +138,7 @@ int main(int argc,char** argv){try{
  life.finish();
  std::printf("frames=%u units=%u reports=%u backend=%u frontend=%u surfaces=%u zcull=%u turns=%u draw_every=%u packets/frame=%.0f %.3f ms/frame releases_checked=%u\n",
   c.frames,c.units,c.reports,c.backend,c.frontend,c.surfaces,c.zcull,c.turns,c.draw_every,double(g.commands-packets)/c.frames,ns/c.frames/1e6,checked);
+ std::printf("indexed=%u draws/frame=%.0f\n",c.indexed,double(g.draw.draws-draws)/c.frames);
 }catch(const std::exception& e){std::fprintf(stderr,"STOP %s\n",e.what());return 1;}}
 '''
 
