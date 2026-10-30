@@ -116,6 +116,10 @@ int main(int argc,char** argv){try{
     else if(reg==0x6c)expect[REPORTS+semaphore_offset]=v;
     else if(reg==0x1d70)expect[REPORTS+backend_offset]=(v&0xff00ff00u)|((v&0xffu)<<16)|((v>>16)&0xffu);}
    at+=4+4*count;}
+  // Deferred labels of the last frame are published when their flight retires (service ticks): pump until they are final.
+  auto final=[&]{for(const auto& [address,value]:expect)if(m.load(address,4)!=value)return false;return true;};
+  for(const auto until=std::chrono::steady_clock::now()+std::chrono::seconds(120);!final() && std::chrono::steady_clock::now()<until;){
+   (void)rsx_worker_request(s,1u<<30);std::this_thread::sleep_for(std::chrono::milliseconds(1));}
   for(const auto& [address,value]:expect){if(m.load(address,4)!=value)throw std::runtime_error("release at "+std::to_string(address)+" holds "+std::to_string(m.load(address,4))+" expected "+std::to_string(value));++checked;}}
  life.finish();
  std::printf("frames=%u units=%u reports=%u backend=%u frontend=%u surfaces=%u zcull=%u turns=%u draw_every=%u packets/frame=%.0f %.3f ms/frame releases_checked=%u\n",
