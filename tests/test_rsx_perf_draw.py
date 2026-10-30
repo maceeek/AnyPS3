@@ -196,7 +196,23 @@ static void pipeline_lookup(){
  unsetenv("ANYPS3_RSX_PIPELINE_LIMIT");
  std::puts("PASS pipeline lookup: one pipeline per state, eviction at every switch with a one-entry cache");
 }
-int main(){try{level_values();image_pins();indexed_reads();shader_reads();write_membership();dynamic_state();register_reads();register_prefix();triangle_list();blob_descriptors();pipeline_lookup();}catch(const std::exception& e){std::fprintf(stderr,"STOP %s\n",e.what());return 1;}}
+static void sampling_words(){
+ PpuState s;setup_draw(s,8,8,32,false);texture_fp(s);s.rsx.renderer=std::make_unique<NativeVulkan>();rsxgraphics::Session session(*s.rsx.renderer,s);s.rsx.graphics_session=&session;session.observe();
+ setenv("ANYPS3_RSX_BACKEND","gpu",1);auto& R=s.rsx.registers;const auto& data=session.draw_data;
+ auto run=[&]{s.rsx.draw.ranges={{0,4}};rsx_execute_draw(s);};
+ // Unit 0 descriptor (blob word 48+): +3/+4/+30 wrap s/t/r = TEXTURE_ADDRESS nibbles 0/8/16, +5/+6 min/mag = FILTER bits 16-18/24-26.
+ // The layout (offset/format/rect/control3) never changes here: the same metadata entry serves every draw.
+ const unsigned cases[][2]={{0x00030303,0x02020000},{0x00010101,0x02020000},{0x00010101,0x01010000},{0x00020301,0x02010000},{0x00030303,0x02020000}};
+ for(const auto& c:cases){R[0x1a08]=c[0];R[0x1a14]=c[1];run();
+  const unsigned wrap_s=c[0]&15,wrap_t=(c[0]>>8)&15,wrap_r=(c[0]>>16)&15,min=(c[1]>>16)&7,mag=(c[1]>>24)&7;
+  if(data[48+3]!=wrap_s || data[48+4]!=wrap_t || data[48+30]!=wrap_r || data[48+5]!=min || data[48+6]!=mag){
+   std::fprintf(stderr,"sampling %08x/%08x: wrap %u %u %u min %u mag %u\n",c[0],c[1],data[48+3],data[48+4],data[48+30],data[48+5],data[48+6]);assert(false);}}
+ // An unsupported filter still stops on every draw, also right after a cached configuration of the same layout.
+ for(unsigned n=0;n<2;++n){R[0x1a14]=0x03030000;bool failed=false;try{run();}catch(const std::runtime_error&){failed=true;}assert(failed);}
+ R[0x1a14]=0x02020000;run();session.flush();s.rsx.graphics_session=nullptr;
+ std::puts("PASS texture sampling words follow every address/filter change of one layout; invalid filters still stop");
+}
+int main(){try{level_values();image_pins();indexed_reads();shader_reads();write_membership();dynamic_state();register_reads();register_prefix();triangle_list();blob_descriptors();pipeline_lookup();sampling_words();}catch(const std::exception& e){std::fprintf(stderr,"STOP %s\n",e.what());return 1;}}
 '''
 
 
@@ -218,5 +234,5 @@ class WarmDrawTests(unittest.TestCase):
                 env.update(VK_DRIVER_FILES='/usr/share/vulkan/icd.d/lvp_icd.json',ANYPS3_VK_DEVICE='lavapipe')
             p=subprocess.run([str(binary)],env=env,capture_output=True,text=True,timeout=120)
             self.assertEqual(p.returncode,0,p.stdout+p.stderr)
-            self.assertEqual(p.stdout.count('PASS '),11)
+            self.assertEqual(p.stdout.count('PASS '),12)
             self.assertNotIn('Validation Error',p.stderr);self.assertNotIn('Validation Warning',p.stderr)

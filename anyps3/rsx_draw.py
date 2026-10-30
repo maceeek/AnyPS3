@@ -1341,7 +1341,7 @@ struct DrawTextureUnits {
     static bool& busy(){static thread_local bool flag=false;return flag;}
     std::unique_ptr<std::array<Texture,16>> nested;std::array<Texture,16>& units;unsigned touched=0;const bool outer;
     DrawTextureUnits():nested(busy()?std::make_unique<std::array<Texture,16>>():nullptr),units(nested?*nested:scratch()),outer(!nested){if(outer)busy()=true;}
-    ~DrawTextureUnits(){if(!outer)return;for(unsigned u=0;u<16;++u)if(touched&(1u<<u))units[u]=Texture{};busy()=false;}
+    ~DrawTextureUnits(){if(!outer)return;for(unsigned u=0;u<16;++u)if(touched&(1u<<u)){units[u].~Texture();new(&units[u]) Texture();}busy()=false;}
     DrawTextureUnits(const DrawTextureUnits&)=delete;DrawTextureUnits& operator=(const DrawTextureUnits&)=delete;
 };
 }

@@ -2117,7 +2117,8 @@ template<class Vertex> static bool prepared(Session& session,const std::vector<s
         const unsigned desc=(alias?2064:48)+unit*32;data[desc]=data.size();data[desc+1]=t.mip_count;data[desc+2]=t.unnormalized;data[desc+3]=t.wrap_s;data[desc+4]=t.wrap_t;
         data[desc+5]=t.min;data[desc+6]=t.mag;data[desc+7]=float_bits(t.bias);data[desc+8]=float_bits(t.min_lod);data[desc+9]=float_bits(t.max_lod);
         data[desc+10]=t.gamma;data[desc+11]=t.features;data[desc+12]=t.signed_mask;data[desc+13]=t.biased;data[desc+14]=t.alpha_kill;
-        for(unsigned c=0;c<4;++c){data[desc+15+c]=t.remap_channel[c];data[desc+19+c]=t.remap_control[c];data[desc+23+c]=float_bits((t.shadow?t.border:texture_input(t,t.border,true))[c]);}
+        const Vec4 border=t.shadow?t.border:texture_input(t,t.border,true);   // pure: once per unit, not per channel
+        for(unsigned c=0;c<4;++c){data[desc+15+c]=t.remap_channel[c];data[desc+19+c]=t.remap_control[c];data[desc+23+c]=float_bits(border[c]);}
         data[desc+27]=t.dimension;data[desc+28]=t.cube;data[desc+29]=t.shadow;data[desc+30]=t.wrap_r;
 
         const unsigned raw_levels=data.size();data[desc+31]=raw_levels;data.resize(raw_levels+t.levels.size()*8);
