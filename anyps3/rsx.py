@@ -656,18 +656,23 @@ static const std::array<std::uint8_t,0x4000>& rsx_plain_table(){
 }
 // One admitted read per 1 MiB IO page for longer packets; any failure
 // repeats the original per-word loads, which raise the original error.
-static void rsx_fifo_values(NativeRsx& gpu,GuestMemory& m,std::uint32_t at,unsigned count,std::uint32_t* out){
+// `cursor` (renderer page cursor, may be null) serves the reads it can; a declined read takes the original transfer/load.
+static void rsx_fifo_values(NativeRsx& gpu,GuestMemory& m,std::uint32_t at,unsigned count,std::uint32_t* out,GuestMemory::RenderCursor* cursor=nullptr){
     if(count>=4){
         try{std::uint8_t bytes[0x2000];unsigned done=0;
             while(done<count){
                 const unsigned n=std::min<unsigned>(count-done,(0x100000-((at+done*4)&0xfffff))/4);
-                m.transfer(rsx_address(gpu,at+done*4),bytes+done*4,n*4,false);done+=n;
+                const auto address=rsx_address(gpu,at+done*4);
+                if(!cursor || !cursor->read(address,bytes+done*4,n*4))m.transfer(address,bytes+done*4,n*4,false);
+                done+=n;
             }
             for(unsigned i=0;i<count;++i){const auto* b=bytes+4*i;out[i]=(std::uint32_t(b[0])<<24)|(std::uint32_t(b[1])<<16)|(std::uint32_t(b[2])<<8)|b[3];}
             return;
         }catch(const std::exception&){}
     }
-    for(unsigned i=0;i<count;++i)out[i]=static_cast<std::uint32_t>(m.load(rsx_address(gpu,at+i*4),4));
+    for(unsigned i=0;i<count;++i){const auto address=rsx_address(gpu,at+i*4);std::uint64_t word;
+        if(!cursor || !cursor->load(address,4,word))word=m.load(address,4);
+        out[i]=static_cast<std::uint32_t>(word);}
 }
 // FIFO window (WARMUP4): command words are read in bulk, one admitted Range read of up to 4 KiB of the published region [GET,PUT)
 // inside one 1 MiB IO page, instead of a scalar load per header plus per-word loads or a transfer per packet (~23k packets/frame in
@@ -738,9 +743,14 @@ static bool rsx_run_impl(PpuState& s,unsigned budget,bool idle_poll=false){
     };
     auto in_window=[&](std::uint32_t at,std::uint64_t n){return window.valid && at>=window.base && std::uint64_t(at)+n<=window.end;};
     try{
+    // Renderer page cursor (GuestMemory::RenderCursor, ANYPS3_RSX_RENDER_BATCH): header/value reads keep one command-buffer
+    // page admitted between packets. It is revoked before the owner hook, a perf capture and every method other than a plain
+    // register store or a transform-constant upload (below), by any other GuestMemory call (GET publication, PUT loads,
+    // transfers it declines) and on leaving this scope, so nothing that can wait, block or call back runs while it is held.
+    GuestMemory::RenderCursor fifo_reads(m);
     for(unsigned step=0;step<budget;++step){
         if(__builtin_expect(rsx_host_waiters.load(std::memory_order_relaxed)!=0,0)){   // = rsx_owner_poll(); the request may change memory
-            window.valid=false;auto& hook=rsx_owner_hook();if(hook)hook();}
+            window.valid=false;fifo_reads.revoke();auto& hook=rsx_owner_hook();if(hook)hook();}
         if(!cursor){window.valid=false;put=static_cast<std::uint32_t>(m.load(gpu.dma+0x40,4));get=static_cast<std::uint32_t>(m.load(gpu.dma+0x44,4));cursor=true;}
         else if(get==put){window.valid=false;put=static_cast<std::uint32_t>(m.load(gpu.dma+0x40,4));}
         if((get|put)&3)throw std::runtime_error("unaligned RSX FIFO position");
@@ -754,8 +764,9 @@ static bool rsx_run_impl(PpuState& s,unsigned budget,bool idle_poll=false){
         std::uint32_t header,paired=0;bool have_pair=false;
         if(in_window(get,4))header=window.words[(get-window.base)/4];
         else{const auto address=rsx_address(gpu,get);
-            if(rsx_fifo_pair && get<put && put-get>=8 && (address&0xfff)<=0xff8){const auto both=m.load(address,8);header=std::uint32_t(both>>32);paired=std::uint32_t(both);have_pair=true;}
-            else header=static_cast<std::uint32_t>(m.load(address,4));}
+            if(rsx_fifo_pair && get<put && put-get>=8 && (address&0xfff)<=0xff8){std::uint64_t both;if(!fifo_reads.load(address,8,both))both=m.load(address,8);
+                header=std::uint32_t(both>>32);paired=std::uint32_t(both);have_pair=true;}
+            else{std::uint64_t word;if(!fifo_reads.load(address,4,word))word=m.load(address,4);header=static_cast<std::uint32_t>(word);}}
         std::uint32_t next=get+4;
         if((header&0xe0000003)==0x20000000 || (header&0xe0000003)==1){
             next=header&((header&1)?0xfffffffc:0x1ffffffc);
@@ -806,23 +817,24 @@ static bool rsx_run_impl(PpuState& s,unsigned budget,bool idle_poll=false){
                     }
                 }
                 if(in_window(get+4,std::uint64_t(count)*4))std::copy_n(window.words+(get+4-window.base)/4,count,values);
-                else if(have_pair){window.valid=false;values[0]=paired;if(count>1)rsx_fifo_values(gpu,m,get+8,count-1,values+1);}
-                else{window.valid=false;rsx_fifo_values(gpu,m,get+4,count,values);}
+                else if(have_pair){window.valid=false;values[0]=paired;if(count>1)rsx_fifo_values(gpu,m,get+8,count-1,values+1,&fifo_reads);}
+                else{window.valid=false;rsx_fifo_values(gpu,m,get+4,count,values,&fifo_reads);}
                 const auto& plain=rsx_plain_table();
                 for(unsigned i=gpu.packet_index;i<count;++i){
                     const auto reg=method+i*increment,value=values[i];
                     // rsx_capture_method returns at once without an active capture: test that here (no call per method).
-                    if(rsx_fifo_plain_fast && reg<0x10000 && !(reg&3) && plain[reg>>2]){if(gpu.perf_capture.active)rsx_capture_method(s,reg,value);gpu.registers.write(reg,value);continue;}
+                    if(rsx_fifo_plain_fast && reg<0x10000 && !(reg&3) && plain[reg>>2]){if(gpu.perf_capture.active){fifo_reads.revoke();rsx_capture_method(s,reg,value);}gpu.registers.write(reg,value);continue;}
                     window.valid=false;   // not a plain store: later command words are read again
                     // Transform constant upload (the most frequent non-plain method): exactly the effects of the chain below for
                     // 0x1f00..0x1f7c (class 1, no other case matches, rsx_vertex_data_register ignores it): constant + raw register.
                     if(rsx_fifo_plain_fast && reg>=0x1f00 && reg<=0x1f7c){
-                        if(gpu.perf_capture.active)rsx_capture_method(s,reg,value);
+                        if(gpu.perf_capture.active){fifo_reads.revoke();rsx_capture_method(s,reg,value);}
                         const std::uint64_t word=std::uint64_t(rsx_reg(gpu,0x1efc))*4+(reg-0x1f00)/4;
                         if(word>=gpu.transform_constants.size())throw std::runtime_error("RSX transform constant index outside bank");
                         gpu.transform_constants.write(word,value);gpu.transform_constants_written.write(word,true);
                         gpu.registers.write(reg,value);continue;
                     }
+                    fifo_reads.revoke();   // every other method may wait, block, call back or access guest memory itself
                     if(method_class(reg)==2)publish();
                     if(reg!=0x68 && gpu.perf_capture.active)rsx_capture_method(s,reg,value);
                     if(reg==0 && value!=0x31337000)throw std::runtime_error("unsupported RSX channel object");

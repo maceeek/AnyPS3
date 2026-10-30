@@ -354,3 +354,106 @@ class Parallel13Memory(unittest.TestCase):
  bool stale=false;try{range.read(0,b,16);}catch(const std::runtime_error& e){stale=std::string(e.what()).find("stale guest range")!=std::string::npos;}
  assert(stale);
 ''')
+
+    def cursor_case(self, name, body, switch='1'):
+        previous = os.environ.get('ANYPS3_RSX_RENDER_BATCH')
+        os.environ['ANYPS3_RSX_RENDER_BATCH'] = switch
+        try:
+            self.native(name, body)
+        finally:
+            if previous is None:
+                os.environ.pop('ANYPS3_RSX_RENDER_BATCH', None)
+            else:
+                os.environ['ANYPS3_RSX_RENDER_BATCH'] = previous
+
+    # Renderer page cursor: an 8 KiB map at 0x10000 whose word i holds 0x5a000000+i (independent of the code), a second map
+    # at 0x20000 and a write-only map at 0x30000. `renderer` runs a body on its own thread registered as the renderer.
+    CURSOR_SETUP = r'''
+ GuestMemory m;m.map(0x10000,8192,6,nullptr,0);for(unsigned i=0;i<2048;++i)m.store(0x10000+i*4,4,0x5a000000u+i);
+ m.map(0x20000,4096,6,nullptr,0);m.map(0x30000,4096,2,nullptr,0);m.enable_concurrency();m.enable_page_broker();
+ std::atomic<unsigned> host_calls{0};
+ m.renderer_access=[&](const void*,std::uint64_t,bool){++host_calls;};
+ auto word=[](unsigned i){return std::uint64_t(0x5a000000u+i);};(void)word;
+ auto renderer=[&](auto body){std::atomic<bool> bound{false};
+  std::thread t([&m,&bound,body]{m.renderer_thread=std::this_thread::get_id();bound=true;body();m.release_reader_slot();});
+  while(!bound.load()){std::this_thread::yield();}return t;};
+ m.renderer_enabled=true;
+'''
+
+    def test_render_cursor_reads_live_words_and_revokes_for_other_apis(self):
+        # Served loads return the words m.load returns; any other GuestMemory API on the thread (a store, a transfer, a
+        # RawPermit of the renderer itself) revokes the cursor first, so its hazard is never overwritten or held across
+        # them; reads crossing the host page, unmapped and unreadable addresses are not served and still fault through
+        # m.load; ANYPS3_RSX_RENDER_BATCH=0 serves nothing. A foreign (non-renderer) thread never gets a cursor.
+        for switch in ('1', '0'):
+            self.cursor_case('cursor-basic-' + switch, self.CURSOR_SETUP + r'''
+ const bool on=std::getenv("ANYPS3_RSX_RENDER_BATCH")[0]=='1';
+ auto t=renderer([&]{auto& local=m.local_state();m.store(0x20000,4,6);   // warm: the store below admits on its first try
+  {GuestMemory::RenderCursor cursor(m);std::uint64_t v=0;
+   for(unsigned i=0;i<2048;++i){const std::uint64_t a=0x10000+i*4;if(!cursor.load(a,4,v))v=m.load(a,4);assert(v==word(i));}
+   assert(GuestMemory::cursor_reads==(on?2046u:0u));   // the first read of each page fills the scalar map cache
+   for(unsigned i=0;i+1<2048;i+=2){const std::uint64_t a=0x10000+i*4;if(!cursor.load(a,8,v))v=m.load(a,8);assert(v==((word(i)<<32)|word(i+1)));}
+   for(unsigned i=1;i+1<1024;i+=2){const std::uint64_t a=0x10000+i*4;if(!cursor.load(a,8,v))v=m.load(a,8);assert(v==((word(i)<<32)|word(i+1)));}
+   std::uint8_t bytes[64];assert(cursor.read(0x10100,bytes,64)==on);
+   if(on)for(unsigned i=0;i<64;++i){assert(bytes[i]==std::uint8_t(word(0x40+i/4)>>(24-8*(i%4))));}
+   assert(local.cursor_active==on && (m.parallel->readers[local.slot].page.load()!=UINTPTR_MAX)==on);
+   m.store(0x20000,4,7);assert(!local.cursor_active && m.parallel->readers[local.slot].page.load()==UINTPTR_MAX);
+   assert(cursor.load(0x10000,4,v)==on);m.transfer(0x10004,bytes,8,false);assert(!local.cursor_active);
+   assert(cursor.load(0x10000,4,v)==on);{GuestMemory::RawPermit raw(m);assert(!local.cursor_active);assert(m.load(0x10008,4)==word(2));}
+   assert(cursor.load(0x10ffc,8,v)==false && !local.cursor_active);   // crosses the page: not served
+   assert(cursor.load(0x11000,4,v)==on && v==(on?word(1024):v));
+   assert(!cursor.load(0x40000,4,v));fault([&]{(void)m.load(0x40000,4);});
+   assert(!cursor.load(0x30000,4,v));fault([&]{(void)m.load(0x30000,4);});
+   assert(!local.cursor_active && (cursor.load(0x11004,4,v) || true));}
+  assert(!local.cursor_active && m.parallel->readers[local.slot].page.load()==UINTPTR_MAX);});
+ t.join();m.renderer_enabled=false;
+ std::thread foreign([&]{GuestMemory::RenderCursor cursor(m);std::uint64_t v;(void)m.load(0x10000,4);assert(!cursor.load(0x10000,4,v));m.release_reader_slot();});foreign.join();
+''', switch)
+
+    def test_render_cursor_yields_to_raw_writer_and_claim(self):
+        # The cursor holds its page while the renderer keeps reading one word. The owner then takes an exclusive RawPermit
+        # (round 0) or a GPU claim of that page (round 1): each is granted while the renderer is still in its read loop (no
+        # deadlock), no read is served by the cursor while the owner holds the page, the renderer makes no progress while
+        # the raw writer holds the gate, and it reads the word the owner wrote under its ownership (independent value).
+        self.cursor_case('cursor-owners', self.CURSOR_SETUP + r'''
+ auto pin=m.regions[0].bytes;
+ for(unsigned round=0;round<2;++round){
+  std::atomic<bool> pinned{false},holding{false};std::atomic<unsigned> served_while_held{0},reads{0};
+  const std::uint32_t fresh=0xc0de0000u+round;
+  auto t=renderer([&]{{GuestMemory::RenderCursor cursor(m);std::uint64_t v=0;
+    const auto until=std::chrono::steady_clock::now()+std::chrono::seconds(30);
+    do{assert(std::chrono::steady_clock::now()<until);const auto before=GuestMemory::cursor_reads;
+     if(!cursor.load(0x10400,4,v))v=m.load(0x10400,4);
+     if(GuestMemory::cursor_reads!=before){if(holding.load())++served_while_held;pinned=true;}++reads;
+    }while(v!=fresh);}});
+  while(!pinned.load())std::this_thread::yield();
+  if(round==0){GuestMemory::RawPermit raw(m);holding=true;const auto r=reads.load();
+   std::this_thread::sleep_for(std::chrono::milliseconds(30));assert(reads.load()<=r+1);
+   auto* p=m.access(0x10400,4,true);p[0]=std::uint8_t(fresh>>24);p[1]=std::uint8_t(fresh>>16);p[2]=std::uint8_t(fresh>>8);p[3]=std::uint8_t(fresh);holding=false;}
+  else{GuestMemory::GpuPages claim(m,{{pin->data()+0x400,4,pin}});holding=true;
+   std::this_thread::sleep_for(std::chrono::milliseconds(30));
+   auto* p=claim.pointer(0);p[0]=std::uint8_t(fresh>>24);p[1]=std::uint8_t(fresh>>16);p[2]=std::uint8_t(fresh>>8);p[3]=std::uint8_t(fresh);holding=false;}
+  t.join();assert(served_while_held.load()==0);
+ }
+''')
+
+    def test_render_cursor_respects_new_watch(self):
+        # A byte-exact watch is published on the pinned page by the owner while the renderer holds the cursor (watch()
+        # takes no exclusive admission): the next read of the page is not served and the watched bytes reach the
+        # renderer's observer path (renderer_access) exactly once; other pages are still served.
+        self.cursor_case('cursor-watch', self.CURSOR_SETUP + r'''
+ auto pin=m.regions[0].bytes;
+ {GuestMemory::RawPermit raw(m);m.host_access_observer=[](const void*,std::uint64_t,bool){};
+  m.host_access_observer.filtered=true;m.host_access_observer.supports_exact_bytes=true;}
+ std::atomic<bool> pinned{false},watched{false};
+ auto t=renderer([&]{GuestMemory::RenderCursor cursor(m);std::uint64_t v=0;
+  (void)m.load(0x10200,4);(void)m.load(0x11000,4);assert(cursor.load(0x10200,4,v) && v==word(0x80));pinned=true;
+  while(!watched.load())std::this_thread::yield();
+  const auto before=GuestMemory::cursor_reads;
+  assert(!cursor.load(0x10204,4,v));v=m.load(0x10204,4);assert(v==word(0x81) && host_calls==0);   // same page, other bytes
+  assert(!cursor.load(0x10300,4,v));v=m.load(0x10300,4);assert(v==word(0xc0) && host_calls==1);   // the watched word
+  assert(cursor.load(0x11000,4,v) && v==word(0x400) && GuestMemory::cursor_reads==before+1);});
+ while(!pinned.load())std::this_thread::yield();
+ m.host_access_observer.watch(pin->data()+0x300,4);watched=true;
+ t.join();m.renderer_enabled=false;
+''')

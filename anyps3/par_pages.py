@@ -163,7 +163,8 @@ TYPES = r'''
         GpuPages()=default;
         GpuPages(GuestMemory& m,std::vector<HostSpan> requested):spans(std::move(requested)){
             if(!m.page_broker.enabled.load())throw std::runtime_error("enable page broker before ownership acquisition");
-            auto& local=m.local_state();if(local.leases || local.raw)throw std::runtime_error("page ownership inside CPU/raw admission");
+            // A renderer page cursor never spans a claim (broker quiesce would wait for its own hazard).
+            auto& local=m.local_state();if(local.cursor_active)m.cursor_revoke(local);if(local.leases || local.raw)throw std::runtime_error("page ownership inside CPU/raw admission");
             // Only map owner may translate and pin new claims in this phase.
             if(!m.memory_owner() && !(m.renderer_owner() && (local.fault_claim || local.renderer_claim)))throw std::runtime_error("foreign page ownership requires map owner pin transaction");
             memory=&m;broker=&m.page_broker;GuestMemory::stat_gpu_claims.fetch_add(1,std::memory_order_relaxed);pages=PageBroker::keys(spans);token=broker->acquire(pages,m.renderer_owner() && (local.fault_claim || local.renderer_claim),&m.metadata_mutex.value);
