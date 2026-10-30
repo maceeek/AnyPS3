@@ -513,6 +513,45 @@ TYPES = RESERVATION_WAIT_TYPES + r'''
         [[gnu::always_inline]] ~ScalarAccess(){if(local){if(full_lease){--local->quiet;--local->leases;}retire(*local);}}
         ScalarAccess(const ScalarAccess&)=delete;
     };
+    // One-page read (ANYPS3_GUEST_PAGE_READ, default 1; 0 keeps the Lease path for every transfer/Range read): the compact
+    // ScalarAccess admission for a read of 1..4096 bytes inside one 4 KiB guest page and one host page, without Lease, span
+    // vector, CpuPages or a second translation. It only completes reads that the Lease path completes with no side effect, and
+    // returns false (nothing read, nothing published) for everything else, which then takes the unchanged Lease path and raises
+    // its own error or runs its own observer callback / claim wait:
+    //  * admission: the pending hazard closes the raw gate exactly as a compact scalar (RawPermit/map publication wait for it;
+    //    a closed gate declines); raw scopes, nested leases and broker-less or symmetric memory decline;
+    //  * the map comes from the admitted snapshot's scalar cache (a miss declines; the Lease path refills it), with its read
+    //    permission and bounds; `epoch` (a Range's pinned map epoch, 0 = none) must equal the admitted snapshot's;
+    //  * observers: paused as for scalars, otherwise any synchronous interest in the bytes (the same byte-exact lookup the
+    //    Lease path makes under transfer's HostByteAccess) declines, so every callback still runs on the Lease path;
+    //  * claims: the page hazard is published before the claim bit is read; a claimed page declines (the Lease path waits),
+    //    an unclaimed one cannot be acquired until the hazard is retired (broker quiesce waits for it), as for scalars;
+    //  * a stopped broker declines (the Lease path rethrows the stop reason).
+    // The bytes are the same acquire loads in the same order (atomic_read) from the same view (coherent iff exact bytes).
+    inline static const bool page_read_enabled=[]{const char* v=std::getenv("ANYPS3_GUEST_PAGE_READ");
+        if(v && std::strcmp(v,"0") && std::strcmp(v,"1")){throw std::runtime_error("invalid ANYPS3_GUEST_PAGE_READ");}return !v || !std::strcmp(v,"1");}();
+    inline static thread_local std::uint64_t page_reads=0;   // TEST HOOK: one-page reads completed by this thread
+    [[gnu::noinline]] bool read_page(std::uint64_t address,std::uint8_t* out,unsigned size,std::uint64_t epoch=0){
+        if(!page_read_enabled || !size || address>UINT32_MAX || (address>>12)!=((address+size-1)>>12) || !parallel->asymmetric ||
+           !page_broker.enabled.load(std::memory_order_acquire) || page_broker.stopped.load(std::memory_order_acquire))return false;
+        auto& state=local_state();if(state.raw || state.leases)return false;
+        suspend_scalar_batch(state);   // as Lease: no owner batch or inline section spans this admission
+        if(!try_enter_scalar_reader(state))return false;
+        const auto* hit=cached_parallel_map(state,address,size,false);
+        if(!hit || (epoch && epoch!=state.snapshot->epoch)){leave_scalar_reader(state);return false;}
+        const auto* pointer=hit->pointer+address-hit->base;const auto at=reinterpret_cast<std::uintptr_t>(pointer);
+        auto* cell=(at>>12)==((at+size-1)>>12)?page_broker.cell(at>>12):nullptr;
+        const bool exact=host_access_observer.supports_exact_bytes.load(std::memory_order_acquire);
+        if(!cell || (!(state.is_owner?in_host_access_observer:state.observer_pauses!=0) && host_access_observer &&
+           (!host_access_observer.filtered || cell->observed.load(std::memory_order_acquire)) && host_access_observer.synchronous(pointer,size,true))){
+            leave_scalar_reader(state);return false;}
+        parallel->readers[state.slot].page.store(at>>12,std::memory_order_release);
+        std::atomic_signal_fence(std::memory_order_seq_cst);
+        if((cell->state.load(std::memory_order_acquire)&PageBroker::claimed) || page_broker.stopped.load(std::memory_order_acquire)){
+            leave_scalar_reader(state);return false;}
+        atomic_read(exact?hit->coherent+address-hit->base:pointer,out,size);
+        leave_scalar_reader(state);++page_reads;return true;
+    }
     // GNU atomic byte-addressable storage. Naturally aligned scalars use their
     // actual width; bulk fringes use bytes, never read/merge/store a neighbour.
     // This is essential when two unreserved subwords share an enclosing word.

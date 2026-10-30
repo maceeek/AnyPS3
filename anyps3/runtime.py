@@ -628,6 +628,9 @@ struct GuestMemory {
             epoch=memory->parallel->epoch;
         }
         void read(unsigned offset,std::uint8_t* out,unsigned count)const{
+            // Concurrent reads go by address through the admitted snapshot (read_admitted below); a one-page read whose map
+            // epoch still equals this Range's needs no check_epoch revalidation and completes without side effects (par_memory).
+            if(memory->concurrent() && offset<=size && count<=size-offset && memory->read_page(address+offset,out,count,epoch))return;
         HostByteAccess exact_bytes{memory->host_access_observer.supports_exact_bytes.load(std::memory_order_acquire)};
             Lease lease(*memory,address+offset,count,false,true);check_epoch();
             if(memory->concurrent()){
@@ -1059,6 +1062,7 @@ struct GuestMemory {
         for(const auto& part:parts){atomic_read(part.source,buffer,part.size);buffer+=part.size;}
     }
     void transfer(std::uint64_t address,std::uint8_t* buffer,unsigned size,bool write) {
+        if(!write && concurrent() && read_page(address,buffer,size))return;   // one-page read without side effects (par_memory)
         HostByteAccess exact_bytes{host_access_observer.supports_exact_bytes.load(std::memory_order_acquire)};
         // A transfer inside one guest page is one span: admit it like a scalar access and skip the per-page broker set.
         const bool one_page=size && address<=UINT32_MAX && (address>>12)==((address+size-1)>>12);

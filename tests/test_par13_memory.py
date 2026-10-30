@@ -255,3 +255,102 @@ class Parallel13Memory(unittest.TestCase):
  {GuestMemory::GpuPages claim(m,{{pin->data(),4,pin}});
   for(std::size_t i=0;i<pages.size();++i)assert(bool(m.page_broker.cell(pages[i])->state.load()&GuestMemory::PageBroker::claimed)==(i==15));}
 ''')
+
+    def page_read_case(self, name, body, switch='1'):
+        previous = os.environ.get('ANYPS3_GUEST_PAGE_READ')
+        os.environ['ANYPS3_GUEST_PAGE_READ'] = switch
+        try:
+            self.native(name, body)
+        finally:
+            if previous is None:
+                os.environ.pop('ANYPS3_GUEST_PAGE_READ', None)
+            else:
+                os.environ['ANYPS3_GUEST_PAGE_READ'] = previous
+
+    # Guest bytes of the one-page read tests: byte i of the 8 KiB map at 0x10000 holds (i*7+3)&0xff (independent of the code).
+    PAGE_SETUP = r'''
+ GuestMemory m;m.map(0x10000,8192,6,nullptr,0);for(unsigned i=0;i<8192;++i)m.store(0x10000+i,1,(i*7+3)&0xff);
+ m.enable_concurrency();m.enable_page_broker();
+ auto expect=[](unsigned i){return std::uint8_t((i*7+3)&0xff);};
+ auto same=[&](const std::uint8_t* got,unsigned at,unsigned n){for(unsigned i=0;i<n;++i)if(got[i]!=expect(at-0x10000+i))return false;return true;};
+ (void)same;
+'''
+
+    def test_one_page_reads_without_lease(self):
+        # transfer and Range::read inside one guest page complete on the compact path (page_reads counts them after the
+        # first read filled the scalar map cache); a span across the page boundary keeps the Lease path. Same bytes
+        # either way, and ANYPS3_GUEST_PAGE_READ=0 takes the Lease path for all of them.
+        for switch in ('1', '0'):
+            self.page_read_case('page-read-' + switch, self.PAGE_SETUP + r'''
+ const bool on=std::getenv("ANYPS3_GUEST_PAGE_READ")[0]=='1';
+ std::thread reader([&]{std::uint8_t b[4096];
+  m.transfer(0x10000,b,4,false);m.transfer(0x11000,b,4,false);assert(same(b,0x11000,4));const auto warm=GuestMemory::page_reads;
+  const unsigned spans[][2]={{0x10000,4096},{0x10004,64},{0x10ffc,4},{0x10123,77},{0x11000,1},{0x11f00,256}};
+  for(const auto& s:spans){std::fill_n(b,sizeof(b),0);const auto before=GuestMemory::page_reads;m.transfer(s[0],b,s[1],false);
+   assert(same(b,s[0],s[1]));assert(GuestMemory::page_reads==before+(on?1:0));}
+  const auto before=GuestMemory::page_reads;m.transfer(0x10ff0,b,32,false);assert(same(b,0x10ff0,32));assert(GuestMemory::page_reads==before);
+  auto range=m.range(0x10f00,512,false);range.read(0x40,b,64);assert(same(b,0x10f40,64));
+  range.read(0xf8,b,16);assert(same(b,0x10ff8,16));   // crosses 0x11000: Lease path
+  assert(GuestMemory::page_reads==before+(on?1:0));(void)warm;
+  m.release_reader_slot();});
+ reader.join();
+''', switch)
+
+    def test_one_page_read_declines_observed_bytes(self):
+        # A byte-exact synchronous watch on part of the page: a read touching it runs the observer callback (Lease path),
+        # a read of other bytes of the same page completes without one.
+        self.page_read_case('page-read-observed', self.PAGE_SETUP + r'''
+ auto pin=m.regions[0].bytes;std::atomic<unsigned> calls{0};
+ {GuestMemory::RawPermit raw(m);m.host_access_observer=[&](const void* p,std::uint64_t n,bool write){
+   assert(!write && p<pin->data()+0x108 && static_cast<const std::uint8_t*>(p)+n>pin->data()+0x100);++calls;};
+  m.host_access_observer.filtered=true;m.host_access_observer.supports_exact_bytes=true;
+  m.host_access_observer.watch(pin->data()+0x100,8);}
+ std::uint8_t b[64];m.transfer(0x10000,b,4,false);
+ auto before=GuestMemory::page_reads;m.transfer(0x10200,b,64,false);assert(same(b,0x10200,64) && GuestMemory::page_reads==before+1 && calls==0);
+ m.transfer(0x100c0,b,64,false);assert(same(b,0x100c0,64) && GuestMemory::page_reads==before+2 && calls==0);   // ends at 0x100 (excl.)
+ m.transfer(0x100f8,b,16,false);assert(same(b,0x100f8,16) && calls==1 && GuestMemory::page_reads==before+2);
+ auto range=m.range(0x10000,4096,false);calls=0;range.read(0x104,b,8);assert(same(b,0x10104,8) && calls==1 && GuestMemory::page_reads==before+2);
+ range.read(0x400,b,8);assert(same(b,0x10400,8) && GuestMemory::page_reads==before+3);
+''')
+
+    def test_one_page_read_waits_for_claim_and_raw_writer(self):
+        # A GPU claim and then an exclusive raw writer hold the page while a foreign reader asks for it: the read must not
+        # complete before each releases, and it returns the bytes written under that ownership (new values, independent of
+        # the read path). No deadlock: both owners finish without waiting for the reader.
+        self.page_read_case('page-read-owners', self.PAGE_SETUP + r'''
+ auto pin=m.regions[0].bytes;
+ for(unsigned round=0;round<2;++round){
+  std::atomic<bool> warm{false},go{false},released{false};std::atomic<int> seen{-1};
+  std::thread reader([&]{std::uint8_t c[64];m.transfer(0x10400,c,64,false);const auto before=GuestMemory::page_reads;
+   m.transfer(0x10400,c,64,false);assert(GuestMemory::page_reads==before+1);   // warm: the compact path is taken
+   warm=true;while(!go.load())std::this_thread::yield();
+   m.transfer(0x10400,c,64,false);seen=released.load()?c[0]:-2;
+   for(unsigned i=1;i<64;++i){assert(c[i]==std::uint8_t(0xa0+round+i));}m.release_reader_slot();});
+  while(!warm.load())std::this_thread::yield();
+  std::optional<GuestMemory::GpuPages> claim;std::optional<GuestMemory::RawPermit> raw;
+  if(round==0){claim.emplace(m,std::vector<GuestMemory::HostSpan>{{pin->data()+0x400,64,pin}});
+   for(unsigned i=0;i<64;++i)claim->pointer(0)[i]=std::uint8_t(0xa0+round+i);}
+  else{raw.emplace(m);auto* p=m.access(0x10400,64,true);for(unsigned i=0;i<64;++i)p[i]=std::uint8_t(0xa0+round+i);}
+  go=true;std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  released=true;if(round==0)claim.reset();else raw.reset();
+  reader.join();assert(seen.load()==int(0xa0+round));
+ }
+''')
+
+    def test_one_page_read_faults_and_stale_range(self):
+        # Unmapped, unreadable and stale-epoch reads still stop with the Lease path's errors after the scalar map cache
+        # was warmed on the same page.
+        self.page_read_case('page-read-faults', self.PAGE_SETUP + r'''
+ std::uint8_t b[64];m.transfer(0x10000,b,64,false);m.transfer(0x11000,b,64,false);
+ fault([&]{m.transfer(0x20000,b,16,false);});
+ auto range=m.range(0x11000,64,false);range.read(0,b,16);assert(same(b,0x11000,16));
+ {GuestMemory::RawPermit raw(m);m.regions[0].flags=2;m.mapping_changed();}
+ fault([&]{m.transfer(0x10000,b,64,false);});
+ {GuestMemory::RawPermit raw(m);m.regions[0].flags=6;m.mapping_changed();}
+ m.transfer(0x10000,b,64,false);assert(same(b,0x10000,64));
+ // The Range's backing is replaced at the same address: its pinned parts are stale and the read must refuse them.
+ {GuestMemory::RawPermit raw(m);m.regions[0].bytes=std::make_shared<GuestBacking>(8192,0);m.mapping_changed();}
+ m.transfer(0x11000,b,16,false);for(unsigned i=0;i<16;++i)assert(b[i]==0);
+ bool stale=false;try{range.read(0,b,16);}catch(const std::runtime_error& e){stale=std::string(e.what()).find("stale guest range")!=std::string::npos;}
+ assert(stale);
+''')
