@@ -163,8 +163,20 @@ static void blob_descriptors(){
  // The constant MOV program samples nothing: every texture descriptor word of the next blob is zero.
  fpword(s,0,(1u<<24)|(15u<<9)|1u);fpword(s,1,2u|(0xe4u<<9)|(7u<<18));fpword(s,2,0);fpword(s,3,0);
  run();for(unsigned w=48;w<48+16*32;++w)if(data[w]){std::fprintf(stderr,"stale blob word %u=%08x\n",w,data[w]);assert(false);}
- session.flush();assert(near_argb(s.memory.load(0xc0100000,4),0x80ff8040));s.rsx.graphics_session=nullptr;
- std::puts("PASS draw blob: descriptors of a previous draw never leak into the next");
+ session.flush();assert(near_argb(s.memory.load(0xc0100000,4),0x80ff8040));
+ // Texture units of a previous draw never survive into the next (also after a draw that throws once units are bound):
+ // TEX R1=unit1; TEX R0=unit0 (END) binds two units, the single-unit program after it must leave unit 1's words zero.
+ auto& R=s.rsx.registers;for(unsigned r=0;r<0x20;r+=4)R[0x1a20+r]=R[0x1a00+r];R[0x1844]=R[0x1840];
+ auto two_units=[&]{fpword(s,0,(23u<<24)|(1u<<17)|(4u<<13)|(15u<<9)|(1u<<1));fpword(s,1,1u|(0xe4u<<9)|(7u<<18));fpword(s,2,0);fpword(s,3,0);
+  fpword(s,4,(23u<<24)|(4u<<13)|(15u<<9)|1u);fpword(s,5,1u|(0xe4u<<9)|(7u<<18));fpword(s,6,0);fpword(s,7,0);};
+ for(unsigned pass=0;pass<2;++pass){
+  two_units();
+  if(pass==0){run();bool unit1=false;for(unsigned w=80;w<112;++w)unit1|=data[w]!=0;assert(unit1);}
+  else{R[0xb40]=0x100;bool failed=false;try{run();}catch(const std::runtime_error&){failed=true;}assert(failed);R[0xb40]=0;}   // texcoord control stop after binding
+  texture_fp(s);run();for(unsigned w=80;w<112;++w)if(data[w]){std::fprintf(stderr,"pass %u stale unit-1 word %u=%08x\n",pass,w,data[w]);assert(false);}
+ }
+ session.flush();s.rsx.graphics_session=nullptr;
+ std::puts("PASS draw blob: descriptors and texture units of a previous draw never leak into the next");
 }
 static void pipeline_lookup(){
  for(const char* limit:{"1024","1"}){

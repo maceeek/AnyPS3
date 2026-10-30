@@ -1330,6 +1330,21 @@ static bool rsx_vertex_data_register(NativeRsx& gpu,std::uint32_t reg,std::uint3
     }
     return true;
 }
+namespace rsxdraw {
+// The 16 fragment texture units of one draw. Constructing and destroying 16 Textures per draw cost ~1k instructions; the
+// outermost draw of a thread reuses one array instead. Invariant: outside a draw every unit of that array is
+// default-constructed. The guard resets exactly the units the draw assigned (touched: every assignment site marks its unit
+// before assigning, the CPU path marks all 16) when the draw's scope ends, also by an exception, at the point where the
+// former local array was destroyed. A nested draw on the same thread gets its own array.
+struct DrawTextureUnits {
+    static std::array<Texture,16>& scratch(){static thread_local std::array<Texture,16> units;return units;}
+    static bool& busy(){static thread_local bool flag=false;return flag;}
+    std::unique_ptr<std::array<Texture,16>> nested;std::array<Texture,16>& units;unsigned touched=0;const bool outer;
+    DrawTextureUnits():nested(busy()?std::make_unique<std::array<Texture,16>>():nullptr),units(nested?*nested:scratch()),outer(!nested){if(outer)busy()=true;}
+    ~DrawTextureUnits(){if(!outer)return;for(unsigned u=0;u<16;++u)if(touched&(1u<<u))units[u]=Texture{};busy()=false;}
+    DrawTextureUnits(const DrawTextureUnits&)=delete;DrawTextureUnits& operator=(const DrawTextureUnits&)=delete;
+};
+}
 static void rsx_execute_draw(PpuState& s){
     using namespace rsxdraw;
     GuestMemory::SplitReadScope split_reads(s.memory);
@@ -1540,7 +1555,7 @@ static void rsx_execute_draw(PpuState& s){
     std::shared_ptr<const std::vector<FpInst>> fp_owner;if(color_target || alpha_test || depth_export)fp_owner=load_fragment_program_shared(s,reg);
     static const std::vector<FpInst> no_fragment_program;const auto& fp=fp_owner?*fp_owner:no_fragment_program;
     host_phase.next(HostStage::texture_metadata);
-    std::array<Texture,16> textures{};
+    DrawTextureUnits texture_units;auto& textures=texture_units.units;
     unsigned used_inputs=0;
 #ifdef ANYPS3_RSX_VK
     bool texture_context_validated=false;
@@ -1551,6 +1566,7 @@ static void rsx_execute_draw(PpuState& s){
         if((inst.s0&3)==1 || (inst.s1&3)==1 || (inst.s2&3)==1)used_inputs|=1u<<((inst.d>>13)&15);
         const unsigned opcode=((inst.d>>24)&63)|((inst.s1>>31)<<6);
         if(opcode==23 || opcode==24 || opcode==25 || opcode==47 || opcode==49){const unsigned unit=(inst.d>>17)&15;
+            texture_units.touched|=1u<<unit;
             if(!(reg.get(0x1a00+unit*32+0xc,0)>>31)){textures[unit].null_texture=true;continue;}
             if(!textures[unit].valid){
 #ifdef ANYPS3_RSX_VK
@@ -1817,6 +1833,7 @@ static void rsx_execute_draw(PpuState& s){
     }
     PerfTimer fallback_timer(fallback_time);
 #endif
+    texture_units.touched=0xffff;   // the CPU renderer below may edit any unit
     for(const auto& t:textures)if(t.null_texture)throw std::runtime_error("RSX FP samples a disabled texture unit on the CPU renderer");
     // Only the Vulkan graphics fragment path models 0x1d7c (sample mask, alpha-to-coverage/one).
     if(reg.get(0x1d7c,0xffff0000)!=0xffff0000)throw std::runtime_error("unsupported RSX multisample coverage/alpha control on the CPU renderer");

@@ -1814,7 +1814,8 @@ template<class Vertex> static bool prepared(Session& session,const std::vector<s
     // re-decode) and the feedback snapshots. Every other draw reads the caller's array.
     bool edit_textures=alias || color_feedback;
     if(!edit_textures)for(const auto& texture:supplied_textures)if(texture.resident_image && texture.plan && texture.plan->gathered){edit_textures=true;break;}
-    std::optional<std::array<Texture,16>> owned_textures;if(edit_textures)owned_textures.emplace(supplied_textures);
+    // Heap copy only on the editing path: an empty std::optional of 16 Textures still cost ~500 instructions per draw.
+    std::unique_ptr<std::array<Texture,16>> owned_textures;if(edit_textures)owned_textures=std::make_unique<std::array<Texture,16>>(supplied_textures);
     const auto& textures=edit_textures?*owned_textures:supplied_textures;
     if(alias)for(const auto& texture:textures)if(texture.null_texture)return attempt.reject("alias_null_texture");
     if(color_feedback)attempt.path("texture_feedback_snapshot");
@@ -2061,10 +2062,13 @@ template<class Vertex> static bool prepared(Session& session,const std::vector<s
             }
             build_vertex_groups();
         }
-        for(unsigned a=0;a<16;++a){const unsigned d=desc+a*8,f=(r(0x1ff0)&(1u<<a))?r(0x1740+4*a):0;
+        const unsigned input_mask=r(0x1ff0);auto* words=data.data();
+        for(unsigned a=0;a<16;++a){const unsigned d=desc+a*8,f=(input_mask&(1u<<a))?r(0x1740+4*a):0;
             const unsigned type=f&15,n=(f>>4)&15,stride=(f>>8)&255,frequency=f>>16;
             data[d]=f;
-            if(!n){const auto v=(r(0x1ff0)&(1u<<a))?register_attribute(state.rsx.draw.immediate[a]):Vec4{0,0,0,1};
+            // A disabled input reads (0,0,0,1): its words directly (float_bits(1.f)==0x3f800000).
+            if(!(input_mask&(1u<<a))){words[d+4]=words[d+5]=words[d+6]=0;words[d+7]=0x3f800000u;continue;}
+            if(!n){const auto v=register_attribute(state.rsx.draw.immediate[a]);
                 for(unsigned c=0;c<4;++c)data[d+4+c]=float_bits(v[c]);
                 continue;}
             if(n>4 || type==0 || type>7)throw std::runtime_error("unsupported RSX vertex attribute type/size");
