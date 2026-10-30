@@ -242,7 +242,33 @@ static void paired_reads(){
  rsx_fifo_pair=true;rsx_fifo_window=true;
  std::puts("PASS paired header/value reads: 3000 packets across page ends and mid-packet PUT kicks, serial and renderer thread, never past PUT");
 }
-int main(){try{extracted_are_special();plain_set();equal_paths();window_release_into_fifo();window_callbacks();window_claimed_page();paired_reads();}catch(const std::exception& e){std::fprintf(stderr,"FAIL %s\n",e.what());return 1;}}
+// Packet validation: a packet whose words name an unsupported register stops before ANY of its words executes, with the
+// original message naming the first unsupported register; the packet before it executed, the one after it did not, GET stays
+// at the stopping packet. Cases: incrementing packet (unsupported third word), non-incrementing packet of an unsupported
+// register, incrementing packet running past 0xfffc. Independent expectation from rsx_method_class, not from the table scan.
+static void unsupported_in_packet(){
+ std::uint32_t reg=0;for(std::uint32_t r=0x200;r+8<0x10000;r+=4)if(rsx_method_class(r)==1 && rsx_method_class(r+4)==1 && !rsx_method_class(r+8) && rsx_plain_table()[r>>2] && rsx_plain_table()[(r+4)>>2]){reg=r;break;}
+ if(!reg)throw std::runtime_error("test: no plain pair followed by an unsupported register");
+ std::uint32_t lone=0;for(std::uint32_t r=0x200;r<0x10000;r+=4)if(!rsx_method_class(r)){lone=r;break;}
+ const std::uint32_t top=0xfff0;   // five words 0xfff0..0x10000: the packet runs past the last 16-bit method
+ struct Case {std::uint32_t method;unsigned count;bool increment;} cases[]={{reg,3,true},{lone,2,false},{top,5,true}};
+ for(const auto& c:cases){
+  std::uint32_t stop=UINT32_MAX;for(unsigned i=0;i<c.count && stop==UINT32_MAX;++i){const auto r=c.method+(c.increment?4*i:0);if(!rsx_method_class(r))stop=r;}
+  if(stop==UINT32_MAX)throw std::runtime_error("test: case without an unsupported register");
+  PpuState s;setup_fifo(s);auto& gpu=s.rsx;gpu.device=0x70000000;
+  std::vector<std::uint32_t> w{(1u<<18)|0x300,0x1111,(c.count<<18)|(c.increment?0u:0x40000000u)|c.method};for(unsigned i=0;i<c.count;++i)w.push_back(0xabc0+i);w.push_back((1u<<18)|0x304);w.push_back(0x2222);
+  std::uint32_t at=BASE;for(auto x:w){put(s,at,x);at+=4;}
+  s.memory.store(gpu.dma+0x44,4,BASE);s.memory.store(gpu.dma+0x40,4,at);
+  std::string error;try{(void)rsx_run_impl(s,1000000);}catch(const std::runtime_error& e){error=e.what();}
+  const auto expected="unimplemented native RSX method "+std::to_string(stop)+" ";
+  if(error.rfind(expected,0)!=0)throw std::runtime_error("unsupported packet: error '"+error+"', expected '"+expected+"...'");
+  if(rsx_reg(gpu,0x300)!=0x1111 || rsx_reg(gpu,0x304)==0x2222)throw std::runtime_error("unsupported packet: neighbours executed wrongly");
+  for(unsigned i=0;i<c.count;++i){const auto r=c.method+(c.increment?4*i:0);if(r<0x10000 && rsx_method_class(r) && rsx_reg(gpu,r)==0xabc0+i)throw std::runtime_error("unsupported packet: a word of the stopping packet executed");}
+  if(s.memory.load(gpu.dma+0x44,4)!=BASE+8)throw std::runtime_error("unsupported packet: GET is not at the stopping packet");
+ }
+ std::puts("PASS a packet naming an unsupported register stops before any of its words executes (incrementing, non-incrementing, past 0xfffc)");
+}
+int main(){try{unsupported_in_packet();extracted_are_special();plain_set();equal_paths();window_release_into_fifo();window_callbacks();window_claimed_page();paired_reads();}catch(const std::exception& e){std::fprintf(stderr,"FAIL %s\n",e.what());return 1;}}
 '''
 
 
@@ -288,7 +314,7 @@ class RsxFifoPlainTests(unittest.TestCase):
             env = dict(os.environ, ANYPS3_VK_DEVICE='lavapipe', VK_DRIVER_FILES='/usr/share/vulkan/icd.d/lvp_icd.json')
             result = subprocess.run([str(root / 'test')], env=env, capture_output=True, text=True, timeout=300)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            self.assertEqual(result.stdout.count('PASS '), 7, result.stdout)
+            self.assertEqual(result.stdout.count('PASS '), 8, result.stdout)
 
 
 if __name__ == '__main__':

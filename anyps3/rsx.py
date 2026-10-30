@@ -780,7 +780,12 @@ static bool rsx_run_impl(PpuState& s,unsigned budget,bool idle_poll=false){
                 // Hoisted table lookups (rsx_method_class without the per-call static guard); registers past 0xfffc take the predicate.
                 const auto& classes=rsx_method_class_table();
                 auto method_class=[&](std::uint32_t reg)->unsigned{return reg<0x10000?classes[reg>>2]:rsx_method_class(reg);};
-                for(unsigned i=0;i<count;++i){
+                // Every register of the packet supported (the common case): one pass over the table bytes, no per-word dispatch.
+                // Otherwise the per-word loop below stops (or, ANYPS3_RSX_DIAG_SKIP=1, logs) at each unsupported register as before.
+                bool supported=std::uint64_t(method)+std::uint64_t(count-1)*increment<0x10000;
+                if(supported){const auto* entry=classes.data()+(method>>2);const unsigned n=increment?count:1u;
+                    for(unsigned i=0;i<n;++i)if(!entry[i]){supported=false;break;}}
+                if(!supported)for(unsigned i=0;i<count;++i){
                     const auto reg=method+i*increment;
                     if(!method_class(reg)){
                         if(!rsx_diag_skip()){
