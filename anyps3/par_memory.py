@@ -570,6 +570,13 @@ TYPES = RESERVATION_WAIT_TYPES + r'''
             case 8:return from_be(__atomic_load_n(reinterpret_cast<const AtomicWord*>(pointer),__ATOMIC_ACQUIRE));
             }
         }
+        // A word-aligned doubleword (the RSX FIFO header+value pair, a PPU ld at a 4-byte boundary): its two aligned words in
+        // ascending order, one acquire load each. Every value this returns is one the bytewise sequence below can return (each
+        // word's four ascending byte loads at one instant); no byte outside [pointer,pointer+8) is touched.
+        if(size==8 && !(reinterpret_cast<std::uintptr_t>(pointer)&3)){
+            const std::uint64_t high=from_be(__atomic_load_n(reinterpret_cast<const AtomicInt*>(pointer),__ATOMIC_ACQUIRE));
+            return (high<<32)|from_be(__atomic_load_n(reinterpret_cast<const AtomicInt*>(pointer+4),__ATOMIC_ACQUIRE));
+        }
         std::uint8_t bytes[8]{};atomic_read(pointer,bytes,size);std::uint64_t value=0;
         for(unsigned i=0;i<size;++i)value=(value<<8)|bytes[i];
         return value;

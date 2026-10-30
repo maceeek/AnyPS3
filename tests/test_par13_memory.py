@@ -223,3 +223,35 @@ class Parallel13Memory(unittest.TestCase):
  assert(state.r[3]==10000 && state.r[4]==10000 && state.r[6]==50005000);
  assert(m.load(0x50000,4)==10000 && !m.local_state().scalar_batch_active);
 ''', instrument=instrument)
+
+    def test_word_aligned_doubleword_reads_two_words(self):
+        # Independent expectation: the guest bytes are 0x10+i, so the big-endian doubleword at offset k is the constant
+        # computed here in Python. Every 4-byte-aligned (not 8-byte-aligned) start takes the two-word read; every other
+        # misaligned start keeps the byte path. Both the static helper and concurrent loads (ScalarAccess) are checked.
+        expect = ''.join(f'{int.from_bytes(bytes(0x10 + i for i in range(k, k + 8)), "big"):#x}ull,' for k in range(24))
+        self.native('dword-halves', r'''
+ static const std::uint64_t expect[24]={''' + expect + r'''};
+ alignas(64) std::uint8_t bytes[32];for(unsigned i=0;i<32;++i)bytes[i]=std::uint8_t(0x10+i);
+ for(unsigned k=0;k<24;++k)assert(GuestMemory::atomic_scalar_read(bytes+k,8)==expect[k]);
+ GuestMemory m;m.map(0x10000,8192,6,nullptr,0);for(unsigned i=0;i<32;++i)m.store(0x10ff0+i,1,0x10+i);
+ m.enable_concurrency();m.enable_page_broker();
+ std::thread reader([&]{for(unsigned k=0;k<24;++k)assert(m.load(0x10ff0+k,8)==expect[k]);m.release_reader_slot();});reader.join();
+ for(unsigned k=0;k<24;++k)assert(m.load(0x10ff0+k,8)==expect[k]);
+''')
+
+    def test_broker_cell_cache_matches_cold_lookup_across_blocks(self):
+        # 12 backings of 3 MiB occupy distinct 2 MiB host blocks, so the direct-mapped TLS cache entries collide. A cold
+        # lookup in a fresh thread (empty cache: radix walk) is the reference; an interleaved order on one warm thread must
+        # return the same cell for every page, and a claim published on one page is seen through that page's cell only.
+        self.native('cell-cache', r'''
+ GuestMemory m;for(unsigned i=0;i<12;++i)m.map(0x1000000+i*0x400000,0x300000,6,nullptr,0);m.enable_concurrency();m.enable_page_broker();
+ std::vector<std::uintptr_t> pages;
+ for(const auto& r:m.regions){const auto at=reinterpret_cast<std::uintptr_t>(r.bytes->data())>>12;pages.push_back(at);pages.push_back(at+512);pages.push_back(at+(r.bytes->size()>>12)-1);}
+ std::vector<GuestMemory::PageBroker::Cell*> cold(pages.size());
+ for(std::size_t i=0;i<pages.size();++i){std::thread t([&]{cold[i]=m.page_broker.cell(pages[i]);});t.join();assert(cold[i]);}
+ for(std::size_t i=0;i<pages.size();++i)for(std::size_t j=0;j<i;++j)assert(cold[i]!=cold[j]);
+ for(unsigned round=0;round<64;++round)for(std::size_t i=0;i<pages.size();++i){const auto k=(i*7+round*5)%pages.size();assert(m.page_broker.cell(pages[k])==cold[k]);}
+ auto pin=m.regions[5].bytes;
+ {GuestMemory::GpuPages claim(m,{{pin->data(),4,pin}});
+  for(std::size_t i=0;i<pages.size();++i)assert(bool(m.page_broker.cell(pages[i])->state.load()&GuestMemory::PageBroker::claimed)==(i==15));}
+''')
