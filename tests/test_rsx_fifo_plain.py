@@ -44,6 +44,10 @@ static Stream build(){
  // incrementing / non-incrementing multi-method packets across plain and special registers
  st.method(0x1efc,{3});st.method(0x1f00,{0x3f800000,0x40000000,0x40400000,0x40800000});
  st.method(0x1ef8,{0});st.method(0xb80,{0x11111111,0x22222222,0x33333333,0x44444444,0x55555555});   // program upload through the load position
+ // constant uploads as the game sends them (load position + one 4x4 matrix), non-incrementing, and at the last bank slot
+ st.method(0x1efc,{40});{std::vector<std::uint32_t> v;for(unsigned i=0;i<16;++i)v.push_back(0x3f000000u+i*0x1111u);
+  st.words.push_back((16u<<18)|0x1f00);for(auto x:v)st.words.push_back(x);}
+ st.method(0x1f40,{0xa1,0xa2,0xa3},false);st.method(0x1efc,{511});st.method(0x1f00,{0xb1,0xb2,0xb3,0xb4});
  st.method(0x300,{1,2,3,4,5,6,7,8},true);st.method(0x300,{9,10,11},false);st.method(0x400,{0xaaaa,0xbbbb,0xcccc},true);
  return st;
 }
@@ -73,6 +77,12 @@ static void equal_paths(){
  if(fast.program!=slow.program || fast.constants!=slow.constants)throw std::runtime_error("transform program/constants differ");
  if(fast.commands!=slow.commands || fast.zcull!=slow.zcull || fast.vertex_cache!=slow.vertex_cache)throw std::runtime_error("counters differ");
  if(fast.registers.size()<400)throw std::runtime_error("test stream wrote too few registers: "+std::to_string(fast.registers.size()));
+ // Independent expectation for the game-shaped constant uploads (load position * 4 + method slot; non-incrementing: last word wins).
+ for(unsigned i=0;i<16;++i)if(fast.constants[160+i]!=0x3f000000u+i*0x1111u)throw std::runtime_error("matrix constant "+std::to_string(i)+" wrong");
+ if(fast.constants[176]!=0xa3 || fast.constants[177]!=0)throw std::runtime_error("non-incrementing constant upload wrong");
+ for(unsigned i=0;i<4;++i)if(fast.constants[2044+i]!=0xb1+i)throw std::runtime_error("last-slot constant upload wrong");
+ {auto reg=[&](std::uint32_t r){for(const auto& [k,v]:fast.registers)if(k==r)return v;return 0u;};
+  if(reg(0x1f00)!=0xb1 || reg(0x1f3c)!=0x3f000000u+15*0x1111u || reg(0x1f40)!=0xa3)throw std::runtime_error("constant registers not stored in the bank");}
  std::printf("PASS fast path equals the chain: %zu registers, %llu packets, %u plain registers\n",fast.registers.size(),(unsigned long long)fast.commands,fast.plain);
 }
 static void plain_set(){

@@ -97,8 +97,10 @@ static std::function<void()>& rsx_owner_hook(){static thread_local std::function
     // Configure presentation policy. This does not queue, complete or display a frame.
     std::fprintf(stderr,"native GCM flip mode head=%u mode=%u\n",head,s.rsx.flip_modes[head]);
 }
-static std::uint64_t rsx_address(const NativeRsx& gpu,std::uint32_t offset){
-    if(offset>=0x10000000 || gpu.io[offset>>20]==UINT32_MAX)throw std::runtime_error("RSX reads unmapped IO offset "+std::to_string(offset));
+[[noreturn,gnu::cold,gnu::noinline]] static void rsx_address_fault(std::uint32_t offset){throw std::runtime_error("RSX reads unmapped IO offset "+std::to_string(offset));}
+// Called for every FIFO word read: the check stays inline, the throw out of line.
+[[gnu::always_inline]] static inline std::uint64_t rsx_address(const NativeRsx& gpu,std::uint32_t offset){
+    if(__builtin_expect(offset>=0x10000000 || gpu.io[offset>>20]==UINT32_MAX,0))rsx_address_fault(offset);
     return std::uint64_t(gpu.io[offset>>20])+(offset&0xfffff);
 }
 static std::uint64_t rsx_semaphore_address(const NativeRsx& gpu,std::uint32_t context,std::uint32_t offset){
@@ -627,9 +629,12 @@ static bool rsx_method_action(std::uint32_t reg){
     case 0x1e98:case 0x17c8:case 0x2328:case 0xc40c:case 0x68:case 0x6c:case 0x1d70:case 0x1d74:case 0x50:return true;
     default:return reg>=0xa400 && reg<0xc000;}
 }
-static unsigned rsx_method_class(std::uint32_t reg){
+static const std::array<std::uint8_t,0x4000>& rsx_method_class_table(){
     static const auto table=[]{std::array<std::uint8_t,0x4000> t{};for(std::uint32_t r=0;r<0x10000;r+=4)t[r/4]=!rsx_method_supported(r)?0:rsx_method_action(r)?2:1;return t;}();
-    return reg<0x10000 && !(reg&3)?table[reg/4]:(rsx_method_supported(reg)?(rsx_method_action(reg)?2u:1u):0u);
+    return table;
+}
+static unsigned rsx_method_class(std::uint32_t reg){
+    return reg<0x10000 && !(reg&3)?rsx_method_class_table()[reg/4]:(rsx_method_supported(reg)?(rsx_method_action(reg)?2u:1u):0u);
 }
 // Registers whose method only stores its value (class 1 and none of the special cases of the execution chain in rsx_run_impl: channel/copy
 // objects, clear, zcull, vertex data and inline-array registers, begin/end/draw, program and constant uploads, flips, reports, blits,
@@ -762,9 +767,12 @@ static bool rsx_run_impl(PpuState& s,unsigned budget,bool idle_poll=false){
                     if(get<put && count*4+4>put-get){publish();return progress;}
                 }
                 std::uint32_t values[0x800];
+                // Hoisted table lookups (rsx_method_class without the per-call static guard); registers past 0xfffc take the predicate.
+                const auto& classes=rsx_method_class_table();
+                auto method_class=[&](std::uint32_t reg)->unsigned{return reg<0x10000?classes[reg>>2]:rsx_method_class(reg);};
                 for(unsigned i=0;i<count;++i){
                     const auto reg=method+i*increment;
-                    if(!rsx_method_class(reg)){
+                    if(!method_class(reg)){
                         if(!rsx_diag_skip()){
                         std::fprintf(stderr,"RSX unsupported method=%04x io=%08x header=%08x count=%u value=%08" PRIx64 "\n",reg,get,header,count,m.load(rsx_address(gpu,get+4+i*4),4));
                         // Diagnostic snapshot of retained state for the next implementation step.
@@ -787,10 +795,20 @@ static bool rsx_run_impl(PpuState& s,unsigned budget,bool idle_poll=false){
                 const auto& plain=rsx_plain_table();
                 for(unsigned i=gpu.packet_index;i<count;++i){
                     const auto reg=method+i*increment,value=values[i];
-                    if(rsx_fifo_plain_fast && reg<0x10000 && !(reg&3) && plain[reg>>2]){rsx_capture_method(s,reg,value);gpu.registers.write(reg,value);continue;}
+                    // rsx_capture_method returns at once without an active capture: test that here (no call per method).
+                    if(rsx_fifo_plain_fast && reg<0x10000 && !(reg&3) && plain[reg>>2]){if(gpu.perf_capture.active)rsx_capture_method(s,reg,value);gpu.registers.write(reg,value);continue;}
                     window.valid=false;   // not a plain store: later command words are read again
-                    if(rsx_method_class(reg)==2)publish();
-                    if(reg!=0x68)rsx_capture_method(s,reg,value);
+                    // Transform constant upload (the most frequent non-plain method): exactly the effects of the chain below for
+                    // 0x1f00..0x1f7c (class 1, no other case matches, rsx_vertex_data_register ignores it): constant + raw register.
+                    if(rsx_fifo_plain_fast && reg>=0x1f00 && reg<=0x1f7c){
+                        if(gpu.perf_capture.active)rsx_capture_method(s,reg,value);
+                        const std::uint64_t word=std::uint64_t(rsx_reg(gpu,0x1efc))*4+(reg-0x1f00)/4;
+                        if(word>=gpu.transform_constants.size())throw std::runtime_error("RSX transform constant index outside bank");
+                        gpu.transform_constants.write(word,value);gpu.transform_constants_written.write(word,true);
+                        gpu.registers.write(reg,value);continue;
+                    }
+                    if(method_class(reg)==2)publish();
+                    if(reg!=0x68 && gpu.perf_capture.active)rsx_capture_method(s,reg,value);
                     if(reg==0 && value!=0x31337000)throw std::runtime_error("unsupported RSX channel object");
                     if(reg==0xe000 && value!=0xcafebabe)throw std::runtime_error("unsupported GCM driver object");
                     if((reg==0x2000 && value!=0x31337303) || (reg==0x6000 && value!=0x313371c3) ||
@@ -893,7 +911,7 @@ static bool rsx_run_impl(PpuState& s,unsigned budget,bool idle_poll=false){
                             if(!gpu.semaphore_wait)std::fprintf(stderr,"RSX semaphore wait address=%08" PRIx64 " expected=%08x actual=%08" PRIx64 "\n",address,value,m.load(address,4));
                             gpu.semaphore_wait=true;gpu.packet_index=i;publish();return progress;
                         }
-                        if(reg==0x68)rsx_capture_method(s,reg,value);
+                        if(reg==0x68 && gpu.perf_capture.active)rsx_capture_method(s,reg,value);
                         if(reg==0x6c)rsx_release_semaphore(s,address,value);
                         gpu.semaphore_wait=false;
                     }else if(reg==0x1d70 || reg==0x1d74){
