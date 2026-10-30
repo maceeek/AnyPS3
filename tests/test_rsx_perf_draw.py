@@ -102,7 +102,64 @@ static void dynamic_state(){
  s.rsx.graphics_session=nullptr;
  std::puts("PASS dynamic reuse, reset and changed scissor/constant fixed pixels");
 }
-int main(){try{level_values();image_pins();indexed_reads();shader_reads();write_membership();dynamic_state();}catch(const std::exception& e){std::fprintf(stderr,"STOP %s\n",e.what());return 1;}}
+// HIRES4-DRAW oracles (independent of the cached/inline implementations):
+// register reads against a std::map model of presence, the per-draw register prefix against the documented reset
+// defaults, triangle-list assembly against a hand-built list, and the per-draw blob against stale descriptor words.
+static void register_reads(){
+ PpuState s;auto& R=s.rsx.registers;std::map<std::uint32_t,std::uint32_t> model;std::uint32_t seed=12345;
+ auto next=[&]{seed=seed*1103515245u+12345u;return seed>>8;};
+ for(unsigned n=0;n<20000;++n){const std::uint32_t r=(next()%0x4000)*4,v=next();
+  switch(next()%4){case 0:case 1:R.write(r,v);model[r]=v;break;case 2:R[r]=v;model[r]=v;break;case 3:R.erase(r);model.erase(r);break;}}
+ const rsxdraw::Reg reg{s.rsx};
+ for(std::uint32_t r=0;r<0x10000;r+=4){const auto it=model.find(r);const std::uint32_t expect=it==model.end()?0:it->second;
+  assert(reg(r)==expect && reg.get(r,0xdeadbeef)==(it==model.end()?0xdeadbeefu:it->second));}
+ // An erased register keeps its old slot value internally; it must read as absent. Unaligned/out-of-bank never present.
+ R.write(0x1a00,77);R.erase(0x1a00);assert(reg(0x1a00)==0 && reg.get(0x1a00,5)==5);
+ volatile std::uint32_t odd=0x1a02,far=0x10000;assert(reg(odd)==0 && reg.get(far,9)==9);
+ std::puts("PASS register reads: presence, erase, unaligned and fallback against a map model");
+}
+static void register_prefix(){
+ PpuState s;setup_draw(s,8,8,32,false);s.rsx.renderer=std::make_unique<NativeVulkan>();rsxgraphics::Session session(*s.rsx.renderer,s);
+ auto& R=s.rsx.registers;std::uint32_t seed=777;auto next=[&]{seed=seed*1103515245u+12345u;return seed>>8;};
+ // Reset values of registers the shaders read when absent (rsx_methods.cpp defaults used by the GPU path).
+ const std::map<std::uint32_t,std::uint32_t> defaults{{0xa6c,0x207},{0x394,0},{0x398,0x3f800000},{0x368,0x1d01},{0x1834,0x901},{0x388,0x3f800000},{0x308,0x207},{0x324,0x01010101},{0x378,0x1503},{0x1d7c,0xffff0000}};
+ for(unsigned round=0;round<40;++round){
+  for(unsigned n=0;n<200;++n){const std::uint32_t r=(next()%0x800)*4,v=next();
+   if(next()%5==0)R.erase(r);else if(next()%7==0)R[r]=v;else R.write(r,v);}
+  if(round%3==0)for(const auto& d:defaults)R.erase(d.first);
+  session.refresh_registers();
+  for(std::uint32_t r=0;r<0x2000;r+=4){std::uint32_t expect=0;
+   if(R.count(r))expect=std::as_const(R).at(r);else if(defaults.count(r))expect=defaults.at(r);
+   if(session.register_prefix[16+r/4]!=expect){std::fprintf(stderr,"prefix %04x=%08x expected %08x\n",r,session.register_prefix[16+r/4],expect);assert(false);}}
+ }
+ std::puts("PASS register prefix: present values, absent zero and reset defaults after random writes/erases");
+}
+static void triangle_list(){
+ PpuState s;setup_draw(s,8,8,32,false);s.rsx.renderer=std::make_unique<NativeVulkan>();rsxgraphics::Session session(*s.rsx.renderer,s);s.rsx.graphics_session=&session;session.observe();
+ setenv("ANYPS3_RSX_BACKEND","gpu",1);
+ auto& R=s.rsx.registers;s.rsx.draw.indexed=true;R[0x181c]=0x3000;R[0x1820]=0x10;s.rsx.draw.primitive=5;
+ const unsigned first[]={0,1,2,2,3,0,1};for(unsigned n=0;n<7;++n)s.memory.store(0xc0003000+2*n,2,first[n]);
+ s.rsx.draw.ranges={{0,7}};rsx_execute_draw(s);   // 7 indices: two triangles, the trailing index is dropped
+ const std::vector<std::array<unsigned,3>> two{{0,1,2},{2,3,0}};assert(s.rsx.draw.scratch_triangles==two);
+ const unsigned second[]={3,2,1};for(unsigned n=0;n<3;++n)s.memory.store(0xc0003000+2*n,2,second[n]);
+ s.rsx.draw.ranges={{0,3}};rsx_execute_draw(s);   // a shorter list replaces (never extends) the previous one
+ const std::vector<std::array<unsigned,3>> one{{3,2,1}};assert(s.rsx.draw.scratch_triangles==one);
+ s.rsx.draw.ranges={{0,2}};rsx_execute_draw(s);assert(s.rsx.draw.scratch_triangles.empty());
+ session.flush();s.rsx.graphics_session=nullptr;
+ std::puts("PASS triangle list: n/3 complete triangles, replaced per draw");
+}
+static void blob_descriptors(){
+ PpuState s;setup_draw(s,8,8,32,false);texture_fp(s);s.rsx.renderer=std::make_unique<NativeVulkan>();rsxgraphics::Session session(*s.rsx.renderer,s);s.rsx.graphics_session=&session;session.observe();
+ setenv("ANYPS3_RSX_BACKEND","gpu",1);
+ auto run=[&]{s.rsx.draw.ranges={{0,4}};rsx_execute_draw(s);};
+ run();const auto& data=session.draw_data;bool described=false;for(unsigned w=48;w<80;++w)described|=data[w]!=0;assert(described);
+ // The constant MOV program samples nothing: every texture descriptor word of the next blob is zero.
+ fpword(s,0,(1u<<24)|(15u<<9)|1u);fpword(s,1,2u|(0xe4u<<9)|(7u<<18));fpword(s,2,0);fpword(s,3,0);
+ run();for(unsigned w=48;w<48+16*32;++w)if(data[w]){std::fprintf(stderr,"stale blob word %u=%08x\n",w,data[w]);assert(false);}
+ session.flush();assert(near_argb(s.memory.load(0xc0100000,4),0x80ff8040));s.rsx.graphics_session=nullptr;
+ std::puts("PASS draw blob: descriptors of a previous draw never leak into the next");
+}
+int main(){try{level_values();image_pins();indexed_reads();shader_reads();write_membership();dynamic_state();register_reads();register_prefix();triangle_list();blob_descriptors();}catch(const std::exception& e){std::fprintf(stderr,"STOP %s\n",e.what());return 1;}}
 '''
 
 
@@ -124,5 +181,5 @@ class WarmDrawTests(unittest.TestCase):
                 env.update(VK_DRIVER_FILES='/usr/share/vulkan/icd.d/lvp_icd.json',ANYPS3_VK_DEVICE='lavapipe')
             p=subprocess.run([str(binary)],env=env,capture_output=True,text=True,timeout=120)
             self.assertEqual(p.returncode,0,p.stdout+p.stderr)
-            self.assertEqual(p.stdout.count('PASS '),6)
+            self.assertEqual(p.stdout.count('PASS '),10)
             self.assertNotIn('Validation Error',p.stderr);self.assertNotIn('Validation Warning',p.stderr)

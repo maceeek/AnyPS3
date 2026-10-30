@@ -58,8 +58,20 @@ CPP = r'''
 #if defined(__SSSE3__) && defined(__SSE4_1__)
 #include <immintrin.h>
 #endif
+#if defined(__SSE2__)
+#include <emmintrin.h>
+#endif
 namespace rsxdraw {
 using Vec4=std::array<float,4>;
+// Zero n words with 16-byte stores: the bytes of memset(p,0,4n). Kept a loop (no memset pattern): a memset of >= 2 KiB is
+// `rep stosb`, which valgrind counts per byte, and the per-draw blob is ~2.2 KiB.
+[[maybe_unused,gnu::optimize("no-tree-loop-distribute-patterns")]] static void zero_words(unsigned* p,std::size_t n){
+    std::size_t i=0;
+#if defined(__SSE2__)
+    for(;i+4<=n;i+=4)_mm_storeu_si128(reinterpret_cast<__m128i*>(p+i),_mm_setzero_si128());
+#endif
+    for(;i<n;++i)p[i]=0;
+}
 // Big-endian index decode: out[i]=raw+base, or UINT32_MAX for the restart value
 // when restart is enabled. largest/any cover the unrestarted raw values only,
 // for the caller's overflow check. Width is 2 or 4 bytes.
@@ -225,11 +237,10 @@ static unsigned logic_op(unsigned op,unsigned src,unsigned dst);
 ''' + GAPS_CPP + SWZ_CPP + r'''
 struct Reg { // gpu.registers access; unwritten registers hold reset value 0 (RPCS3 rsx_methods.cpp:137).
     const NativeRsx& gpu;
-    std::uint32_t operator()(std::uint32_t r)const{
-        auto it=gpu.registers.find(r);
-        return it==gpu.registers.end()?0u:it->second;
-    }
-    std::uint32_t get(std::uint32_t r,std::uint32_t fallback)const{auto it=gpu.registers.find(r);return it==gpu.registers.end()?fallback:it->second;}
+    // Inline presence test + slot load (RsxRegisters::value_or, the const find() result): a draw reads ~150 registers, almost
+    // all with constant addresses, so the bounds/alignment checks fold away instead of an out-of-line find per read.
+    [[gnu::always_inline]] std::uint32_t operator()(std::uint32_t r)const{return gpu.registers.value_or(r,0u);}
+    [[gnu::always_inline]] std::uint32_t get(std::uint32_t r,std::uint32_t fallback)const{return gpu.registers.value_or(r,fallback);}
 };
 
 static const std::vector<GuestMemory::Region>& rsx_maps(const PpuState& s){return s.memory.regions;}
@@ -1412,7 +1423,7 @@ static void rsx_execute_draw(PpuState& s){
         if(draw.primitive==3 && n>1)lines.push_back({indices.back(),indices.front()});
         break;
     case 1:break; // expanded into squares after viewport/program state is known
-    case 5:{const auto at=triangles.size();triangles.resize(at+n/3);if(n/3)std::memcpy(triangles.data()+at,indices.data(),n/3*3*sizeof(std::uint32_t));}break;
+    case 5:{const auto* first=reinterpret_cast<const std::array<std::uint32_t,3>*>(indices.data());triangles.insert(triangles.end(),first,first+n/3);}break; // no zero-fill before the copy
     case 6:for(std::size_t i=0;i+2<n;++i)triangles.push_back(i&1?std::array<std::uint32_t,3>{indices[i+1],indices[i],indices[i+2]}:std::array<std::uint32_t,3>{indices[i],indices[i+1],indices[i+2]});break;
     case 7:case 10:for(std::size_t i=1;i+1<n;++i)triangles.push_back({indices[0],indices[i],indices[i+1]});break;
     case 8:for(std::size_t i=0;i+3<n;i+=4){triangles.push_back({indices[i],indices[i+1],indices[i+2]});triangles.push_back({indices[i],indices[i+2],indices[i+3]});}break;

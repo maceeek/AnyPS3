@@ -935,8 +935,11 @@ struct Session {
             if(tracked)continue;
             if(!fresh && register_presence[block]==bank.written[block] && !std::memcmp(source,previous,64*sizeof(*source)))continue;
             ++register_blocks_rebuilt;++register_versions[block];std::copy_n(source,64,previous);register_presence[block]=bank.written[block];
-            for(unsigned i=0;i<64;++i)register_prefix[16+block*64+i]=(bank.written[block]&(UINT64_C(1)<<i))?source[i].second:0;
-            for(const auto& value:defaults)if(value.first/256==block)register_prefix[16+value.first/4]=r.get(value.first,value.second);
+            // Absent registers read 0 except the reset defaults: zero the block, store present slots only (set presence bits).
+            auto* out=register_prefix.data()+16+block*64;std::memset(out,0,64*sizeof(unsigned));
+            for(auto bits=bank.written[block];bits;bits&=bits-1){const unsigned i=unsigned(__builtin_ctzll(bits));out[i]=source[i].second;}
+            static constexpr std::uint32_t default_blocks=[]{std::uint32_t m=0;for(const auto& value:defaults)m|=1u<<(value.first/256);return m;}();
+            if((default_blocks>>block)&1)for(const auto& value:defaults)if(value.first/256==block)register_prefix[16+value.first/4]=r.get(value.first,value.second);
         }
     }
     void serialize_registers(std::vector<unsigned>& data,unsigned width,unsigned height){
@@ -947,7 +950,8 @@ struct Session {
     }
     void serialize_draw_registers(std::vector<unsigned>& data,unsigned width,unsigned height){
         refresh_registers();const auto& bank=std::as_const(state.rsx).registers;
-        data.assign(48+16*32,0);data[0]=width;data[1]=height;data[3]=data.size();
+        // Same contents as assign(560,0): shrinking keeps the capacity without writes, then every word is zeroed.
+        data.resize(48+16*32);zero_words(data.data(),data.size());data[0]=width;data[1]=height;data[3]=data.size();
         for(unsigned i=0;i<8;++i)if(bank.count(0x2c0+8*i) && bank.count(0x2c4+8*i))data[8]|=1u<<i;
         data[9]=bank.count(0x8cc)!=0;
     }
