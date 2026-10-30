@@ -923,18 +923,23 @@ struct Session {
     // Bank epochs at the last refresh (RsxRegisters change tracking). A block
     // whose epoch is unchanged and that was never mutably borrowed holds the
     // same presence and values; every other block is compared by value.
-    std::array<std::uint64_t,32> register_epochs{};std::uint64_t register_identity=0;
+    std::array<std::uint64_t,32> register_epochs{};std::uint64_t register_identity=0;std::uint32_t register_values_stale=0;
     void refresh_registers(){
         const auto& bank=std::as_const(state.rsx).registers;const Reg r{state.rsx};
         const bool fresh=register_prefix.empty() || register_identity!=bank.identity;if(fresh)register_prefix.assign(2576,0);
         register_identity=bank.identity;
         static constexpr std::pair<unsigned,unsigned> defaults[]={{0xa6c,0x207},{0x394,0},{0x398,0x3f800000},{0x368,0x1d01},{0x1834,0x901},{0x388,0x3f800000},{0x308,0x207},{0x324,0x01010101},{0x378,0x1503},{0x1d7c,0xffff0000}};
         for(unsigned block=0;block<32;++block){const auto* source=bank.values.data()+block*64;auto* previous=register_values.data()+block*64;
-            const bool tracked=!fresh && !bank.block_exposed(block) && register_epochs[block]==bank.epochs[block];
+            const bool exposed=bank.block_exposed(block),tracked=!fresh && !exposed && register_epochs[block]==bank.epochs[block];
             register_epochs[block]=bank.epochs[block];
             if(tracked)continue;
-            if(!fresh && register_presence[block]==bank.written[block] && !std::memcmp(source,previous,64*sizeof(*source)))continue;
-            ++register_blocks_rebuilt;++register_versions[block];std::copy_n(source,64,previous);register_presence[block]=bank.written[block];
+            // A never-borrowed block whose epoch moved changed presence or a value since the last refresh (a write back to the
+            // old value is rebuilt too: the same words, one redundant upload), so only a borrowed block is compared, and only
+            // against a current snapshot: rebuilding a never-borrowed block leaves its snapshot stale (register_values_stale).
+            const bool stale=(register_values_stale>>block)&1;
+            if(!fresh && exposed && !stale && register_presence[block]==bank.written[block] && !std::memcmp(source,previous,64*sizeof(*source)))continue;
+            ++register_blocks_rebuilt;++register_versions[block];register_presence[block]=bank.written[block];
+            if(exposed){std::copy_n(source,64,previous);register_values_stale&=~(UINT32_C(1)<<block);}else register_values_stale|=UINT32_C(1)<<block;
             // Absent registers read 0 except the reset defaults: zero the block, store present slots only (set presence bits).
             auto* out=register_prefix.data()+16+block*64;std::memset(out,0,64*sizeof(unsigned));
             for(auto bits=bank.written[block];bits;bits&=bits-1){const unsigned i=unsigned(__builtin_ctzll(bits));out[i]=source[i].second;}

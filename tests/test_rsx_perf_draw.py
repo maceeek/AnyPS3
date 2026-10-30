@@ -127,11 +127,18 @@ static void register_prefix(){
   for(unsigned n=0;n<200;++n){const std::uint32_t r=(next()%0x800)*4,v=next();
    if(next()%5==0)R.erase(r);else if(next()%7==0)R[r]=v;else R.write(r,v);}
   if(round%3==0)for(const auto& d:defaults)R.erase(d.first);
+  if(round%10==9){RsxRegisters copy=R;R=copy;if(round%20==19)R.exposed.fill(0);}   // new identity, sometimes nothing borrowed
   session.refresh_registers();
   for(std::uint32_t r=0;r<0x2000;r+=4){std::uint32_t expect=0;
    if(R.count(r))expect=std::as_const(R).at(r);else if(defaults.count(r))expect=defaults.at(r);
    if(session.register_prefix[16+r/4]!=expect){std::fprintf(stderr,"prefix %04x=%08x expected %08x\n",r,session.register_prefix[16+r/4],expect);assert(false);}}
  }
+ // A borrowed block compares against its last snapshot; that snapshot must not survive a period of tracked (never borrowed)
+ // rebuilds: borrowed 5 -> new identity, unborrowed, tracked 6 -> borrowed back to 5 must read 5.
+ R[0x1d00]=5;session.refresh_registers();assert(session.register_prefix[16+0x1d00/4]==5);
+ {RsxRegisters copy=R;R=copy;}R.exposed.fill(0);
+ R.write(0x1d00,6);session.refresh_registers();assert(session.register_prefix[16+0x1d00/4]==6);
+ R[0x1d00]=5;session.refresh_registers();assert(session.register_prefix[16+0x1d00/4]==5);
  std::puts("PASS register prefix: present values, absent zero and reset defaults after random writes/erases");
 }
 static void triangle_list(){
@@ -159,7 +166,25 @@ static void blob_descriptors(){
  session.flush();assert(near_argb(s.memory.load(0xc0100000,4),0x80ff8040));s.rsx.graphics_session=nullptr;
  std::puts("PASS draw blob: descriptors of a previous draw never leak into the next");
 }
-int main(){try{level_values();image_pins();indexed_reads();shader_reads();write_membership();dynamic_state();register_reads();register_prefix();triangle_list();blob_descriptors();}catch(const std::exception& e){std::fprintf(stderr,"STOP %s\n",e.what());return 1;}}
+static void pipeline_lookup(){
+ for(const char* limit:{"1024","1"}){
+  setenv("ANYPS3_RSX_PIPELINE_LIMIT",limit,1);const bool single=!std::strcmp(limit,"1");
+  PpuState s;setup_draw(s,8,8,32,false);s.rsx.renderer=std::make_unique<NativeVulkan>();rsxgraphics::Session session(*s.rsx.renderer,s);s.rsx.graphics_session=&session;session.observe();
+  setenv("ANYPS3_RSX_BACKEND","gpu",1);auto& R=s.rsx.registers;auto& vk=*s.rsx.renderer;
+  // Alternate no blend / blend ZERO,ZERO (result 0): two fixed states, one shader pair.
+  auto run=[&](bool zero){R[0x310]=zero;R[0x314]=0;R[0x318]=0;R[0x320]=0x80068006;s.rsx.draw.ranges={{0,4}};rsx_execute_draw(s);session.flush();return s.memory.load(0xc0100000,4);};
+  const auto before=vk.compile_stats.graphics_pipelines;
+  for(unsigned n=0;n<6;++n){const bool zero=n&1;const auto pixel=run(zero);
+   if(zero?pixel!=0:!near_argb(pixel,0x80ff8040)){std::fprintf(stderr,"draw %u pixel %08x\n",n,unsigned(pixel));assert(false);}
+   // Oracle: a 1024-entry cache compiles each state once; a one-entry cache evicts the other state at every switch.
+   const std::uint64_t created=vk.compile_stats.graphics_pipelines-before,expect=single?n+1:std::min(n+1,2u);
+   if(created!=expect){std::fprintf(stderr,"limit %s draw %u: %llu pipelines, expected %llu\n",limit,n,(unsigned long long)created,(unsigned long long)expect);assert(false);}}
+  s.rsx.graphics_session=nullptr;
+ }
+ unsetenv("ANYPS3_RSX_PIPELINE_LIMIT");
+ std::puts("PASS pipeline lookup: one pipeline per state, eviction at every switch with a one-entry cache");
+}
+int main(){try{level_values();image_pins();indexed_reads();shader_reads();write_membership();dynamic_state();register_reads();register_prefix();triangle_list();blob_descriptors();pipeline_lookup();}catch(const std::exception& e){std::fprintf(stderr,"STOP %s\n",e.what());return 1;}}
 '''
 
 
@@ -181,5 +206,5 @@ class WarmDrawTests(unittest.TestCase):
                 env.update(VK_DRIVER_FILES='/usr/share/vulkan/icd.d/lvp_icd.json',ANYPS3_VK_DEVICE='lavapipe')
             p=subprocess.run([str(binary)],env=env,capture_output=True,text=True,timeout=120)
             self.assertEqual(p.returncode,0,p.stdout+p.stderr)
-            self.assertEqual(p.stdout.count('PASS '),10)
+            self.assertEqual(p.stdout.count('PASS '),11)
             self.assertNotIn('Validation Error',p.stderr);self.assertNotIn('Validation Warning',p.stderr)
