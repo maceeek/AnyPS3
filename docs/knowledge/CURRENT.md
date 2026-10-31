@@ -40,8 +40,8 @@ lavapipe test (independent oracle) and mutation checks; **no game build, run or 
   12.6 µs native begins; `PERF RENDER_SCALE_WORK` work counters per frame; no copy is removable. Visual 2× MSAA
   plane→sample load path `ANYPS3_RENDER_SCALE_MSAA_LOAD=1` (default 0, **NVIDIA test pending**) — the only change aimed at
   the second visual plane (2.3 ms). The −2.5 ms GPU target is not demonstrated here.
-- **Tests:** each agent's area modules OK on its branch; the coordinator's 40-module run on the merge is in progress
-  (record); full suite deferred to the end of HIRES7.
+- **Tests:** each agent's area modules OK on its branch; on the merge the union of both area lists, 40 modules, all OK
+  (lavapipe); full suite deferred to the end of HIRES7.
 Record: [cloud HIRES6](experiments/2026-10-31-cloud-hires6.md). First next actions on the PC: the integration build
 walks, a marks walk, `ANYPS3_RSX_BARRIER_DEDUPE=0` A/B and the NVIDIA MSAA test (record, "First next actions").
 

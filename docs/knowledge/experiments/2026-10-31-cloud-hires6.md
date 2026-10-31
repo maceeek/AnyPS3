@@ -156,8 +156,15 @@ the MSAA load path, default off, unverified on NVIDIA.
   all 4 compiler variants, guest_memory_guard): all OK; the failures found there were fixed on the branch and re-run OK
   (test_rsx_perf_draw `register_prefix` oracle → 7424d72; `-Werror=unused-variable` in builds without ANYPS3_RSX_VK in
   test_rsx_tex, test_rsx_tex3, test_par11_memory and two tests each of test_par13_memory/test_par10_memory → 2ed1bf3).
-- **Coordinator, merged snapshot 8126bbc:** the union of both area lists (40 modules, two lanes) — IN PROGRESS at the time
-  of this commit; the result is added here when it finishes.
+- **Coordinator, merged snapshot 8126bbc (`git archive`, one process per module, two lanes, lavapipe):** the union of both
+  area lists, **40 modules, all OK** — test_rsx_gpu_work, test_rsx_visual_msaa (1 skip: the NVIDIA 2× comparison, no ICD),
+  test_rsx_visual_batch, test_rsx_render_scale, test_rsx_visual_history, test_rsx_vk_submit, test_rsx_recorder,
+  test_rsx_graphics, test_rsx_pipeline, test_rsx_vk, test_rsx_vk_resident, test_rsx_vk_memory_pool, test_rsx_rtt,
+  test_rsx_tex, test_rsx2_draw, test_rsx_perf_draw, test_rsx_depth_blit, test_rsx_depth_owner, test_rsx_drain_bound,
+  test_rsx_gpu_batch, test_rsx_gpu_status, test_rsxfast_draw, test_rsxvk21, test_rsxvk22_cpu370, test_rsx_fifo_plain,
+  test_rsx_register_epochs, test_rsx_graphics_cache, test_rsx_constant_chunks, test_rsx_graphics_costs, test_rsx_vp_flow,
+  test_rsx_fifo_contract, test_rsx_gpu_upload, test_rsx_gpu_vertex, test_rsx_host_cost, test_rsx_index_decode,
+  test_rsx_tex3, test_guest_memory_guard, test_par11_memory, test_par13_memory, test_par10_memory.
 - **Full suite:** deferred to the end of HIRES7 so that one run covers HIRES6 and HIRES7 (4 vCPUs shared with two agents).
 
 ## Risks
