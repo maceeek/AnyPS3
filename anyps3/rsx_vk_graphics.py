@@ -176,6 +176,7 @@ public:
         // readbacks are deliberately absent: they retain their command order.
         std::vector<VkBufferCopy> uploads;
         VkFramebuffer active_framebuffer=VK_NULL_HANDLE;
+        std::uint64_t barrier_serial=0;   // graphics_command_serial right after this recording's last full barrier (0: none yet)
         std::uint64_t render_passes=0,render_pass_reuses=0,upload_commands=0;
         // MSAA plane runs: while consecutive draws keep plane 0's pass on one
         // attachment set, their planes >=1 are recorded later, one pass per
@@ -188,7 +189,7 @@ public:
             unsigned vertices,instances,first_vertex,query;bool indexed;VkDeviceSize index_offset;VkQueryControlFlags query_flags;
         };
         std::vector<PlaneDraw> plane_draws;std::array<VkFramebuffer,4> plane_framebuffers{};
-        VkRenderPass plane_pass=VK_NULL_HANDLE;VkExtent2D plane_extent{};unsigned plane_count=0;
+        VkRenderPass plane_pass=VK_NULL_HANDLE;VkExtent2D plane_extent{};unsigned plane_count=0,plane_attachments=0;bool plane_visual=false;
         std::uint64_t plane_deferred=0;
         // Recorder-owned snapshots survive ring-slot reuse. Semantic command
         // boundaries drain them; generic recorder synchronization does not.
@@ -329,13 +330,41 @@ private:
     struct GraphicsSite{unsigned previous;explicit GraphicsSite(unsigned s):previous(graphics_site_ref()){graphics_site_ref()=s;}~GraphicsSite(){graphics_site_ref()=previous;}};
     static void graphics_mark(GraphicsBatch& b,unsigned kind){
         if(!b.marks || b.mark_count>=4096)return;
-        vkCmdWriteTimestamp(b.command,VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,b.marks,b.mark_count++);b.mark_kinds.push_back((b.replaying_visual?unsigned(SiteVisual):graphics_site_ref())*16+kind);  // visual replays (incl. their planes) are one site
+        // A tagged command recorded since the previous mark (a copy, clear, blit or barrier without its own mark, e.g. the
+        // visual half of a clear or a texture upload just before a pass begin) gets its own mark first: its time is not
+        // attributed to the next mark's kind.
+        const unsigned pending=graphics_last_kind();graphics_last_kind()=MarkOther;
+        const unsigned site=(b.replaying_visual?unsigned(SiteVisual):graphics_site_ref())*16;   // visual replays (incl. their planes) are one site
+        if(pending!=MarkOther && pending!=kind && b.mark_count<4095){vkCmdWriteTimestamp(b.command,VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,b.marks,b.mark_count++);b.mark_kinds.push_back(site+pending);}
+        vkCmdWriteTimestamp(b.command,VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,b.marks,b.mark_count++);b.mark_kinds.push_back(site+kind);
     }
+public:
+    // ---- GPU work accounting (always on; plain relaxed load+store like RsxPerfCounters: one recording thread at a time per batch) ----
+    // Per command kind as recorded (rsx_vk_resources.py wrappers and the pass-begin sites): counts, bytes (buffer copies) and
+    // texels (image copies/blits/clears: extent x layers). PERF RENDER_SCALE_WORK prints the totals; tests read the deltas.
+    enum GraphicsWorkId:unsigned {WorkBarriers,WorkBarriersElided,WorkPipelineBarriers,WorkPassNative,WorkPassVisual,WorkPassAttachments,
+        WorkCopyBuffer,WorkCopyBufferBytes,WorkCopyImage,WorkCopyImageTexels,WorkBufferImage,WorkBufferImageTexels,WorkBlits,WorkBlitTexels,
+        WorkClears,WorkClearTexels,WorkDispatches,WorkCount};
+    static constexpr const char* graphics_work_names[WorkCount]={"barriers","barriers_elided","pipeline_barriers","pass_native","pass_visual","pass_attachments",
+        "copy_buffer","copy_buffer_bytes","copy_image","copy_image_texels","buffer_image","buffer_image_texels","blits","blit_texels",
+        "clears","clear_texels","dispatches"};
+    static std::array<std::atomic<std::uint64_t>,WorkCount>& graphics_work(){static std::array<std::atomic<std::uint64_t>,WorkCount> values{};return values;}
+    static void graphics_work_add(unsigned id,std::uint64_t n=1){auto& v=graphics_work()[id];v.store(v.load(std::memory_order_relaxed)+n,std::memory_order_relaxed);}
+    static std::uint64_t graphics_work_value(unsigned id){return graphics_work()[id].load(std::memory_order_relaxed);}
+    // Bumped by every action command recorded outside a render pass and by every pass begin/end, on every thread and into every
+    // command buffer (rsx_vk_resources.py wrappers; draws and queries only occur inside a pass whose begin is counted). A value
+    // unchanged since a batch's last full barrier proves that nothing was recorded into that batch since (graphics_barrier).
+    // A locked increment: a lost update must never bring the value back to an older snapshot.
+    static std::atomic<std::uint64_t>& graphics_command_serial(){static std::atomic<std::uint64_t> serial{1};return serial;}
+    static void graphics_command_recorded(){graphics_command_serial().fetch_add(1,std::memory_order_acq_rel);}
+    static void graphics_pass_begun(bool visual,unsigned attachments){graphics_work_add(visual?WorkPassVisual:WorkPassNative);graphics_work_add(WorkPassAttachments,attachments);}
+private:
     static void graphics_replay_planes(GraphicsBatch& b){
         for(unsigned plane=1;plane<b.plane_count;++plane){
             VkRenderPassBeginInfo pass{};pass.sType=VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;pass.renderPass=b.plane_pass;
             pass.framebuffer=b.plane_framebuffers[plane];pass.renderArea={{0,0},b.plane_extent};
             vkCmdBeginRenderPass(b.command,&pass,VK_SUBPASS_CONTENTS_INLINE);graphics_mark(b,MarkPassBegin);++b.render_passes;::RsxPerfCounters::add(::RsxPerfCounters::render_passes);
+            graphics_pass_begun(b.plane_visual,b.plane_attachments);
             const std::array<unsigned,22>* previous=b.dynamic_valid?&b.dynamic_state:nullptr;
             for(const auto& d:b.plane_draws){
                 if(d.query!=UINT_MAX)vkCmdBeginQuery(b.command,b.occlusion,d.query+plane,d.query_flags);
@@ -374,14 +403,24 @@ private:
     static bool graphics_barrier_host(){static const bool host=[]{const char* v=std::getenv("ANYPS3_RSX_BARRIER_HOST");
         if(v && std::strcmp(v,"0") && std::strcmp(v,"1")){throw std::runtime_error("invalid ANYPS3_RSX_BARRIER_HOST");}
         return v && !std::strcmp(v,"1");}();return host;}
+    // ANYPS3_RSX_BARRIER_DEDUPE=0 records every full barrier (former behaviour, A/B). Default 1: a full barrier directly after this
+    // batch's previous full barrier, with no command recorded between them (graphics_command_serial unchanged), is not recorded.
+    // Exact: the second barrier's first synchronization scope (ALL_COMMANDS) already holds every command before the first one and
+    // its access scope every earlier write; the first adds no dependency the second does not have. Timestamps (marks, stamps)
+    // and state binds are not counted: they access no memory a later command reads.
+    static bool graphics_barrier_dedupe(){static const bool value=[]{const char* v=std::getenv("ANYPS3_RSX_BARRIER_DEDUPE");
+        if(v && std::strcmp(v,"0") && std::strcmp(v,"1")){throw std::runtime_error("invalid ANYPS3_RSX_BARRIER_DEDUPE");}
+        return !v || !std::strcmp(v,"1");}();return value;}
     static void graphics_barrier(GraphicsBatch& b){
-        graphics_end_pass(b);graphics_mark(b,graphics_last_kind());graphics_last_kind()=MarkOther;
+        graphics_end_pass(b);
+        graphics_mark(b,graphics_last_kind());graphics_last_kind()=MarkOther;
         const bool host=graphics_barrier_host();
         VkMemoryBarrier m{};m.sType=VK_STRUCTURE_TYPE_MEMORY_BARRIER;
         m.srcAccessMask=VK_ACCESS_MEMORY_WRITE_BIT|VK_ACCESS_MEMORY_READ_BIT|(host?VK_ACCESS_HOST_WRITE_BIT:0);
         m.dstAccessMask=VK_ACCESS_MEMORY_READ_BIT|VK_ACCESS_MEMORY_WRITE_BIT;
         vkCmdPipelineBarrier(b.command,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT|(host?VK_PIPELINE_STAGE_HOST_BIT:0),
             VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,0,1,&m,0,nullptr,0,nullptr);graphics_mark(b,MarkBarrier);
+        b.barrier_serial=graphics_command_serial().load(std::memory_order_acquire);graphics_work_add(WorkBarriers);
     }
     void graphics_begin(GraphicsBatch& b){
         if(b.owner!=this || b.failed)throw std::runtime_error("RSX graphics batch owner/failure");
@@ -389,7 +428,7 @@ private:
         if(b.submitted || b.completion)throw std::runtime_error("RSX graphics begin before retirement/reset");
         if(!b.plane_draws.empty())throw std::runtime_error("RSX graphics deferred MSAA planes outlived their batch");
         VkCommandBufferBeginInfo i{};i.sType=VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;i.flags=graphics_gpu_loop()?VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT:VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-        check(vkBeginCommandBuffer(b.command,&i),"graphics begin");b.recording=true;++graphics_recordings;
+        check(vkBeginCommandBuffer(b.command,&i),"graphics begin");b.recording=true;++graphics_recordings;b.barrier_serial=0;
         if(b.queries)vkCmdResetQueryPool(b.command,b.queries,0,4096);
         vkCmdResetQueryPool(b.command,b.occlusion,0,1024);
         if(transfer_queue && b.busy_queries){vkCmdResetQueryPool(b.command,b.busy_queries,0,3);vkCmdWriteTimestamp(b.command,VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,b.busy_queries,0);}
@@ -882,14 +921,14 @@ public:
         if(image->ms){
             const VkImageAspectFlags all=image->depth?VK_IMAGE_ASPECT_DEPTH_BIT|(image->format==VK_FORMAT_D24_UNORM_S8_UINT?VK_IMAGE_ASPECT_STENCIL_BIT:0):VK_IMAGE_ASPECT_COLOR_BIT;
             if(image->ms_current || (aspects&all)==all){
-                const VkImageSubresourceRange whole{aspects,0,1,0,1};
+                const VkImageSubresourceRange whole{aspects,0,1,0,1};graphics_work_add(WorkClearTexels,std::uint64_t(image->width)*image->height*2);
                 if(image->depth){const VkClearDepthStencilValue value{depth,stencil};vkCmdClearDepthStencilImage(b.command,image->ms->image,VK_IMAGE_LAYOUT_GENERAL,&value,1,&whole);}
                 else vkCmdClearColorImage(b.command,image->ms->image,VK_IMAGE_LAYOUT_GENERAL,&color,1,&whole);
                 if(aspects&VK_IMAGE_ASPECT_STENCIL_BIT){image->ms_stencil_known=true;image->ms_stencil=stencil&255;}
                 image->ms_current=true;b.pins.push_back(image);++graphics_ms_clears;graphics_visual_taint(*image,0,true);return;
             }
         }
-        const VkImageSubresourceRange range{aspects,0,1,0,image->layers};
+        const VkImageSubresourceRange range{aspects,0,1,0,image->layers};graphics_work_add(WorkClearTexels,std::uint64_t(image->width)*image->height*image->layers);
         if(image->depth){const VkClearDepthStencilValue value{depth,stencil};vkCmdClearDepthStencilImage(b.command,image->image,VK_IMAGE_LAYOUT_GENERAL,&value,1,&range);}
         else vkCmdClearColorImage(b.command,image->image,VK_IMAGE_LAYOUT_GENERAL,&color,1,&range);
         b.pins.push_back(image);++graphics_full_clears;graphics_visual_taint(*image,0,true);
@@ -1043,6 +1082,7 @@ public:
         for(unsigned layer=0;layer<2;++layer){
             VkRenderPassBeginInfo pass{};pass.sType=VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;pass.renderPass=p.pass;pass.framebuffer=v.ms_expand_fb[layer];pass.renderArea={{0,0},{v.width,v.height}};
             vkCmdBeginRenderPass(b.command,&pass,VK_SUBPASS_CONTENTS_INLINE);graphics_mark(b,MarkPassBegin);++b.render_passes;::RsxPerfCounters::add(::RsxPerfCounters::render_passes);
+            graphics_pass_begun(true,1);
             vkCmdBindPipeline(b.command,VK_PIPELINE_BIND_POINT_GRAPHICS,p.pipeline);
             vkCmdBindDescriptorSets(b.command,VK_PIPELINE_BIND_POINT_GRAPHICS,p.layout,0,1,&set,1,&offset);
             graphics_emit_dynamic(b.command,d,nullptr);
@@ -1328,7 +1368,7 @@ public:
                 // only visual images, immutable slices and buffers that only frontend commands rewrite, and every frontend
                 // command still replays them first (graphics_end_pass). Fewer native/visual alternations, longer visual runs.
                 if(!s.visual_pass && !b.replaying_visual && !graphics_native_switch_replay())graphics_close_pass_only(b);else graphics_end_pass(b);
-                vkCmdBeginRenderPass(b.command,&pass,VK_SUBPASS_CONTENTS_INLINE);graphics_mark(b,MarkPassBegin);
+                vkCmdBeginRenderPass(b.command,&pass,VK_SUBPASS_CONTENTS_INLINE);graphics_mark(b,MarkPassBegin);graphics_pass_begun(s.visual_pass,view_count);
                 b.active_framebuffer=framebuffer;++b.render_passes;::RsxPerfCounters::add(::RsxPerfCounters::render_passes);
             }else ++b.render_pass_reuses;
             // A framebuffer change may replay older visual draws. Open this
@@ -1378,7 +1418,7 @@ public:
             bool same=b.plane_count==passes && b.plane_extent.width==raster_width && b.plane_extent.height==raster_height;
             for(unsigned layer=1;layer<passes && same;++layer)same=b.plane_framebuffers[layer]==plane_fb[layer];
             if(!b.plane_draws.empty() && !same)graphics_end_pass(b);
-            if(b.plane_draws.empty()){b.plane_framebuffers=plane_fb;b.plane_pass=p.pass;b.plane_extent={raster_width,raster_height};b.plane_count=passes;}
+            if(b.plane_draws.empty()){b.plane_framebuffers=plane_fb;b.plane_pass=p.pass;b.plane_extent={raster_width,raster_height};b.plane_count=passes;b.plane_visual=s.visual_pass;b.plane_attachments=s.colors+(depth?1u:0u);}
             b.plane_draws.push_back(deferred);++b.plane_deferred;
         }
         if(ms_mode && depth && s.z.stencilTestEnable && (s.z.front.writeMask || s.z.back.writeMask))depth->ms_stencil_known=false;
@@ -1721,6 +1761,9 @@ public:
             if(b.frames && graphics_render_scale>1 && graphics_profile_frames%120==0 && graphics_visual_msaa())
                 std::fprintf(stderr,"PERF RENDER_SCALE_MSAA images=%llu clears=%llu draws=%llu plane_draws=%llu expands=%llu bit_expands=%llu\n",(unsigned long long)graphics_ms_images.load(),(unsigned long long)graphics_ms_clears.load(),
                     (unsigned long long)graphics_ms_draws.load(),(unsigned long long)graphics_ms_plane_draws.load(),(unsigned long long)graphics_ms_expands.load(),(unsigned long long)graphics_ms_bit_expands.load());
+            if(b.frames && graphics_render_scale>1 && graphics_profile_frames%120==0){std::string line="PERF RENDER_SCALE_WORK frames="+std::to_string(graphics_profile_frames);
+                for(unsigned k=0;k<WorkCount;++k){line+=' ';line+=graphics_work_names[k];line+='=';line+=std::to_string(graphics_work_value(k));}
+                std::fprintf(stderr,"%s\n",line.c_str());}
             if(b.frames && graphics_render_scale>1 && graphics_profile_frames%120==0)for(const auto& r:graphics_visual_reasons)
                 std::fprintf(stderr,"PERF RENDER_SCALE_SYNC reason=%s count=%llu pixels=%llu\n",r.name.c_str(),(unsigned long long)r.count,(unsigned long long)r.pixels);
             b.visibility.resize(b.visibility_count);
