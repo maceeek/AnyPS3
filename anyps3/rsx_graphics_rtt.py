@@ -34,6 +34,20 @@ MEMBERS = r'''
     static bool rtt_literals(){static const bool on=[]{const char* v=std::getenv("ANYPS3_RSX_RTT_LITERALS");
         if(v && std::strcmp(v,"0") && std::strcmp(v,"1")){throw std::runtime_error("invalid ANYPS3_RSX_RTT_LITERALS");}
         return !v || !std::strcmp(v,"1");}();return on;}
+    // ANYPS3_RSX_RTT_PREFILTER (default 1): rtt_image first looks the texture's first byte up in surface_watches. That sorted,
+    // merged span list is a superset of every member surface's physical spans: refresh_surface_watches rebuilds it after each
+    // insertion into surfaces (every push_back is directly followed by it), and a removal only leaves extra spans. A byte
+    // outside it overlaps no surface, so the per-surface scan would end with no owner: the same result without the scan.
+    // 0 always scans every surface.
+    static bool rtt_prefilter(){static const bool on=[]{const char* v=std::getenv("ANYPS3_RSX_RTT_PREFILTER");
+        if(v && std::strcmp(v,"0") && std::strcmp(v,"1")){throw std::runtime_error("invalid ANYPS3_RSX_RTT_PREFILTER");}
+        return !v || !std::strcmp(v,"1");}();return on;}
+    bool surface_watched(const void* p)const{
+        const auto at=reinterpret_cast<std::uintptr_t>(p);
+        auto next=std::upper_bound(surface_watches.begin(),surface_watches.end(),at,[](std::uintptr_t a,const SurfaceWatch& w){return a<reinterpret_cast<std::uintptr_t>(w.first);});
+        if(next==surface_watches.begin())return false;
+        const auto& span=*std::prev(next);return at-reinterpret_cast<std::uintptr_t>(span.first)<span.second;
+    }
     static bool rtt_visual_fast(){static const bool on=[]{const char* v=std::getenv("ANYPS3_RENDER_SCALE_RTT_FAST");
         if(v && std::strcmp(v,"0") && std::strcmp(v,"1")){throw std::runtime_error("invalid ANYPS3_RENDER_SCALE_RTT_FAST");}
         return !v || !std::strcmp(v,"1");}();return on;}
@@ -73,6 +87,7 @@ MEMBERS = r'''
         auto reason=[&](const char* name){if(fallback_stats().enabled)++fallback_stats().paths[std::string("rtt_")+name];};
         if(!allow_resident_textures || !texture.plan || texture.levels.size()!=1 || texture.dimension!=2 || texture.cube || texture.levels[0].border){reason("unsupported_shape");return {};}
         const auto& level=texture.levels[0];bool owner_found=false;
+        if(rtt_prefilter() && !texture.plan->runs.empty() && !surface_watched(texture.plan->runs.front().data)){reason("no_owner");reason("miss");return {};}
         auto reject=[&](const char* name,const Surface& surface,std::uint64_t origin){
             reason(name);if(!fallback_stats().enabled)return;
             std::ostringstream detail;detail<<"cause="<<name<<" texture={format:"<<texture.format<<",width:"<<level.width<<",height:"<<level.height<<",pitch:"<<level.pitch<<",swizzle:"<<texture.swizzled<<",offset:"<<offset<<"} surface={format:"<<surface.format<<",width:"<<surface.width<<",height:"<<surface.height<<",samples:"<<surface.samples<<",pitch:"<<surface.target.pitch<<",tile:"<<bool(surface.target.tile)<<",swizzle:"<<surface.target.swizzle_width<<",origin:"<<origin<<"}";
