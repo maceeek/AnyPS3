@@ -6,8 +6,11 @@ respect to a clear/copy (or lost, duplicated, recorded into the wrong batch) sho
 slots (producer back-pressure), a recorder failure (the next enqueue/drain/finish rethrows it, nothing hangs), teardown with queued draws. The
 batch lifecycle jobs (graphics_reset's recorder-owned half as a Reset job, a front-half graphics_begin as a Begin job) are counted: with the
 recorder every reset runs on the recorder thread and the model sequences pass through Reset -> Begin -> draw and Reset -> inline begin (clear/
-copy after b.sync()); a failing Reset job stops the next enqueue and every later sync. The validation layer (including its thread-safety
-checks) must stay silent.
+copy after b.sync()); a failing Reset job stops the next enqueue and every later sync. graphics_submit queues a Submit job (the
+recorder records the tail and calls vkQueueSubmit): the queue order of deferred and inline submissions is checked with a recorder that
+sleeps before every Submit job (a later submission that overtook an earlier one leaves the earlier batch's color), and a failing Submit
+job is rethrown by the next collect without a hang at teardown. The validation layer (including its thread-safety checks) must stay
+silent.
 """
 import os
 from pathlib import Path
@@ -81,11 +84,11 @@ static void model_sequence(const char* mode,unsigned seed,unsigned rounds,unsign
  // Lifecycle jobs: read_back resets once per round plus once for the initial clear; with the recorder each reset is a Reset job and a
  // round whose first operation is a draw begins the reset batch through a Begin job (a clear/copy first begins inline after b.sync()).
  g.b->sync();   // the last read_back's Reset job may still be queued
- const auto resets=g.vk.graphics_recorder_resets.load(),begins=g.vk.graphics_recorder_begins.load();
- const bool on=!std::strcmp(mode,"1");
- if(resets!=(on?rounds+1:0) || begins!=(on?first_draws:0))
-  throw std::runtime_error(std::string(mode)+": recorder lifecycle jobs resets="+std::to_string(resets)+" begins="+std::to_string(begins)+" expected "+std::to_string(on?rounds+1:0)+"/"+std::to_string(on?first_draws:0));
- std::printf("PASS recorder=%s model sequence: %u rounds x %u ops (%u draws) equal the CPU model, %llu Reset / %llu Begin jobs\n",mode,rounds,ops,draws,(unsigned long long)resets,(unsigned long long)begins);
+ const auto resets=g.vk.graphics_recorder_resets.load(),begins=g.vk.graphics_recorder_begins.load(),submits=g.vk.graphics_recorder_submits.load();
+ const bool on=!std::strcmp(mode,"1");   // one graphics_finish (Submit job) per read_back
+ if(resets!=(on?rounds+1:0) || begins!=(on?first_draws:0) || submits!=(on?rounds+1:0))
+  throw std::runtime_error(std::string(mode)+": recorder lifecycle jobs resets="+std::to_string(resets)+" begins="+std::to_string(begins)+" submits="+std::to_string(submits)+" expected "+std::to_string(on?rounds+1:0)+"/"+std::to_string(on?first_draws:0)+"/"+std::to_string(on?rounds+1:0));
+ std::printf("PASS recorder=%s model sequence: %u rounds x %u ops (%u draws) equal the CPU model, %llu Reset / %llu Begin / %llu Submit jobs\n",mode,rounds,ops,draws,(unsigned long long)resets,(unsigned long long)begins,(unsigned long long)submits);
 }
 static void back_pressure(){
  Gpu g("1");   // 900 tiny draws in one batch: more than the 256 ring slots
@@ -152,6 +155,34 @@ static void reset_failure(){
  if(!stopped)throw std::runtime_error("recorder Reset failure was forgotten");
  std::puts("PASS recorder Reset failure: rethrown at the next enqueue and by every later sync");
 }
+// Queue order: batch A draws red and is submitted through a (slow) Submit job; batch B then draws green into the same image and is
+// submitted (1) through the ring as well, (2) inline (B->inline_draws: never deferred), which must first let the recorder submit A.
+// The GPU executes one queue in submission order, so the image is green only if A reached the queue before B.
+static void submit_order(){
+ for(const bool inline_b:{false,true}){
+  Gpu g("1");auto other=g.vk.graphics_batch(8*1024*1024);
+  g.vk.graphics_test_recorder_submit_delay_ms=30;
+  g.draw(0,0,0,16,16,0xff0000ffu);const auto a=g.vk.graphics_submit(*g.b);
+  auto first=std::move(g.b);g.b=std::move(other);g.b->inline_draws=inline_b;
+  g.draw(0,0,0,16,16,0xff00ff00u);const auto b=g.vk.graphics_submit(*g.b);
+  if(b!=a+1)throw std::runtime_error("submission values not consecutive");
+  g.vk.graphics_collect(*g.b,true);g.vk.graphics_collect(*first,true);g.vk.graphics_reset(*first);
+  g.vk.graphics_reset(*g.b);g.b->inline_draws=false;g.vk.graphics_test_recorder_submit_delay_ms=0;
+  Model got{};read_back(g,got);
+  if(got[0][0]!=0xff00ff00u || got[0][255]!=0xff00ff00u)throw std::runtime_error(std::string("submission order broken (")+(inline_b?"inline":"queued")+" second batch): got "+std::to_string(got[0][0]));
+ }
+ std::puts("PASS recorder Submit jobs keep the queue order of queued and inline submissions");
+}
+// A Submit job that fails on the recorder thread (graphics_test_submit_fault): the next collect rethrows the submit's own error, and the
+// batch (booked as submitted, its fence never submitted) is destroyed without waiting on that fence.
+static void submit_failure(){
+ Gpu g("1");g.draw(0,0,0,16,16,1);g.vk.graphics_test_submit_fault=true;
+ bool stopped=false;std::string what;
+ try{g.vk.graphics_finish(*g.b);}catch(const std::runtime_error& e){stopped=true;what=e.what();}
+ if(!stopped || what.find("injected graphics submit failure")==std::string::npos)throw std::runtime_error("recorder Submit failure was not reported: '"+what+"'");
+ g.b.reset();
+ std::puts("PASS recorder Submit failure: rethrown by the next collect, teardown does not wait on the unsubmitted fence");
+}
 static void teardown(){
  {Gpu g("1");for(unsigned i=0;i<200;++i)g.draw(0,0,0,16,16,0xff00ff00u);}   // destructors with queued draws
  {Gpu g("1");g.draw(0,0,0,16,16,1);g.b.reset();}                              // batch destroyed with a queued draw
@@ -175,7 +206,7 @@ int main(){try{
  if(std::getenv("RECORDER_BENCH")){bench();return 0;}
  for(const char* mode:{"0","1"})model_sequence(mode,12345,4,400);
  model_sequence("1",777,6,700);
- back_pressure();two_batches();completion();failure();reset_failure();teardown();
+ back_pressure();two_batches();completion();failure();reset_failure();submit_order();submit_failure();teardown();
 }catch(const std::exception& e){std::fprintf(stderr,"FAIL %s\n",e.what());return 1;}}
 '''
 
@@ -202,7 +233,7 @@ class RsxRecorderTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertNotIn('Validation Error', result.stdout + result.stderr)
             self.assertNotIn('Validation Warning', result.stdout + result.stderr)
-            self.assertEqual(result.stdout.count('PASS '), 9, result.stdout)
+            self.assertEqual(result.stdout.count('PASS '), 11, result.stdout)
 
 
 if __name__ == '__main__':

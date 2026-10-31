@@ -425,6 +425,9 @@ public:
         VkFenceCreateInfo fence{};fence.sType=VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
         check(vkCreateFence(device,&fence,nullptr,&work.fence),"vkCreateFence");
         VkSubmitInfo submit{};submit.sType=VK_STRUCTURE_TYPE_SUBMIT_INFO;submit.commandBufferCount=1;submit.pCommandBuffers=&work.command;
+#ifdef ANYPS3_RSX_VK
+        recorder_queue_order();
+#endif
         check(vkQueueSubmit(queue,1,&submit,work.fence),"vkQueueSubmit");
         check(vkWaitForFences(device,1,&work.fence,VK_TRUE,UINT64_MAX),"vkWaitForFences");
         if(!coherent)check(vkInvalidateMappedMemoryRanges(device,1,&range),"vkInvalidateMappedMemoryRanges");
