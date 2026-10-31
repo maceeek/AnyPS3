@@ -71,6 +71,9 @@ struct Stream {
    me.color[i]=((argb>>16)&255)|(((argb>>8)&255)<<8)|((argb&255)<<16)|((argb>>24)<<24);}
   vk.graphics_unpack_upload(*b,e,8,false,4,N*4,1,table,words,guest.data());
   draw(e,me,1,false,false,r);
+  // Device data upload (barrier, copy, barrier), then more draws into C: a chain of passes only since that barrier.
+  std::vector<std::uint32_t> blob(64,f);(void)vk.graphics_device_upload(*b,blob.data(),blob.size()*4);
+  for(unsigned i=0;i<2;++i)draw(c,mc,2,false,false,r);
   clear(post,mpost,0xff000000u|f);for(unsigned i=0;i<3;++i)draw(post,mpost,1,false,false,r);   // single-sample post target
  }
  void check(const Img& image,const Model& m,const char* name){
@@ -194,11 +197,11 @@ def check_modes(test, means):
     # Grouped clears/copies: the visual halves of the three clears (scene colour, depth, post) and of the surface copy, and the
     # depth clear after the scene colour clear, record no barrier of their own: 5 fewer full barriers per frame.
     test.assertEqual(means['pass0']['barriers'], means['pair0pass0']['barriers'] - 5)
-    # A pass end is the batch's last full barrier: the leading barriers of the ops that directly follow draws (scene copy after
-    # the scene draws, upload after the copy's draws, unpack after the upload's draws, post clear after the unpack's draw)
-    # are not recorded: 4 per frame.
-    test.assertEqual(means['defaults']['barriers'], means['pass0']['barriers'] - 4)
-    test.assertEqual(means['defaults']['barriers_elided'], 5)
+    # A pass end is the batch's last full barrier only after a chain of passes from a full barrier: per frame only the post
+    # clear's leading barrier (after the device upload's final barrier and the draws into C) is not recorded. The ops after
+    # the other draws keep theirs: a clear, copy, upload or blit since the last barrier is not in a pass end's scope.
+    test.assertEqual(means['defaults']['barriers'], means['pass0']['barriers'] - 1)
+    test.assertEqual(means['defaults']['barriers_elided'], 2)
     for mode in ('dedupe0', 'pair0', 'pass0', 'pair0pass0'):
         for key, value in means[mode].items():
             if key not in ('barriers', 'barriers_elided', 'pipeline_barriers') and not key.startswith('mark_'):

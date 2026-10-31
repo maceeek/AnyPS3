@@ -177,6 +177,9 @@ public:
         std::vector<VkBufferCopy> uploads;
         VkFramebuffer active_framebuffer=VK_NULL_HANDLE;
         std::uint64_t barrier_serial=0;   // graphics_command_serial right after this recording's last full barrier (0: none yet)
+        // graphics_pass_ended: serial after the last full barrier or the pass end that continued a passes-only chain from it
+        // (0: none), the serial right after the open pass's begin, and whether that begin directly followed pass_chain.
+        std::uint64_t pass_chain=0,pass_begin=0;bool pass_clean=false;
         std::uint64_t render_passes=0,render_pass_reuses=0,upload_commands=0;
         // MSAA plane runs: while consecutive draws keep plane 0's pass on one
         // attachment set, their planes >=1 are recorded later, one pass per
@@ -357,14 +360,16 @@ public:
     // A locked increment: a lost update must never bring the value back to an older snapshot.
     static std::atomic<std::uint64_t>& graphics_command_serial(){static std::atomic<std::uint64_t> serial{1};return serial;}
     static void graphics_command_recorded(){graphics_command_serial().fetch_add(1,std::memory_order_acq_rel);}
-    static void graphics_pass_begun(bool visual,unsigned attachments){graphics_work_add(visual?WorkPassVisual:WorkPassNative);graphics_work_add(WorkPassAttachments,attachments);}
+    // Right after every vkCmdBeginRenderPass: counts, and whether this pass extends a clean chain (graphics_pass_ended).
+    static void graphics_pass_begun(GraphicsBatch& b,bool visual,unsigned attachments){graphics_work_add(visual?WorkPassVisual:WorkPassNative);graphics_work_add(WorkPassAttachments,attachments);
+        const auto now=graphics_command_serial().load(std::memory_order_acquire);b.pass_clean=b.pass_chain && now==b.pass_chain+1;b.pass_begin=now;}
 private:
     static void graphics_replay_planes(GraphicsBatch& b){
         for(unsigned plane=1;plane<b.plane_count;++plane){
             VkRenderPassBeginInfo pass{};pass.sType=VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;pass.renderPass=b.plane_pass;
             pass.framebuffer=b.plane_framebuffers[plane];pass.renderArea={{0,0},b.plane_extent};
             vkCmdBeginRenderPass(b.command,&pass,VK_SUBPASS_CONTENTS_INLINE);graphics_mark(b,MarkPassBegin);++b.render_passes;::RsxPerfCounters::add(::RsxPerfCounters::render_passes);
-            graphics_pass_begun(b.plane_visual,b.plane_attachments);
+            graphics_pass_begun(b,b.plane_visual,b.plane_attachments);
             const std::array<unsigned,22>* previous=b.dynamic_valid?&b.dynamic_state:nullptr;
             for(const auto& d:b.plane_draws){
                 if(d.query!=UINT_MAX)vkCmdBeginQuery(b.command,b.occlusion,d.query+plane,d.query_flags);
@@ -412,15 +417,19 @@ private:
         if(v && std::strcmp(v,"0") && std::strcmp(v,"1")){throw std::runtime_error("invalid ANYPS3_RSX_BARRIER_DEDUPE");}
         return !v || !std::strcmp(v,"1");}();return value;}
     // ANYPS3_RSX_PASS_BARRIER=0: a full barrier right after a render pass end is still recorded (A/B). Default 1: the end of
-    // every generated pass counts as this batch's last full barrier. Exact: its begin dependency (EXTERNAL->0, src
-    // ALL_COMMANDS/MEMORY_WRITE) and its end dependency (0->EXTERNAL, ALL_GRAPHICS -> ALL_COMMANDS, dst MEMORY_READ|WRITE)
-    // chain through subpass 0: every command before the pass happens before every command after it, every earlier write
-    // is made available (begin) and all available writes visible to every later access (end) -- the same guarantees as a
-    // full barrier recorded after the end. Not with ANYPS3_RSX_BARRIER_HOST=1 (its HOST source is not in the dependencies).
+    // a pass counts as this batch's last full barrier when everything recorded since the previous full barrier is render
+    // passes (each begun directly after the previous end: b.pass_chain/pass_clean, checked with graphics_command_serial).
+    // Exact: the accesses since that barrier are attachment reads/writes and shader reads/stores of those passes; the end
+    // dependency (0->EXTERNAL, src ALL_GRAPHICS + attachment writes, dst ALL_COMMANDS + MEMORY_READ|WRITE) orders them and
+    // makes the attachment writes visible to every later access (shader stores are only the status words, read after their
+    // own barrier at submit); every older access is ordered by the previous full barrier. A copy/clear/upload in the chain
+    // (its writes are not in an end dependency's access scope) keeps the next barrier. Not with ANYPS3_RSX_BARRIER_HOST=1.
     static bool graphics_pass_barrier(){static const bool value=[]{const char* v=std::getenv("ANYPS3_RSX_PASS_BARRIER");
         if(v && std::strcmp(v,"0") && std::strcmp(v,"1")){throw std::runtime_error("invalid ANYPS3_RSX_PASS_BARRIER");}
         return !v || !std::strcmp(v,"1");}();return value;}
-    static void graphics_pass_ended(GraphicsBatch& b){if(graphics_pass_barrier() && !graphics_barrier_host())b.barrier_serial=graphics_command_serial().load(std::memory_order_acquire);}
+    static void graphics_pass_ended(GraphicsBatch& b){const auto now=graphics_command_serial().load(std::memory_order_acquire);
+        if(b.pass_clean && now==b.pass_begin+1 && graphics_pass_barrier() && !graphics_barrier_host())b.barrier_serial=b.pass_chain=now;
+        b.pass_clean=false;}
     static void graphics_barrier(GraphicsBatch& b){
         graphics_end_pass(b);
         if(b.barrier_serial && b.barrier_serial==graphics_command_serial().load(std::memory_order_acquire) && graphics_barrier_dedupe()){graphics_work_add(WorkBarriersElided);return;}
@@ -431,7 +440,7 @@ private:
         m.dstAccessMask=VK_ACCESS_MEMORY_READ_BIT|VK_ACCESS_MEMORY_WRITE_BIT;
         vkCmdPipelineBarrier(b.command,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT|(host?VK_PIPELINE_STAGE_HOST_BIT:0),
             VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,0,1,&m,0,nullptr,0,nullptr);graphics_mark(b,MarkBarrier);
-        b.barrier_serial=graphics_command_serial().load(std::memory_order_acquire);graphics_work_add(WorkBarriers);
+        b.barrier_serial=b.pass_chain=graphics_command_serial().load(std::memory_order_acquire);graphics_work_add(WorkBarriers);
     }
     void graphics_begin(GraphicsBatch& b){
         if(b.owner!=this || b.failed)throw std::runtime_error("RSX graphics batch owner/failure");
@@ -439,7 +448,7 @@ private:
         if(b.submitted || b.completion)throw std::runtime_error("RSX graphics begin before retirement/reset");
         if(!b.plane_draws.empty())throw std::runtime_error("RSX graphics deferred MSAA planes outlived their batch");
         VkCommandBufferBeginInfo i{};i.sType=VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;i.flags=graphics_gpu_loop()?VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT:VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-        check(vkBeginCommandBuffer(b.command,&i),"graphics begin");b.recording=true;++graphics_recordings;b.barrier_serial=0;
+        check(vkBeginCommandBuffer(b.command,&i),"graphics begin");b.recording=true;++graphics_recordings;b.barrier_serial=b.pass_chain=0;
         if(b.queries)vkCmdResetQueryPool(b.command,b.queries,0,4096);
         vkCmdResetQueryPool(b.command,b.occlusion,0,1024);
         if(transfer_queue && b.busy_queries){vkCmdResetQueryPool(b.command,b.busy_queries,0,3);vkCmdWriteTimestamp(b.command,VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,b.busy_queries,0);}
@@ -1108,7 +1117,7 @@ public:
         for(unsigned layer=0;layer<2;++layer){
             VkRenderPassBeginInfo pass{};pass.sType=VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;pass.renderPass=p.pass;pass.framebuffer=v.ms_expand_fb[layer];pass.renderArea={{0,0},{v.width,v.height}};
             vkCmdBeginRenderPass(b.command,&pass,VK_SUBPASS_CONTENTS_INLINE);graphics_mark(b,MarkPassBegin);++b.render_passes;::RsxPerfCounters::add(::RsxPerfCounters::render_passes);
-            graphics_pass_begun(true,1);
+            graphics_pass_begun(b,true,1);
             vkCmdBindPipeline(b.command,VK_PIPELINE_BIND_POINT_GRAPHICS,p.pipeline);
             vkCmdBindDescriptorSets(b.command,VK_PIPELINE_BIND_POINT_GRAPHICS,p.layout,0,1,&set,1,&offset);
             graphics_emit_dynamic(b.command,d,nullptr);
@@ -1394,7 +1403,7 @@ public:
                 // only visual images, immutable slices and buffers that only frontend commands rewrite, and every frontend
                 // command still replays them first (graphics_end_pass). Fewer native/visual alternations, longer visual runs.
                 if(!s.visual_pass && !b.replaying_visual && !graphics_native_switch_replay())graphics_close_pass_only(b);else graphics_end_pass(b);
-                vkCmdBeginRenderPass(b.command,&pass,VK_SUBPASS_CONTENTS_INLINE);graphics_mark(b,MarkPassBegin);graphics_pass_begun(s.visual_pass,view_count);
+                vkCmdBeginRenderPass(b.command,&pass,VK_SUBPASS_CONTENTS_INLINE);graphics_mark(b,MarkPassBegin);graphics_pass_begun(b,s.visual_pass,view_count);
                 b.active_framebuffer=framebuffer;++b.render_passes;::RsxPerfCounters::add(::RsxPerfCounters::render_passes);
             }else ++b.render_pass_reuses;
             // A framebuffer change may replay older visual draws. Open this
