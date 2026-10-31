@@ -74,10 +74,12 @@ public:
         // back into the planes (sample n -> plane n). ms_current/ms_stencil_* are recording-order state (recorder thread, or
         // the frontend after GraphicsBatch::sync); ms_wanted (an eligible draw targeted this image) is frontend state.
         std::shared_ptr<GraphicsImage> ms;bool ms_current=false,ms_wanted=false,ms_stencil_known=false;unsigned ms_stencil=0;
-        std::shared_ptr<GraphicsPipeline> ms_expand,ms_expand_bits;std::array<VkFramebuffer,2> ms_expand_fb{};
+        std::shared_ptr<GraphicsPipeline> ms_expand,ms_expand_bits;std::array<VkFramebuffer,4> ms_expand_fb{};
+        std::shared_ptr<GraphicsPipeline> ms_load,ms_load_bits;VkFramebuffer ms_load_fb=VK_NULL_HANDLE;   // planes -> working image (graphics_ms_load)
         GraphicsImage(NativeVulkan* o,VkFormat f,unsigned w,unsigned h,unsigned l,bool d):owner(o),format(f),width(w),height(h),layers(l),depth(d){}
         ~GraphicsImage(){if(sampler)vkDestroySampler(owner->device,sampler,nullptr);
             for(auto f:ms_expand_fb)if(f)vkDestroyFramebuffer(owner->device,f,nullptr);
+            if(ms_load_fb)vkDestroyFramebuffer(owner->device,ms_load_fb,nullptr);
             for(auto v:views)vkDestroyImageView(owner->device,v,nullptr);
             if(array_view && !borrowed)vkDestroyImageView(owner->device,array_view,nullptr);
             if(stencil_array_view)vkDestroyImageView(owner->device,stencil_array_view,nullptr);
@@ -583,7 +585,7 @@ private:
         VkPipelineViewportStateCreateInfo viewport{};viewport.sType=VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;viewport.viewportCount=viewport.scissorCount=1;
         auto raster=s.raster;raster.sType=VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;raster.polygonMode=VK_POLYGON_MODE_FILL;raster.lineWidth=1;
         VkPipelineMultisampleStateCreateInfo ms{};ms.sType=VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;ms.rasterizationSamples=VkSampleCountFlagBits(s.raster_samples);
-        if(s.raster_samples!=1 && (s.raster_samples!=2 || multiview))throw std::runtime_error("RSX graphics pipeline raster samples");
+        if(s.raster_samples!=1 && ((s.raster_samples!=2 && s.raster_samples!=graphics_ms_samples()) || multiview))throw std::runtime_error("RSX graphics pipeline raster samples");
         auto z=s.z;z.sType=VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
         VkPipelineColorBlendStateCreateInfo cb{};cb.sType=VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;cb.attachmentCount=s.colors;cb.pAttachments=s.blend.data();
         cb.logicOpEnable=s.logic_enable;cb.logicOp=s.logic;
@@ -1042,7 +1044,21 @@ public:
             if(v && std::strcmp(v,"0") && std::strcmp(v,"1")){throw std::runtime_error("invalid ANYPS3_RENDER_SCALE_MSAA");}
             return v && !std::strcmp(v,"1");}();
         return value;}
-    std::atomic<std::uint64_t> graphics_ms_draws{0},graphics_ms_plane_draws{0},graphics_ms_expands{0},graphics_ms_bit_expands{0},graphics_ms_clears{0},graphics_ms_images{0};
+    std::atomic<std::uint64_t> graphics_ms_draws{0},graphics_ms_plane_draws{0},graphics_ms_expands{0},graphics_ms_bit_expands{0},graphics_ms_clears{0},graphics_ms_images{0},graphics_ms_loads{0};
+    // ANYPS3_RENDER_SCALE_MSAA_LOAD=1 (with ANYPS3_RENDER_SCALE_MSAA=1; default 0, NVIDIA test pending): the plane->sample load.
+    // An eligible draw creates its targets' working images itself (not only a full clear), and a target whose planes hold the
+    // content is loaded into its working image first (graphics_ms_load: one 2-sample pass, sample n <- plane n by per-sample
+    // shading; depth by gl_FragDepth, stencil by 8 bit-plane REPLACE draws with per-sample discard). Needs sampleRateShading.
+    // TEST HOOK ANYPS3_RENDER_SCALE_MSAA_TEST_SAMPLES=4: working images of 4-plane visual images, for devices without 2x
+    // (lavapipe). Draw eligibility stays 2-sample, so only clears, loads and expands use them (load/expand round trip test).
+    static unsigned graphics_ms_samples(){static const unsigned value=[]{const char* v=std::getenv("ANYPS3_RENDER_SCALE_MSAA_TEST_SAMPLES");
+            if(v && std::strcmp(v,"2") && std::strcmp(v,"4")){throw std::runtime_error("invalid ANYPS3_RENDER_SCALE_MSAA_TEST_SAMPLES");}
+            return v?unsigned(v[0]-'0'):2u;}();
+        return value;}
+    bool graphics_ms_load_on()const{static const bool value=[]{const char* v=std::getenv("ANYPS3_RENDER_SCALE_MSAA_LOAD");
+            if(v && std::strcmp(v,"0") && std::strcmp(v,"1")){throw std::runtime_error("invalid ANYPS3_RENDER_SCALE_MSAA_LOAD");}
+            return v && !std::strcmp(v,"1");}();
+        return value && graphics_visual_msaa() && graphics_features.sampleRateShading;}
     bool graphics_ms_any=false;   // set once any working image exists (frontend, published to the recorder through the job queue)
     // Formats whose 2-sample working image round-trips exactly through a sampled texelFetch and an attachment write.
     std::array<signed char,256> graphics_ms_format_known{};   // 0 unknown, 1 yes, -1 no (formats < 256)
@@ -1054,19 +1070,20 @@ public:
         const auto& l=graphics_properties.limits;if(!l.standardSampleLocations)return false;
         const bool color=f==VK_FORMAT_R8G8B8A8_UNORM || f==VK_FORMAT_R5G6B5_UNORM_PACK16 || f==VK_FORMAT_R16G16B16A16_SFLOAT || f==VK_FORMAT_R32G32B32A32_SFLOAT || f==VK_FORMAT_R32_SFLOAT;
         if(depth?(f!=VK_FORMAT_D24_UNORM_S8_UINT && f!=VK_FORMAT_D16_UNORM):!color)return false;
-        if(depth?!(l.framebufferDepthSampleCounts&l.sampledImageDepthSampleCounts&VK_SAMPLE_COUNT_2_BIT) || (f==VK_FORMAT_D24_UNORM_S8_UINT && !(l.framebufferStencilSampleCounts&l.sampledImageStencilSampleCounts&VK_SAMPLE_COUNT_2_BIT))
-                :!(l.framebufferColorSampleCounts&l.sampledImageColorSampleCounts&VK_SAMPLE_COUNT_2_BIT))return false;
+        const auto count=VkSampleCountFlagBits(graphics_ms_samples());
+        if(depth?!(l.framebufferDepthSampleCounts&l.sampledImageDepthSampleCounts&count) || (f==VK_FORMAT_D24_UNORM_S8_UINT && !(l.framebufferStencilSampleCounts&l.sampledImageStencilSampleCounts&count))
+                :!(l.framebufferColorSampleCounts&l.sampledImageColorSampleCounts&count))return false;
         VkImageFormatProperties p{};
         const VkImageUsageFlags usage=VK_IMAGE_USAGE_TRANSFER_DST_BIT|VK_IMAGE_USAGE_SAMPLED_BIT|(depth?VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT:VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT);
-        return vkGetPhysicalDeviceImageFormatProperties(physical,f,VK_IMAGE_TYPE_2D,VK_IMAGE_TILING_OPTIMAL,usage,0,&p)==VK_SUCCESS && (p.sampleCounts&VK_SAMPLE_COUNT_2_BIT);
+        return vkGetPhysicalDeviceImageFormatProperties(physical,f,VK_IMAGE_TYPE_2D,VK_IMAGE_TILING_OPTIMAL,usage,0,&p)==VK_SUCCESS && (p.sampleCounts&count);
     }
     // Frontend: creates the working image of visual image v, its expand pipelines and per-plane framebuffers. Outside a pass.
     bool graphics_ms_prepare(GraphicsBatch& b,const std::shared_ptr<GraphicsImage>& v){
         if(v->ms)return true;
-        if(v->layers!=2 || v->visual || v->borrowed || !graphics_ms_format(v->format,v->depth)){v->ms_wanted=false;return false;}
+        if(v->layers!=graphics_ms_samples() || v->visual || v->borrowed || !graphics_ms_format(v->format,v->depth)){v->ms_wanted=false;return false;}
         auto m=std::make_shared<GraphicsImage>(this,v->format,v->width,v->height,1,v->depth);
         VkImageCreateInfo ii{};ii.sType=VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;ii.imageType=VK_IMAGE_TYPE_2D;ii.format=v->format;ii.extent={v->width,v->height,1};ii.mipLevels=1;ii.arrayLayers=1;
-        ii.samples=VK_SAMPLE_COUNT_2_BIT;ii.tiling=VK_IMAGE_TILING_OPTIMAL;ii.usage=VK_IMAGE_USAGE_TRANSFER_DST_BIT|VK_IMAGE_USAGE_SAMPLED_BIT|(v->depth?VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT:VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT);
+        ii.samples=VkSampleCountFlagBits(v->layers);ii.tiling=VK_IMAGE_TILING_OPTIMAL;ii.usage=VK_IMAGE_USAGE_TRANSFER_DST_BIT|VK_IMAGE_USAGE_SAMPLED_BIT|(v->depth?VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT:VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT);
         check(vkCreateImage(device,&ii,nullptr,&m->image),"visual msaa image");
         VkMemoryRequirements r{};vkGetImageMemoryRequirements(device,m->image,&r);VkMemoryAllocateInfo ai{};ai.sType=VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;ai.allocationSize=r.size;ai.memoryTypeIndex=memory_type(r.memoryTypeBits,VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
         m->memory_bytes=r.size;check(vkAllocateMemory(device,&ai,nullptr,&m->memory),"visual msaa memory");check(vkBindImageMemory(device,m->image,m->memory,0),"visual msaa bind");
@@ -1094,8 +1111,24 @@ public:
             v->ms_expand=graphics_pipeline(e,*vs,*fs_depth,vs,fs_depth);
             if(stencil){e.z.depthTestEnable=e.z.depthWriteEnable=false;v->ms_expand_bits=graphics_pipeline(e,*vs,*fs_bits,vs,fs_bits);}}
         else{e.colors=1;e.color=v->format;e.blend[0].colorWriteMask=15;v->ms_expand=graphics_pipeline(e,*vs,*fs_color,vs,fs_color);}
-        for(unsigned layer=0;layer<2;++layer){VkFramebufferCreateInfo fi{};fi.sType=VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;fi.renderPass=v->ms_expand->pass;fi.attachmentCount=1;fi.pAttachments=&v->views[layer];
+        for(unsigned layer=0;layer<v->layers;++layer){VkFramebufferCreateInfo fi{};fi.sType=VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;fi.renderPass=v->ms_expand->pass;fi.attachmentCount=1;fi.pAttachments=&v->views[layer];
             fi.width=v->width;fi.height=v->height;fi.layers=1;check(vkCreateFramebuffer(device,&fi,nullptr,&v->ms_expand_fb[layer]),"visual msaa expand framebuffer");}
+        if(graphics_ms_load_on()){
+            // Load (planes -> samples): gl_SampleID selects the plane, so every sample is shaded on its own.
+            static const auto ld_color=std::make_shared<const std::string>(head+"layout(binding=17) uniform sampler2DArray src_;layout(location=0) out vec4 o;\n"
+                "void main(){o=texelFetch(src_,ivec3(ivec2(gl_FragCoord.xy),gl_SampleID),0);}\n");
+            static const auto ld_depth=std::make_shared<const std::string>(head+"layout(binding=17) uniform sampler2DArray src_;\n"
+                "void main(){gl_FragDepth=texelFetch(src_,ivec3(ivec2(gl_FragCoord.xy),gl_SampleID),0).r;}\n");
+            static const auto ld_bits=std::make_shared<const std::string>(head+"layout(binding=18) uniform usampler2DArray stencil_;\n"
+                "void main(){if(((texelFetch(stencil_,ivec3(ivec2(gl_FragCoord.xy),gl_SampleID),0).r>>bit_)&1u)==0u)discard;}\n");
+            GraphicsState l=e;l.raster_samples=v->layers;
+            if(v->depth){l.z.depthTestEnable=l.z.depthWriteEnable=true;l.z.depthCompareOp=VK_COMPARE_OP_ALWAYS;v->ms_load=graphics_pipeline(l,*vs,*ld_depth,vs,ld_depth);   // also writes stencil 0 (REPLACE, reference 0)
+                if(stencil){if(!v->stencil_array_view){VkImageViewCreateInfo vi{};vi.sType=VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;vi.image=v->image;vi.viewType=VK_IMAGE_VIEW_TYPE_2D_ARRAY;vi.format=v->format;
+                        vi.subresourceRange={VK_IMAGE_ASPECT_STENCIL_BIT,0,1,0,v->layers};check(vkCreateImageView(device,&vi,nullptr,&v->stencil_array_view),"visual msaa plane stencil view");}
+                    l.z.depthTestEnable=l.z.depthWriteEnable=false;v->ms_load_bits=graphics_pipeline(l,*vs,*ld_bits,vs,ld_bits);}}
+            else v->ms_load=graphics_pipeline(l,*vs,*ld_color,vs,ld_color);
+            VkFramebufferCreateInfo fi{};fi.sType=VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;fi.renderPass=v->ms_load->pass;fi.attachmentCount=1;fi.pAttachments=&m->views[0];
+            fi.width=v->width;fi.height=v->height;fi.layers=1;check(vkCreateFramebuffer(device,&fi,nullptr,&v->ms_load_fb),"visual msaa load framebuffer");}
         b.pins.push_back(v);v->ms=std::move(m);v->ms_current=false;graphics_ms_any=true;++graphics_ms_images;return true;
     }
     // Recording side (draw recorder, or the frontend after b.sync()): working image -> planes. Ends any open pass first.
@@ -1118,7 +1151,7 @@ public:
         for(unsigned face=0;face<2;++face){d[6+face*3]=255;d[7+face*3]=255;d[8+face*3]=v.ms_stencil_known?v.ms_stencil&255:0;}
         const float one=1;std::memcpy(&d[19],&one,4);
         const std::uint32_t offset=0;
-        for(unsigned layer=0;layer<2;++layer){
+        for(unsigned layer=0;layer<v.layers;++layer){
             VkRenderPassBeginInfo pass{};pass.sType=VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;pass.renderPass=p.pass;pass.framebuffer=v.ms_expand_fb[layer];pass.renderArea={{0,0},{v.width,v.height}};
             vkCmdBeginRenderPass(b.command,&pass,VK_SUBPASS_CONTENTS_INLINE);graphics_mark(b,MarkPassBegin);++b.render_passes;::RsxPerfCounters::add(::RsxPerfCounters::render_passes);
             graphics_pass_begun(b,true,1);
@@ -1137,6 +1170,44 @@ public:
         }
         b.bound_graphics_pipeline=bits?v.ms_expand_bits->pipeline:p.pipeline;b.dynamic_valid=false;
         v.ms_current=false;++graphics_ms_expands;if(bits)++graphics_ms_bit_expands;
+    }
+    // Recording side: planes -> working image (graphics_ms_load_on). Ends any open pass first; the working image is current after.
+    void graphics_ms_load(GraphicsBatch& b,GraphicsImage& v){
+        graphics_close_pass_only(b);
+        const auto& p=*v.ms_load;const bool bits=bool(v.ms_load_bits);
+        if(!graphics_sampler){VkSamplerCreateInfo sampler{};sampler.sType=VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+            sampler.magFilter=sampler.minFilter=VK_FILTER_NEAREST;sampler.mipmapMode=VK_SAMPLER_MIPMAP_MODE_NEAREST;
+            sampler.addressModeU=sampler.addressModeV=sampler.addressModeW=VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+            check(vkCreateSampler(device,&sampler,nullptr,&graphics_sampler),"graphics sampler");}
+        const auto set=graphics_descriptor_set(b,p.descriptors,"visual msaa load descriptor");
+        std::array<VkWriteDescriptorSet,3> writes{};const VkDescriptorBufferInfo data{b.data_buffer,0,16};
+        const VkDescriptorImageInfo images[2]{{graphics_sampler,v.array_view,VK_IMAGE_LAYOUT_GENERAL},{graphics_sampler,v.stencil_array_view,VK_IMAGE_LAYOUT_GENERAL}};
+        for(auto& w:writes){w.sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;w.dstSet=set;w.descriptorCount=1;}
+        writes[0].dstBinding=0;writes[0].descriptorType=VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC;writes[0].pBufferInfo=&data;
+        writes[1].dstBinding=17;writes[1].descriptorType=VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;writes[1].pImageInfo=&images[0];
+        writes[2].dstBinding=18;writes[2].descriptorType=VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;writes[2].pImageInfo=&images[1];
+        vkUpdateDescriptorSets(device,bits?3:2,writes.data(),0,nullptr);
+        std::array<unsigned,22> d{};d[0]=d[4]=v.width;d[1]=d[5]=v.height;
+        for(unsigned face=0;face<2;++face){d[6+face*3]=255;d[7+face*3]=255;d[8+face*3]=0;}   // depth pass: stencil REPLACE with 0
+        const float one=1;std::memcpy(&d[19],&one,4);
+        const std::uint32_t offset=0;
+        VkRenderPassBeginInfo pass{};pass.sType=VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;pass.renderPass=p.pass;pass.framebuffer=v.ms_load_fb;pass.renderArea={{0,0},{v.width,v.height}};
+        vkCmdBeginRenderPass(b.command,&pass,VK_SUBPASS_CONTENTS_INLINE);graphics_mark(b,MarkPassBegin);++b.render_passes;::RsxPerfCounters::add(::RsxPerfCounters::render_passes);
+        graphics_pass_begun(b,true,1);
+        vkCmdBindPipeline(b.command,VK_PIPELINE_BIND_POINT_GRAPHICS,p.pipeline);
+        vkCmdBindDescriptorSets(b.command,VK_PIPELINE_BIND_POINT_GRAPHICS,p.layout,0,1,&set,1,&offset);
+        graphics_emit_dynamic(b.command,d,nullptr);
+        GraphicsPush push{float(v.width),float(v.height),0,0,0,0,{},{1,1}};
+        vkCmdPushConstants(b.command,p.layout,VK_SHADER_STAGE_VERTEX_BIT|VK_SHADER_STAGE_FRAGMENT_BIT,0,sizeof(GraphicsPush),&push);
+        vkCmdDraw(b.command,3,1,0,0);graphics_mark(b,MarkDraw);
+        if(bits){vkCmdBindPipeline(b.command,VK_PIPELINE_BIND_POINT_GRAPHICS,v.ms_load_bits->pipeline);
+            vkCmdSetStencilReference(b.command,VK_STENCIL_FACE_FRONT_AND_BACK,255);
+            for(unsigned bit=0;bit<8;++bit){push.layers=bit;vkCmdSetStencilWriteMask(b.command,VK_STENCIL_FACE_FRONT_AND_BACK,1u<<bit);
+                vkCmdPushConstants(b.command,p.layout,VK_SHADER_STAGE_VERTEX_BIT|VK_SHADER_STAGE_FRAGMENT_BIT,0,sizeof(GraphicsPush),&push);
+                vkCmdDraw(b.command,3,1,0,0);graphics_mark(b,MarkDraw);}}
+        vkCmdEndRenderPass(b.command);graphics_pass_ended(b);graphics_mark(b,MarkPassEnd);::RsxPerfCounters::add(::RsxPerfCounters::pass_ends);
+        b.bound_graphics_pipeline=bits?v.ms_load_bits->pipeline:p.pipeline;b.dynamic_valid=false;
+        v.ms_current=true;v.ms_stencil_known=false;++graphics_ms_loads;
     }
     // Frontend hook before any non-draw access to `image` (a native image with a visual companion, a visual image, or an
     // input alias of one): its pending visual draws are recorded, then a current working image is expanded.
@@ -1325,6 +1396,10 @@ public:
         if(graphics_ms_any){
             for(const auto& t:textures)if(t){if(t->ms && t->ms_current)graphics_ms_expand(b,*t);if(t->borrowed && t->borrowed->ms && t->borrowed->ms_current)graphics_ms_expand(b,*t->borrowed);}
             ms_mode=bool(j.ms_pipeline);
+            // Load path: every attachment has a working image with a load pipeline; the ones whose planes hold the content
+            // are loaded first, so the draw goes into the working images (ms_load exists only with graphics_ms_load_on).
+            if(ms_mode){bool loadable=true;for(unsigned i=0;i<s.colors;++i)loadable=loadable && colors[i]->ms && colors[i]->ms_load;if(depth)loadable=loadable && depth->ms && depth->ms_load;
+                if(loadable){for(unsigned i=0;i<s.colors;++i)if(!colors[i]->ms_current)graphics_ms_load(b,*colors[i]);if(depth && !depth->ms_current)graphics_ms_load(b,*depth);}}
             for(unsigned i=0;i<s.colors && ms_mode;++i)ms_mode=colors[i]->ms && colors[i]->ms_current;
             if(ms_mode && depth)ms_mode=depth->ms && depth->ms_current;
             if(!ms_mode){for(unsigned i=0;i<s.colors;++i)if(colors[i] && colors[i]->ms && colors[i]->ms_current)graphics_ms_expand(b,*colors[i]);
@@ -1496,8 +1571,9 @@ public:
             if(depth)ok=ok && depth->layers==2 && graphics_ms_format(depth->format,true);
             for(const auto& t:textures)if(t && ok){for(unsigned i=0;i<s.colors;++i)ok=ok && t!=colors[i] && t->borrowed!=colors[i];ok=ok && (!depth || (t!=depth && t->borrowed!=depth));}
             if(ok){bool ready=true;
-                for(unsigned i=0;i<s.colors;++i){colors[i]->ms_wanted=true;ready=ready && colors[i]->ms;}
-                if(depth){depth->ms_wanted=true;ready=ready && depth->ms;}
+                const bool load=graphics_ms_load_on();   // the load path needs no full clear to create a working image
+                for(unsigned i=0;i<s.colors;++i){colors[i]->ms_wanted=true;if(load && !colors[i]->ms)graphics_ms_prepare(b,colors[i]);ready=ready && colors[i]->ms;}
+                if(depth){depth->ms_wanted=true;if(load && !depth->ms)graphics_ms_prepare(b,depth);ready=ready && depth->ms;}
                 if(ready){if(!pipeline->ms_variant){auto m=s;m.raster_samples=2;pipeline->ms_variant=graphics_pipeline(m,vs,fs,vs_owner,fs_owner);}ms_pipeline=pipeline->ms_variant;}}
         }
         // An optional tail (vertex input bytes) directly follows the words in
@@ -1798,8 +1874,8 @@ public:
             if(b.frames && graphics_render_scale>1 && graphics_profile_frames%120==0)
                 std::fprintf(stderr,"PERF RENDER_SCALE scale=%u visual_draws=%llu native_copies=%llu host_invalidations=%llu queued=%llu drains=%llu max_run=%llu history_copies=%llu history_texels=%llu\n",graphics_render_scale,(unsigned long long)graphics_visual_draws,(unsigned long long)graphics_visual_native_copies,(unsigned long long)graphics_visual_host_invalidations,(unsigned long long)graphics_visual_queued_total,(unsigned long long)graphics_visual_drains_total,(unsigned long long)graphics_visual_run_max,(unsigned long long)graphics_visual_history_copies,(unsigned long long)graphics_visual_history_texels);
             if(b.frames && graphics_render_scale>1 && graphics_profile_frames%120==0 && graphics_visual_msaa())
-                std::fprintf(stderr,"PERF RENDER_SCALE_MSAA images=%llu clears=%llu draws=%llu plane_draws=%llu expands=%llu bit_expands=%llu\n",(unsigned long long)graphics_ms_images.load(),(unsigned long long)graphics_ms_clears.load(),
-                    (unsigned long long)graphics_ms_draws.load(),(unsigned long long)graphics_ms_plane_draws.load(),(unsigned long long)graphics_ms_expands.load(),(unsigned long long)graphics_ms_bit_expands.load());
+                std::fprintf(stderr,"PERF RENDER_SCALE_MSAA images=%llu clears=%llu draws=%llu plane_draws=%llu expands=%llu bit_expands=%llu loads=%llu\n",(unsigned long long)graphics_ms_images.load(),(unsigned long long)graphics_ms_clears.load(),
+                    (unsigned long long)graphics_ms_draws.load(),(unsigned long long)graphics_ms_plane_draws.load(),(unsigned long long)graphics_ms_expands.load(),(unsigned long long)graphics_ms_bit_expands.load(),(unsigned long long)graphics_ms_loads.load());
             if(b.frames && graphics_render_scale>1 && graphics_profile_frames%120==0){std::string line="PERF RENDER_SCALE_WORK frames="+std::to_string(graphics_profile_frames);
                 for(unsigned k=0;k<WorkCount;++k){line+=' ';line+=graphics_work_names[k];line+='=';line+=std::to_string(graphics_work_value(k));}
                 static const char* const site_names[]={"none","tex_upload","surface_copy","transfer","unpack","pack","aspect","decode","raw_buffer","device_upload","predicate","present","clear","device_copies","visual"};
