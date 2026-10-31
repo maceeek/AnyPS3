@@ -54,12 +54,19 @@ TYPES = r'''
         [[gnu::always_inline]] Cell* cell(std::uintptr_t page)const{
             // Cache only positive leaves, so publication never leaves a stale
             // negative hint. Identity prevents reuse after broker destruction.
-            struct Cache {std::uint64_t identity=0;std::uintptr_t block=0;Node* leaf=nullptr;};thread_local Cache cache;
-            if(cache.identity!=identity || cache.block!=page>>9){auto* node=root.get();
-                for(int shift=45;node && shift>=9;shift-=9)node=node->children[(page>>shift)&511].load(std::memory_order_acquire);
-                if(!node)return nullptr;
-                cache={identity,page>>9,node};}
-            return &cache.leaf->cells[page&511];
+            // Four fully associative entries (2 MiB host blocks, round-robin refill): alternating pages of different backings
+            // (the RSX FIFO page and its GET/control page, a draw's buffers) no longer evict each other on every access (one
+            // entry walked 5 levels per GET store). A leaf, once linked, stays linked to the same block for the broker's lifetime.
+            // Identity 0 is never a broker's, so an empty entry never matches.
+            struct Cache {std::uint64_t identity=0;std::uintptr_t block=0;Node* leaf=nullptr;};
+            struct Caches {std::array<Cache,4> entry{};unsigned next=0;};thread_local Caches caches;
+            const auto block=page>>9;
+            for(const auto& cache:caches.entry)if(cache.identity==identity && cache.block==block)return &cache.leaf->cells[page&511];
+            auto* node=root.get();
+            for(int shift=45;node && shift>=9;shift-=9)node=node->children[(page>>shift)&511].load(std::memory_order_acquire);
+            if(!node)return nullptr;
+            caches.entry[caches.next++&3]={identity,block,node};
+            return &node->cells[page&511];
         }
         bool owner_unclaimed(const void* pointer,unsigned size){
             if(stopped.load(std::memory_order_acquire))return false;
@@ -156,7 +163,8 @@ TYPES = r'''
         GpuPages()=default;
         GpuPages(GuestMemory& m,std::vector<HostSpan> requested):spans(std::move(requested)){
             if(!m.page_broker.enabled.load())throw std::runtime_error("enable page broker before ownership acquisition");
-            auto& local=m.local_state();if(local.leases || local.raw)throw std::runtime_error("page ownership inside CPU/raw admission");
+            // A renderer page cursor never spans a claim (broker quiesce would wait for its own hazard).
+            auto& local=m.local_state();if(local.cursor_active)m.cursor_revoke(local);if(local.leases || local.raw)throw std::runtime_error("page ownership inside CPU/raw admission");
             // Only map owner may translate and pin new claims in this phase.
             if(!m.memory_owner() && !(m.renderer_owner() && (local.fault_claim || local.renderer_claim)))throw std::runtime_error("foreign page ownership requires map owner pin transaction");
             memory=&m;broker=&m.page_broker;GuestMemory::stat_gpu_claims.fetch_add(1,std::memory_order_relaxed);pages=PageBroker::keys(spans);token=broker->acquire(pages,m.renderer_owner() && (local.fault_claim || local.renderer_claim),&m.metadata_mutex.value);

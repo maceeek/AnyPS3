@@ -99,6 +99,9 @@ TYPES = RESERVATION_WAIT_TYPES + r'''
         unsigned leases=0,raw=0,quiet=0,slot=UINT32_MAX,observer_pauses=0,raw_yields=0;bool fault_claim=false,renderer_claim=false,is_owner=false;
         unsigned scalar_batch_depth=0;bool scalar_batch_active=false,inline_active=false;
         const SmallList<std::uintptr_t,4>* leased_pages=nullptr;std::uintptr_t leased_scalar_page=UINTPTR_MAX;
+        // RenderCursor (renderer only): this thread's page hazard is held for guest span [cursor_lo,cursor_hi) of one host page.
+        bool cursor_active=false,cursor_filtered=false;std::uint64_t cursor_lo=0,cursor_hi=0;const std::uint8_t* cursor_payload=nullptr;
+        const std::atomic<std::uint32_t>* cursor_state=nullptr;const std::atomic<bool>* cursor_observed=nullptr;
         const ParallelMemory::Snapshot* snapshot=nullptr;
         std::array<std::pair<std::uint32_t,unsigned>,64> cache{};
         std::array<ScalarCache,64> scalar_cache{};
@@ -242,6 +245,8 @@ TYPES = RESERVATION_WAIT_TYPES + r'''
     [[gnu::always_inline]] void suspend_scalar_batch(LocalAccess& local){
         // Every admission, raw scope or blocking byte API first retires an
         // inline section; translated code then sees the blocked table.
+        // A renderer page cursor is revoked the same way (its hazard never spans another admission or a wait).
+        if(local.cursor_active)cursor_revoke(local);
         if(local.inline_active)inline_leave(local);
         if(local.scalar_batch_active && !local.leases){local.scalar_batch_active=false;leave_reader(local);}
     }
@@ -461,6 +466,21 @@ TYPES = RESERVATION_WAIT_TYPES + r'''
            !(hit.flags&(write?2:4)) || (write && (hit.flags&1)))return nullptr;
         return &hit;
     }
+    // The admitted fast paths (read_page, cursor_pin, range_admitted) refill a missing entry from the admitted snapshot instead
+    // of declining: the mapping that holds the whole span, the same one translate_parallel resolves and caches (maps never
+    // overlap). No error is raised here; a hole or a missing permission returns nullptr and the caller declines to its Lease
+    // path, which raises the original error. Two guest pages 256 KiB apart share an entry (64 entries by page number).
+    [[gnu::noinline]] const ScalarCache* refill_parallel_map(LocalAccess& local,std::uint64_t address,unsigned size,bool write){
+        if(address>UINT32_MAX || !size || size>UINT64_C(0x100000000)-address)return nullptr;
+        for(const auto& map:local.snapshot->maps){const auto& r=map.region;
+            if(address>=r.base && address-r.base<r.bytes->size() && size<=r.bytes->size()-(address-r.base)){
+                cache_scalar_mapping(local,map,address);return cached_parallel_map(local,address,size,write);}}
+        return nullptr;
+    }
+    [[gnu::always_inline]] const ScalarCache* admitted_parallel_map(LocalAccess& local,std::uint64_t address,unsigned size,bool write){
+        if(const auto* hit=cached_parallel_map(local,address,size,write))return hit;
+        return refill_parallel_map(local,address,size,write);
+    }
     void cache_scalar_mapping(LocalAccess& local,const ParallelMemory::Mapping& map,std::uint64_t address){
         const auto& r=map.region;auto& cached=local.scalar_cache[(address>>12)%local.scalar_cache.size()];
         cached={local.snapshot->epoch,r.base,r.base+r.bytes->size(),r.flags,&map,r.bytes->data(),r.bytes->coherent_data(),map.state->tracked.get()};
@@ -480,7 +500,8 @@ TYPES = RESERVATION_WAIT_TYPES + r'''
         [[gnu::always_inline]] void reject(LocalAccess& state){retire(state);memory.suspend_scalar_batch(state);}
         [[gnu::always_inline]] ScalarAccess(GuestMemory& m,std::uint64_t address,unsigned size,bool write,bool cached_only=false,bool payload_only=false):memory(m),compact(cached_only),full_lease(!payload_only){
             if(!size || size>8 || !m.parallel->asymmetric || !m.page_broker.enabled.load(std::memory_order_acquire))return;
-            auto& state=m.local_state();if(state.raw || state.leases)return;
+            auto& state=m.local_state();if(state.cursor_active)m.cursor_revoke(state);   // the hazard slot is reused below
+            if(state.raw || state.leases)return;
             if(cached_only && state.scalar_batch_depth){
                 if(state.scalar_batch_active && m.parallel->exclusive.load(std::memory_order_acquire))m.suspend_scalar_batch(state);
                 if(!state.scalar_batch_active)m.resume_scalar_batch(state);
@@ -512,6 +533,114 @@ TYPES = RESERVATION_WAIT_TYPES + r'''
         }
         [[gnu::always_inline]] ~ScalarAccess(){if(local){if(full_lease){--local->quiet;--local->leases;}retire(*local);}}
         ScalarAccess(const ScalarAccess&)=delete;
+    };
+    // One-page read (ANYPS3_GUEST_PAGE_READ, default 1; 0 keeps the Lease path for every transfer/Range read): the compact
+    // ScalarAccess admission for a read of 1..4096 bytes inside one 4 KiB guest page and one host page, without Lease, span
+    // vector, CpuPages or a second translation. It only completes reads that the Lease path completes with no side effect, and
+    // returns false (nothing read, nothing published) for everything else, which then takes the unchanged Lease path and raises
+    // its own error or runs its own observer callback / claim wait:
+    //  * admission: the pending hazard closes the raw gate exactly as a compact scalar (RawPermit/map publication wait for it;
+    //    a closed gate declines); raw scopes, nested leases and broker-less or symmetric memory decline;
+    //  * the map comes from the admitted snapshot's scalar cache (a miss declines; the Lease path refills it), with its read
+    //    permission and bounds; `epoch` (a Range's pinned map epoch, 0 = none) must equal the admitted snapshot's;
+    //  * observers: paused as for scalars, otherwise any synchronous interest in the bytes (the same byte-exact lookup the
+    //    Lease path makes under transfer's HostByteAccess) declines, so every callback still runs on the Lease path;
+    //  * claims: the page hazard is published before the claim bit is read; a claimed page declines (the Lease path waits),
+    //    an unclaimed one cannot be acquired until the hazard is retired (broker quiesce waits for it), as for scalars;
+    //  * a stopped broker declines (the Lease path rethrows the stop reason).
+    // The bytes are the same acquire loads in the same order (atomic_read) from the same view (coherent iff exact bytes).
+    inline static const bool page_read_enabled=[]{const char* v=std::getenv("ANYPS3_GUEST_PAGE_READ");
+        if(v && std::strcmp(v,"0") && std::strcmp(v,"1")){throw std::runtime_error("invalid ANYPS3_GUEST_PAGE_READ");}return !v || !std::strcmp(v,"1");}();
+    inline static thread_local std::uint64_t page_reads=0;   // TEST HOOK: one-page reads completed by this thread
+    [[gnu::noinline]] bool read_page(std::uint64_t address,std::uint8_t* out,unsigned size,std::uint64_t epoch=0){
+        if(!page_read_enabled || !size || address>UINT32_MAX || (address>>12)!=((address+size-1)>>12) || !parallel->asymmetric ||
+           !page_broker.enabled.load(std::memory_order_acquire) || page_broker.stopped.load(std::memory_order_acquire))return false;
+        auto& state=local_state();if(state.raw || state.leases)return false;
+        suspend_scalar_batch(state);   // as Lease: no owner batch or inline section spans this admission
+        if(!try_enter_scalar_reader(state))return false;
+        const auto* hit=admitted_parallel_map(state,address,size,false);
+        if(!hit || (epoch && epoch!=state.snapshot->epoch)){leave_scalar_reader(state);return false;}
+        const auto* pointer=hit->pointer+address-hit->base;const auto at=reinterpret_cast<std::uintptr_t>(pointer);
+        auto* cell=(at>>12)==((at+size-1)>>12)?page_broker.cell(at>>12):nullptr;
+        const bool exact=host_access_observer.supports_exact_bytes.load(std::memory_order_acquire);
+        if(!cell || (!(state.is_owner?in_host_access_observer:state.observer_pauses!=0) && host_access_observer &&
+           (!host_access_observer.filtered || cell->observed.load(std::memory_order_acquire)) && host_access_observer.synchronous(pointer,size,true))){
+            leave_scalar_reader(state);return false;}
+        parallel->readers[state.slot].page.store(at>>12,std::memory_order_release);
+        std::atomic_signal_fence(std::memory_order_seq_cst);
+        if((cell->state.load(std::memory_order_acquire)&PageBroker::claimed) || page_broker.stopped.load(std::memory_order_acquire)){
+            leave_scalar_reader(state);return false;}
+        atomic_read(exact?hit->coherent+address-hit->base:pointer,out,size);
+        leave_scalar_reader(state);++page_reads;return true;
+    }
+    // ---- Renderer page cursor (ANYPS3_RSX_RENDER_BATCH, default 1; 0 = every FIFO read admits on its own, as before) ----
+    // The RSX FIFO consumer (the registered renderer thread only) reads headers and packet values page after page. A cursor
+    // keeps the compact scalar admission of ONE host page published between those reads: the reader's page hazard stays
+    // on that page (it pins the map snapshot exactly like a compact scalar's hazard), and the page's map/cell resolution is
+    // reused. Every read is still a live acquire load at its original program point; only the translation is reused, and the
+    // held hazard keeps it valid (map publication needs RawPermit, whose quiet() waits for the hazard).
+    // Who can wait for the held hazard, and why it is released in bounded time without blocking the renderer:
+    //  * an exclusive raw writer or map publisher: the next cursor read sees `exclusive` and revokes;
+    //  * a GPU claim of the pinned page (broker quiesce waits for page hazards): the next read of that page sees the claim
+    //    bit and revokes; a read of another page moves the hazard off it;
+    //  * between two cursor reads the consumer executes only plain register stores and transform-constant uploads (no
+    //    guest-memory access, wait or callback). Every other method, the owner hook, a perf capture, leaving rsx_run_impl
+    //    (RAII, also on exceptions) and every GuestMemory API on this thread revoke first (suspend_scalar_batch: Lease,
+    //    read_page, RawPermit, RawYield, release_reader_slot; ScalarAccess and GpuPages explicitly), so the renderer never
+    //    blocks, waits or calls back while it holds the hazard and no other API reuses the hazard slot behind the cursor.
+    // A read the cursor cannot serve (exclusive gate, claim, observed page, cache miss, page crossing, another mapping state)
+    // revokes and returns false; the caller then takes the unchanged per-access path, which raises the original error,
+    // runs the observer callback or waits. An installed unfiltered observer, or an observed page summary, is never served;
+    // installing/replacing the observer needs RawPermit (revokes), and the per-page summary is re-read on every access.
+    inline static const bool render_batch_enabled=[]{const char* v=std::getenv("ANYPS3_RSX_RENDER_BATCH");
+        if(v && std::strcmp(v,"0") && std::strcmp(v,"1")){throw std::runtime_error("invalid ANYPS3_RSX_RENDER_BATCH");}return !v || !std::strcmp(v,"1");}();
+    inline static thread_local std::uint64_t cursor_reads=0;   // TEST HOOK: reads served by this thread's cursor
+    [[gnu::noinline]] void cursor_revoke(LocalAccess& local){local.cursor_active=false;leave_scalar_reader(local);}
+    [[gnu::noinline]] bool cursor_pin(LocalAccess& local,std::uint64_t address,unsigned size){
+        if(local.cursor_active)cursor_revoke(local);
+        if(!size || size>4096 || address>UINT32_MAX || local.raw || local.leases || local.inline_active || local.scalar_batch_active ||
+           !page_broker.enabled.load(std::memory_order_acquire) || page_broker.stopped.load(std::memory_order_acquire) ||
+           !try_enter_scalar_reader(local))return false;
+        const auto* hit=admitted_parallel_map(local,address,size,false);
+        const auto* pointer=hit?hit->pointer+address-hit->base:nullptr;const auto at=reinterpret_cast<std::uintptr_t>(pointer);
+        auto* cell=hit && (at>>12)==((at+size-1)>>12)?page_broker.cell(at>>12):nullptr;
+        const bool observer=bool(host_access_observer),filtered=observer && host_access_observer.filtered;
+        if(!cell || (observer && !filtered) || (filtered && cell->observed.load(std::memory_order_acquire))){leave_scalar_reader(local);return false;}
+        parallel->readers[local.slot].page.store(at>>12,std::memory_order_release);
+        std::atomic_signal_fence(std::memory_order_seq_cst);
+        if((cell->state.load(std::memory_order_acquire)&PageBroker::claimed) || page_broker.stopped.load(std::memory_order_acquire)){
+            leave_scalar_reader(local);return false;}
+        // Guest span of this host page inside the mapping (a mapping may start or end inside the host page).
+        const std::uint64_t offset=at&4095,first=address>=offset?address-offset:0;
+        local.cursor_lo=std::max<std::uint64_t>(first,hit->base);local.cursor_hi=std::min<std::uint64_t>(first+4096,hit->end);
+        const bool exact=host_access_observer.supports_exact_bytes.load(std::memory_order_acquire);
+        local.cursor_payload=(exact?hit->coherent:hit->pointer)+(local.cursor_lo-hit->base);
+        local.cursor_state=&cell->state;local.cursor_observed=&cell->observed;local.cursor_filtered=filtered;local.cursor_active=true;
+        return true;
+    }
+    struct RenderCursor {
+        GuestMemory& memory;LocalAccess* local=nullptr;
+        explicit RenderCursor(GuestMemory& m):memory(m){
+            if(render_batch_enabled && m.concurrent() && m.parallel->asymmetric && m.renderer_owner())local=&m.local_state();}
+        ~RenderCursor(){revoke();}
+        RenderCursor(const RenderCursor&)=delete;
+        void revoke(){if(local && local->cursor_active)memory.cursor_revoke(*local);}
+        // Served: the pinned page still holds [address,address+size), no exclusive writer or claim waits for it and its
+        // observer summary is clear. Liveness only: the held hazard already excludes both owners.
+        [[gnu::always_inline]] bool served(std::uint64_t address,unsigned size)const{
+            const auto& l=*local;
+            return l.cursor_active && address>=l.cursor_lo && address+size<=l.cursor_hi && !memory.parallel->exclusive.load(std::memory_order_acquire) &&
+                !(l.cursor_state->load(std::memory_order_acquire)&PageBroker::claimed) && !(l.cursor_filtered && l.cursor_observed->load(std::memory_order_acquire));
+        }
+        // A scalar (1/2/4/8 bytes) of [address,address+size): false = not served, nothing read.
+        [[gnu::always_inline]] bool load(std::uint64_t address,unsigned size,std::uint64_t& value){
+            if(!local || !(served(address,size) || memory.cursor_pin(*local,address,size)))return false;
+            value=atomic_scalar_read(local->cursor_payload+(address-local->cursor_lo),size);++cursor_reads;return true;
+        }
+        bool read(std::uint64_t address,std::uint8_t* out,unsigned size){
+            if(!local || !(served(address,size) || memory.cursor_pin(*local,address,size)))return false;
+            atomic_read(local->cursor_payload+(address-local->cursor_lo),out,size);++cursor_reads;return true;
+        }
     };
     // GNU atomic byte-addressable storage. Naturally aligned scalars use their
     // actual width; bulk fringes use bytes, never read/merge/store a neighbour.
@@ -569,6 +698,13 @@ TYPES = RESERVATION_WAIT_TYPES + r'''
             case 4:return from_be(__atomic_load_n(reinterpret_cast<const AtomicInt*>(pointer),__ATOMIC_ACQUIRE));
             case 8:return from_be(__atomic_load_n(reinterpret_cast<const AtomicWord*>(pointer),__ATOMIC_ACQUIRE));
             }
+        }
+        // A word-aligned doubleword (the RSX FIFO header+value pair, a PPU ld at a 4-byte boundary): its two aligned words in
+        // ascending order, one acquire load each. Every value this returns is one the bytewise sequence below can return (each
+        // word's four ascending byte loads at one instant); no byte outside [pointer,pointer+8) is touched.
+        if(size==8 && !(reinterpret_cast<std::uintptr_t>(pointer)&3)){
+            const std::uint64_t high=from_be(__atomic_load_n(reinterpret_cast<const AtomicInt*>(pointer),__ATOMIC_ACQUIRE));
+            return (high<<32)|from_be(__atomic_load_n(reinterpret_cast<const AtomicInt*>(pointer+4),__ATOMIC_ACQUIRE));
         }
         std::uint8_t bytes[8]{};atomic_read(pointer,bytes,size);std::uint64_t value=0;
         for(unsigned i=0;i<size;++i)value=(value<<8)|bytes[i];

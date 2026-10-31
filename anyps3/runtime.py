@@ -628,6 +628,9 @@ struct GuestMemory {
             epoch=memory->parallel->epoch;
         }
         void read(unsigned offset,std::uint8_t* out,unsigned count)const{
+            // Concurrent reads go by address through the admitted snapshot (read_admitted below); a one-page read whose map
+            // epoch still equals this Range's needs no check_epoch revalidation and completes without side effects (par_memory).
+            if(memory->concurrent() && offset<=size && count<=size-offset && memory->read_page(address+offset,out,count,epoch))return;
         HostByteAccess exact_bytes{memory->host_access_observer.supports_exact_bytes.load(std::memory_order_acquire)};
             Lease lease(*memory,address+offset,count,false,true);check_epoch();
             if(memory->concurrent()){
@@ -801,7 +804,43 @@ struct GuestMemory {
     // coherence point as range(address,size,false) -- creation retires GPU-authoritative bytes at this safe point, which the
     // draw relies on before it reserves staging space -- but without page-broker cell admission: nothing is read here.
     Range range_translated(std::uint64_t address,unsigned size){return range(address,size,false,false);}
+    // One-mapping Range creation (ANYPS3_GUEST_RANGE_ADMISSION, default 1; 0 = the Lease for every creation): a span inside
+    // one mapping of the admitted snapshot (scalar map cache hit, permission checked) whose bytes no synchronous observer is
+    // interested in (the Lease path's own lookup, same HostByteAccess context) is created under the compact pending hazard
+    // instead of Lease + CpuPages + a per-mapping walk. Creation reads no payload byte; its only effects besides the Range are
+    // the observer coherence point (any interest declines) and, when brokered, not completing while a claim is in progress on
+    // one of its pages (the Lease path then asks page_broker.coherence and waits). So brokered creation (up to 64 host pages)
+    // declines when any page's claim bit is set; a claim whose bit appears after that check began after this creation, which
+    // the Lease path would only have made wait for the creation: no guest byte, label or callback differs. Translation-only
+    // creation (brokered=false) takes no broker interest at all, as on the Lease path. A declined creation (nothing published)
+    // takes the unchanged Lease path: errors, callbacks, coherence requests, claim waits, spans over several mappings. The Range
+    // pins the backing (shared_ptr copied under admission) and records the admitted snapshot's epoch (= parallel->epoch).
+    inline static const bool range_admission_enabled=[]{const char* v=std::getenv("ANYPS3_GUEST_RANGE_ADMISSION");
+        if(v && std::strcmp(v,"0") && std::strcmp(v,"1")){throw std::runtime_error("invalid ANYPS3_GUEST_RANGE_ADMISSION");}return !v || !std::strcmp(v,"1");}();
+    inline static thread_local std::uint64_t admitted_ranges=0;   // TEST HOOK: creations completed by this thread without a Lease
+    [[gnu::noinline]] bool range_admitted(std::uint64_t address,unsigned size,bool write,bool brokered,Range& result){
+        if(!range_admission_enabled || !size || address>UINT32_MAX || size>UINT64_C(0x100000000)-address || !parallel->asymmetric ||
+           !page_broker.enabled.load(std::memory_order_acquire) || page_broker.stopped.load(std::memory_order_acquire))return false;
+        auto& state=local_state();if(state.raw || state.leases)return false;
+        suspend_scalar_batch(state);   // as Lease: no batch, inline section or renderer cursor spans this admission
+        if(!try_enter_scalar_reader(state))return false;
+        const auto* hit=admitted_parallel_map(state,address,size,write);
+        auto* pointer=hit?hit->pointer+address-hit->base:nullptr;const auto at=reinterpret_cast<std::uintptr_t>(pointer);
+        if(!hit || (!(state.is_owner?in_host_access_observer:state.observer_pauses!=0) && host_access_observer && host_access_observer.synchronous(pointer,size))){
+            leave_scalar_reader(state);return false;}
+        if(brokered){
+            const auto first=at>>12,last=(at+size-1)>>12;bool clear=last-first<64;
+            for(auto page=first;clear && page<=last;++page){const auto* cell=page_broker.cell(page);
+                clear=cell && !(cell->state.load(std::memory_order_acquire)&PageBroker::claimed);}
+            if(!clear || page_broker.stopped.load(std::memory_order_acquire)){leave_scalar_reader(state);return false;}
+        }
+        auto pin=hit->map->region.bytes;const auto identity=hit->map->region.identity;const auto epoch=state.snapshot->epoch;
+        leave_scalar_reader(state);
+        result.memory=this;result.size=size;result.writable=write;result.address=address;result.epoch=epoch;
+        result.parts.push_back({0,size,pointer,std::move(pin),identity});++admitted_ranges;return true;
+    }
     Range range(std::uint64_t address,unsigned size,bool write,bool brokered=true){
+        if(concurrent()){Range admitted;if(range_admitted(address,size,write,brokered,admitted))return admitted;}
         Lease lease(*this,address,size,write,true,brokered);
         if(address>UINT32_MAX || size>UINT64_C(0x100000000)-address)
             throw std::runtime_error("guest address outside 32-bit space");
@@ -1059,6 +1098,7 @@ struct GuestMemory {
         for(const auto& part:parts){atomic_read(part.source,buffer,part.size);buffer+=part.size;}
     }
     void transfer(std::uint64_t address,std::uint8_t* buffer,unsigned size,bool write) {
+        if(!write && concurrent() && read_page(address,buffer,size))return;   // one-page read without side effects (par_memory)
         HostByteAccess exact_bytes{host_access_observer.supports_exact_bytes.load(std::memory_order_acquire)};
         // A transfer inside one guest page is one span: admit it like a scalar access and skip the per-page broker set.
         const bool one_page=size && address<=UINT32_MAX && (address>>12)==((address+size-1)>>12);
