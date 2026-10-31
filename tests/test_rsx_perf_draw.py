@@ -225,7 +225,24 @@ static void fragment_keys(){
  assert(source(a)==sa && source(c)==sc && source(b)==sb);
  std::puts("PASS fragment source keys separate valid/null texture units, equal inputs share one source");
 }
-int main(){try{level_values();image_pins();indexed_reads();shader_reads();write_membership();dynamic_state();register_reads();register_prefix();triangle_list();blob_descriptors();pipeline_lookup();sampling_words();fragment_keys();}catch(const std::exception& e){std::fprintf(stderr,"STOP %s\n",e.what());return 1;}}
+static void texture_writes(){
+ // A sampled 2x2 texture of one colour: every pixel of the 8x8 target shows it. Repeated draws reuse the uploaded image; a CPU
+ // write of new texels (also back to the old ones), a new offset with the same bytes and a format change reach the next draw.
+ PpuState s;setup_draw(s,8,8,32,false);texture_fp(s);s.rsx.renderer=std::make_unique<NativeVulkan>();rsxgraphics::Session session(*s.rsx.renderer,s);s.rsx.graphics_session=&session;session.observe();
+ setenv("ANYPS3_RSX_BACKEND","gpu",1);auto& R=s.rsx.registers;
+ auto fill=[&](unsigned at,std::uint32_t argb){for(unsigned i=0;i<4;++i)s.memory.store(at+i*4,4,argb);};
+ auto draw=[&](std::uint32_t expect){s.rsx.draw.ranges={{0,4}};rsx_execute_draw(s);session.flush();
+  for(unsigned y=0;y<8;++y)for(unsigned x=0;x<8;++x)if(!near_argb(s.memory.load(0xc0100000+y*32+x*4,4),expect)){
+   std::fprintf(stderr,"texture_writes pixel %u,%u %08llx expected %08x\n",x,y,(unsigned long long)s.memory.load(0xc0100000+y*32+x*4,4),expect);assert(false);}};
+ fill(0xc0002000,0xff336699);draw(0xff336699);const auto hits=session.raw_hits;draw(0xff336699);draw(0xff336699);assert(session.raw_hits==hits+2);
+ fill(0xc0002000,0xff00ff00);draw(0xff00ff00);draw(0xff00ff00);
+ fill(0xc0002000,0xff336699);draw(0xff336699);
+ fill(0xc0003000,0xffff0000);R[0x1a00]=0x3000;draw(0xffff0000);R[0x1a00]=0x2000;draw(0xff336699);
+ s.memory.store(0xc0002004,4,0xff336699);draw(0xff336699);                 // same value: content unchanged
+ session.flush();s.rsx.graphics_session=nullptr;
+ std::puts("PASS sampled texture image reuse follows CPU texel writes, offset changes and same-value stores");
+}
+int main(){try{level_values();image_pins();indexed_reads();shader_reads();write_membership();dynamic_state();register_reads();register_prefix();triangle_list();blob_descriptors();pipeline_lookup();sampling_words();fragment_keys();texture_writes();}catch(const std::exception& e){std::fprintf(stderr,"STOP %s\n",e.what());return 1;}}
 '''
 
 
@@ -247,5 +264,5 @@ class WarmDrawTests(unittest.TestCase):
                 env.update(VK_DRIVER_FILES='/usr/share/vulkan/icd.d/lvp_icd.json',ANYPS3_VK_DEVICE='lavapipe')
             p=subprocess.run([str(binary)],env=env,capture_output=True,text=True,timeout=120)
             self.assertEqual(p.returncode,0,p.stdout+p.stderr)
-            self.assertEqual(p.stdout.count('PASS '),13)
+            self.assertEqual(p.stdout.count('PASS '),14)
             self.assertNotIn('Validation Error',p.stderr);self.assertNotIn('Validation Warning',p.stderr)
