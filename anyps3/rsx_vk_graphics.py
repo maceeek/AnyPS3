@@ -913,9 +913,18 @@ public:
         b.buffer_pins.push_back(transfer);b.pins.push_back(source);b.pins.push_back(result);if(!visual)graphics_visual_sync(b,result,"aspect");return result;
     }
     std::uint64_t graphics_full_clears=0;
-    void graphics_clear_image(GraphicsBatch& b,const std::shared_ptr<GraphicsImage>& image,const VkClearColorValue& color,float depth,unsigned stencil,VkImageAspectFlags aspects){b.sync();
+    // lead=false: the caller has just recorded the leading full barrier of this group and since then only clears/copies of
+    // other images (a native image before its visual companion, colour targets before the depth target of one guest clear).
+    // Exact without a barrier of its own: the group's barrier orders every earlier access of this image (pending visual draws
+    // were replayed before it), the group's other commands touch distinct images, and every later reader of this image starts
+    // with its own full dependency (a graphics_barrier or a pass begin), as after any clear.
+    static void graphics_group_lead(GraphicsBatch& b,bool lead){
+        if(lead){graphics_barrier(b);return;}
+        if(b.active_framebuffer || !b.visual_jobs.empty() || !b.plane_draws.empty())throw std::runtime_error("RSX grouped clear/copy without its leading barrier");
+    }
+    void graphics_clear_image(GraphicsBatch& b,const std::shared_ptr<GraphicsImage>& image,const VkClearColorValue& color,float depth,unsigned stencil,VkImageAspectFlags aspects,bool lead=true){b.sync();
         GraphicsSite site(SiteClear);
-        graphics_begin(b);graphics_barrier(b);
+        graphics_begin(b);graphics_group_lead(b,lead||!graphics_pair_barriers());
         // Visual MSAA: a clear of every aspect makes the working image current (its planes are then stale); a partial clear
         // of a current working image stays in it. Anything else clears the planes (a current working image is then absent).
         if(graphics_visual_msaa() && image->ms_wanted && !image->ms)graphics_ms_prepare(b,image);
@@ -933,9 +942,15 @@ public:
         if(image->depth){const VkClearDepthStencilValue value{depth,stencil};vkCmdClearDepthStencilImage(b.command,image->image,VK_IMAGE_LAYOUT_GENERAL,&value,1,&range);}
         else vkCmdClearColorImage(b.command,image->image,VK_IMAGE_LAYOUT_GENERAL,&color,1,&range);
         b.pins.push_back(image);++graphics_full_clears;graphics_visual_taint(*image,0,true);
-        if(image->visual)graphics_clear_image(b,image->visual,color,depth,stencil,aspects);
+        if(image->visual)graphics_clear_image(b,image->visual,color,depth,stencil,aspects,false);
     }
-    void graphics_copy(GraphicsBatch& b,const std::shared_ptr<GraphicsImage>& from,const std::shared_ptr<GraphicsImage>& to){b.sync();
+    // ANYPS3_RSX_PAIR_BARRIERS=0: the visual half of a clear/copy and later clears of one guest clear record their own leading
+    // barrier again (former behaviour, A/B). Default 1 (graphics_group_lead).
+    static bool graphics_pair_barriers(){static const bool value=[]{const char* v=std::getenv("ANYPS3_RSX_PAIR_BARRIERS");
+            if(v && std::strcmp(v,"0") && std::strcmp(v,"1")){throw std::runtime_error("invalid ANYPS3_RSX_PAIR_BARRIERS");}
+            return !v || !std::strcmp(v,"1");}();
+        return value;}
+    void graphics_copy(GraphicsBatch& b,const std::shared_ptr<GraphicsImage>& from,const std::shared_ptr<GraphicsImage>& to,bool lead=true){b.sync();
         if(from==to)return;
         graphics_ms_planes(b,from.get());graphics_ms_planes(b,to.get());
         GraphicsSite site(SiteSurfaceCopy);
@@ -943,7 +958,7 @@ public:
             (to->format==VK_FORMAT_R8G8B8A8_SRGB && from->format==VK_FORMAT_R8G8B8A8_UNORM);
         if((from->format!=to->format && !rgba_compatible) || from->width!=to->width || from->height!=to->height || from->layers!=to->layers || from->depth!=to->depth)
             throw std::runtime_error("RSX graphics copy shape mismatch");
-        graphics_begin(b);graphics_barrier(b);
+        graphics_begin(b);graphics_group_lead(b,lead||!graphics_pair_barriers());
         for(const VkImageAspectFlags aspect:from->depth?std::vector<VkImageAspectFlags>{VK_IMAGE_ASPECT_DEPTH_BIT}:std::vector<VkImageAspectFlags>{VK_IMAGE_ASPECT_COLOR_BIT}){
             VkImageCopy c{};c.srcSubresource={aspect,0,0,from->layers};c.dstSubresource={aspect,0,0,to->layers};c.extent={from->width,from->height,1};
             vkCmdCopyImage(b.command,from->image,VK_IMAGE_LAYOUT_GENERAL,to->image,VK_IMAGE_LAYOUT_GENERAL,1,&c);}
@@ -951,7 +966,7 @@ public:
             vkCmdCopyImage(b.command,from->image,VK_IMAGE_LAYOUT_GENERAL,to->image,VK_IMAGE_LAYOUT_GENERAL,1,&c);}
         b.pins.push_back(from);b.pins.push_back(to);
         graphics_visual_taint(*to,from->visual_taint,true);
-        if(to->visual){if(from->visual)graphics_copy(b,from->visual,to->visual);else graphics_visual_sync(b,to,"copy_unpaired");}
+        if(to->visual){if(from->visual)graphics_copy(b,from->visual,to->visual,graphics_ms_any);else graphics_visual_sync(b,to,"copy_unpaired");}
     }
     // Visual history through a native byte permutation (alias merge, equal
     // footprint rebind): regions are in visual units, the visual blocks of whole

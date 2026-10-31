@@ -43,7 +43,8 @@ struct Stream {
   if(!a->visual || !z->visual || a->visual->width!=2*N)throw std::runtime_error("scale-2 companions missing");}
  static VkClearColorValue rgba(std::uint32_t color){VkClearColorValue v{};for(unsigned k=0;k<4;++k)v.float32[k]=float((color>>(8*k))&255)/255.f;return v;}
  void clear(const Img& image,Model& m,std::uint32_t color){vk.graphics_clear_image(*b,image,rgba(color),0,0,VK_IMAGE_ASPECT_COLOR_BIT);std::fill(m.color.begin(),m.color.end(),color);}
- void clear_depth(){vk.graphics_clear_image(*b,z,{},1.f,0,VK_IMAGE_ASPECT_DEPTH_BIT|VK_IMAGE_ASPECT_STENCIL_BIT);std::fill(ma.written.begin(),ma.written.end(),0);}
+ // The guest clear of colour + depth (rsx_graphics.py): the depth clear shares the colour clear's leading barrier.
+ void clear_depth(){vk.graphics_clear_image(*b,z,{},1.f,0,VK_IMAGE_ASPECT_DEPTH_BIT|VK_IMAGE_ASPECT_STENCIL_BIT,false);std::fill(ma.written.begin(),ma.written.end(),0);}
  // Full-screen triangle limited by the scissor; depth z=0.5 against the model's cleared (1.0) / written (0.5) depth.
  void draw(const Img& target,Model& m,unsigned samples,bool with_depth,bool less,std::uint32_t& r){
   unsigned x0=lcg(r)%N,x1=lcg(r)%N,y0=lcg(r)%N,y1=lcg(r)%N;if(x0>x1)std::swap(x0,x1);if(y0>y1)std::swap(y0,y1);++x1;++y1;
@@ -169,7 +170,7 @@ class CommandSerialTests(unittest.TestCase):
 
 # (name, environment) per mode; check_modes compares their per-frame means.
 MODES = [('defaults', {}), ('marks', {'ANYPS3_RSX_VK_MARKS': '1', 'ANYPS3_PERF_REPORT': '1'}),
-         ('dedupe0', {'ANYPS3_RSX_BARRIER_DEDUPE': '0'})]
+         ('dedupe0', {'ANYPS3_RSX_BARRIER_DEDUPE': '0'}), ('pair0', {'ANYPS3_RSX_PAIR_BARRIERS': '0'})]
 
 
 def check_modes(test, means):
@@ -178,14 +179,23 @@ def check_modes(test, means):
     for key, value in means['defaults'].items():
         if not key.startswith(('marks_', 'mark_')):
             test.assertEqual(means['marks'][key], value, key)
-    test.assertEqual(means['marks']['mark_clear'], means['marks']['mark_clears'])
-    test.assertEqual(means['marks']['mark_image'], means['marks']['mark_images'])
+    # Each run of consecutive clears (scene colour + depth group, post) and of image copies/blits (surface copy pair, upload,
+    # its visual rebuild, unpack upload, its visual rebuild) carries its own mark: 2 and 5 per frame over 4 frames (without
+    # the pending-kind mark the runs not followed by a barrier have none: their time goes to the next pass begin).
+    test.assertEqual(means['marks']['mark_clear'], 8)
+    test.assertEqual(means['marks']['mark_image'], 20)
     # Barrier dedupe: per frame exactly one full barrier directly follows another with nothing between them (the unpack
     # upload's final barrier and its visual rebuild's leading barrier); every other count is unchanged.
     test.assertEqual(means['dedupe0']['barriers_elided'], 0)
     test.assertEqual(means['defaults']['barriers_elided'], 1)
     test.assertEqual(means['defaults']['barriers'], means['dedupe0']['barriers'] - 1)
     test.assertEqual(means['defaults']['pipeline_barriers'], means['dedupe0']['pipeline_barriers'] - 1)
+    # Grouped clears/copies: the visual halves of the three clears (scene colour, depth, post) and of the surface copy, and the
+    # depth clear after the scene colour clear, record no barrier of their own: 5 fewer full barriers per frame.
+    test.assertEqual(means['defaults']['barriers'], means['pair0']['barriers'] - 5)
+    for key, value in means['pair0'].items():
+        if key not in ('barriers', 'pipeline_barriers') and not key.startswith('mark_'):
+            test.assertEqual(means['defaults'][key], value, key)
 
 
 if __name__ == '__main__':
