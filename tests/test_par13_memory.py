@@ -457,3 +457,73 @@ class Parallel13Memory(unittest.TestCase):
  m.host_access_observer.watch(pin->data()+0x300,4);watched=true;
  t.join();m.renderer_enabled=false;
 ''')
+
+    def range_case(self, name, body, switch='1'):
+        previous = os.environ.get('ANYPS3_GUEST_RANGE_ADMISSION')
+        os.environ['ANYPS3_GUEST_RANGE_ADMISSION'] = switch
+        try:
+            self.native(name, body)
+        finally:
+            if previous is None:
+                os.environ.pop('ANYPS3_GUEST_RANGE_ADMISSION', None)
+            else:
+                os.environ['ANYPS3_GUEST_RANGE_ADMISSION'] = previous
+
+    # Two adjacent maps (0x10000 8 KiB, 0x12000 4 KiB), a read-only map at 0x20000; a renderer thread creates the Ranges
+    # (the game's draw-input configuration); renderer_access counts observer deliveries.
+    RANGE_SETUP = r'''
+ GuestMemory m;m.map(0x10000,8192,6,nullptr,0);m.map(0x12000,4096,6,nullptr,0);m.map(0x20000,4096,4,nullptr,0);
+ m.enable_concurrency();m.enable_page_broker();auto pin=m.regions[0].bytes;
+ std::atomic<unsigned> host_calls{0};m.renderer_access=[&](const void*,std::uint64_t,bool){++host_calls;};
+ auto renderer=[&](auto body){std::atomic<bool> bound{false};
+  std::thread t([&m,&bound,body]{m.renderer_thread=std::this_thread::get_id();bound=true;body();m.release_reader_slot();});
+  while(!bound.load()){std::this_thread::yield();}return t;};
+ m.renderer_enabled=true;
+ auto warm=[&]{(void)m.load(0x10000,4);(void)m.load(0x11000,4);(void)m.load(0x12000,4);(void)m.load(0x20000,4);};
+'''
+
+    def test_range_creation_without_lease(self):
+        # A Range inside one mapping is created on the compact admission (admitted_ranges counts it); its single part names
+        # the mapping's backing at the offset computed here from the map layout. A brokered span over two host pages or
+        # two mappings keeps the Lease path (same parts); unmapped and unwritable spans still fault; switch 0 creates
+        # every Range on the Lease path.
+        for switch in ('1', '0'):
+            self.range_case('range-basic-' + switch, self.RANGE_SETUP + r'''
+ const bool on=std::getenv("ANYPS3_GUEST_RANGE_ADMISSION")[0]=='1';
+ auto t=renderer([&]{warm();const auto before=GuestMemory::admitted_ranges;
+  auto r=m.range(0x10010,64,false);
+  assert(r.parts.size()==1 && r.parts[0].offset==0 && r.parts[0].size==64 && r.parts[0].data==pin->data()+0x10 && r.parts[0].owner==pin);
+  assert(r.parts[0].mapping_id==m.regions[0].identity && r.size==64 && !r.writable && r.address==0x10010 && r.epoch==m.parallel->epoch);
+  auto w=m.range(0x10ff0,0x1010,true,false);   // translation-only over two host pages of one mapping
+  assert(w.parts.size()==1 && w.parts[0].data==pin->data()+0xff0 && w.parts[0].size==0x1010 && w.writable);
+  assert(GuestMemory::admitted_ranges==before+(on?2:0));
+  auto b=m.range(0x10ff0,32,false);   // brokered over two host pages: Lease path
+  assert(b.parts.size()==1 && b.parts[0].data==pin->data()+0xff0);
+  auto two=m.range(0x11ff0,32,false,false);   // two mappings: Lease path, two parts
+  assert(two.parts.size()==2 && two.parts[0].size==16 && two.parts[1].owner==m.regions[1].bytes && two.parts[1].offset==16);
+  assert(GuestMemory::admitted_ranges==before+(on?2:0));
+  fault([&]{(void)m.range(0x30000,16,false);});fault([&]{(void)m.range(0x20000,16,true);});
+  auto ro=m.range(0x20000,16,false);assert(ro.parts.size()==1 && ro.parts[0].owner==m.regions[2].bytes);
+  assert(GuestMemory::admitted_ranges==before+(on?3:0));});
+ t.join();m.renderer_enabled=false;
+''', switch)
+
+    def test_range_creation_waits_for_claim_and_reaches_observer(self):
+        # Creation of a brokered Range on a page the owner has claimed returns only after the release; a creation over
+        # watched bytes delivers them to the observer path (renderer_access) once, while unwatched bytes of the same
+        # page are created without a delivery.
+        self.range_case('range-owners', self.RANGE_SETUP + r'''
+ std::atomic<bool> warmed{false},go{false},released{false};std::atomic<int> after{-1};
+ auto t=renderer([&]{warm();(void)m.range(0x10400,16,false);warmed=true;while(!go.load())std::this_thread::yield();
+  const auto before=GuestMemory::admitted_ranges;auto r=m.range(0x10400,16,false);after=released.load()?1:0;
+  assert(r.parts.size()==1 && r.parts[0].data==pin->data()+0x400 && GuestMemory::admitted_ranges==before);});
+ while(!warmed.load())std::this_thread::yield();
+ {GuestMemory::GpuPages claim(m,{{pin->data()+0x400,16,pin}});go=true;std::this_thread::sleep_for(std::chrono::milliseconds(30));released=true;}
+ t.join();assert(after.load()==1);
+ {GuestMemory::RawPermit raw(m);m.host_access_observer=[](const void*,std::uint64_t,bool){};
+  m.host_access_observer.filtered=true;m.host_access_observer.supports_exact_bytes=true;m.host_access_observer.watch(pin->data()+0x500,4);}
+ auto u=renderer([&]{warm();const auto before=GuestMemory::admitted_ranges;
+  {HostByteAccess exact(true);auto r=m.range(0x10600,64,false);assert(host_calls==0 && GuestMemory::admitted_ranges==before+1);
+   auto v=m.range(0x104f0,32,false);assert(host_calls==1 && GuestMemory::admitted_ranges==before+1 && v.parts[0].data==pin->data()+0x4f0);}});
+ u.join();m.renderer_enabled=false;
+''')
