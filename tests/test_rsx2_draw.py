@@ -301,7 +301,59 @@ static void geometry_reuse_(){
  session->flush();s.rsx.graphics_session=nullptr;
  std::puts("PASS vertex input reuse: hits for unchanged bytes; PPU, foreign transfer, GPU claim, raw pointer, same-batch, GPU-owned, remap, rewrite limit, format change and switch-off draw the current bytes");
 }
-int main(){try{vertex_groups_();memory_reuse_();lease_vertex_reads_();ordered_bulk_writes_();geometry_reuse_();}catch(const std::exception& e){std::fprintf(stderr,"FAIL %s\n",e.what());return 1;}
+// Index list reuse (ANYPS3_RSX_GEOMETRY_REUSE, Session::index_read/index_prepare/index_store): a repeated draw of an
+// unchanged index span is served from the session's decoded list; every writer and every decode parameter change makes
+// the next draw decode the current bytes. Oracle: the triangle list the draw uploads (scratch_triangles) against the
+// list computed here from the values the test stored (+ base index); each scenario uses its own index address.
+static void index_reuse_(){
+ PpuState s;setup_draw(s,16,8,64,false);auto& m=s.memory;auto& R=s.rsx.registers;auto& d=s.rsx.draw;m.enable_concurrency();
+ s.rsx.renderer=std::make_unique<NativeVulkan>();rsxgraphics::Session session(*s.rsx.renderer,s);session.observe();s.rsx.graphics_session=&session;
+ setenv("ANYPS3_RSX_BACKEND","gpu",1);
+ std::uint64_t at=0xc0003000;unsigned width=2;
+ auto be=[&](const std::vector<unsigned>& v){std::vector<std::uint8_t> b;for(auto x:v)for(unsigned k=0;k<width;++k)b.push_back(std::uint8_t(x>>(8*(width-1-k))));return b;};
+ auto put=[&](const std::vector<unsigned>& v){for(unsigned i=0;i<v.size();++i)m.store(at+width*i,width,v[i]);};
+ auto start=[&](std::uint64_t base,unsigned location,const std::vector<unsigned>& v){at=base;R[0x181c]=unsigned(at-(location?0x70000000u:0xc0000000u));R[0x1820]=(width==2?0x10u:0u)|location;put(v);};
+ auto draw=[&](const std::vector<unsigned>& v,unsigned base=0){R[0x173c]=base;d.indexed=true;d.primitive=5;d.ranges={{0,3},{3,3}};rsx_execute_draw(s);
+  std::vector<std::array<unsigned,3>> expect;for(std::size_t i=0;i+3<=v.size();i+=3)expect.push_back({v[i]+base,v[i+1]+base,v[i+2]+base});
+  assert(d.scratch_triangles==expect);};
+ const std::vector<unsigned> quad{0,1,2,0,2,3},other{2,1,0,3,2,0},third{1,2,3,1,3,0};
+ // (a) unchanged span: the second draw is a hit; (b) PPU stores into it: decoded afresh.
+ start(0xc0003100,0,quad);draw(quad);auto hits=session.index_hits;draw(quad);assert(session.index_hits==hits+1);
+ put(other);draw(other);
+ // (c) SPU-DMA-style bulk write from a foreign thread.
+ start(0xc0003200,0,quad);draw(quad);draw(quad);
+ std::thread([&]{auto b=be(third);m.transfer(at,b.data(),unsigned(b.size()),true);m.release_reader_slot();}).join();draw(third);
+ // (d) RSX/GPU claim write (ClaimTransfer commit).
+ start(0xc0003300,0,quad);draw(quad);draw(quad);
+ {const auto range=m.range(at,12,true);rsxdraw::ClaimTransfer transfer(range,0,12);const auto b=be(other);transfer.write(0,b.data(),12);}draw(other);
+ // (e) raw-pointer write (RawPermit, HLE/syscall buffers).
+ start(0xc0003400,0,quad);draw(quad);draw(quad);
+ {GuestMemory::RawPermit raw(m);const auto range=m.range(at,12,true);auto* p=range.pointer(0,12);const auto b=be(third);std::memcpy(p,b.data(),12);}draw(third);
+ // (f) base index change at the same span, then back: each decodes with its own base (no stale +base).
+ start(0xc0003500,0,quad);draw(quad);draw(quad,1);draw(quad,1);draw(quad);
+ // (g) a write between two draws of one batch (no flush in between).
+ start(0xc0003600,0,quad);draw(quad);draw(quad);put(other);draw(other);session.flush();
+ // (h) 32-bit indices at the same address: another span size and width.
+ width=4;start(0xc0003500,0,third);draw(third);draw(third);width=2;
+ // (i) restart enabled: strips split at the restart value, no reuse of the restart-free list of the same span.
+ {const std::vector<unsigned> strip{0,1,2,0xffff,2,3};start(0xc0003700,0,quad);draw(quad);put(strip);R[0x1dac]=1;R[0x1db0]=0xffff;
+  R[0x173c]=0;d.indexed=true;d.primitive=5;d.ranges={{0,3},{3,3}};rsx_execute_draw(s);
+  const std::vector<std::array<unsigned,3>> one{{0,1,2}};assert(d.scratch_triangles==one);R[0x1dac]=0;put(quad);draw(quad);}
+ // (j) unmap + map of the IO mapping holding the span (location 1) with new bytes: a new physical identity.
+ start(0x70003800,1,quad);draw(quad);draw(quad);
+ {auto it=std::find_if(m.regions.begin(),m.regions.end(),[](const auto& r){return r.base==0x70000000;});assert(it!=m.regions.end());
+  std::vector<std::uint8_t> bytes(it->bytes->size());const auto size=bytes.size();
+  {GuestMemory::ObserverPause pause(m);for(std::size_t i=0;i<size;++i)bytes[i]=std::uint8_t(m.load(0x70000000+i,1));}
+  const auto b=be(other);std::copy(b.begin(),b.end(),bytes.begin()+(at-0x70000000u));
+  m.allocated-=size;m.regions.erase(it);m.mapping_changed();m.map(0x70000000,size,6,bytes.data(),size);}
+ draw(other);
+ // (k) switch off: no entry.
+ session.flush();session.geometry_reuse=false;const auto entries=session.index_entries.size();hits=session.index_hits;
+ start(0xc0003900,0,quad);draw(quad);draw(quad);assert(session.index_entries.size()==entries && session.index_hits==hits);
+ session.flush();s.rsx.graphics_session=nullptr;
+ std::puts("PASS index list reuse: hits for unchanged spans; PPU, foreign transfer, GPU claim, raw pointer, same-batch writes, base/width/restart changes, remap and switch-off decode the current bytes");
+}
+int main(){try{vertex_groups_();memory_reuse_();lease_vertex_reads_();ordered_bulk_writes_();geometry_reuse_();index_reuse_();}catch(const std::exception& e){std::fprintf(stderr,"FAIL %s\n",e.what());return 1;}
 }
 '''
 
@@ -331,7 +383,7 @@ class Rsx2DrawTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 self.assertNotIn('Validation Error', result.stdout + result.stderr)
                 self.assertNotIn('Validation Warning', result.stdout + result.stderr)
-                self.assertEqual(result.stdout.count('PASS '), 5, result.stdout)
+                self.assertEqual(result.stdout.count('PASS '), 6, result.stdout)
 
 
 if __name__ == '__main__':

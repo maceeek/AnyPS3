@@ -1433,8 +1433,13 @@ static void rsx_execute_draw(PpuState& s){
         // admissible schedule of the per-range reads -- and decoded in one pass. Any exception re-runs the per-range loop
         // below from the start, so the first failing range raises its original error at its original point (the union
         // read and decode have no guest-visible effect). Without restart the unrestarted extent is kept for IndexBounds.
+        // With geometry reuse the session serves an unchanged span's decoded list (Session::index_read) or keeps this
+        // decode (index_prepare before the transfer, index_store after it); its errors still come from the per-range loop.
         bool merged=false;
-        if(draw.ranges.size()>1){
+#ifdef ANYPS3_RSX_VK
+        auto* reuse=graphics_backend?static_cast<rsxgraphics::Session*>(gpu.graphics_session):nullptr;
+#endif
+        if(!draw.ranges.empty()){
             try{
                 std::uint64_t total=0,first_address=0;bool adjacent=true;
                 for(std::size_t k=0;k<draw.ranges.size() && adjacent;++k){const auto [first,count]=draw.ranges[k];
@@ -1446,17 +1451,25 @@ static void rsx_execute_draw(PpuState& s){
                     total+=count;
                 }
                 if(adjacent && total*width<=0x1000000){
-                    auto& bytes=draw.scratch_index_bytes;bytes.resize(total*width);
-                    m.transfer(first_address,bytes.data(),unsigned(total*width),false);
+                    std::uint32_t largest=0,smallest=UINT32_MAX;bool any=false;bool served=false;
+#ifdef ANYPS3_RSX_VK
+                    std::optional<rsxgraphics::Session::IndexToken> token;
+                    if(reuse){served=reuse->index_read(first_address,unsigned(total*width),width,restart,restart_index,base_index,indices,largest,smallest,any);
+                        if(!served)token=reuse->index_prepare(first_address,unsigned(total*width));}
+#endif
+                    auto& bytes=draw.scratch_index_bytes;
+                    if(!served){bytes.resize(total*width);m.transfer(first_address,bytes.data(),unsigned(total*width),false);}
                     // Grown in steps of <= 256 indices: the same <= 1 KiB value-initialising resizes as the per-range loop (one
                     // resize of several KiB is a `rep stosb`, which callgrind counts per byte).
-                    std::uint32_t largest=0,smallest=UINT32_MAX;bool any=false;
-                    for(unsigned at=0;at<total;at+=256){const unsigned n=std::min<std::uint64_t>(256,total-at);indices.resize(at+n);
+                    if(!served)for(unsigned at=0;at<total;at+=256){const unsigned n=std::min<std::uint64_t>(256,total-at);indices.resize(at+n);
                         std::uint32_t high=0,low=UINT32_MAX;bool seen=false;
                         decode_indices(bytes.data()+std::size_t(at)*width,indices.data()+at,n,width,restart,restart_index,base_index,high,low,seen);
                         if(seen){largest=any?std::max(largest,high):high;smallest=any?std::min(smallest,low):low;any=true;}}
                     if(any && std::uint64_t(largest)+base_index>=UINT32_MAX)throw std::runtime_error("RSX vertex index overflow");
                     merged=true;if(!restart && any){draw.extent_lo=smallest+base_index;draw.extent_hi=largest+base_index;draw.extent_known=true;}
+#ifdef ANYPS3_RSX_VK
+                    if(token)reuse->index_store(std::move(*token),width,restart,restart_index,base_index,indices,largest,smallest,any);
+#endif
                 }
             }catch(...){indices.clear();draw.extent_known=false;}
         }

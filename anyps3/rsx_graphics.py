@@ -1023,12 +1023,14 @@ struct Session {
         geometry_bytes-=it->second.bytes.size();geometry_entries.erase(it);
     }
     void invalidate_geometry(const void* p,std::uint64_t n){
-        if(!n || geometry_entries.empty())return;
+        if(!n || (geometry_entries.empty() && index_entries.empty()))return;
         const auto a=reinterpret_cast<std::uintptr_t>(p);
         for(auto it=geometry_entries.begin();it!=geometry_entries.end();){const auto b=reinterpret_cast<std::uintptr_t>(it->second.data);
             if(b<a+n && a<b+it->second.bytes.size()){auto next=std::next(it);geometry_erase(it,true);it=next;}else ++it;}
+        for(auto it=index_entries.begin();it!=index_entries.end();){const auto b=reinterpret_cast<std::uintptr_t>(it->second.data);
+            if(b<a+n && a<b+it->second.size){auto next=std::next(it);index_erase(it,true);it=next;}else ++it;}
     }
-    void clear_geometry(){geometry_entries.clear();geometry_bytes=0;}
+    void clear_geometry(){geometry_entries.clear();index_entries.clear();geometry_bytes=0;}
     // Copies the bytes of one vertex input Range to out; false = not reusable here (the caller reads the Range itself).
     bool geometry_read(const GuestMemory::Range& range,std::uint8_t* out){
         if(!geometry_reuse || !range.memory->concurrent() || range.memory!=&state.memory || range.parts.size()!=1 || !range.size ||
@@ -1037,6 +1039,9 @@ struct Session {
         if(!(++geometry_clock&4095))for(auto it=geometry_entries.begin();it!=geometry_entries.end();){
             const bool rewritten=it->second.dirty->watch->dirty.load(std::memory_order_acquire);
             if(rewritten || geometry_clock-it->second.last_use>(1u<<20)){auto next=std::next(it);geometry_erase(it,rewritten);it=next;}else ++it;}
+        if(!(geometry_clock&4095))for(auto it=index_entries.begin();it!=index_entries.end();){
+            const bool rewritten=it->second.dirty->watch->dirty.load(std::memory_order_acquire);
+            if(rewritten || geometry_clock-it->second.last_use>(1u<<20)){auto next=std::next(it);index_erase(it,rewritten);it=next;}else ++it;}
         auto it=geometry_entries.find(key);
         if(it!=geometry_entries.end()){auto& e=it->second;
             if(e.data==part.data && e.owner==part.owner && e.mapping_id==part.mapping_id){e.last_use=geometry_clock;
@@ -1048,9 +1053,7 @@ struct Session {
             geometry_erase(it,false);
         }
         {const auto rewrites=geometry_rewrites.find(range.address);if(rewrites!=geometry_rewrites.end() && rewrites->second>=2)return false;}
-        while(!geometry_entries.empty() && (geometry_entries.size()>=geometry_entry_limit || geometry_bytes+range.size>geometry_byte_limit)){
-            auto old=std::min_element(geometry_entries.begin(),geometry_entries.end(),[](const auto& x,const auto& y){return x.second.last_use<y.second.last_use;});
-            geometry_erase(old,false);++geometry_evictions;}
+        while(!(geometry_entries.empty() && index_entries.empty()) && (geometry_entries.size()+index_entries.size()>=geometry_entry_limit || geometry_bytes+range.size>geometry_byte_limit))geometry_evict();
         GeometryEntry e;
         try{e.dirty=std::make_shared<RawTexture::DirtyInputs>(state.memory);e.dirty->watch=state.memory.watch_cpu_dirty(range);}
         catch(const std::exception&){return false;}   // not registrable (foreign thread, stale epoch): the caller's read raises any error
@@ -1058,6 +1061,66 @@ struct Session {
         range.read(0,out,range.size);
         e.bytes.assign(out,out+range.size);e.data=part.data;e.owner=part.owner;e.mapping_id=part.mapping_id;e.last_use=geometry_clock;
         geometry_bytes+=range.size;geometry_entries.emplace(key,std::move(e));++geometry_misses;return true;
+    }
+    // ---- Index list reuse (same switch, bounds and invalidation protocol as the vertex input entries above) ----
+    // An entry keeps the decoded index list of one contiguous index span (rsx_execute_draw's union read), keyed by guest
+    // address and byte size, valid only for the decode parameters it was decoded with (width, restart, restart index,
+    // base index) and pinned to the span's physical identity. A use first creates the span's translation Range, which
+    // performs the map epoch/permission validation and the observer coherence point that the transfer performed (a
+    // GPU-authoritative span is retired and republished via publish_gpu_write), then consumes the entry's CPU-dirty bit.
+    // A miss registers the watch and consumes it BEFORE the transfer reads the bytes (index_prepare), and stores the
+    // decoded list afterwards (index_store); an exception in between drops the token (its watch is unregistered).
+    struct IndexEntry {
+        std::shared_ptr<RawTexture::DirtyInputs> dirty;const std::uint8_t* data=nullptr;std::shared_ptr<GuestBacking> owner;
+        std::uint64_t mapping_id=0,last_use=0;unsigned size=0,width=0,restart_index=0,base=0;bool restart=false,any=false;
+        std::uint32_t largest=0,smallest=0;std::vector<std::uint32_t> values;
+    };
+    std::unordered_map<std::uint64_t,IndexEntry> index_entries;std::uint64_t index_hits=0,index_misses=0;
+    void index_erase(std::unordered_map<std::uint64_t,IndexEntry>::iterator it,bool rewritten){
+        if(rewritten)(void)geometry_rewritten(it->first>>32);
+        geometry_bytes-=it->second.values.size()*4;index_entries.erase(it);
+    }
+    bool index_cacheable(unsigned bytes)const{
+        return geometry_reuse && state.memory.concurrent() && bytes && bytes<=geometry_entry_bytes && (state.memory.memory_owner() || state.memory.renderer_owner());
+    }
+    // The decoded list of the span [address,address+bytes) for these parameters into out; false = decode it (nothing changed).
+    bool index_read(std::uint64_t address,unsigned bytes,unsigned width,bool restart,unsigned restart_index,unsigned base,
+                    std::vector<std::uint32_t>& out,std::uint32_t& largest,std::uint32_t& smallest,bool& any){
+        if(!index_cacheable(bytes))return false;
+        const std::uint64_t key=(address<<32)|bytes;auto it=index_entries.find(key);
+        if(it==index_entries.end())return false;
+        auto& e=it->second;GuestMemory::Range range;
+        try{range=state.memory.range_translated(address,bytes);}catch(const std::exception&){return false;}   // the transfer raises it
+        if(range.parts.size()!=1 || range.parts[0].data!=e.data || range.parts[0].owner!=e.owner || range.parts[0].mapping_id!=e.mapping_id){index_erase(it,false);return false;}
+        if(e.dirty->consume()){index_erase(it,true);return false;}
+        if(e.width!=width || e.restart!=restart || e.restart_index!=restart_index || e.base!=base){index_erase(it,false);return false;}
+        e.last_use=++geometry_clock;out.assign(e.values.begin(),e.values.end());largest=e.largest;smallest=e.smallest;any=e.any;++index_hits;return true;
+    }
+    struct IndexToken {std::uint64_t key;std::shared_ptr<RawTexture::DirtyInputs> dirty;const std::uint8_t* data;std::shared_ptr<GuestBacking> owner;std::uint64_t mapping_id;};
+    std::optional<IndexToken> index_prepare(std::uint64_t address,unsigned bytes){
+        if(!index_cacheable(bytes))return std::nullopt;
+        {const auto rewrites=geometry_rewrites.find(address);if(rewrites!=geometry_rewrites.end() && rewrites->second>=2)return std::nullopt;}
+        try{const auto range=state.memory.range_translated(address,bytes);if(range.parts.size()!=1 || range.parts[0].size!=bytes)return std::nullopt;
+            IndexToken token{(address<<32)|bytes,std::make_shared<RawTexture::DirtyInputs>(state.memory),range.parts[0].data,range.parts[0].owner,range.parts[0].mapping_id};
+            token.dirty->watch=state.memory.watch_cpu_dirty(range);token.dirty->consume();   // clear BEFORE the transfer reads the bytes
+            return token;
+        }catch(const std::exception&){return std::nullopt;}   // the transfer raises any error
+    }
+    void index_store(IndexToken&& token,unsigned width,bool restart,unsigned restart_index,unsigned base,const std::vector<std::uint32_t>& values,
+                     std::uint32_t largest,std::uint32_t smallest,bool any){
+        if(values.size()*4>geometry_entry_bytes)return;
+        {auto old=index_entries.find(token.key);if(old!=index_entries.end())index_erase(old,false);}
+        while(!(geometry_entries.empty() && index_entries.empty()) && (geometry_entries.size()+index_entries.size()>=geometry_entry_limit || geometry_bytes+values.size()*4>geometry_byte_limit))geometry_evict();
+        IndexEntry e;e.dirty=std::move(token.dirty);e.data=token.data;e.owner=std::move(token.owner);e.mapping_id=token.mapping_id;e.last_use=++geometry_clock;
+        e.size=unsigned(token.key&UINT32_MAX);e.width=width;e.restart=restart;e.restart_index=restart_index;e.base=base;e.any=any;e.largest=largest;e.smallest=smallest;e.values=values;
+        geometry_bytes+=values.size()*4;index_entries.emplace(token.key,std::move(e));++index_misses;
+    }
+    // Least recently used vertex or index entry.
+    void geometry_evict(){
+        auto v=std::min_element(geometry_entries.begin(),geometry_entries.end(),[](const auto& x,const auto& y){return x.second.last_use<y.second.last_use;});
+        auto i=std::min_element(index_entries.begin(),index_entries.end(),[](const auto& x,const auto& y){return x.second.last_use<y.second.last_use;});
+        if(i==index_entries.end() || (v!=geometry_entries.end() && v->second.last_use<i->second.last_use))geometry_erase(v,false);else index_erase(i,false);
+        ++geometry_evictions;
     }
     // DrawReadBatch::read with reuse: the same per-input order, memory check and reads for every input not served above.
     void read_inputs(const DrawReadBatch& batch,std::uint8_t* output){
