@@ -937,10 +937,12 @@ struct Session {
         const bool fresh=register_prefix.empty() || register_identity!=bank.identity;if(fresh)register_prefix.assign(2576,0);
         register_identity=bank.identity;
         static constexpr std::pair<unsigned,unsigned> defaults[]={{0xa6c,0x207},{0x394,0},{0x398,0x3f800000},{0x368,0x1d01},{0x1834,0x901},{0x388,0x3f800000},{0x308,0x207},{0x324,0x01010101},{0x378,0x1503},{0x1d7c,0xffff0000}};
-        for(unsigned block=0;block<32;++block){const auto* source=bank.values.data()+block*64;auto* previous=register_values.data()+block*64;
-            const bool exposed=bank.block_exposed(block),tracked=!fresh && !exposed && register_epochs[block]==bank.epochs[block];
+        // Blocks that the loop below would not skip as tracked (fresh, exposed or epoch moved), found without branches first.
+        std::uint32_t visit=fresh?~UINT32_C(0):std::uint32_t(bank.exposed[0]);
+        for(unsigned block=0;block<32;++block)visit|=std::uint32_t(register_epochs[block]!=bank.epochs[block])<<block;
+        for(;visit;visit&=visit-1){const unsigned block=unsigned(__builtin_ctz(visit));const auto* source=bank.values.data()+block*64;auto* previous=register_values.data()+block*64;
+            const bool exposed=bank.block_exposed(block);
             register_epochs[block]=bank.epochs[block];
-            if(tracked)continue;
             // A never-borrowed block whose epoch moved changed presence or a value since the last refresh (a write back to the
             // old value is rebuilt too: the same words, one redundant upload), so only a borrowed block is compared, and only
             // against a current snapshot: rebuilding a never-borrowed block leaves its snapshot stale (register_values_stale).
@@ -1016,18 +1018,32 @@ struct Session {
             ++fragment_constants_version;}
     }
     void bind_draw_blocks(std::vector<unsigned>& data,bool direct){
-        std::array<NativeVulkan::GraphicsStateBlock,49> blocks{};
-        for(unsigned i=0;i<32;++i)blocks[i]={register_versions[i]*2,register_prefix.data()+16+i*64,64};
-        std::array<unsigned,64> last;
-        if(direct && !std::as_const(state.rsx).registers.count(0x1ff4)){
-            std::copy_n(blocks[31].data,64,last.begin());last[(0x1ff4/4)%64]=0x3fffff;
-            blocks[31].data=last.data();++blocks[31].version;
-        }
+        // Slots 0-48 in ascending order, exactly as one graphics_state_blocks call over all 49: a slot whose batch version
+        // equals is a hit (counted, nothing read), any other slot goes through graphics_state_blocks (its stop for an invalid
+        // block, upload, version/offset, upload count). Only the array of 49 descriptors is no longer built per draw.
+        auto& b=*batch;
+        auto slot=[&](unsigned index,std::uint64_t version,const unsigned* p,unsigned n){
+            if(version && n && b.state_versions[index]==version){++b.state_block_hits;return;}
+            vk.graphics_state_blocks(b,std::array<NativeVulkan::GraphicsStateBlock,1>{{{version,p,n}}},index);};
+        const bool default_viewport=direct && !std::as_const(state.rsx).registers.count(0x1ff4);
+        // Register slots 0-30 (31 too without the direct default) and the 16 constant slots: the slots whose batch version
+        // differs, found without branches; the rest hit. A version 0 (never produced: the first refresh of each source bumps
+        // it) still takes the slot path and its stop.
+        std::uint32_t changed=0;std::uint32_t constants=0;
+        for(unsigned i=0;i<32;++i){const auto v=register_versions[i]*2;changed|=std::uint32_t(b.state_versions[i]!=v || !v)<<i;}
+        if(default_viewport)changed&=~(UINT32_C(1)<<31);
+        for(unsigned c=0;c<=constant_chunks;++c){const auto v=constant_chunk_versions[c];constants|=std::uint32_t(b.state_versions[32+c]!=v || !v)<<c;}
+        b.state_block_hits+=31+!default_viewport-__builtin_popcount(changed);
+        for(;changed;changed&=changed-1){const unsigned i=unsigned(__builtin_ctz(changed));slot(i,register_versions[i]*2,register_prefix.data()+16+i*64,64);}
+        if(default_viewport){const auto version=register_versions[31]*2+1;   // odd: never the version of the stored block
+            if(version==b.state_versions[31])++b.state_block_hits;
+            else{std::array<unsigned,64> last;std::copy_n(register_prefix.data()+16+31*64,64,last.begin());last[(0x1ff4/4)%64]=0x3fffff;slot(31,version,last.data(),64);}}
         constexpr unsigned words=468*4;
-        for(unsigned c=0;c<constant_chunks;++c)blocks[32+c]={constant_chunk_versions[c],vertex_constants_cache.data()+c*constant_chunk_words,std::min(constant_chunk_words,words-c*constant_chunk_words)};
-        blocks[32+constant_chunks]={constant_chunk_versions[constant_chunks],vertex_constants_cache.data()+words,468};
-        blocks[48]={fragment_constants_version,fragment_constants_cache.data(),unsigned(fragment_constants_cache.size())};
-        vk.graphics_state_blocks(*batch,blocks);
+        b.state_block_hits+=constant_chunks+1-__builtin_popcount(constants);
+        for(;constants;constants&=constants-1){const unsigned c=unsigned(__builtin_ctz(constants));
+            if(c<constant_chunks)slot(32+c,constant_chunk_versions[c],vertex_constants_cache.data()+c*constant_chunk_words,std::min(constant_chunk_words,words-c*constant_chunk_words));
+            else slot(32+constant_chunks,constant_chunk_versions[constant_chunks],vertex_constants_cache.data()+words,468);}
+        slot(48,fragment_constants_version,fragment_constants_cache.data(),unsigned(fragment_constants_cache.size()));
         std::array<unsigned,16> table{};for(unsigned c=0;c<=constant_chunks;++c)table[c]=unsigned(batch->state_offsets[32+c]);
         if(table!=constant_table || constant_table_batch!=batch.get() || !constant_table_version){constant_table=table;constant_table_batch=batch.get();++constant_table_version;}
         vk.graphics_state_blocks(*batch,std::array<NativeVulkan::GraphicsStateBlock,1>{{{constant_table_version,constant_table.data(),16}}},49);
