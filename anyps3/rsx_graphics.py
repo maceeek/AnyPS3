@@ -970,15 +970,26 @@ struct Session {
         }
     }
     void serialize_registers(std::vector<unsigned>& data,unsigned width,unsigned height){
+        if(&data==&draw_data)draw_data_known=false;
         refresh_registers();const auto& bank=std::as_const(state.rsx).registers;
         data.assign(register_prefix.begin(),register_prefix.end());data[0]=width;data[1]=height;data[3]=data.size();
         for(unsigned i=0;i<8;++i)if(bank.count(0x2c0+8*i) && bank.count(0x2c4+8*i))data[8]|=1u<<i;
         data[9]=bank.count(0x8cc)!=0;
     }
+    // draw_data's 560-word head after the last serialize_draw_registers: only words 0..47 and the 32-word descriptor blocks of the
+    // units in draw_data_units can be non-zero (prepared() sets a unit's bit before it writes that block, and writes nothing else
+    // below word 560 on the non-alias path); draw_data_known is false while anything else may have written or moved draw_data
+    // (the alias path's serialize_registers and draw_alias, a fresh session).
+    bool draw_data_known=false;std::uint32_t draw_data_units=0;
     void serialize_draw_registers(std::vector<unsigned>& data,unsigned width,unsigned height){
         refresh_registers();const auto& bank=std::as_const(state.rsx).registers;
-        // Same contents as assign(560,0): shrinking keeps the capacity without writes, then every word is zeroed.
-        data.resize(48+16*32);zero_words(data.data(),data.size());data[0]=width;data[1]=height;data[3]=data.size();
+        // Same contents as assign(560,0): shrinking keeps the capacity without writes, then every possibly non-zero word is zeroed.
+        const bool known=&data==&draw_data && draw_data_known && data.size()>=48+16*32;
+        data.resize(48+16*32);
+        if(known){zero_words(data.data(),48);for(auto units=draw_data_units;units;units&=units-1)zero_words(data.data()+48+32*__builtin_ctz(units),32);}
+        else zero_words(data.data(),data.size());
+        draw_data_known=&data==&draw_data;draw_data_units=0;
+        data[0]=width;data[1]=height;data[3]=data.size();
         for(unsigned i=0;i<8;++i)if(bank.count(0x2c0+8*i) && bank.count(0x2c4+8*i))data[8]|=1u<<i;
         data[9]=bank.count(0x8cc)!=0;
     }
@@ -2314,6 +2325,7 @@ template<class Vertex> static bool prepared(Session& session,const std::vector<s
     phase.next(HostStage::g_tex);
     for(unsigned unit=0;unit<16;++unit){const auto& t=textures[unit];if(!t.valid)continue;
         texture_images[unit]=t.resident_image?t.resident_image:(!alias?session.texture_image(t):nullptr);
+        if(!alias)session.draw_data_units|=1u<<unit;   // before the block is written (serialize_draw_registers zeroes it next draw)
         const unsigned desc=(alias?2064:48)+unit*32;data[desc]=data.size();data[desc+1]=t.mip_count;data[desc+2]=t.unnormalized;data[desc+3]=t.wrap_s;data[desc+4]=t.wrap_t;
         data[desc+5]=t.min;data[desc+6]=t.mag;data[desc+7]=float_bits(t.bias);data[desc+8]=float_bits(t.min_lod);data[desc+9]=float_bits(t.max_lod);
         data[desc+10]=t.gamma;data[desc+11]=t.features;data[desc+12]=t.signed_mask;data[desc+13]=t.biased;data[desc+14]=t.alpha_kill;
