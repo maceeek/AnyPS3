@@ -508,6 +508,40 @@ class Parallel13Memory(unittest.TestCase):
  t.join();m.renderer_enabled=false;
 ''', switch)
 
+    def test_range_parts_inline_and_split(self):
+        # Range::Parts keeps one part inline and spills to a vector from the second: Ranges over one, two and three
+        # mappings (serial and concurrent memory) list the parts in address order with the offsets/sizes/backings computed
+        # here from the map layout; copies, moves and assignments between the inline and the spilled form keep them, and
+        # Range::read returns the bytes stored through each mapping.
+        self.native('range-parts', r'''
+ for(int concurrent=0;concurrent<2;++concurrent){
+  GuestMemory m;m.map(0x10000,0x1000,6,nullptr,0);m.map(0x11000,0x1000,6,nullptr,0);m.map(0x12000,0x1000,6,nullptr,0);
+  for(unsigned i=0;i<0x3000;i+=4)m.store(0x10000+i,4,0x01000000u*(i>>12)+i);
+  if(concurrent)m.enable_concurrency();
+  auto check=[&](const GuestMemory::Range& r,std::uint64_t address,unsigned size){
+   std::vector<std::pair<unsigned,unsigned>> expect;   // (offset, size) per 4 KiB mapping crossed
+   for(std::uint64_t at=address;at<address+size;){const auto end=std::min<std::uint64_t>(address+size,(at&~0xfffull)+0x1000);expect.push_back({unsigned(at-address),unsigned(end-at)});at=end;}
+   assert(r.parts.size()==expect.size() && r.parts.empty()==expect.empty() && r.size==size && r.address==address);
+   unsigned k=0;for(const auto& part:r.parts){const auto ea=address+part.offset;const auto& map=m.regions[(ea-0x10000)>>12];
+    assert(part.offset==expect[k].first && part.size==expect[k].second && part.owner==map.bytes && part.data==map.bytes->data()+(ea&0xfff) && part.mapping_id==map.identity);
+    assert(&r.parts[k]==&part && &r.parts.at(k)==&part);++k;}
+   {bool thrown=false;try{(void)r.parts.at(r.parts.size());}catch(const std::out_of_range&){thrown=true;}assert(thrown);}   // as std::vector::at
+   if(size){assert(&r.parts.front()==r.parts.begin() && &r.parts.back()==r.parts.end()-1);
+    std::vector<std::uint8_t> bytes(size);r.read(0,bytes.data(),size);
+    for(unsigned i=0;i<size;++i){const auto at=address+i-0x10000;const std::uint32_t word=0x01000000u*unsigned(at>>12)+unsigned(at&~3ull);assert(bytes[i]==std::uint8_t(word>>(8*(3-at%4))));}}};
+  for(const auto& [address,size]:std::vector<std::pair<std::uint64_t,unsigned>>{{0x10010,64},{0x10ff0,32},{0x10800,0x2000},{0x11000,0x1000},{0x10004,0x2ff8}}){
+   const auto r=m.range(address,size,false,false);check(r,address,size);
+   auto copy=r;check(copy,address,size);check(r,address,size);
+   auto moved=std::move(copy);check(moved,address,size);
+   GuestMemory::Range other=m.range(0x10020,8,false,false);other=r;check(other,address,size);   // inline <- either form
+   GuestMemory::Range wide=m.range(0x10800,0x2000,false,false);wide=r;check(wide,address,size);   // spilled <- either form
+   wide=m.range(0x10040,4,false,false);check(wide,0x10040,4);}
+  const auto pin=m.regions[1].bytes;const auto before=pin.use_count();
+  {auto r=m.range(0x10ff0,0x20,false,false);auto copy=r;assert(pin.use_count()==before+2);}   // each copy pins its backings
+  assert(pin.use_count()==before);
+ }
+''')
+
     def test_range_creation_waits_for_claim_and_reaches_observer(self):
         # Creation of a brokered Range on a page the owner has claimed returns only after the release; a creation over
         # watched bytes delivers them to the observer path (renderer_access) once, while unwatched bytes of the same
