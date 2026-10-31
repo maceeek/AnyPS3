@@ -2446,9 +2446,11 @@ static bool clear(Session& session,unsigned mask){
     if(depth.base)zi=session.bind(depth,width,height,samples,df,true,false,false,full_rect && full_depth).image;
     if(full_rect && (targets.empty() || full_color) && (!depth.base || !stencil_mask || stencil_mask==255)){
         VkClearColorValue value{};if(integer)value.uint32[0]=clear_word;else std::copy(color.begin(),color.end(),value.float32);
-        for(unsigned i=0;i<fixed.colors;++i)session.vk.graphics_clear_image(*session.batch,images[i],value,0,0,VK_IMAGE_ASPECT_COLOR_BIT);
+        // One leading barrier for the whole clear (graphics_group_lead): the targets are distinct images (non-overlapping).
+        auto lead=[&](const std::shared_ptr<NativeVulkan::GraphicsImage>& image,unsigned before){bool first=!before;for(unsigned j=0;j<before;++j)first|=images[j]==image;return first;};
+        for(unsigned i=0;i<fixed.colors;++i)session.vk.graphics_clear_image(*session.batch,images[i],value,0,0,VK_IMAGE_ASPECT_COLOR_BIT,lead(images[i],i));
         if(zi){const VkImageAspectFlags aspects=(mask&1?VK_IMAGE_ASPECT_DEPTH_BIT:0)|(stencil_mask?VK_IMAGE_ASPECT_STENCIL_BIT:0);
-            session.vk.graphics_clear_image(*session.batch,zi,value,z,r(0x1d8c)&255,aspects);}
+            session.vk.graphics_clear_image(*session.batch,zi,value,z,r(0x1d8c)&255,aspects,lead(zi,fixed.colors));}
         if(fallback_stats().enabled)++fallback_stats().paths["clear_transfer"];
     }else{
         static const auto vs=std::make_shared<const std::string>("#version 450\nvoid main(){vec2 p=vec2((gl_VertexIndex<<1)&2,gl_VertexIndex&2);gl_Position=vec4(p*2-1,0,1);}");
