@@ -572,8 +572,10 @@ struct IndexBounds {
     const std::vector<std::array<unsigned,3>>& indices;
     unsigned lo=UINT_MAX,hi=0;const DeviceGeometry* device=nullptr;
     std::vector<std::pair<unsigned,std::pair<unsigned,unsigned>>> modulo;
-    explicit IndexBounds(const std::vector<std::array<unsigned,3>>& input,const DeviceGeometry* sequence=nullptr):indices(input),device(sequence){
+    // known: the exact extent of input recorded while its indices were decoded (RsxDrawState::triangle_extent), else scanned.
+    explicit IndexBounds(const std::vector<std::array<unsigned,3>>& input,const DeviceGeometry* sequence=nullptr,const std::pair<unsigned,unsigned>* known=nullptr):indices(input),device(sequence){
         if(device){const auto b=device->bounds(1,false);lo=b.first;hi=b.second;return;}
+        if(known){lo=known->first;hi=known->second;return;}
         index_extent(indices.data(),indices.size(),lo,hi);
     }
     std::pair<unsigned,unsigned> get(unsigned frequency,bool mod){
@@ -1841,7 +1843,7 @@ template<class Vertex> static bool prepared(Session& session,const std::vector<s
     }
     if(device && alias){materialize();device=nullptr;}
     phase.next(HostStage::g_inputs);
-    IndexBounds bounds(indices,device);
+    std::pair<unsigned,unsigned> known_extent;IndexBounds bounds(indices,device,state.rsx.draw.triangle_extent(indices,known_extent));
     // Vertex attributes frequently interleave one buffer: attributes whose spans overlap or touch
     // share one guest Range (one lease/claim, one copy) and index into it by byte offset.
     struct VertexExtent {bool used=false;unsigned group=0;std::uint64_t address=0,span=0;};
