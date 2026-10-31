@@ -155,16 +155,19 @@ static void reset_failure(){
  if(!stopped)throw std::runtime_error("recorder Reset failure was forgotten");
  std::puts("PASS recorder Reset failure: rethrown at the next enqueue and by every later sync");
 }
-// Queue order: batch A draws red and is submitted through a (slow) Submit job; batch B then draws green into the same image and is
-// submitted (1) through the ring as well, (2) inline (B->inline_draws: never deferred), which must first let the recorder submit A.
-// The GPU executes one queue in submission order, so the image is green only if A reached the queue before B.
+// Queue order: batch A draws red and is submitted through a (slow) Submit job; batch B draws green into the same image and is submitted
+// after A (1) through the ring as well, (2) inline (B->inline_draws: never deferred; B recorded its draw inline before A's draw, so
+// nothing after A's submission drains the recorder but graphics_submit's own queue-order rule). The GPU executes one queue in
+// submission order, so the image is green only if A reached the queue before B.
 static void submit_order(){
  for(const bool inline_b:{false,true}){
   Gpu g("1");auto other=g.vk.graphics_batch(8*1024*1024);
   g.vk.graphics_test_recorder_submit_delay_ms=30;
+  if(inline_b){other->inline_draws=true;std::swap(g.b,other);g.draw(0,0,0,16,16,0xff00ff00u);std::swap(g.b,other);}
   g.draw(0,0,0,16,16,0xff0000ffu);const auto a=g.vk.graphics_submit(*g.b);
-  auto first=std::move(g.b);g.b=std::move(other);g.b->inline_draws=inline_b;
-  g.draw(0,0,0,16,16,0xff00ff00u);const auto b=g.vk.graphics_submit(*g.b);
+  auto first=std::move(g.b);g.b=std::move(other);
+  if(!inline_b)g.draw(0,0,0,16,16,0xff00ff00u);
+  const auto b=g.vk.graphics_submit(*g.b);
   if(b!=a+1)throw std::runtime_error("submission values not consecutive");
   g.vk.graphics_collect(*g.b,true);g.vk.graphics_collect(*first,true);g.vk.graphics_reset(*first);
   g.vk.graphics_reset(*g.b);g.b->inline_draws=false;g.vk.graphics_test_recorder_submit_delay_ms=0;
