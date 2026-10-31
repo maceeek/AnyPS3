@@ -391,7 +391,7 @@ class Parallel13Memory(unittest.TestCase):
  auto t=renderer([&]{auto& local=m.local_state();m.store(0x20000,4,6);   // warm: the store below admits on its first try
   {GuestMemory::RenderCursor cursor(m);std::uint64_t v=0;
    for(unsigned i=0;i<2048;++i){const std::uint64_t a=0x10000+i*4;if(!cursor.load(a,4,v))v=m.load(a,4);assert(v==word(i));}
-   assert(GuestMemory::cursor_reads==(on?2046u:0u));   // the first read of each page fills the scalar map cache
+   assert(GuestMemory::cursor_reads==(on?2048u:0u));   // every read served (the warm store bound the slot; misses refill)
    for(unsigned i=0;i+1<2048;i+=2){const std::uint64_t a=0x10000+i*4;if(!cursor.load(a,8,v))v=m.load(a,8);assert(v==((word(i)<<32)|word(i+1)));}
    for(unsigned i=1;i+1<1024;i+=2){const std::uint64_t a=0x10000+i*4;if(!cursor.load(a,8,v))v=m.load(a,8);assert(v==((word(i)<<32)|word(i+1)));}
    std::uint8_t bytes[64];assert(cursor.read(0x10100,bytes,64)==on);
@@ -484,8 +484,8 @@ class Parallel13Memory(unittest.TestCase):
 
     def test_range_creation_without_lease(self):
         # A Range inside one mapping is created on the compact admission (admitted_ranges counts it); its single part names
-        # the mapping's backing at the offset computed here from the map layout. A brokered span over two host pages or
-        # two mappings keeps the Lease path (same parts); unmapped and unwritable spans still fault; switch 0 creates
+        # the mapping's backing at the offset computed here from the map layout, also brokered over two host pages. A span over
+        # two mappings keeps the Lease path (two parts); unmapped and unwritable spans still fault; switch 0 creates
         # every Range on the Lease path.
         for switch in ('1', '0'):
             self.range_case('range-basic-' + switch, self.RANGE_SETUP + r'''
@@ -497,14 +497,14 @@ class Parallel13Memory(unittest.TestCase):
   auto w=m.range(0x10ff0,0x1010,true,false);   // translation-only over two host pages of one mapping
   assert(w.parts.size()==1 && w.parts[0].data==pin->data()+0xff0 && w.parts[0].size==0x1010 && w.writable);
   assert(GuestMemory::admitted_ranges==before+(on?2:0));
-  auto b=m.range(0x10ff0,32,false);   // brokered over two host pages: Lease path
+  auto b=m.range(0x10ff0,32,false);   // brokered over two host pages
   assert(b.parts.size()==1 && b.parts[0].data==pin->data()+0xff0);
   auto two=m.range(0x11ff0,32,false,false);   // two mappings: Lease path, two parts
   assert(two.parts.size()==2 && two.parts[0].size==16 && two.parts[1].owner==m.regions[1].bytes && two.parts[1].offset==16);
-  assert(GuestMemory::admitted_ranges==before+(on?2:0));
+  assert(GuestMemory::admitted_ranges==before+(on?3:0));
   fault([&]{(void)m.range(0x30000,16,false);});fault([&]{(void)m.range(0x20000,16,true);});
   auto ro=m.range(0x20000,16,false);assert(ro.parts.size()==1 && ro.parts[0].owner==m.regions[2].bytes);
-  assert(GuestMemory::admitted_ranges==before+(on?3:0));});
+  assert(GuestMemory::admitted_ranges==before+(on?4:0));});
  t.join();m.renderer_enabled=false;
 ''', switch)
 
@@ -520,6 +520,14 @@ class Parallel13Memory(unittest.TestCase):
  while(!warmed.load())std::this_thread::yield();
  {GuestMemory::GpuPages claim(m,{{pin->data()+0x400,16,pin}});go=true;std::this_thread::sleep_for(std::chrono::milliseconds(30));released=true;}
  t.join();assert(after.load()==1);
+ // The claim on the SECOND host page of a brokered two-page span (0x10ff0..0x1100f): creation must wait for it too.
+ {std::atomic<bool> warm2{false},go2{false},released2{false};std::atomic<int> after2{-1};
+  auto t2=renderer([&]{warm();(void)m.range(0x10ff0,32,false);warm2=true;while(!go2.load())std::this_thread::yield();
+   const auto before=GuestMemory::admitted_ranges;auto r=m.range(0x10ff0,32,false);after2=released2.load()?1:0;
+   assert(r.parts.size()==1 && r.parts[0].data==pin->data()+0xff0 && GuestMemory::admitted_ranges==before);});
+  while(!warm2.load())std::this_thread::yield();
+  {GuestMemory::GpuPages claim(m,{{pin->data()+0x1000,16,pin}});go2=true;std::this_thread::sleep_for(std::chrono::milliseconds(30));released2=true;}
+  t2.join();assert(after2.load()==1);}
  {GuestMemory::RawPermit raw(m);m.host_access_observer=[](const void*,std::uint64_t,bool){};
   m.host_access_observer.filtered=true;m.host_access_observer.supports_exact_bytes=true;m.host_access_observer.watch(pin->data()+0x500,4);}
  auto u=renderer([&]{warm();const auto before=GuestMemory::admitted_ranges;

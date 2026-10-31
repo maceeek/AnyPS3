@@ -466,6 +466,21 @@ TYPES = RESERVATION_WAIT_TYPES + r'''
            !(hit.flags&(write?2:4)) || (write && (hit.flags&1)))return nullptr;
         return &hit;
     }
+    // The admitted fast paths (read_page, cursor_pin, range_admitted) refill a missing entry from the admitted snapshot instead
+    // of declining: the mapping that holds the whole span, the same one translate_parallel resolves and caches (maps never
+    // overlap). No error is raised here; a hole or a missing permission returns nullptr and the caller declines to its Lease
+    // path, which raises the original error. Two guest pages 256 KiB apart share an entry (64 entries by page number).
+    [[gnu::noinline]] const ScalarCache* refill_parallel_map(LocalAccess& local,std::uint64_t address,unsigned size,bool write){
+        if(address>UINT32_MAX || !size || size>UINT64_C(0x100000000)-address)return nullptr;
+        for(const auto& map:local.snapshot->maps){const auto& r=map.region;
+            if(address>=r.base && address-r.base<r.bytes->size() && size<=r.bytes->size()-(address-r.base)){
+                cache_scalar_mapping(local,map,address);return cached_parallel_map(local,address,size,write);}}
+        return nullptr;
+    }
+    [[gnu::always_inline]] const ScalarCache* admitted_parallel_map(LocalAccess& local,std::uint64_t address,unsigned size,bool write){
+        if(const auto* hit=cached_parallel_map(local,address,size,write))return hit;
+        return refill_parallel_map(local,address,size,write);
+    }
     void cache_scalar_mapping(LocalAccess& local,const ParallelMemory::Mapping& map,std::uint64_t address){
         const auto& r=map.region;auto& cached=local.scalar_cache[(address>>12)%local.scalar_cache.size()];
         cached={local.snapshot->epoch,r.base,r.base+r.bytes->size(),r.flags,&map,r.bytes->data(),r.bytes->coherent_data(),map.state->tracked.get()};
@@ -543,7 +558,7 @@ TYPES = RESERVATION_WAIT_TYPES + r'''
         auto& state=local_state();if(state.raw || state.leases)return false;
         suspend_scalar_batch(state);   // as Lease: no owner batch or inline section spans this admission
         if(!try_enter_scalar_reader(state))return false;
-        const auto* hit=cached_parallel_map(state,address,size,false);
+        const auto* hit=admitted_parallel_map(state,address,size,false);
         if(!hit || (epoch && epoch!=state.snapshot->epoch)){leave_scalar_reader(state);return false;}
         const auto* pointer=hit->pointer+address-hit->base;const auto at=reinterpret_cast<std::uintptr_t>(pointer);
         auto* cell=(at>>12)==((at+size-1)>>12)?page_broker.cell(at>>12):nullptr;
@@ -586,7 +601,7 @@ TYPES = RESERVATION_WAIT_TYPES + r'''
         if(!size || size>4096 || address>UINT32_MAX || local.raw || local.leases || local.inline_active || local.scalar_batch_active ||
            !page_broker.enabled.load(std::memory_order_acquire) || page_broker.stopped.load(std::memory_order_acquire) ||
            !try_enter_scalar_reader(local))return false;
-        const auto* hit=cached_parallel_map(local,address,size,false);
+        const auto* hit=admitted_parallel_map(local,address,size,false);
         const auto* pointer=hit?hit->pointer+address-hit->base:nullptr;const auto at=reinterpret_cast<std::uintptr_t>(pointer);
         auto* cell=hit && (at>>12)==((at+size-1)>>12)?page_broker.cell(at>>12):nullptr;
         const bool observer=bool(host_access_observer),filtered=observer && host_access_observer.filtered;

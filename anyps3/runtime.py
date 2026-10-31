@@ -808,12 +808,13 @@ struct GuestMemory {
     // one mapping of the admitted snapshot (scalar map cache hit, permission checked) whose bytes no synchronous observer is
     // interested in (the Lease path's own lookup, same HostByteAccess context) is created under the compact pending hazard
     // instead of Lease + CpuPages + a per-mapping walk. Creation reads no payload byte; its only effects besides the Range are
-    // waiting for an in-progress claim (brokered) and the observer coherence point, so: brokered creation needs one host page
-    // and publishes the page hazard before reading the claim bit (claimed declines; an unclaimed page cannot be acquired before
-    // creation ends), translation-only creation (brokered=false) takes no broker interest at all, as on the Lease path, and any
-    // interest declines. A declined creation (nothing published) takes the unchanged Lease path: errors, callbacks, claim waits,
-    // spans over several mappings. The Range pins the backing (shared_ptr copied under admission) and records the admitted
-    // snapshot's epoch, which equals parallel->epoch while admitted.
+    // the observer coherence point (any interest declines) and, when brokered, not completing while a claim is in progress on
+    // one of its pages (the Lease path then asks page_broker.coherence and waits). So brokered creation (up to 64 host pages)
+    // declines when any page's claim bit is set; a claim whose bit appears after that check began after this creation, which
+    // the Lease path would only have made wait for the creation: no guest byte, label or callback differs. Translation-only
+    // creation (brokered=false) takes no broker interest at all, as on the Lease path. A declined creation (nothing published)
+    // takes the unchanged Lease path: errors, callbacks, coherence requests, claim waits, spans over several mappings. The Range
+    // pins the backing (shared_ptr copied under admission) and records the admitted snapshot's epoch (= parallel->epoch).
     inline static const bool range_admission_enabled=[]{const char* v=std::getenv("ANYPS3_GUEST_RANGE_ADMISSION");
         if(v && std::strcmp(v,"0") && std::strcmp(v,"1")){throw std::runtime_error("invalid ANYPS3_GUEST_RANGE_ADMISSION");}return !v || !std::strcmp(v,"1");}();
     inline static thread_local std::uint64_t admitted_ranges=0;   // TEST HOOK: creations completed by this thread without a Lease
@@ -823,17 +824,15 @@ struct GuestMemory {
         auto& state=local_state();if(state.raw || state.leases)return false;
         suspend_scalar_batch(state);   // as Lease: no batch, inline section or renderer cursor spans this admission
         if(!try_enter_scalar_reader(state))return false;
-        const auto* hit=cached_parallel_map(state,address,size,write);
+        const auto* hit=admitted_parallel_map(state,address,size,write);
         auto* pointer=hit?hit->pointer+address-hit->base:nullptr;const auto at=reinterpret_cast<std::uintptr_t>(pointer);
         if(!hit || (!(state.is_owner?in_host_access_observer:state.observer_pauses!=0) && host_access_observer && host_access_observer.synchronous(pointer,size))){
             leave_scalar_reader(state);return false;}
         if(brokered){
-            auto* cell=(at>>12)==((at+size-1)>>12)?page_broker.cell(at>>12):nullptr;
-            if(!cell){leave_scalar_reader(state);return false;}
-            parallel->readers[state.slot].page.store(at>>12,std::memory_order_release);
-            std::atomic_signal_fence(std::memory_order_seq_cst);
-            if((cell->state.load(std::memory_order_acquire)&PageBroker::claimed) || page_broker.stopped.load(std::memory_order_acquire)){
-                leave_scalar_reader(state);return false;}
+            const auto first=at>>12,last=(at+size-1)>>12;bool clear=last-first<64;
+            for(auto page=first;clear && page<=last;++page){const auto* cell=page_broker.cell(page);
+                clear=cell && !(cell->state.load(std::memory_order_acquire)&PageBroker::claimed);}
+            if(!clear || page_broker.stopped.load(std::memory_order_acquire)){leave_scalar_reader(state);return false;}
         }
         auto pin=hit->map->region.bytes;const auto identity=hit->map->region.identity;const auto epoch=state.snapshot->epoch;
         leave_scalar_reader(state);
