@@ -15,10 +15,11 @@ counters of the worker and main threads after WARM frames and dumps both after t
 the worker thread (the file whose profile holds rsx_run_impl) is steady-state cost only.
 
 Usage: python3 bench/rsx_fifo_actions_bench.py [-o OUT_DIR] [--no-run] [CXXFLAGS...]
-The binary takes key=value arguments: frames= warm= units= reports= backend= frontend= surfaces= zcull= turns= draw_every= indexed=
+The binary takes key=value arguments: frames= warm= units= reports= backend= frontend= surfaces= zcull= turns= draw_every= indexed= dynamic=
 indexed=1 makes each drawing unit game-shaped: an indexed triangle list (1200 BE16 indices in local memory over a 20x20 vertex
 grid with positions and UVs in IO memory) with a sampled texture and the fragment program in local memory, all read by the
-draw from concurrent guest memory (the draw bench uses a non-concurrent GuestMemory).
+draw from concurrent guest memory (the draw bench uses a non-concurrent GuestMemory). dynamic=1 additionally rewrites the vertex
+positions from the main thread before every frame (rewritten geometry; default 0 keeps the stream identical).
 and prints ns/frame (wall, lavapipe included) and the worker-relevant counters.
 """
 import argparse
@@ -43,7 +44,7 @@ MAIN = r'''
 #define BENCH_DUMP() do{}while(0)
 #endif
 static const std::uint32_t BASE=0x20000,IO=0x70000000,REPORTS=0x80000000;
-struct Config {unsigned frames=6,warm=2,units=2000,reports=230,backend=16,frontend=8,surfaces=32,zcull=8,turns=32,draw_every=0,indexed=0;};
+struct Config {unsigned frames=6,warm=2,units=2000,reports=230,backend=16,frontend=8,surfaces=32,zcull=8,turns=32,draw_every=0,indexed=0,dynamic=0;};
 struct Stream {
  PpuState& s;std::uint32_t at=BASE;std::vector<std::uint32_t> turn_ends;
  std::vector<std::pair<std::uint32_t,std::uint32_t>> values;   // (IO offset of a semaphore value word, base value)
@@ -89,7 +90,7 @@ int main(int argc,char** argv){try{
   const auto k=a.substr(0,eq);const unsigned v=unsigned(std::stoul(a.substr(eq+1)));
   if(k=="frames")c.frames=v;else if(k=="warm")c.warm=v;else if(k=="units")c.units=v;else if(k=="reports")c.reports=v;else if(k=="backend")c.backend=v;
   else if(k=="frontend")c.frontend=v;else if(k=="surfaces")c.surfaces=v;else if(k=="zcull")c.zcull=v;else if(k=="turns")c.turns=v;else if(k=="draw_every")c.draw_every=v;
-  else if(k=="indexed")c.indexed=v;
+  else if(k=="indexed")c.indexed=v;else if(k=="dynamic")c.dynamic=v;
   else throw std::runtime_error("unknown argument "+k);}
  setenv("ANYPS3_RSX_BACKEND","gpu",1);setenv("ANYPS3_RSX_WORKER","0",1);setenv("ANYPS3_SPU_THREADS","0",1);
  PpuState s;setup_draw(s,8,8,32,false);auto& g=s.rsx;auto& m=s.memory;
@@ -109,6 +110,9 @@ int main(int argc,char** argv){try{
  SpuWorkerSession life(s);auto& w=s.process.rsx_worker;if(!w.enabled)throw std::runtime_error("RSX worker not enabled");
  auto frame=[&](unsigned f){
   for(const auto& [offset,base]:st.values)m.store(IO+offset,4,base+f);   // a new value per frame: no same-value release shortcut
+  // dynamic=1 (with indexed=1): the main thread rewrites the 400 vertex positions (same values, 4-byte stores) before every
+  // frame, the worst case for geometry reuse (every frame's first draw finds its vertex copy written).
+  if(c.dynamic)for(unsigned a=0;a<400*16;a+=4)m.store(0x70002000+a,4,m.load(0x70002000+a,4));
   for(const auto end:st.turn_ends){m.store(g.dma+0x40,4,end);
    for(const auto until=std::chrono::steady_clock::now()+std::chrono::seconds(600);m.load(g.dma+0x44,4)!=end;){
     (void)rsx_worker_request(s,1u<<30);if(std::chrono::steady_clock::now()>until)throw std::runtime_error("FIFO did not reach PUT");std::this_thread::yield();}}
