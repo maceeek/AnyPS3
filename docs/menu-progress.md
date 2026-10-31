@@ -633,3 +633,8 @@ CPU scaled blits (fast2/fix7-stutter). See knowledge/experiments/2026-10-23-fix7
 - 2026-10-28: cloud round HIRES3 (no game/GPU): device-memory pool for the 1440p alloc/free hitches, three exact per-draw CPU
   cuts and typed-RTT literals on branch `ccr-8139488c-79xg7b`, lavapipe-tested with mutation checks; nothing measured in the
   game. [Record](knowledge/experiments/2026-10-28-cloud-hires3.md).
+- 2026-10-30/31: cloud round HIRES4 (no game/GPU): three Opus agents cut the RSX worker's host instructions exactly —
+  per-draw path, FIFO decode and actions, renderer-thread guest-memory admission (page cursor, one-page reads, Range
+  creation; switches default on). Callgrind on a game-shaped stream: −37 % worker Ir/frame with 500 indexed draws, −51 %
+  between draws; derived heavy-frame worker ~15–16 ms, still above 13 ms; nothing measured in the game. Branch
+  `ccr-b1a3987e-aypb5o`. [Record](knowledge/experiments/2026-10-30-cloud-hires4.md).

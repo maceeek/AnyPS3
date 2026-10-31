@@ -1,5 +1,20 @@
 # Handoff to the next instance
 
+## Cloud round HIRES4 — 2026-10-30/31 (cloud container; goal NOT reached, nothing measured in the game)
+
+Branch `ccr-b1a3987e-aypb5o` (pushed; HIRES3 de6bc4f + merges of `cloud/hires4-fifo` (fast-forward, b602751),
+`cloud/hires4-draw` (ceab1ba) and `cloud/hires4-mem` (b694994)). Read the [record](experiments/2026-10-30-cloud-hires4.md):
+per-draw cuts (agent A), FIFO decode/non-draw cuts (agent B), renderer guest-memory admission (agent C), the combined
+callgrind table, the suite result and the coordinator's review notes. The agent branches remain local to the cloud
+container (not pushed); their commits are all in the pushed branch. No process of this round is live.
+
+First next actions on the real PC: (1) one integration build; QUIET alternating 1440p walks vs 1031/1034 — rsx_worker
+ms/frame and µs/draw in heavy frames, main-thread RsxWait, `PERF GUEST_MEMORY`; (2) the same binary with
+`ANYPS3_RSX_RENDER_BATCH=0`, then all three memory switches 0 (`ANYPS3_GUEST_PAGE_READ`, `ANYPS3_RSX_RENDER_BATCH`,
+`ANYPS3_GUEST_RANGE_ADMISSION`), and `ANYPS3_RSX_FIFO_PAIR=0`; (3) GCC 15 compile time/size; (4) still open from HIRES3:
+pool A/B, 1035 MSAA, the recorder teal-frame check (if clean, recorder on by default in runtime and GUI); (5) if the worker
+is still > 13 ms, the per-draw designs in the record and HIRES3's two-thread worker.
+
 ## Cloud round HIRES3 — 2026-10-28 (cloud container; goal NOT reached, nothing measured in the game)
 
 Branch `ccr-8139488c-79xg7b` (pushed; based on main 95756e2). Read the

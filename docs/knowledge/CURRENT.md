@@ -1,5 +1,27 @@
 # Current state and goal
 
+## Cloud round HIRES4 — 2026-10-30/31 (cloud container: no game, no NVIDIA; branch `ccr-b1a3987e-aypb5o`)
+
+RSX worker CPU, the 1440p critical path (HIRES2: ~20–22 ms in heavy frames, target <= ~13 ms). Three Opus agents
+(per-draw path, FIFO/non-draw, renderer guest-memory access) on top of HIRES3 (de6bc4f); every cut exact, with a native
+lavapipe test (independent oracle) and mutation checks; **no game build, run or FPS figure**.
+- **Measured (callgrind, worker thread, synthetic game-shaped streams on the real RSX worker with concurrent memory):**
+  no draws 33.96 → 16.61 M Ir/frame (−51 %), with 500 indexed draws 68.49 → 43.41 M (−37 %), per indexed draw
+  69.1 k → 53.6 k (−22 %); draw bench scenario 5 at scale 2: 50.7 k → 41.4 k Ir/draw (−18 %, non-concurrent memory).
+- **Derived, unverified:** heavy-frame worker ~15–16 ms (from ~21) if instructions scale to time — a large step, still
+  above the target. Main thread (~14.8 ms) and scale-2 GPU (~15 ms) unchanged by this round.
+- **Switches for PC A/B (all default 1):** `ANYPS3_RSX_RENDER_BATCH` (renderer page cursor), `ANYPS3_GUEST_PAGE_READ`,
+  `ANYPS3_GUEST_RANGE_ADMISSION`, `ANYPS3_RSX_FIFO_PAIR`; the rest is unconditional.
+- **Found:** ~75 % of the worker's between-draw cost was FIFO decode, dominated by renderer-thread guest-memory admission
+  (~190–240 Ir per scalar, ~820 per one-page transfer); half the paired FIFO loads went bytewise (4-byte-aligned doublewords);
+  the broker's one-entry cell cache missed on 98 % of GET stores. Remaining per-draw cost needs designs (vertex upload reuse,
+  bound-texture memo, state-block scan, FP constant rewrite).
+- **Suite (lavapipe, 202 modules, 915 tests):** no regression; the 18 failing modules fail on the base too (GCC 13 `-Werror`,
+  missing `local/` tools, SDL offscreen without Vulkan, the container's compile speed against 30/60 s test limits).
+Record: [cloud HIRES4](experiments/2026-10-30-cloud-hires4.md). First next action on the PC: one integration build,
+alternating QUIET 1440p walks vs 1031/1034 (rsx_worker ms/frame and µs/draw in heavy frames), then the same binary with
+`ANYPS3_RSX_RENDER_BATCH=0` and with all three memory switches 0.
+
 ## Cloud round HIRES3 — 2026-10-28 (cloud container: no game, no NVIDIA; branch `ccr-8139488c-79xg7b`)
 
 Source-level changes on top of main 95756e2, each with a native lavapipe test (independent oracle) and mutation checks;

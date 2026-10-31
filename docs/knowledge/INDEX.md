@@ -9,6 +9,8 @@ Latest state and handoff: the top sections of [CURRENT.md](CURRENT.md) and [HAND
 
 Each record describes its own snapshot, not the current runtime.
 
+- 2026-10-30 [cloud round HIRES4](experiments/2026-10-30-cloud-hires4.md): RSX worker CPU per draw and between draws
+  (FIFO decode, renderer guest-memory admission); callgrind −37 % worker Ir/frame on a game-shaped stream; lavapipe tests only.
 - 2026-10-28 [cloud round HIRES3](experiments/2026-10-28-cloud-hires3.md): device-memory pool (stutter), per-draw CPU cuts
   (DrawJob pointers, report floors, constant chunks), typed-RTT literals, FIFO decode bench; lavapipe tests only, no game run.
 - 2026-10-25 [higher-resolution performance milestone](experiments/2026-10-25-scale2-walking.md): GPU depth copies,
