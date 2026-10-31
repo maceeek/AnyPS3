@@ -794,8 +794,15 @@ static bool rsx_run_impl(PpuState& s,unsigned budget,bool idle_poll=false){
                 auto method_class=[&](std::uint32_t reg)->unsigned{return reg<0x10000?classes[reg>>2]:rsx_method_class(reg);};
                 // Every register of the packet supported (the common case): one pass over the table bytes, no per-word dispatch.
                 // Otherwise the per-word loop below stops (or, ANYPS3_RSX_DIAG_SKIP=1, logs) at each unsupported register as before.
-                bool supported=std::uint64_t(method)+std::uint64_t(count-1)*increment<0x10000;
-                if(supported){const auto* entry=classes.data()+(method>>2);const unsigned n=increment?count:1u;
+                // An all-plain packet (every register a plain store, the common state packet; plain implies class 1, so the packet
+                // is supported) stores its words in order without the per-method dispatch below: the same stores, as the dispatch's
+                // capture hook is off and a resumed packet (packet_index) is never all plain (only a semaphore wait resumes).
+                const bool in_bank=std::uint64_t(method)+std::uint64_t(count-1)*increment<0x10000;
+                bool all_plain=rsx_fifo_plain_fast && in_bank && !gpu.packet_index && !gpu.perf_capture.active;
+                if(all_plain){const auto* entry=plain.data()+(method>>2);const unsigned n=increment?count:1u;
+                    for(unsigned i=0;i<n;++i)all_plain&=entry[i]!=0;}
+                bool supported=in_bank;
+                if(supported && !all_plain){const auto* entry=classes.data()+(method>>2);const unsigned n=increment?count:1u;
                     for(unsigned i=0;i<n;++i)if(!entry[i]){supported=false;break;}}
                 if(!supported)for(unsigned i=0;i<count;++i){
                     const auto reg=method+i*increment;
@@ -820,7 +827,8 @@ static bool rsx_run_impl(PpuState& s,unsigned budget,bool idle_poll=false){
                 if(in_window(get+4,std::uint64_t(count)*4))std::copy_n(window.words+(get+4-window.base)/4,count,values);
                 else if(have_pair){window.valid=false;values[0]=paired;if(count>1)rsx_fifo_values(gpu,m,get+8,count-1,values+1,&fifo_reads);}
                 else{window.valid=false;rsx_fifo_values(gpu,m,get+4,count,values,&fifo_reads);}
-                for(unsigned i=gpu.packet_index;i<count;++i){
+                if(all_plain){for(unsigned k=0;k<count;++k)gpu.registers.write(method+k*increment,values[k]);}
+                else for(unsigned i=gpu.packet_index;i<count;++i){
                     const auto reg=method+i*increment,value=values[i];
                     // rsx_capture_method returns at once without an active capture: test that here (no call per method).
                     if(rsx_fifo_plain_fast && reg<0x10000 && !(reg&3) && plain[reg>>2]){if(gpu.perf_capture.active){fifo_reads.revoke();rsx_capture_method(s,reg,value);}gpu.registers.write(reg,value);continue;}
