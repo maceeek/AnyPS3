@@ -2323,7 +2323,7 @@ template<class Vertex> static bool prepared(Session& session,const std::vector<s
         data[14]=data.size();for(const auto& inst:fp)rsxvk::append(data,inst.constant);}
     else{session.refresh_vertex_constants();session.refresh_fragment_constants(fp);}
     const unsigned line_base=data.size();if(lines){data[10]=line_base;data.insert(data.end(),line_data.begin(),line_data.end());}
-    std::array<std::shared_ptr<NativeVulkan::GraphicsBuffer>,16> raw_buffers{};
+    static const std::array<std::shared_ptr<NativeVulkan::GraphicsBuffer>,16> raw_buffers{};   // no raw texture buffers on this path
     std::array<std::shared_ptr<NativeVulkan::GraphicsImage>,20> texture_images{};
     phase.next(HostStage::g_tex);
     for(unsigned unit=0;unit<16;++unit){const auto& t=textures[unit];if(!t.valid)continue;
