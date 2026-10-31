@@ -68,7 +68,7 @@ struct RsxRegisters {
     static constexpr bool epoch_tracked(unsigned slot){return slot<0x1efc/4 || slot>0x1f7c/4;}
     // Tracked write (the FIFO path): no borrow escapes, the block epoch changes
     // exactly when presence or value of a register outside the constant window changes.
-    void write(std::uint32_t r,std::uint32_t value){
+    [[gnu::always_inline]] void write(std::uint32_t r,std::uint32_t value){   // inline at the FIFO store sites (hot)
         if(r>=0x10000 || (r&3))throw std::runtime_error("invalid RSX register bank address");
         const unsigned slot=r/4;auto& mask=written[slot/64];const auto bit=UINT64_C(1)<<(slot%64);
         if(!(mask&bit)){mask|=bit;values[slot]={r,value};++count_;if(epoch_tracked(slot))++epochs[slot/64];}
