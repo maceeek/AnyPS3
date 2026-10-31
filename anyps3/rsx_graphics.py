@@ -352,12 +352,15 @@ void main(){C q[1];bool front=w[11]!=0u || gl_FrontFacing;
 static std::shared_ptr<const std::string> fragment_source(const std::vector<FpInst>& fp,const Reg& r,unsigned count,const std::array<Texture,16>& textures,bool lines=false,rsxvk::FragmentFailure* failure=nullptr,unsigned width=0,unsigned height=0){
     static thread_local std::vector<unsigned> key;const unsigned discard_state=fragment_discard_state(r,width,height);
     key.assign({count,unsigned(lines),unsigned(packed_color(r)),unsigned(bool(r(0x1d60)&14u)),r(0x1d60)&64u,unsigned(float_color(r(0x208)&31u)),unsigned(rsx_layered_shaders().load(std::memory_order_relaxed)),discard_state});
-    unsigned mask=0;for(unsigned unit=0;unit<16;++unit)if(textures[unit].valid)mask|=1u<<unit;else if(textures[unit].null_texture)mask|=0x10000u<<unit;key.push_back(mask);
+    // One pass over the units: the mask word is stored at its key position once every unit was seen.
+    unsigned mask=0;const auto mask_at=key.size();key.push_back(0);
     const unsigned explicit_units=explicit_sampler_mask(fp);
-    for(unsigned unit=0;unit<16;++unit){const auto& t=textures[unit];if(!t.valid)continue;
+    for(unsigned unit=0;unit<16;++unit){const auto& t=textures[unit];if(!t.valid){if(t.null_texture)mask|=0x10000u<<unit;continue;}
+        mask|=1u<<unit;
         const bool manual=!implicit_sampler(t) || (explicit_units&(1u<<unit));
         const bool dynamic=bool(t.resident_image) && dynamic_resident_sampler();
         key.insert(key.end(),{unsigned(bool(t.resident_image)),t.format,t.dimension,unsigned(t.dimension==3 && t.levels[0].depth>1),unsigned(t.cube),t.shadow,unsigned(t.alpha_kill),dynamic?0u:t.wrap_s,dynamic?0u:t.wrap_t,dynamic?0u:t.wrap_r,manual?t.mip_count:0u,dynamic?0u:unsigned(t.unnormalized),manual?t.min:0u,manual?t.mag:0u});}
+    key[mask_at]=mask;
     // The source reads only the instruction words of fp (never its constants). A loader structure id names exactly those words
     // (rsxdraw::FpInst::structure); the tag word keeps the two key forms disjoint.
     if(!fp.empty() && fp[0].structure)key.insert(key.end(),{1u,unsigned(fp.size()),unsigned(fp[0].structure),unsigned(fp[0].structure>>32)});
@@ -996,10 +999,11 @@ struct Session {
             static_assert(decltype(gpu.transform_constants)::chunk==constant_chunk_words,"constant chunks follow the bank's write chunks");
             const bool tracked=!fresh && !gpu.transform_constants.borrowed() && constants_identity==gpu.transform_constants.identity;
             constants_identity=gpu.transform_constants.identity;
-            for(unsigned c=0;c<constant_chunks;++c){const unsigned first=c*constant_chunk_words,n=std::min(constant_chunk_words,words-first);
-                const auto seen=gpu.transform_constants.chunk_version(c);
-                if(tracked && constants_chunk_seen[c]==seen)continue;
-                constants_chunk_seen[c]=seen;
+            // The chunks to compare, found without branches first: all, or (tracked) those whose write version moved.
+            std::uint32_t todo=tracked?0u:(UINT32_C(1)<<constant_chunks)-1;
+            if(tracked)for(unsigned c=0;c<constant_chunks;++c)todo|=std::uint32_t(constants_chunk_seen[c]!=gpu.transform_constants.chunk_version(c))<<c;
+            for(;todo;todo&=todo-1){const unsigned c=unsigned(__builtin_ctz(todo)),first=c*constant_chunk_words,n=std::min(constant_chunk_words,words-first);
+                constants_chunk_seen[c]=gpu.transform_constants.chunk_version(c);
                 const auto* source=gpu.transform_constants.data()+first;auto* cached=vertex_constants_cache.data()+first;
                 if(fresh || std::memcmp(source,cached,n*sizeof(unsigned))){std::copy_n(source,n,cached);constant_chunk_versions[c]=++constant_chunk_clock;}}
             if(masks){std::copy_n(gpu.transform_constants_written.begin(),words,vertex_constants_written.begin());

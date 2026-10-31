@@ -212,7 +212,20 @@ static void sampling_words(){
  R[0x1a14]=0x02020000;run();session.flush();s.rsx.graphics_session=nullptr;
  std::puts("PASS texture sampling words follow every address/filter change of one layout; invalid filters still stop");
 }
-int main(){try{level_values();image_pins();indexed_reads();shader_reads();write_membership();dynamic_state();register_reads();register_prefix();triangle_list();blob_descriptors();pipeline_lookup();sampling_words();}catch(const std::exception& e){std::fprintf(stderr,"STOP %s\n",e.what());return 1;}}
+static void fragment_keys(){
+ // fragment_source keys every unit's validity (mask word: bit n valid, bit 16+n null texture) and the valid units' fields.
+ // Inputs that differ only in that mask must get their own cache entry; equal inputs reuse one.
+ PpuState s;setup_draw(s,8,8,32,false);texture_fp(s);NativeVulkan vk;rsxgraphics::Session session(vk,s);const rsxdraw::Reg r{s.rsx};
+ const auto fp=rsxdraw::load_fragment_program(s,r);
+ std::array<rsxdraw::Texture,16> a{},b{},c{};a[0]=session.texture_metadata(0);assert(a[0].valid);
+ b[0].null_texture=true;c=a;c[5].null_texture=true;
+ auto source=[&](const std::array<rsxdraw::Texture,16>& units){auto out=rsxgraphics::fragment_source(fp,r,1,units,false,nullptr,8,8);assert(out);return out;};
+ const auto sa=source(a);assert(source(a)==sa);
+ const auto sb=source(b),sc=source(c);assert(sb!=sa && sc!=sa && sc!=sb);
+ assert(source(a)==sa && source(c)==sc && source(b)==sb);
+ std::puts("PASS fragment source keys separate valid/null texture units, equal inputs share one source");
+}
+int main(){try{level_values();image_pins();indexed_reads();shader_reads();write_membership();dynamic_state();register_reads();register_prefix();triangle_list();blob_descriptors();pipeline_lookup();sampling_words();fragment_keys();}catch(const std::exception& e){std::fprintf(stderr,"STOP %s\n",e.what());return 1;}}
 '''
 
 
@@ -234,5 +247,5 @@ class WarmDrawTests(unittest.TestCase):
                 env.update(VK_DRIVER_FILES='/usr/share/vulkan/icd.d/lvp_icd.json',ANYPS3_VK_DEVICE='lavapipe')
             p=subprocess.run([str(binary)],env=env,capture_output=True,text=True,timeout=120)
             self.assertEqual(p.returncode,0,p.stdout+p.stderr)
-            self.assertEqual(p.stdout.count('PASS '),12)
+            self.assertEqual(p.stdout.count('PASS '),13)
             self.assertNotIn('Validation Error',p.stderr);self.assertNotIn('Validation Warning',p.stderr)
