@@ -129,14 +129,30 @@ game's geometry is as static as the bench's and instructions scale to time (both
   assertion on 549f94d and on `git archive 990c799`).
 - **Coordinator, merged snapshot 1c102a6, one module at a time:** `test_rsx_perf_draw` (both agents' cases, 15 PASS),
   `test_rsx2_draw`, `test_rsx_graphics_cache`, `test_rsx_index_decode` (4 compiler variants), `test_rsx_rtt`: all OK.
-- **Full suite (202 modules, `git archive` of 1c102a6, 3 processes): still running at the time of this commit** (54 of 202
-  done at 10:47 UTC, no assertion failure). Five modules failed so far, all with `TimeoutExpired` on a test's own compile
-  limit: `test_guest_memory_rsxmem` (30 s), `test_guest_printf` (60 s), `test_spufast_blocks` (900 s),
-  `test_native_audio`, `test_native_audio_full` (60 s; both also in HIRES4). `test_guest_memory_rsxmem` passed in HIRES4,
-  so its compile was timed with the limit lifted, alternating under the same load: base 990c799 30.4 / 27.0 s, merge
-  33.4 / 27.4 s, both OK — the compile sits at the 30 s limit in this container (the coordinator's timing runs added a
-  fourth process during `test_guest_printf` and part of `test_spufast_blocks`). Every timed-out module is re-run alone
-  after the suite; the result replaces this paragraph.
+- **Full suite** (202 modules, 3 processes, `git archive` of 1c102a6 — no test reads untracked files or `docs/`; `local/`
+  is absent in the container as in HIRES4): **180 OK, 22 failing, no regression found.**
+  - **18 = HIRES4's failing modules, none fixed and none changed:** 17 fail with the same tests and the same first error as in
+    [HIRES4](2026-10-30-cloud-hires4.md#regression-suite-lavapipe-cloud-container) (GCC 13 `-Werror` on `fp_fused_sum` /
+    `assert` macro / `graphics_static_discard`, the five lavapipe-sensitive RSX cache modules above, SDL offscreen without
+    Vulkan, missing `local/ratchet` tools — only the path prefix differs — and compile timeouts of `test_native_audio`,
+    `test_program`, `test_services`, which also time out on the base); `test_native_audio_full` again fails only by compile
+    timeouts (3 of its subtests instead of 1).
+  - **4 not failing in HIRES4, all `TimeoutExpired` on the test's own compile limit, no assertion:** `test_guest_memory_rsxmem`
+    (30 s), `test_guest_printf` (60 s), `test_vulkan` (60 s), `test_spufast_blocks` (900 s). The first two also timed out
+    when re-run alone, so each was timed alone with the limits lifted (`integ/time_audio_compile.py`; the test files are
+    unchanged), alternating with the base:
+
+    | module (limited compile) | limit | base 990c799 | merge 1c102a6 | result with the limit lifted |
+    | --- | ---: | ---: | ---: | --- |
+    | `test_guest_memory_rsxmem` (2nd compile) | 30 s | 29.7 / 30.8 s | 30.3 / 30.1 s | OK on both |
+    | `test_guest_printf` | 60 s | 60.2 / 55.4 s | 57.2 / 60.1 s | OK on both |
+    | `test_vulkan` | 60 s | 57.5 s | 57.9 s | OK on both |
+    | `test_native_audio_full` (16 compiles) | 60 s | — | 52.3–62.4 s (4 over) | OK |
+    | `test_spufast_blocks` (native-ISA compile) | 900 s | 1044 s | 1040 s (alone in the module run: 1128 s) | OK (module, merge); base and merge compiled side by side from the extracted sources |
+
+    The merge does not change these compile times measurably (differences within the run-to-run spread of one tree); these
+    compiles sit at their limits in this 4-vCPU container on the base as well, so whether they time out depends on the load
+    (the coordinator's own timing runs added a process during part of the suite). No test or limit was changed.
 
 ## Risks
 

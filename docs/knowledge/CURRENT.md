@@ -39,8 +39,8 @@ every cut has a native lavapipe test (independent oracle) and mutation checks; *
   static as the bench's and instructions scale to time; main thread (~14.8 ms) and scale-2 GPU (~15 ms) unchanged.
 - **Found:** the FIFO bench's setup borrows the register bank and constant arrays, forcing exact-compare paths the game does
   not take (~6.9 k Ir/draw of the bench).
-- **Suite (lavapipe):** targeted modules OK on the merge; full suite still running at the time of this commit (54/202
-  done, five compile timeouts, no assertion failure; see the record).
+- **Suite (lavapipe, 202 modules):** 180 OK, no regression: HIRES4's 18 failing modules fail unchanged; 4 more time
+  out on a test's own compile limit, which the base exceeds equally in this container (timed alone, base vs merge).
 Record: [cloud HIRES5](experiments/2026-10-31-cloud-hires5.md). First next action on the PC: one integration build,
 alternating QUIET 1440p walks vs 1031/1034, then the same binary with `ANYPS3_RSX_GEOMETRY_REUSE=0` (worker and main
 thread ms, `PERF RSX_COUNTERS` geometry/index hits, `PERF PPU_INLINE` medium/slow stores).
