@@ -1,5 +1,20 @@
 # Handoff to the next instance
 
+## Cloud round HIRES5 — 2026-10-31 (cloud container; goal NOT reached, nothing measured in the game)
+
+Branch `ccr-b1a3987e-aypb5o` (pushed): HIRES4 990c799 + merges of `cloud/hires5-state` (agent E, 8a03614) and
+`cloud/hires5-data` (agent D, 1c102a6; conflict only in `tests/test_rsx_perf_draw.py`, both sides kept). Read the
+[record](experiments/2026-10-31-cloud-hires5.md): changes, per-agent and combined callgrind tables, the bench-borrow finding,
+the coordinator's review of both invalidation arguments, risks. Agent worktrees and branches were removed after the
+merges (all commits are in the pushed branch). No process of this round is live.
+
+First next actions on the real PC: (1) one integration build; QUIET alternating 1440p walks vs 1031/1034 — rsx_worker
+ms/frame and µs/draw in heavy frames, main-thread ms and RsxWait; (2) the same binary alternating with
+`ANYPS3_RSX_GEOMETRY_REUSE=0`, plus a `-DANYPS3_RSX_PERF_COUNTERS` build for geometry/index hit rates and PPU medium/slow
+stores (reuse 1 vs 0); (3) `ANYPS3_RSX_RTT_PREFILTER=0 ANYPS3_RSX_TEXTURE_IMAGE_MEMO=0`; (4) a visual check of animated or
+skinned geometry with reuse on; (5) the HIRES4/HIRES3 switch A/B runs still open; (6) if the worker is <= 13 ms, the next
+blockers are the main guest thread (SPU-job wait) and the scale-2 GPU.
+
 ## Cloud round HIRES4 — 2026-10-30/31 (cloud container; goal NOT reached, nothing measured in the game)
 
 Branch `ccr-b1a3987e-aypb5o` (pushed; HIRES3 de6bc4f + merges of `cloud/hires4-fifo` (fast-forward, b602751),

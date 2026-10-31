@@ -642,3 +642,8 @@ CPU scaled blits (fast2/fix7-stutter). See knowledge/experiments/2026-10-23-fix7
   runtime handoffs 198–246 moved to `docs/knowledge/history/` (links rebased), a dated summary at the top of CURRENT; cloud
   container: merged agent worktrees/branches and finished-round bench builds removed. The PC's `local/ratchet` builds were
   not reachable from the cloud session and are unchanged.
+- 2026-10-31: cloud round HIRES5 (no game/GPU): two Opus agents cut the RSX worker's per-draw cost — geometry reuse of
+  unchanged vertex inputs and index spans under CPU-dirty watches (`ANYPS3_RSX_GEOMETRY_REUSE`, default on), an O(log n)
+  dirty-watch registry, exact index/state-path cuts. Callgrind: −24.3 % worker Ir per indexed draw (game-shaped −28.7 %);
+  derived heavy-frame worker ≈ 13 ms only if the game's geometry is static; nothing measured in the game. Branch
+  `ccr-b1a3987e-aypb5o`. [Record](knowledge/experiments/2026-10-31-cloud-hires5.md).

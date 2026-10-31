@@ -10,6 +10,8 @@ runtime handoffs 198–246 on 2026-10-31.
 
 Each record describes its own snapshot, not the current runtime.
 
+- 2026-10-31 [cloud round HIRES5](experiments/2026-10-31-cloud-hires5.md): per-draw geometry reuse (vertex/index copies
+  under CPU-dirty watches) and state-path cuts; callgrind −24 % worker Ir per indexed draw (game-shaped −29 %); lavapipe tests only.
 - 2026-10-30 [cloud round HIRES4](experiments/2026-10-30-cloud-hires4.md): RSX worker CPU per draw and between draws
   (FIFO decode, renderer guest-memory admission); callgrind −37 % worker Ir/frame on a game-shaped stream; lavapipe tests only.
 - 2026-10-28 [cloud round HIRES3](experiments/2026-10-28-cloud-hires3.md): device-memory pool (stutter), per-draw CPU cuts

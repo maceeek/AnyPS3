@@ -9,16 +9,41 @@
   2026-10-21); 1440p walking 39.91 / 40.58 FPS (build 1031, 2026-10-27, HIRES2). Blockers measured then: RSX worker
   ~20–22 ms in heavy frames (≈ 2.9 ms + 9.1 µs per draw), main guest thread ~14.8 ms (~3.9 ms SPU-job wait), GPU at
   scale 2 ~15.4 ms.
-- **Not yet measured in the game:** the cloud rounds HIRES3 (device-memory pool, per-draw cuts) and HIRES4 (RSX worker
-  CPU, synthetic −37 % worker instructions per frame; derived heavy frame ~15–16 ms), both on branch
-  `ccr-b1a3987e-aypb5o`; HIRES5 (per-draw geometry data and state path) is running in the cloud on top of it.
+- **Not yet measured in the game:** the cloud rounds HIRES3 (device-memory pool, per-draw cuts), HIRES4 (RSX worker
+  CPU, synthetic −37 % worker instructions per frame) and HIRES5 (per-draw geometry reuse and state path, synthetic
+  −24 % instructions per indexed draw, game-shaped −29 %; derived heavy-frame worker ≈ 13 ms only if the game's geometry
+  is as static as the bench's), all on branch `ccr-b1a3987e-aypb5o`.
 - **First next action on the PC:** one integration build of `ccr-b1a3987e-aypb5o`, QUIET alternating 1440p walks against
-  1031/1034, then the switch A/B runs listed in the HIRES4 and HIRES3 sections below.
+  1031/1034, then the same binary with `ANYPS3_RSX_GEOMETRY_REUSE=0` and the switch A/B runs listed in the HIRES5, HIRES4
+  and HIRES3 sections below.
 - **Builds cited as baselines or pending measurement:** 706 (60 FPS reference), 960 (= main f92681c at 1440p), 1031, 1034
   (1440p), 1002 and 1035 (to be measured, HIRES2). Which binaries still exist on the PC is not recorded after the
   2026-10-25 cleanup ([history](history/CURRENT-2026-10-21-to-10-25.md#local-data-cleanup--2026-10-25-user-request)); a
   further `local/ratchet` cleanup must run on the PC and keep these.
 - **Not verified:** physical gamepad acceptance at 1440p, stable 60 FPS at 1440p.
+
+## Cloud round HIRES5 — 2026-10-31 (cloud container: no game, no NVIDIA; branch `ccr-b1a3987e-aypb5o`)
+
+Per-draw cost of the RSX worker on top of HIRES4 (990c799): two Opus agents, geometry data path (D) and state path (E);
+every cut has a native lavapipe test (independent oracle) and mutation checks; **no game build, run or FPS figure**.
+- **Measured (callgrind, worker thread, concurrent FIFO bench, merge 1c102a6, same-session base):** per indexed draw
+  53,459 → **40,453 Ir (−24.3 %)**, worker frame with 500 indexed draws 43.37 → 36.84 M (−15.1 %); game-shaped diagnostic
+  (bench without its setup's register/constant borrows) 46,734 → 33,335 (−28.7 %); exact cuts alone (all new switches 0)
+  48,390 (−9.5 %); all positions rewritten every frame 43,778 (−18.1 %).
+- **Main change:** geometry reuse — unchanged vertex input groups and decoded index spans are served from host copies
+  validated by CPU-dirty watches (`ANYPS3_RSX_GEOMETRY_REUSE`, default 1); the dirty-watch registry now marks writers'
+  watches in O(log n) (a store into a watched page cost 1.6 µs at 600 watches before). Exact: one transfer + AVX2 decode
+  for adjacent index ranges, index extent from the decode, state-slot version mask, one-pass fragment key; switches
+  `ANYPS3_RSX_RTT_PREFILTER`, `ANYPS3_RSX_TEXTURE_IMAGE_MEMO` (default 1).
+- **Derived, unverified:** heavy-frame worker ≈ 13.2 ms at ~2000 draws (HIRES4 ~15–16 ms) **if** the game's geometry is as
+  static as the bench's and instructions scale to time; main thread (~14.8 ms) and scale-2 GPU (~15 ms) unchanged.
+- **Found:** the FIFO bench's setup borrows the register bank and constant arrays, forcing exact-compare paths the game does
+  not take (~6.9 k Ir/draw of the bench).
+- **Suite (lavapipe):** targeted modules OK on the merge; full suite still running at the time of this commit (54/202
+  done, five compile timeouts, no assertion failure; see the record).
+Record: [cloud HIRES5](experiments/2026-10-31-cloud-hires5.md). First next action on the PC: one integration build,
+alternating QUIET 1440p walks vs 1031/1034, then the same binary with `ANYPS3_RSX_GEOMETRY_REUSE=0` (worker and main
+thread ms, `PERF RSX_COUNTERS` geometry/index hits, `PERF PPU_INLINE` medium/slow stores).
 
 ## Cloud round HIRES4 — 2026-10-30/31 (cloud container: no game, no NVIDIA; branch `ccr-b1a3987e-aypb5o`)
 
