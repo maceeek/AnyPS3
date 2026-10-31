@@ -2,8 +2,9 @@
 
 This is the version-controlled entry point for the next model, a new run and a human. Read the goal state and runtime evidence in [CURRENT.md](CURRENT.md), the writing rules in [WORKFLOW.md](WORKFLOW.md), the handoff in [HANDOFF.md](HANDOFF.md). A record in the documentation does not, by itself, verify the emulator's function.
 
-Latest state and handoff: the top sections of [CURRENT.md](CURRENT.md) and [HANDOFF.md](HANDOFF.md). Sections older than
-2026-10-21 moved to [history/](history/) on 2026-10-25.
+Latest state and handoff: the summary and top sections of [CURRENT.md](CURRENT.md) and [HANDOFF.md](HANDOFF.md). Sections
+older than 2026-10-21 moved to [history/](history/) on 2026-10-25, those of 2026-10-21 to 2026-10-25 and the superseded
+runtime handoffs 198–246 on 2026-10-31.
 
 ## Records, newest first
 

@@ -14,7 +14,7 @@ Date: 2026-10-14, Claude Opus 5.5. Work interrupted on user instruction for hand
 5. Static targets: vtables `0xc3c428`, `0xc3c378`, statusCb `0xcd3b38`, trophy handlers 299/310, jump tables; automatic
    verified detection of switch tables (`anyps3/jump_tables.py`, `build.json` → `verified_jump_tables`). Translation budget 1,000,000.
 6. **RSX software renderer** (`anyps3/rsx_draw.py`): VP/FP interpreter, textures (A8R8G8B8, DXT1/3/5, mipmaps, gamma,
-   border texels), quad-lockstep derivatives, depth/alpha/blend. Detail: [experiments/2026-10-14-rsx-software-draw.md](experiments/2026-10-14-rsx-software-draw.md).
+   border texels), quad-lockstep derivatives, depth/alpha/blend. Detail: [experiments/2026-10-14-rsx-software-draw.md](../experiments/2026-10-14-rsx-software-draw.md).
 7. First guest-rendered image: `local/ratchet/native-bundle-228/frame-000005.png` (loading icon). Run 231/235:
    thousands of flips with an animated icon.
 

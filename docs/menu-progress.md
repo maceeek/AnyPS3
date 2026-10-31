@@ -341,7 +341,7 @@ match the snapshot of build 198; the four frames remain black.
 The requested handoff between models is governed by the root [AGENTS.md](../AGENTS.md).
 The [knowledge base](knowledge/INDEX.md) contains local CELL/SPU/PPU/RSX
 references, original PDFs and page-by-page Markdown conversions with a manifest.
-[Runtime handoff 198](knowledge/runtime-handoff-198.md) lists the exact
+[Runtime handoff 198](knowledge/history/runtime-handoff-198.md) lists the exact
 artifacts, reproduction and the first next diagnostic action. The menu and gamepad
 navigation are still not reached; a documentation milestone is not a substitute for them.
 
@@ -415,7 +415,7 @@ Menu/nav still not proven. See [246](knowledge/experiments/2026-10-14-byte-switc
 stop, case 13 not yet verified. The interruption manifest independently verifies PT_LOAD,
 source/profile/base/diagnostic hashes, logs and captures; logs do not grow after the end.
 No live build/run handle issued by us. Menu/nav not fulfilled. Full verifiable
-[handoff 246](knowledge/runtime-handoff-246.md), current CURRENT/HANDOFF/INDEX
+[handoff 246](knowledge/history/runtime-handoff-246.md), current CURRENT/HANDOFF/INDEX
 updated; the next run only upon authorization, a new unused directory 247.
 
 ## 247–255 (2026-10-14 evening, Claude Opus 5.5 + codex GPT-6.1 Sol subagents)
@@ -638,3 +638,7 @@ CPU scaled blits (fast2/fix7-stutter). See knowledge/experiments/2026-10-23-fix7
   creation; switches default on). Callgrind on a game-shaped stream: −37 % worker Ir/frame with 500 indexed draws, −51 %
   between draws; derived heavy-frame worker ~15–16 ms, still above 13 ms; nothing measured in the game. Branch
   `ccr-b1a3987e-aypb5o`. [Record](knowledge/experiments/2026-10-30-cloud-hires4.md).
+- 2026-10-31: knowledge-base cleanup (user request): CURRENT/HANDOFF sections of 2026-10-21 to 2026-10-25 and the superseded
+  runtime handoffs 198–246 moved to `docs/knowledge/history/` (links rebased), a dated summary at the top of CURRENT; cloud
+  container: merged agent worktrees/branches and finished-round bench builds removed. The PC's `local/ratchet` builds were
+  not reachable from the cloud session and are unchanged.

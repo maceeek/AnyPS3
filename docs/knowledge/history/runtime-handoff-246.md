@@ -225,17 +225,17 @@ without verifying the original guard/base/offset/count/targets and identity.
 
 ## Index of evidence and history
 
-- [238: original actual stop and SPU](experiments/2026-10-14-loading-238.md)
-- [239: renderer, benchmark, tests](experiments/2026-10-14-constant-fragment-239.md)
-- [240: first vtable](experiments/2026-10-14-vtable-240.md)
-- [241/242: six vtables](experiments/2026-10-14-loader-vtables-241-242.md)
-- [244: callbacks, virtual pad, actual FP stop](experiments/2026-10-14-virtual-pad-and-callbacks-244.md)
-- [245: FP semantics and regressions](experiments/2026-10-14-fp-zero-divide-245.md)
-- [246: table and interruption](experiments/2026-10-14-byte-switch-246.md)
-- [Previous progress 198–237](runtime-handoff-237.md), [brief history](../menu-progress.md)
-- [RSX semantics and limitations](experiments/2026-10-14-rsx-software-draw.md),
-  [PRX/trophy/PPU details](experiments/2026-10-14-prx-import-references.md)
-- [Primary sources, exact paths and revisions of the references](SOURCES.md)
+- [238: original actual stop and SPU](../experiments/2026-10-14-loading-238.md)
+- [239: renderer, benchmark, tests](../experiments/2026-10-14-constant-fragment-239.md)
+- [240: first vtable](../experiments/2026-10-14-vtable-240.md)
+- [241/242: six vtables](../experiments/2026-10-14-loader-vtables-241-242.md)
+- [244: callbacks, virtual pad, actual FP stop](../experiments/2026-10-14-virtual-pad-and-callbacks-244.md)
+- [245: FP semantics and regressions](../experiments/2026-10-14-fp-zero-divide-245.md)
+- [246: table and interruption](../experiments/2026-10-14-byte-switch-246.md)
+- [Previous progress 198–237](runtime-handoff-237.md), [brief history](../../menu-progress.md)
+- [RSX semantics and limitations](../experiments/2026-10-14-rsx-software-draw.md),
+  [PRX/trophy/PPU details](../experiments/2026-10-14-prx-import-references.md)
+- [Primary sources, exact paths and revisions of the references](../SOURCES.md)
 
 Evidence files in `local/ratchet/`: `target-240-evidence.txt`,
 `target-241-evidence.txt`, `loader-vtables-242-evidence.json`,
