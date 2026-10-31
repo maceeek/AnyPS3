@@ -835,7 +835,10 @@ static bool rsx_run_impl(PpuState& s,unsigned budget,bool idle_poll=false){
                         gpu.registers.write(reg,value);continue;
                     }
                     fifo_reads.revoke();   // every other method may wait, block, call back or access guest memory itself
-                    if(method_class(reg)==2)publish();
+                    // BEGIN (0x1808 with a primitive) is an action only for its END twin: it edits host draw state (or stops on a
+                    // nested begin, where the catch below publishes this same GET), touches no guest memory and cannot wait, so GET
+                    // may lag behind it as behind a state method; the END that follows publishes before the draw executes.
+                    if(method_class(reg)==2 && !(reg==0x1808 && value))publish();
                     if(reg!=0x68 && gpu.perf_capture.active)rsx_capture_method(s,reg,value);
                     if(reg==0 && value!=0x31337000)throw std::runtime_error("unsupported RSX channel object");
                     if(reg==0xe000 && value!=0xcafebabe)throw std::runtime_error("unsupported GCM driver object");
