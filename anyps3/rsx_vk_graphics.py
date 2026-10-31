@@ -413,6 +413,7 @@ private:
         return !v || !std::strcmp(v,"1");}();return value;}
     static void graphics_barrier(GraphicsBatch& b){
         graphics_end_pass(b);
+        if(b.barrier_serial && b.barrier_serial==graphics_command_serial().load(std::memory_order_acquire) && graphics_barrier_dedupe()){graphics_work_add(WorkBarriersElided);return;}
         graphics_mark(b,graphics_last_kind());graphics_last_kind()=MarkOther;
         const bool host=graphics_barrier_host();
         VkMemoryBarrier m{};m.sType=VK_STRUCTURE_TYPE_MEMORY_BARRIER;

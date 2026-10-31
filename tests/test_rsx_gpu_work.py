@@ -142,8 +142,34 @@ class GpuWorkTests(unittest.TestCase):
             check_modes(self, means)
 
 
+class CommandSerialTests(unittest.TestCase):
+    """graphics_barrier skips a full barrier only if graphics_command_serial is unchanged since the batch's previous one: every
+    action command that can be recorded outside a render pass must bump it (rsx_vk_resources.py wrapper). Commands that only
+    occur inside a pass (whose begin is counted; graphics_barrier ends any pass first) or access no memory are listed here."""
+    COUNTED = {'BeginRenderPass', 'EndRenderPass', 'CopyBuffer', 'CopyBufferToImage', 'CopyImageToBuffer', 'CopyImage', 'BlitImage',
+               'FillBuffer', 'Dispatch', 'ClearColorImage', 'ClearDepthStencilImage', 'PipelineBarrier', 'ResetQueryPool', 'CopyQueryPoolResults'}
+    UNCOUNTED = {'BindDescriptorSets', 'BindIndexBuffer', 'BindPipeline', 'PushConstants', 'SetBlendConstants', 'SetDepthBias', 'SetDepthBounds',
+                 'SetScissor', 'SetStencilCompareMask', 'SetStencilReference', 'SetStencilWriteMask', 'SetViewport', 'WriteTimestamp',
+                 'BeginQuery', 'EndQuery', 'Draw', 'DrawIndexed', 'ClearAttachments', 'BeginConditionalRenderingEXT', 'EndConditionalRenderingEXT'}
+
+    def test_every_action_command_bumps_the_serial(self):
+        package = Path(__file__).resolve().parents[1]/'anyps3'
+        used = set()
+        for path in package.glob('*.py'):
+            used |= set(re.findall(r'vkCmd([A-Za-z0-9]+)', path.read_text()))
+        unknown = used - self.COUNTED - self.UNCOUNTED
+        self.assertFalse(unknown, f'classify these commands for the barrier dedupe: {sorted(unknown)}')
+        wrappers = (package/'rsx_vk_resources.py').read_text()
+        for name in self.COUNTED:
+            start = wrappers.find(' vkCmd' + name + '(VkCommandBuffer')
+            self.assertGreaterEqual(start, 0, name)
+            body = wrappers[start:wrappers.index('::vkCmd' + name + '(', start)]
+            self.assertIn('graphics_command_recorded();', body, name)
+
+
 # (name, environment) per mode; check_modes compares their per-frame means.
-MODES = [('defaults', {}), ('marks', {'ANYPS3_RSX_VK_MARKS': '1', 'ANYPS3_PERF_REPORT': '1'})]
+MODES = [('defaults', {}), ('marks', {'ANYPS3_RSX_VK_MARKS': '1', 'ANYPS3_PERF_REPORT': '1'}),
+         ('dedupe0', {'ANYPS3_RSX_BARRIER_DEDUPE': '0'})]
 
 
 def check_modes(test, means):
@@ -154,6 +180,12 @@ def check_modes(test, means):
             test.assertEqual(means['marks'][key], value, key)
     test.assertEqual(means['marks']['mark_clear'], means['marks']['mark_clears'])
     test.assertEqual(means['marks']['mark_image'], means['marks']['mark_images'])
+    # Barrier dedupe: per frame exactly one full barrier directly follows another with nothing between them (the unpack
+    # upload's final barrier and its visual rebuild's leading barrier); every other count is unchanged.
+    test.assertEqual(means['dedupe0']['barriers_elided'], 0)
+    test.assertEqual(means['defaults']['barriers_elided'], 1)
+    test.assertEqual(means['defaults']['barriers'], means['dedupe0']['barriers'] - 1)
+    test.assertEqual(means['defaults']['pipeline_barriers'], means['dedupe0']['pipeline_barriers'] - 1)
 
 
 if __name__ == '__main__':
