@@ -1001,8 +1001,9 @@ struct Session {
     //  * map/unmap/configuration handoff: identity mismatch (above); entries pin their backing, so a host pointer is never
     //    reused by another backing while an entry names it.
     // Bounds: <= geometry_entry_limit entries/watches (as the 512 raw texture watches), <= geometry_byte_limit host bytes;
-    // LRU eviction. Cost for writers: a store to a watched page takes the medium path, one to a watched byte also scans the
-    // watch list. An address whose entry was invalidated twice is never cached again (rewritten buffers stay on the direct
+    // LRU eviction. Cost for writers: a PPU store to a watched page takes the medium path, a GuestMemory::store to it publishes
+    // through the registry (O(log watches), CpuDirtyList). An address whose entry was invalidated twice is never cached again
+    // (rewritten buffers stay on the direct
     // path), and every 4096 reads the entries already invalidated are dropped, so a rewritten buffer that is not drawn
     // again does not stay watched.
     struct GeometryEntry {
@@ -1045,10 +1046,10 @@ struct Session {
         auto it=geometry_entries.find(key);
         if(it!=geometry_entries.end()){auto& e=it->second;
             if(e.data==part.data && e.owner==part.owner && e.mapping_id==part.mapping_id){e.last_use=geometry_clock;
-                if(!e.dirty->consume()){std::memcpy(out,e.bytes.data(),range.size);++geometry_hits;return true;}
+                if(!e.dirty->consume()){std::memcpy(out,e.bytes.data(),range.size);++geometry_hits;::RsxPerfCounters::add(::RsxPerfCounters::geometry_hits);return true;}
                 // Written since the copy: the bit is consumed (clear before the read), refresh the copy under the same watch.
                 if(geometry_rewritten(range.address)){geometry_erase(it,false);return false;}
-                range.read(0,out,range.size);std::memcpy(e.bytes.data(),out,range.size);++geometry_rereads;return true;
+                range.read(0,out,range.size);std::memcpy(e.bytes.data(),out,range.size);++geometry_rereads;::RsxPerfCounters::add(::RsxPerfCounters::geometry_rereads);return true;
             }
             geometry_erase(it,false);
         }
@@ -1060,7 +1061,7 @@ struct Session {
         e.dirty->consume();   // clear BEFORE the read: a writer admitted during/after it leaves a new bit
         range.read(0,out,range.size);
         e.bytes.assign(out,out+range.size);e.data=part.data;e.owner=part.owner;e.mapping_id=part.mapping_id;e.last_use=geometry_clock;
-        geometry_bytes+=range.size;geometry_entries.emplace(key,std::move(e));++geometry_misses;return true;
+        geometry_bytes+=range.size;geometry_entries.emplace(key,std::move(e));++geometry_misses;::RsxPerfCounters::add(::RsxPerfCounters::geometry_misses);return true;
     }
     // ---- Index list reuse (same switch, bounds and invalidation protocol as the vertex input entries above) ----
     // An entry keeps the decoded index list of one contiguous index span (rsx_execute_draw's union read), keyed by guest
@@ -1094,7 +1095,7 @@ struct Session {
         if(range.parts.size()!=1 || range.parts[0].data!=e.data || range.parts[0].owner!=e.owner || range.parts[0].mapping_id!=e.mapping_id){index_erase(it,false);return false;}
         if(e.dirty->consume()){index_erase(it,true);return false;}
         if(e.width!=width || e.restart!=restart || e.restart_index!=restart_index || e.base!=base){index_erase(it,false);return false;}
-        e.last_use=++geometry_clock;out.assign(e.values.begin(),e.values.end());largest=e.largest;smallest=e.smallest;any=e.any;++index_hits;return true;
+        e.last_use=++geometry_clock;out.assign(e.values.begin(),e.values.end());largest=e.largest;smallest=e.smallest;any=e.any;++index_hits;::RsxPerfCounters::add(::RsxPerfCounters::index_hits);return true;
     }
     struct IndexToken {std::uint64_t key;std::shared_ptr<RawTexture::DirtyInputs> dirty;const std::uint8_t* data;std::shared_ptr<GuestBacking> owner;std::uint64_t mapping_id;};
     std::optional<IndexToken> index_prepare(std::uint64_t address,unsigned bytes){
@@ -1113,7 +1114,7 @@ struct Session {
         while(!(geometry_entries.empty() && index_entries.empty()) && (geometry_entries.size()+index_entries.size()>=geometry_entry_limit || geometry_bytes+values.size()*4>geometry_byte_limit))geometry_evict();
         IndexEntry e;e.dirty=std::move(token.dirty);e.data=token.data;e.owner=std::move(token.owner);e.mapping_id=token.mapping_id;e.last_use=++geometry_clock;
         e.size=unsigned(token.key&UINT32_MAX);e.width=width;e.restart=restart;e.restart_index=restart_index;e.base=base;e.any=any;e.largest=largest;e.smallest=smallest;e.values=values;
-        geometry_bytes+=values.size()*4;index_entries.emplace(token.key,std::move(e));++index_misses;
+        geometry_bytes+=values.size()*4;index_entries.emplace(token.key,std::move(e));++index_misses;::RsxPerfCounters::add(::RsxPerfCounters::index_misses);
     }
     // Least recently used vertex or index entry.
     void geometry_evict(){
