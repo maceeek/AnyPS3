@@ -109,6 +109,27 @@ class Parallel11Memory(unittest.TestCase):
  assert(m.load(0x10040,1)==0x11);assert(m.load(0x10041,1)==0x22 && calls==2);m.renderer_enabled=false;
 ''')
 
+    def test_many_watches_mark_exactly_the_overlapping_ones(self):
+        # Oracle: guest-address interval overlap of every write with every watched range (one linear mapping), computed
+        # here; writers: scalar stores (store_parallel_inline page path), bulk transfers and GPU publication.
+        self.native('dirty-many',r'''
+ GuestMemory m;m.map(0x10000,0x40000,6,nullptr,0);m.enable_concurrency();m.enable_page_broker();
+ unsigned seed=11;auto rng=[&]{seed=seed*1103515245u+12345u;return (seed>>8)&0xffffff;};
+ std::vector<std::shared_ptr<GuestMemory::CpuDirtyWatch>> watches;std::vector<std::vector<std::pair<unsigned,unsigned>>> spans;
+ for(unsigned w=0;w<600;++w){std::vector<GuestMemory::Range> ranges;std::vector<std::pair<unsigned,unsigned>> guest;
+  for(unsigned k=0,n=1+rng()%3;k<n;++k){const unsigned at=0x10000+rng()%0x3e000,size=1+rng()%(rng()%4?64:6000);ranges.push_back(m.range(at,size,true));guest.push_back({at,at+size});}
+  watches.push_back(m.watch_cpu_dirty(ranges));assert(watches.back()->consume());spans.push_back(guest);}
+ unsigned marked=0;
+ for(unsigned round=0;round<4000;++round){const unsigned kind=rng()%3,size=kind==0?1u<<(rng()%4):1+rng()%300,at=0x10000+rng()%(0x40000-size);
+  if(kind==0)m.store(at,size,rng());
+  else if(kind==1){std::vector<std::uint8_t> bytes(size,std::uint8_t(round));m.transfer(at,bytes.data(),size,true);}
+  else m.publish_gpu_write(m.regions[0].bytes->data()+(at-0x10000),size);
+  for(unsigned w=0;w<watches.size();++w){bool expect=false;for(const auto& [first,last]:spans[w])if(first<at+size && at<last)expect=true;
+   const bool dirty=watches[w]->consume();assert(dirty==expect);marked+=dirty;}}
+ assert(marked>1000);   // non-vacuous: many writes hit watches
+ for(auto& w:watches)m.unwatch_cpu_dirty(w);
+''')
+
     def test_batched_dirty_ranges_preserve_holes_aliases_and_stale_map(self):
         self.native('dirty-batch',r'''
  GuestMemory m;m.map(0x10000,8192,6,nullptr,0);m.regions.push_back({0x20000,6,m.regions[0].bytes});m.enable_concurrency();m.enable_page_broker();

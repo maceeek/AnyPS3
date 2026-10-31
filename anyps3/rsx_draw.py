@@ -34,6 +34,13 @@ struct RsxDrawState {
     std::vector<std::uint32_t> scratch_indices;
     std::vector<std::uint8_t> scratch_index_bytes;
     std::vector<std::array<std::uint32_t,3>> scratch_triangles;
+    // Minimum/maximum (+ base) of the decoded unrestarted indices of the current draw (extent_known), recorded for
+    // scratch_triangles at its built size (extent_of/extent_size) only when every decoded index is in a triangle.
+    // Reset at every index build; triangle_extent() hands it to IndexBounds instead of a second scan.
+    bool extent_known=false;std::uint32_t extent_lo=0,extent_hi=0;const void* extent_of=nullptr;std::size_t extent_size=0;
+    const std::pair<unsigned,unsigned>* triangle_extent(const std::vector<std::array<std::uint32_t,3>>& t,std::pair<unsigned,unsigned>& out)const{
+        if(!extent_known || extent_of!=static_cast<const void*>(&t) || extent_size!=t.size() || t.empty())return nullptr;
+        out={extent_lo,extent_hi};return &out;}
 };
 '''
 
@@ -73,19 +80,41 @@ using Vec4=std::array<float,4>;
     for(;i<n;++i)p[i]=0;
 }
 // Big-endian index decode: out[i]=raw+base, or UINT32_MAX for the restart value
-// when restart is enabled. largest/any cover the unrestarted raw values only,
-// for the caller's overflow check. Width is 2 or 4 bytes.
+// when restart is enabled. largest/smallest/any cover the unrestarted raw values only,
+// for the caller's overflow check and its index extent (smallest/largest are only
+// meaningful when any). Width is 2 or 4 bytes.
 [[maybe_unused]] static void decode_indices(const std::uint8_t* in,std::uint32_t* out,unsigned count,unsigned width,bool restart,
-        std::uint32_t restart_index,std::uint32_t base,std::uint32_t& largest,bool& any){
+        std::uint32_t restart_index,std::uint32_t base,std::uint32_t& largest,std::uint32_t& smallest,bool& any){
     unsigned i=0;
 #if defined(__SSSE3__) && defined(__SSE4_1__)
-    __m128i maxv=_mm_setzero_si128(),seen=_mm_setzero_si128();
+    // Restart lanes are or-ed to all ones before the minimum and cleared before the maximum, so they count for neither.
+#if defined(__AVX2__)
+    if(width==2 && count>=16){
+        __m256i maxv=_mm256_setzero_si256(),minv=_mm256_set1_epi32(-1),seen=_mm256_setzero_si256();
+        const __m256i basev=_mm256_set1_epi32(int(base)),restartv=_mm256_set1_epi32(int(restart_index)),ones=_mm256_set1_epi32(-1);
+        const __m128i swap16=_mm_setr_epi8(1,0,3,2,5,4,7,6,9,8,11,10,13,12,15,14);
+        auto widen=[&](unsigned at){return _mm256_cvtepu16_epi32(_mm_shuffle_epi8(_mm_loadu_si128(reinterpret_cast<const __m128i*>(in+2*at)),swap16));};
+        if(!restart){seen=ones;   // count >= 16: some value is unrestarted
+            for(;i+16<=count;i+=16){const __m256i x=widen(i),y=widen(i+8);
+                _mm256_storeu_si256(reinterpret_cast<__m256i*>(out+i),_mm256_add_epi32(x,basev));_mm256_storeu_si256(reinterpret_cast<__m256i*>(out+i+8),_mm256_add_epi32(y,basev));
+                maxv=_mm256_max_epu32(maxv,_mm256_max_epu32(x,y));minv=_mm256_min_epu32(minv,_mm256_min_epu32(x,y));}
+            for(;i+8<=count;i+=8){const __m256i x=widen(i);_mm256_storeu_si256(reinterpret_cast<__m256i*>(out+i),_mm256_add_epi32(x,basev));maxv=_mm256_max_epu32(maxv,x);minv=_mm256_min_epu32(minv,x);}
+        }else for(;i+8<=count;i+=8){const __m256i x=widen(i),hit=_mm256_cmpeq_epi32(x,restartv);
+            _mm256_storeu_si256(reinterpret_cast<__m256i*>(out+i),_mm256_or_si256(_mm256_add_epi32(x,basev),hit));
+            maxv=_mm256_max_epu32(maxv,_mm256_andnot_si256(hit,x));minv=_mm256_min_epu32(minv,_mm256_or_si256(hit,x));seen=_mm256_or_si256(seen,_mm256_andnot_si256(hit,ones));}
+        alignas(32) std::uint32_t m[8],l[8];_mm256_store_si256(reinterpret_cast<__m256i*>(m),maxv);_mm256_store_si256(reinterpret_cast<__m256i*>(l),minv);
+        largest=0;smallest=UINT32_MAX;for(unsigned k=0;k<8;++k){largest=std::max(largest,m[k]);smallest=std::min(smallest,l[k]);}
+        any=!_mm256_testz_si256(seen,seen);
+    }else
+#endif
+    {
+    __m128i maxv=_mm_setzero_si128(),minv=_mm_set1_epi32(-1),seen=_mm_setzero_si128();
     const __m128i basev=_mm_set1_epi32(int(base)),restartv=_mm_set1_epi32(int(restart_index)),ones=_mm_set1_epi32(-1);
     auto lanes=[&](__m128i x,std::uint32_t* to){
         if(restart){const __m128i hit=_mm_cmpeq_epi32(x,restartv);
             _mm_storeu_si128(reinterpret_cast<__m128i*>(to),_mm_or_si128(_mm_add_epi32(x,basev),hit));
-            maxv=_mm_max_epu32(maxv,_mm_andnot_si128(hit,x));seen=_mm_or_si128(seen,_mm_andnot_si128(hit,ones));}
-        else{_mm_storeu_si128(reinterpret_cast<__m128i*>(to),_mm_add_epi32(x,basev));maxv=_mm_max_epu32(maxv,x);seen=ones;}
+            maxv=_mm_max_epu32(maxv,_mm_andnot_si128(hit,x));minv=_mm_min_epu32(minv,_mm_or_si128(hit,x));seen=_mm_or_si128(seen,_mm_andnot_si128(hit,ones));}
+        else{_mm_storeu_si128(reinterpret_cast<__m128i*>(to),_mm_add_epi32(x,basev));maxv=_mm_max_epu32(maxv,x);minv=_mm_min_epu32(minv,x);seen=ones;}
     };
     if(width==2){
         const __m128i low=_mm_setr_epi8(1,0,-1,-1,3,2,-1,-1,5,4,-1,-1,7,6,-1,-1),high=_mm_setr_epi8(9,8,-1,-1,11,10,-1,-1,13,12,-1,-1,15,14,-1,-1);
@@ -95,16 +124,21 @@ using Vec4=std::array<float,4>;
         const __m128i swap=_mm_setr_epi8(3,2,1,0,7,6,5,4,11,10,9,8,15,14,13,12);
         for(;i+4<=count;i+=4)lanes(_mm_shuffle_epi8(_mm_loadu_si128(reinterpret_cast<const __m128i*>(in+4*i)),swap),out+i);
     }
-    alignas(16) std::uint32_t m[4];_mm_store_si128(reinterpret_cast<__m128i*>(m),maxv);
-    largest=std::max(std::max(m[0],m[1]),std::max(m[2],m[3]));any=!_mm_testz_si128(seen,seen);
+    alignas(16) std::uint32_t m[4],l[4];_mm_store_si128(reinterpret_cast<__m128i*>(m),maxv);_mm_store_si128(reinterpret_cast<__m128i*>(l),minv);
+    largest=std::max(std::max(m[0],m[1]),std::max(m[2],m[3]));smallest=std::min(std::min(l[0],l[1]),std::min(l[2],l[3]));any=!_mm_testz_si128(seen,seen);
+    }
 #else
-    largest=0;any=false;
+    largest=0;smallest=UINT32_MAX;any=false;
 #endif
     for(;i<count;++i){
         const std::uint32_t raw=width==2?(std::uint32_t(in[2*i])<<8|in[2*i+1]):(std::uint32_t(in[4*i])<<24|std::uint32_t(in[4*i+1])<<16|std::uint32_t(in[4*i+2])<<8|in[4*i+3]);
         if(restart && raw==restart_index){out[i]=UINT32_MAX;continue;}
-        largest=std::max(largest,raw);any=true;out[i]=raw+base;
+        largest=std::max(largest,raw);smallest=std::min(smallest,raw);any=true;out[i]=raw+base;
     }
+}
+[[maybe_unused]] static void decode_indices(const std::uint8_t* in,std::uint32_t* out,unsigned count,unsigned width,bool restart,
+        std::uint32_t restart_index,std::uint32_t base,std::uint32_t& largest,bool& any){
+    std::uint32_t smallest;decode_indices(in,out,count,width,restart,restart_index,base,largest,smallest,any);
 }
 // Minimum and maximum over every index of n triangles (n may be zero).
 [[maybe_unused]] static void index_extent(const std::array<std::uint32_t,3>* t,std::size_t n,unsigned& lo,unsigned& hi){
@@ -299,7 +333,7 @@ struct DrawReadBatch {
         if(count==inputs.size())throw std::runtime_error("RSX draw input capacity");
         inputs[count++]={&range,destination};
     }
-    void read(std::uint8_t* output){
+    void read(std::uint8_t* output)const{
         if(!count)return;
         const auto& first=*inputs[0].range;
         if(!first.memory->concurrent()){
@@ -1379,6 +1413,7 @@ static void rsx_execute_draw(PpuState& s){
     if(graphics_backend){device_geometry.emplace(draw);lazy_geometry=device_geometry->valid;}
 #endif
     auto build_indices=[&]{
+    draw.extent_known=false;draw.extent_of=nullptr;
     const auto base_index=reg.get(0x173c,0);
     if(!draw.elements.empty()){
         const bool restart=reg.get(0x1dac,0)&1;
@@ -1393,7 +1428,52 @@ static void rsx_execute_draw(PpuState& s){
         if(!width || (dma&15)>1)throw std::runtime_error("unsupported RSX index array format/location");
         const bool restart=reg.get(0x1dac,0)&1;
         const unsigned restart_index=reg.get(0x1db0,0xffffffff)&(width==2?0xffff:0xffffffff);
-        for(const auto& [first,count]:draw.ranges){
+        // Adjacent ranges (each starting where the previous one ended: one index list split into <=256-index
+        // DRAW_INDEX_ARRAY words) are read with ONE transfer of their union -- the same bytes in the same order, one
+        // admissible schedule of the per-range reads -- and decoded in one pass. Any exception re-runs the per-range loop
+        // below from the start, so the first failing range raises its original error at its original point (the union
+        // read and decode have no guest-visible effect). Without restart the unrestarted extent is kept for IndexBounds.
+        // With geometry reuse the session serves an unchanged span's decoded list (Session::index_read) or keeps this
+        // decode (index_prepare before the transfer, index_store after it); its errors still come from the per-range loop.
+        bool merged=false;
+#ifdef ANYPS3_RSX_VK
+        auto* reuse=graphics_backend?static_cast<rsxgraphics::Session*>(gpu.graphics_session):nullptr;
+#endif
+        if(!draw.ranges.empty()){
+            try{
+                std::uint64_t total=0,first_address=0;bool adjacent=true;
+                for(std::size_t k=0;k<draw.ranges.size() && adjacent;++k){const auto [first,count]=draw.ranges[k];
+                    const auto begin=std::uint64_t(offset)+std::uint64_t(first)*width;
+                    if(!count || begin>UINT32_MAX || std::uint64_t(count)*width>UINT32_MAX || (k && std::uint64_t(first)!=std::uint64_t(draw.ranges[k-1].first)+draw.ranges[k-1].second)){adjacent=false;break;}
+                    const auto address=location_address(gpu,dma&15,begin,count*width);
+                    if(k && address!=first_address+total*width){adjacent=false;break;}
+                    if(!k)first_address=address;
+                    total+=count;
+                }
+                if(adjacent && total*width<=0x1000000){
+                    std::uint32_t largest=0,smallest=UINT32_MAX;bool any=false;bool served=false;
+#ifdef ANYPS3_RSX_VK
+                    std::optional<rsxgraphics::Session::IndexToken> token;
+                    if(reuse){served=reuse->index_read(first_address,unsigned(total*width),width,restart,restart_index,base_index,indices,largest,smallest,any);
+                        if(!served)token=reuse->index_prepare(first_address,unsigned(total*width));}
+#endif
+                    auto& bytes=draw.scratch_index_bytes;
+                    if(!served){bytes.resize(total*width);m.transfer(first_address,bytes.data(),unsigned(total*width),false);}
+                    // Grown in steps of <= 256 indices: the same <= 1 KiB value-initialising resizes as the per-range loop (one
+                    // resize of several KiB is a `rep stosb`, which callgrind counts per byte).
+                    if(!served)for(unsigned at=0;at<total;at+=256){const unsigned n=std::min<std::uint64_t>(256,total-at);indices.resize(at+n);
+                        std::uint32_t high=0,low=UINT32_MAX;bool seen=false;
+                        decode_indices(bytes.data()+std::size_t(at)*width,indices.data()+at,n,width,restart,restart_index,base_index,high,low,seen);
+                        if(seen){largest=any?std::max(largest,high):high;smallest=any?std::min(smallest,low):low;any=true;}}
+                    if(any && std::uint64_t(largest)+base_index>=UINT32_MAX)throw std::runtime_error("RSX vertex index overflow");
+                    merged=true;if(!restart && any){draw.extent_lo=smallest+base_index;draw.extent_hi=largest+base_index;draw.extent_known=true;}
+#ifdef ANYPS3_RSX_VK
+                    if(token)reuse->index_store(std::move(*token),width,restart,restart_index,base_index,indices,largest,smallest,any);
+#endif
+                }
+            }catch(...){indices.clear();draw.extent_known=false;}
+        }
+        if(!merged)for(const auto& [first,count]:draw.ranges){
             const auto begin=std::uint64_t(offset)+std::uint64_t(first)*width;
             if(begin>UINT32_MAX || std::uint64_t(count)*width>UINT32_MAX)throw std::runtime_error("RSX index array address overflow");
             const auto address=location_address(gpu,dma&15,begin,count*width);
@@ -1403,9 +1483,11 @@ static void rsx_execute_draw(PpuState& s){
             // Same values/errors as the per-element loop: decode into place,
             // checking overflow on the unrestarted maximum only.
             const auto at=indices.size();indices.resize(at+count);
-            std::uint32_t largest=0;bool any=false;
-            decode_indices(bytes.data(),indices.data()+at,count,width,restart,restart_index,base_index,largest,any);
+            std::uint32_t largest=0,smallest=UINT32_MAX;bool any=false;
+            decode_indices(bytes.data(),indices.data()+at,count,width,restart,restart_index,base_index,largest,smallest,any);
             if(any && std::uint64_t(largest)+base_index>=UINT32_MAX)throw std::runtime_error("RSX vertex index overflow");
+            if(!restart && any){draw.extent_lo=draw.extent_known?std::min(draw.extent_lo,smallest+base_index):smallest+base_index;
+                draw.extent_hi=draw.extent_known?std::max(draw.extent_hi,largest+base_index):largest+base_index;draw.extent_known=true;}
         }
     }else if(!draw.immediate_vertices.empty()){
         for(std::uint32_t i=0;i<draw.immediate_vertices.size();++i)indices.push_back(i);
@@ -1453,6 +1535,10 @@ static void rsx_execute_draw(PpuState& s){
         assemble(strip);
         indices.erase(std::remove(indices.begin(),indices.end(),UINT32_MAX),indices.end());
     }else assemble(indices);
+    // A triangle list without restart holds every decoded index iff the count is a multiple of 3 (else the tail is dropped).
+    if(draw.extent_known && draw.primitive==5 && !(reg.get(0x1dac,0)&1) && indices.size()%3==0 && triangles.size()*3==indices.size()){
+        draw.extent_of=&triangles;draw.extent_size=triangles.size();}
+    else draw.extent_known=false;
     };
     if(!lazy_geometry)build_triangles();
     host_phase.next(HostStage::state);

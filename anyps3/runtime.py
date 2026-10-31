@@ -703,8 +703,28 @@ struct GuestMemory {
         bool consume(){return dirty.exchange(false,std::memory_order_acq_rel);}
     };
     HostObserver cpu_dirty_filter=[] {HostObserver filter;filter.filtered=true;filter.supports_exact_bytes=true;return filter;}();
-    using CpuDirtyList=std::vector<std::shared_ptr<CpuDirtyWatch>>;
-    CpuDirtyList cpu_dirty_watches;
+    using CpuDirtyWatches=std::vector<std::shared_ptr<CpuDirtyWatch>>;
+    // One immutable published registry: the watches plus every watched span sorted by start, each with the running maximum
+    // of the span ends up to it, so a writer marks the watches overlapping its bytes in O(log n + overlapping spans)
+    // instead of testing every watch (raw texture inputs and geometry entries: up to ~1000 watches). The marked set is
+    // exactly that of CpuDirtyWatch::overlaps over all watches.
+    struct CpuDirtyList : CpuDirtyWatches {
+        struct Span {std::uintptr_t first,last,reach;CpuDirtyWatch* watch;};
+        std::vector<Span> index;
+        CpuDirtyList()=default;
+        explicit CpuDirtyList(const CpuDirtyWatches& watches):CpuDirtyWatches(watches){
+            for(const auto& watch:*this)for(const auto& span:watch->spans)index.push_back({span.first,span.second,0,watch.get()});
+            std::sort(index.begin(),index.end(),[](const Span& a,const Span& b){return a.first<b.first;});
+            std::uintptr_t reach=0;for(auto& span:index){reach=std::max(reach,span.last);span.reach=reach;}
+        }
+        void mark(const void* pointer,unsigned size)const{
+            if(!size)return;
+            const auto p=reinterpret_cast<std::uintptr_t>(pointer),end=p+size;
+            auto it=std::lower_bound(index.begin(),index.end(),end,[](const Span& span,std::uintptr_t e){return span.first<e;});
+            while(it!=index.begin()){--it;if(it->reach<=p)break;if(it->last>p)it->watch->dirty.store(true,std::memory_order_release);}
+        }
+    };
+    CpuDirtyWatches cpu_dirty_watches;
     std::shared_ptr<const CpuDirtyList> gpu_dirty_watches=std::make_shared<const CpuDirtyList>();
     struct CpuDirtyRegistry {
         std::shared_ptr<const CpuDirtyList> current;
@@ -774,14 +794,12 @@ struct GuestMemory {
         publish_cpu_write_watched(pointer,size);
     }
     [[gnu::noinline]] void publish_cpu_write_watched(const void* pointer,unsigned size){
-        CpuDirtyPin pin(*this);
-        for(const auto& watch:*pin.snapshot)if(watch->overlaps(pointer,size))watch->dirty.store(true,std::memory_order_release);
+        CpuDirtyPin pin(*this);pin.snapshot->mark(pointer,size);
     }
     void publish_gpu_write(const void* pointer,unsigned size){
         // GPU claims exclude bytes, not observer metadata permits. A cold
         // immutable registry snapshot keeps concurrent watch removal safe.
-        const auto watches=std::atomic_load_explicit(&gpu_dirty_watches,std::memory_order_acquire);
-        for(const auto& watch:*watches)if(watch->overlaps(pointer,size))watch->dirty.store(true,std::memory_order_release);
+        const auto watches=std::atomic_load_explicit(&gpu_dirty_watches,std::memory_order_acquire);watches->mark(pointer,size);
     }
     // One admitted, permission/map-checked read of the complete upload range.
     // This is an immutable byte snapshot, not a promise of atomic multiword

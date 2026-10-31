@@ -56,6 +56,43 @@ static void indexed_reads(){
  R[0x181c]=UINT_MAX;s.rsx.draw.ranges={{0,0}};failed=false;try{rsx_execute_draw(s);}catch(const std::runtime_error&){failed=true;}assert(failed);
  std::puts("PASS bulk indices: literal BE16/32, memory/remap/permission, split, restart, overflow and empty");
 }
+static void merged_index_ranges(){
+ setenv("ANYPS3_RSX_BACKEND","cpu",1);
+ PpuState s;setup_draw(s,8,8,32,false);auto& R=s.rsx.registers;auto& d=s.rsx.draw;R[0x181c]=0x3000;R[0x1820]=0x10;
+ const unsigned values[]={3,1,2,2,3,1,0,2,3,0,1,2};for(unsigned n=0;n<12;++n)s.memory.store(0xc0003000+2*n,2,values[n]);
+ // Expected triangles: the listed ranges' values in order (+ base), complete triples only; extent over those triangles.
+ auto check=[&](std::vector<std::pair<std::uint32_t,std::uint32_t>> ranges,unsigned base,bool extent_expected){
+  R[0x173c]=base;std::vector<unsigned> list;for(const auto& [first,count]:ranges)for(unsigned i=0;i<count;++i)list.push_back(values[first+i]+base);
+  std::vector<std::array<unsigned,3>> tris;unsigned lo=UINT_MAX,hi=0;
+  for(std::size_t i=0;i+3<=list.size();i+=3){tris.push_back({list[i],list[i+1],list[i+2]});for(unsigned k=0;k<3;++k){lo=std::min(lo,list[i+k]);hi=std::max(hi,list[i+k]);}}
+  d.indexed=true;d.primitive=5;d.ranges=ranges;rsx_execute_draw(s);
+  assert(d.scratch_triangles==tris);
+  std::pair<unsigned,unsigned> known;const auto* extent=d.triangle_extent(d.scratch_triangles,known);
+  assert(extent_expected?(extent && extent->first==lo && extent->second==hi):!extent);
+ };
+ check({{0,3},{3,3},{6,3}},0,true);          // adjacent: one union read
+ check({{0,3},{3,3},{6,3}},1,true);          // base index is part of the extent
+ check({{0,3},{6,3}},0,true);                // a gap: per-range reads
+ check({{0,6}},0,true);                      // one range
+ check({{0,4},{4,3}},0,false);               // 7 indices: the dropped 0 is not in a triangle
+ R[0x1dac]=1;R[0x1db0]=0xffff;check({{0,3},{3,3}},0,false);R[0x1dac]=0;   // restart: strips, no recorded extent
+ // A later range in unmapped memory raises the per-range error of that range (address and size of that range).
+ auto source=s.memory.regions[1];const auto cut=0x3006u;
+ s.memory.regions[1]={source.base,6,std::make_shared<GuestBacking>(source.bytes->begin(),source.bytes->begin()+cut)};
+ std::string expected;{std::uint8_t buffer[6];try{s.memory.transfer(0xc0003006,buffer,6,false);}catch(const std::runtime_error& e){expected=e.what();}}
+ assert(!expected.empty());std::string actual;
+ d.indexed=true;d.primitive=5;d.ranges={{0,3},{3,3}};try{rsx_execute_draw(s);}catch(const std::runtime_error& e){actual=e.what();}
+ assert(actual==expected);
+ // The first failing range decides the error: range 2 unmapped (at the end of a shortened VRAM mapping), range 3 outside
+ // VRAM. The per-range order reads range 2 first, so the draw raises range 2's transfer error, not range 3's bounds error.
+ s.memory.regions[1]=source;const std::uint32_t tail=s.rsx.local_size-12;for(unsigned n=0;n<3;++n)s.memory.store(0xc0000000u+tail+2*n,2,values[n]);
+ s.memory.regions[1]={source.base,6,std::make_shared<GuestBacking>(source.bytes->begin(),source.bytes->begin()+tail+6)};R[0x181c]=tail;
+ expected.clear();{std::uint8_t buffer[6];try{s.memory.transfer(0xc0000000u+tail+6,buffer,6,false);}catch(const std::runtime_error& e){expected=e.what();}}
+ assert(!expected.empty() && expected.find("VRAM")==std::string::npos);actual.clear();
+ d.indexed=true;d.primitive=5;d.ranges={{0,3},{3,3},{6,3}};try{rsx_execute_draw(s);}catch(const std::runtime_error& e){actual=e.what();}
+ assert(actual==expected);s.memory.regions[1]=source;R[0x181c]=0x3000;
+ std::puts("PASS merged index ranges: triangles, recorded extent and the per-range error of a later range");
+}
 static void shader_reads(){
  PpuState s;setup_draw(s,8,8,32,false);const rsxdraw::Reg r{s.rsx};
  auto first=rsxdraw::load_fragment_program(s,r);assert(first.size()==1 && first[0].has_constant && first[0].constant[0]==1 && first[0].constant[1]==.5f);
@@ -242,7 +279,7 @@ static void texture_writes(){
  session.flush();s.rsx.graphics_session=nullptr;
  std::puts("PASS sampled texture image reuse follows CPU texel writes, offset changes and same-value stores");
 }
-int main(){try{level_values();image_pins();indexed_reads();shader_reads();write_membership();dynamic_state();register_reads();register_prefix();triangle_list();blob_descriptors();pipeline_lookup();sampling_words();fragment_keys();texture_writes();}catch(const std::exception& e){std::fprintf(stderr,"STOP %s\n",e.what());return 1;}}
+int main(){try{level_values();image_pins();indexed_reads();merged_index_ranges();shader_reads();write_membership();dynamic_state();register_reads();register_prefix();triangle_list();blob_descriptors();pipeline_lookup();sampling_words();fragment_keys();texture_writes();}catch(const std::exception& e){std::fprintf(stderr,"STOP %s\n",e.what());return 1;}}
 '''
 
 
@@ -264,5 +301,5 @@ class WarmDrawTests(unittest.TestCase):
                 env.update(VK_DRIVER_FILES='/usr/share/vulkan/icd.d/lvp_icd.json',ANYPS3_VK_DEVICE='lavapipe')
             p=subprocess.run([str(binary)],env=env,capture_output=True,text=True,timeout=120)
             self.assertEqual(p.returncode,0,p.stdout+p.stderr)
-            self.assertEqual(p.stdout.count('PASS '),14)
+            self.assertEqual(p.stdout.count('PASS '),15)
             self.assertNotIn('Validation Error',p.stderr);self.assertNotIn('Validation Warning',p.stderr)
