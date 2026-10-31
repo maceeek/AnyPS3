@@ -2206,6 +2206,7 @@ template<class Vertex> static bool prepared(Session& session,const std::vector<s
     std::vector<unsigned> line_data;
     std::uint64_t tail_bytes=0;unsigned tail_attributes=0;std::array<unsigned,16> tail_rel{},group_rel{};std::array<bool,16> group_added{};
     struct TailPad {std::uint64_t at,n;};std::array<TailPad,16> tail_pads{};unsigned tail_pad_count=0;DrawReadBatch input_reads;
+    const std::uint8_t* index_tail=nullptr;std::uint64_t index_bytes=0;   // direct indexed draw: the triangle list as the blob slice's tail
     std::vector<std::array<unsigned,3>> accepted;
     phase.next(HostStage::g_data);
     unsigned vertices=0;
@@ -2255,7 +2256,9 @@ template<class Vertex> static bool prepared(Session& session,const std::vector<s
             for(const auto& range:device->ranges){data.push_back(range.first);data.push_back(range.second);}
             vertices=device->vertices;data[15]=2;attempt.path("gpu_array_topology");}
         else{static_assert(sizeof(std::array<unsigned,3>)==3*sizeof(unsigned),"packed triangle indices");
-            const auto* first=reinterpret_cast<const unsigned*>(indices.data());data.insert(data.end(),first,first+indices.size()*3);
+            // The triangle list is not copied into the blob: graphics_draw stores it as the slice's tail, directly behind the
+            // finished blob words, and data[13] (the index buffer offset, set below) names that position.
+            index_tail=reinterpret_cast<const std::uint8_t*>(indices.data());index_bytes=std::uint64_t(indices.size())*3*4;
             vertices=indices.size()*3;data[15]=1;}
         data[12]=data.size();const unsigned desc=data.size();data.resize(desc+16*8);
         std::uint64_t tail_used=0;
@@ -2339,13 +2342,15 @@ template<class Vertex> static bool prepared(Session& session,const std::vector<s
         data[desc]=data.size();const unsigned levels=data.size();data.resize(levels+t.levels.size()*4);
         for(unsigned l=0;l<t.levels.size();++l){const auto& level=t.levels[l];data[levels+4*l]=data.size();data[levels+4*l+1]=level.width;data[levels+4*l+2]=level.height;data[levels+4*l+3]=level.depth;
             if(alias && !t.resident_image)for(unsigned z=0;z<level.depth;++z)for(unsigned y=0;y<level.height;++y)for(unsigned x=0;x<level.width;++x){auto c=texel(t,level,x,y,z);rsxvk::append(data,t.shadow?c:texture_input(t,c,false));}}}
+    if(index_tail)data[13]=data.size();   // the blob is complete: its tail (the triangle list) starts here
+    const std::uint64_t blob_bytes=std::uint64_t(data.size())*4+index_bytes;
     if(vertices==0)return true;
     if(alias){bool parallel_alias=false;if(!draw_alias(session,std::move(data),*fs,colors,depth,width,height,samples,count,vertices,x0,y0,x1,y1,parallel_alias))return attempt.reject("color_depth_alias_device_capacity");
         attempt.path(parallel_alias?"parallel_attachment_alias":"component_attachment_alias");return true;}
     attempt.path("scalar_fragment");
-    const auto visual_blob_bytes=vk.graphics_render_scale>1?std::uint64_t(data.size())*4:0;
-    if(visual_blob_bytes && !session.ensure_upload_capacity(data.size()*4+tail_bytes+visual_blob_bytes+128*1024))throw std::runtime_error("RSX paired draw exceeds staging capacity");
-    if(session.batch->used+data.size()*4+visual_blob_bytes+32*1024*1024>session.batch->capacity || session.batch->visibility_count+samples>=1000 || session.batch->pipeline_pins.size()>=64)session.submit_async("batch_capacity");
+    const auto visual_blob_bytes=vk.graphics_render_scale>1?blob_bytes:0;
+    if(visual_blob_bytes && !session.ensure_upload_capacity(blob_bytes+tail_bytes+visual_blob_bytes+128*1024))throw std::runtime_error("RSX paired draw exceeds staging capacity");
+    if(session.batch->used+blob_bytes+visual_blob_bytes+32*1024*1024>session.batch->capacity || session.batch->visibility_count+samples>=1000 || session.batch->pipeline_pins.size()>=64)session.submit_async("batch_capacity");
     std::array<std::shared_ptr<NativeVulkan::GraphicsImage>,4> images{};std::shared_ptr<NativeVulkan::GraphicsImage> z;
     phase.next(HostStage::g_bind);
     for(unsigned i=0;i<count;++i)images[i]=colors[i].base?session.bind(colors[i],width,height,samples,format,false,srgb,packed).image:session.history_image(fixed.color,width,height,samples,4+i);
@@ -2357,7 +2362,7 @@ template<class Vertex> static bool prepared(Session& session,const std::vector<s
     if(packed)for(unsigned i=0;i<count;++i)texture_images[16+i]=session.history_image(fixed.color,width,height,samples,i);
     std::uint64_t reuse=UINT64_MAX;
     for(unsigned primitive=0;primitive<(sequential_packed?vertices/3:1u);++primitive){
-    if(session.batch->used+(reuse==UINT64_MAX?data.size()*4+tail_bytes:0)+visual_blob_bytes+128*1024>session.batch->capacity || session.batch->visibility_count+samples>=1000 || session.batch->pipeline_pins.size()>=64){session.submit_async("batch_capacity");reuse=UINT64_MAX;}
+    if(session.batch->used+(reuse==UINT64_MAX?blob_bytes+tail_bytes:0)+visual_blob_bytes+128*1024>session.batch->capacity || session.batch->visibility_count+samples>=1000 || session.batch->pipeline_pins.size()>=64){session.submit_async("batch_capacity");reuse=UINT64_MAX;}
     if(packed)for(unsigned i=0;i<count;++i){vk.graphics_copy(*session.batch,images[i],texture_images[16+i]);::RsxPerfCounters::add(::RsxPerfCounters::history_copies);}
     const auto first=session.batch->visibility_count;
     // graphics_draw allocates the descriptor blob at aligned staging offset.
@@ -2373,13 +2378,13 @@ template<class Vertex> static bool prepared(Session& session,const std::vector<s
         if(sequential_packed)std::memcpy(out,session.vertex_tail.data(),tail_bytes);
         else{session.read_inputs(input_reads,out);for(unsigned i=0;i<tail_pad_count;++i)std::memset(out+tail_pads[i].at,0,tail_pads[i].n);}
     }
-    ::RsxPerfCounters::add(::RsxPerfCounters::blob_bytes,data.size()*4);
+    ::RsxPerfCounters::add(::RsxPerfCounters::blob_bytes,blob_bytes);
     phase.next(HostStage::draw);
     const auto actual=[&]{
         NativeVulkan::ConditionalScope condition(vk,*session.batch,session.conditional?session.conditional->buffer:nullptr,session.conditional?session.conditional->offset:0);
-        return vk.graphics_draw(*session.batch,fixed,images,z,vertex_shader,*fs,data,sequential_packed?3:vertices,positions,bits_float(r(0xa7c)),bits_float(r(0xa78)),bits_float(r(0x384)),bits_float(r.get(0x388,0x3f800000)),texture_images,sequential_packed?primitive*3:0,reuse,raw_buffers,vertex_owner,fs,nullptr,0,true);
+        return vk.graphics_draw(*session.batch,fixed,images,z,vertex_shader,*fs,data,sequential_packed?3:vertices,positions,bits_float(r(0xa7c)),bits_float(r(0xa78)),bits_float(r(0x384)),bits_float(r.get(0x388,0x3f800000)),texture_images,sequential_packed?primitive*3:0,reuse,raw_buffers,vertex_owner,fs,index_tail,index_bytes,true);
     }();
-    if(actual+data.size()*4+tail_bytes>UINT_MAX)throw std::runtime_error("RSX graphics status offset overflow");
+    if(actual+blob_bytes+tail_bytes>UINT_MAX)throw std::runtime_error("RSX graphics status offset overflow");
     reuse=actual;
     session.pending.push_back({static_cast<unsigned>(actual+7*4),first,vk.graphics_last_queries,r(0x17cc)!=0});
     for(auto& surface:session.surfaces){for(unsigned i=0;i<count;++i)if(surface.image==images[i])session.dirty_surface(surface);
