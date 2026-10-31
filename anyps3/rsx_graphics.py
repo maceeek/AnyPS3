@@ -967,6 +967,11 @@ struct Session {
             for(auto bits=bank.written[block];bits;bits&=bits-1){const unsigned i=unsigned(__builtin_ctzll(bits));out[i]=source[i].second;}
             static constexpr std::uint32_t default_blocks=[]{std::uint32_t m=0;for(const auto& value:defaults)m|=1u<<(value.first/256);return m;}();
             if((default_blocks>>block)&1)for(const auto& value:defaults)if(value.first/256==block)register_prefix[16+value.first/4]=r.get(value.first,value.second);
+            // The transform-constant window (RsxRegisters::epoch_tracked) reads 0: no generated shader reads R/F/w[16+] of
+            // 0x1efc..0x1f7c (every R()/F() is a literal outside it, or 0xb40+4t, 0x2c0/0x2c4+8i, 0x1480+4(y&31), 0x32c..0x344
+            // (+offset 0/32); w[16u+] only 0x1fc0/0x1478/0x1ff4), and its stores do not move the epoch of blocks 30/31.
+            static_assert(0x1efc/256==30 && 0x1f00/256==31 && 0x1f7c/256==31,"constant window blocks");
+            if(block==30)out[(0x1efc/4)%64]=0;else if(block==31)std::memset(out,0,32*sizeof(unsigned));
         }
     }
     void serialize_registers(std::vector<unsigned>& data,unsigned width,unsigned height){

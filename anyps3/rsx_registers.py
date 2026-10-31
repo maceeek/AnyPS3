@@ -62,13 +62,17 @@ struct RsxRegisters {
         if(this!=&other){values=other.values;written=other.written;count_=other.count_;epochs=other.epochs;exposed=other.exposed;identity=next_identity();}
         return *this;
     }
+    // The transform-constant window (0x1efc load position, 0x1f00..0x1f7c constant data words) is in no derived register
+    // block: rsxgraphics::Session::refresh_registers stores 0 for these words (no shader reads them), so its stores keep the
+    // block epoch. Every other consumer reads the bank's values directly.
+    static constexpr bool epoch_tracked(unsigned slot){return slot<0x1efc/4 || slot>0x1f7c/4;}
     // Tracked write (the FIFO path): no borrow escapes, the block epoch changes
-    // exactly when presence or value changes.
+    // exactly when presence or value of a register outside the constant window changes.
     void write(std::uint32_t r,std::uint32_t value){
         if(r>=0x10000 || (r&3))throw std::runtime_error("invalid RSX register bank address");
         const unsigned slot=r/4;auto& mask=written[slot/64];const auto bit=UINT64_C(1)<<(slot%64);
-        if(!(mask&bit)){mask|=bit;values[slot]={r,value};++count_;++epochs[slot/64];}
-        else if(values[slot].second!=value){values[slot].second=value;++epochs[slot/64];}
+        if(!(mask&bit)){mask|=bit;values[slot]={r,value};++count_;if(epoch_tracked(slot))++epochs[slot/64];}
+        else if(values[slot].second!=value){values[slot].second=value;if(epoch_tracked(slot))++epochs[slot/64];}
     }
     unsigned next(unsigned i)const{
         if(i>=slots)return slots;
