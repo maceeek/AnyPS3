@@ -1415,7 +1415,7 @@ static void rsx_execute_draw(PpuState& s){
     bool lazy_geometry=false;
     // Only the eager index build of a triangle list may take the reuse entry's triangles (the device-geometry materializer
     // fills the scratch lists that prepared() already holds).
-    bool share_triangles=graphics_backend && draw.indexed && draw.primitive==5;std::size_t shared_count=0;
+    [[maybe_unused]] bool share_triangles=graphics_backend && draw.indexed && draw.primitive==5;std::size_t shared_count=0;
 #ifdef ANYPS3_RSX_VK
     std::optional<rsxgraphics::DeviceGeometry> device_geometry;
     if(graphics_backend){device_geometry.emplace(draw);lazy_geometry=device_geometry->valid;}
