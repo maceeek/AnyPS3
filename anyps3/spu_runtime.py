@@ -94,6 +94,7 @@ struct NativeSpu {
         // Internal AOT dispatch context; each spu_step defaults to one instruction.
         unsigned block_budget=1;std::uint64_t block_limit=UINT64_MAX;bool block_trace=false,block_control_exit=false;
         bool dynamic_miss=false;
+        unsigned chain_depth=0;   // nesting of chained native calls (spu_chain_call), bounded by SPU_CHAIN_DEPTH
         // Relocation is a hint only: generated word/run guards revalidate LS.
         std::uint32_t reloc_delta=0;
         // Translation identity is independent of the thread's boot image.

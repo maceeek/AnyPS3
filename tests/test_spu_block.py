@@ -25,8 +25,52 @@ def setup(img):
     return body+'spu_prepare(s,t,ls);t.decrementer_running=false;\n'
 
 
+def _ri10(op,value,ra,rt):return (op<<24)|((value&0x3ff)<<14)|(ra<<7)|rt
+def _ri16(op,value,rt):return (op<<23)|((value&0xffff)<<7)|rt
+
+
+def chained_recursion():
+    """HIRES7 chained calls: main (0x100) and A (0x200) in native function 0, B (0x1100) in native function 1. B and A call each
+    other with BRSL (r0 saved on a stack at r1) until the depth counter r10 reaches 0: 80 nested guest calls, deeper than the
+    chaining bound. Hand-counted: B with r10!=0 after the decrement retires 9 + callee, the last B 4, A 7 + callee."""
+    ai=lambda rt,ra,v:_ri10(0x1c,v,ra,rt);il=lambda rt,v:_ri16(0x081,v,rt);stqd=lambda rt,ra,off:_ri10(0x24,off//16,ra,rt)
+    lqd=lambda rt,ra,off:_ri10(0x34,off//16,ra,rt);bi=lambda ra:(0x1a8<<21)|(ra<<7)
+    rel=lambda op,rt,pc,to:_ri16(op,(to-pc)//4,rt)
+    w={0x100:il(10,40),0x104:il(20,0),0x108:il(21,0),0x10c:(0x21<<25)|(0x3ff00<<7)|1,0x110:rel(0x066,0,0x110,0x1100),
+       0x114:ai(21,21,1),0x118:rel(0x064,0,0x118,0x118)}
+    a=[ai(20,20,1),stqd(0,1,0),ai(1,1,-16),rel(0x066,0,0x20c,0x1100),ai(1,1,16),lqd(0,1,0),bi(0)]
+    b=[ai(10,10,-1),ai(20,20,2),rel(0x040,10,0x1108,0x1120),stqd(0,1,0),ai(1,1,-16),rel(0x066,0,0x1114,0x200),ai(1,1,16),
+       lqd(0,1,0),bi(0)]
+    w.update({0x200+4*i:x for i,x in enumerate(a)});w.update({0x1100+4*i:x for i,x in enumerate(b)})
+    return w
+
+
 @unittest.skipUnless(shutil.which('c++'),'Requires native C++ compiler')
 class SpuBlockTests(unittest.TestCase):
+    def test_chained_calls_keep_exact_steps_registers_and_fallbacks(self):
+        # 5 + 39*9+4 (B) + 39*7 (A) + 1 = 634 instructions reach the final self-loop at 0x118; r20 = 2*40 + 39 = 119.
+        # Exact budgets (7 < one superblock) retire exactly 7 per slice; chained calls must not change that, nor the results of
+        # one large slice. Then B's first word becomes AI r10,r10,-2: the chained callee no longer validates, the generic path
+        # interprets the new bytes: 20 B runs, 19 A runs, r20 = 2*20 + 19 = 59, 5 + (19*9+4) + 19*7 + 1 = 314 instructions.
+        self.native(chained_recursion(),r'''
+ auto reset=[&]{t.pc=0x100;t.steps=0;t.gpr={};};
+ auto check=[&](unsigned r20,std::uint64_t steps){
+  assert(t.pc==0x118 && spu_word(t.gpr[20],0)==r20 && spu_word(t.gpr[21],0)==1 && spu_word(t.gpr[10],0)==0 && spu_word(t.gpr[1],0)==0x3ff00);
+  assert(t.steps>=steps);};
+ reset();while(t.steps<634){const auto before=t.steps;assert(spu_run(s,7) && t.steps==before+7);}
+ check(119,634);
+ const auto chained=spu_chain_returns;
+ reset();assert(spu_run(s,4096) && t.steps>=4096 && t.steps<4096+64);check(119,634);
+ assert(spu_chain_returns>=chained+16);   // the large slice continues callers after chained calls (bounded nesting)
+ reset();for(unsigned budget=1;t.steps<634;budget=budget%13+1){const auto before=t.steps;assert(spu_run(s,budget) && t.steps==before+budget);}
+ check(119,634);
+ ls[0x1100]=0x1c;ls[0x1101]=0xff;ls[0x1102]=0x85;ls[0x1103]=0x0a;   // AI r10,r10,-2
+ reset();while(t.steps<314){const auto before=t.steps;assert(spu_run(s,7) && t.steps==before+7);}
+ check(59,314);
+ reset();assert(spu_run(s,4096));check(59,314);
+''')
+
+
     def native(self,words,body,overlays=()):
         img=image(words)
         test_runtime_objects.RuntimeObjectsTests().run_native(setup(img)+body,spu_images=(img,),spu_overlays=(overlays,))

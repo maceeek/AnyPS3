@@ -982,7 +982,13 @@ struct SpuBlockScope {
     explicit SpuBlockScope(NativeSpu::Thread& t):thread(t),limit(static_cast<unsigned>(std::min<std::uint64_t>(t.block_budget,t.block_limit-t.steps))),
         hard(static_cast<unsigned>(std::min<std::uint64_t>(t.block_limit-t.steps,UINT32_MAX))),fast(t.block_exact?0u:std::min(limit,hard>=64u?hard-63u:0u)),
         generation(t.control_generation),origin(HostAccessOrigin::Engine::Spu,t.id,t.pc,&t.steps,&executed){}
-    ~SpuBlockScope(){if(thread.control_generation==generation){thread.steps+=executed;thread.published_steps.value.store(thread.steps,std::memory_order_relaxed);thread.block_budget-=std::min(executed,thread.block_budget);}}
+    ~SpuBlockScope(){commit();}
+    // Publish the instructions retired so far exactly as the destructor does (used before a chained call, spu_chain_call).
+    void commit(){if(thread.control_generation==generation){thread.steps+=executed;thread.published_steps.value.store(thread.steps,std::memory_order_relaxed);thread.block_budget-=std::min(executed,thread.block_budget);}executed=0;}
+    // The budget fields a fresh scope would compute now (the caller continues after a chained call as a new entry would).
+    void rearm(){limit=static_cast<unsigned>(std::min<std::uint64_t>(thread.block_budget,thread.block_limit-thread.steps));
+        hard=static_cast<unsigned>(std::min<std::uint64_t>(thread.block_limit-thread.steps,UINT32_MAX));fast=thread.block_exact?0u:std::min(limit,hard>=64u?hard-63u:0u);
+        generation=thread.control_generation;}
 };
 
 // SPU ISA v1.2 PDF pp.178-181,251-252; Cell BE Handbook v1.1 pp.470-471.
