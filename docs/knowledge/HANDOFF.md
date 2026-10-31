@@ -1,5 +1,22 @@
 # Handoff to the next instance
 
+## Cloud round HIRES6 — 2026-10-31 (cloud container; goal NOT reached, nothing measured in the game)
+
+Branch `ccr-b1a3987e-aypb5o` (pushed): HIRES5 46aa60f + merges of `cloud/hires6-gpu` (agent G, b577d49) and
+`cloud/hires6-worker` (agent F, 8126bbc; no conflicts). Read the [record](experiments/2026-10-31-cloud-hires6.md): the
+game-shaped `tracked=1` bench mode, F's exact worker cuts and G's barrier/marks/MSAA-load changes, the combined callgrind
+table (two alternating rounds), the coordinator's review of the barrier-skip and constant-window arguments, risks.
+A follow-up round HIRES7 (SPU job speed for the main thread's SPU wait; moving work off the RSX worker thread) was started
+in the cloud container on the same day from 8126bbc; its state is in its own section once it is merged.
+
+First next actions on the real PC: (1) one integration build; QUIET alternating 1440p walks vs 1031/1034 — rsx_worker
+ms/frame and µs/draw in heavy frames, main-thread ms, GPU busy ms/frame; (2) an `ANYPS3_RSX_VK_MARKS=1` scale-2 walk:
+`PERF GPU_MARKS` vs 1031sm1 (native `pass_begin` per begin should fall towards ~1.5 µs if the attribution hypothesis holds)
+and `PERF RENDER_SCALE_WORK` (barriers, barriers_elided, site_* copies); (3) defaults vs `ANYPS3_RSX_BARRIER_DEDUPE=0`, then
+`ANYPS3_RSX_PASS_BARRIER=0` / `ANYPS3_RSX_PAIR_BARRIERS=0`; (4) `tests/test_rsx_visual_msaa.py` on NVIDIA, then
+`ANYPS3_RENDER_SCALE_MSAA=1` with `ANYPS3_RENDER_SCALE_MSAA_LOAD=1` vs 0 vs MSAA off; (5) the HIRES5/HIRES4/HIRES3 A/B runs
+still open.
+
 ## Cloud round HIRES5 — 2026-10-31 (cloud container; goal NOT reached, nothing measured in the game)
 
 Branch `ccr-b1a3987e-aypb5o` (pushed): HIRES4 990c799 + merges of `cloud/hires5-state` (agent E, 8a03614) and

@@ -10,6 +10,9 @@ runtime handoffs 198–246 on 2026-10-31.
 
 Each record describes its own snapshot, not the current runtime.
 
+- 2026-10-31 [cloud round HIRES6](experiments/2026-10-31-cloud-hires6.md): RSX worker draw unit −9.9 % on a new game-shaped
+  bench mode; exact GPU barrier cuts (17 → 10 per frame on a scale-2 stream), GPU mark attribution, work counters, visual 2×
+  MSAA load path (default off, NVIDIA pending); lavapipe tests only.
 - 2026-10-31 [cloud round HIRES5](experiments/2026-10-31-cloud-hires5.md): per-draw geometry reuse (vertex/index copies
   under CPU-dirty watches) and state-path cuts; callgrind −24 % worker Ir per indexed draw (game-shaped −29 %); lavapipe tests only.
 - 2026-10-30 [cloud round HIRES4](experiments/2026-10-30-cloud-hires4.md): RSX worker CPU per draw and between draws

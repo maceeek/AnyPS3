@@ -647,3 +647,10 @@ CPU scaled blits (fast2/fix7-stutter). See knowledge/experiments/2026-10-23-fix7
   dirty-watch registry, exact index/state-path cuts. Callgrind: −24.3 % worker Ir per indexed draw (game-shaped −28.7 %);
   derived heavy-frame worker ≈ 13 ms only if the game's geometry is static; nothing measured in the game. Branch
   `ccr-b1a3987e-aypb5o`. [Record](knowledge/experiments/2026-10-31-cloud-hires5.md).
+- 2026-10-31: cloud round HIRES6 (no game/GPU): two Opus agents — RSX worker CPU (game-shaped bench mode `tracked=1`;
+  single-part inline `GuestMemory::Range`, shared cached triangles on index hits, constant-window registers out of the
+  register blocks, all-plain FIFO packets, no GET publication before BEGIN; draw unit −9.9 %, default mode −6.3 %, target
+  −25 % missed) and GPU work at scale 2 (exact barrier cuts 17 → 10 per frame on a synthetic stream, GPU mark attribution of
+  clears/copies — a hypothesis for the 12.6 µs native pass begins —, work counters, visual 2× MSAA load path default off,
+  NVIDIA test pending). Derived worker ≈ 12.5 ms at 2000 draws; nothing measured in the game. Branch `ccr-b1a3987e-aypb5o`.
+  [Record](knowledge/experiments/2026-10-31-cloud-hires6.md).

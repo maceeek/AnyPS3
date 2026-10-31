@@ -12,15 +12,38 @@
 - **Not yet measured in the game:** the cloud rounds HIRES3 (device-memory pool, per-draw cuts), HIRES4 (RSX worker
   CPU, synthetic −37 % worker instructions per frame) and HIRES5 (per-draw geometry reuse and state path, synthetic
   −24 % instructions per indexed draw, game-shaped −29 %; derived heavy-frame worker ≈ 13 ms only if the game's geometry
-  is as static as the bench's), all on branch `ccr-b1a3987e-aypb5o`.
+  is as static as the bench's) and HIRES6 (worker draw unit −9.9 % on the game-shaped bench, derived ≈ 12.5 ms at 2000
+  draws / ≈ 14.5 ms at 2400; exact barrier cuts 17 → 10 per frame on a scale-2 stream; visual 2× MSAA load path default
+  off, NVIDIA test pending), all on branch `ccr-b1a3987e-aypb5o`.
 - **First next action on the PC:** one integration build of `ccr-b1a3987e-aypb5o`, QUIET alternating 1440p walks against
-  1031/1034, then the same binary with `ANYPS3_RSX_GEOMETRY_REUSE=0` and the switch A/B runs listed in the HIRES5, HIRES4
-  and HIRES3 sections below.
+  1031/1034, then the same binary with `ANYPS3_RSX_VK_MARKS=1` (does the 12.6 µs "native pass begin" move to clears/copies?),
+  `ANYPS3_RSX_BARRIER_DEDUPE=0`, `ANYPS3_RSX_GEOMETRY_REUSE=0`, `test_rsx_visual_msaa` on NVIDIA, and the switch A/B runs
+  listed in the HIRES6, HIRES5, HIRES4 and HIRES3 sections below.
 - **Builds cited as baselines or pending measurement:** 706 (60 FPS reference), 960 (= main f92681c at 1440p), 1031, 1034
   (1440p), 1002 and 1035 (to be measured, HIRES2). Which binaries still exist on the PC is not recorded after the
   2026-10-25 cleanup ([history](history/CURRENT-2026-10-21-to-10-25.md#local-data-cleanup--2026-10-25-user-request)); a
   further `local/ratchet` cleanup must run on the PC and keep these.
 - **Not verified:** physical gamepad acceptance at 1440p, stable 60 FPS at 1440p.
+
+## Cloud round HIRES6 — 2026-10-31 (cloud container: no game, no NVIDIA; branch `ccr-b1a3987e-aypb5o`)
+
+Two Opus agents on top of HIRES5 (46aa60f): RSX worker CPU (F) and GPU work at scale 2 (G); every cut has a native
+lavapipe test (independent oracle) and mutation checks; **no game build, run or FPS figure**.
+- **Measured (callgrind, worker thread, new game-shaped bench mode `tracked=1`, merge 8126bbc vs same-session base, two
+  alternating rounds):** draw unit (per indexed draw + b0/2000) 41,670 → **37,555 Ir (−9.9 %)**; default bench mode
+  48,617 → 45,569 (−6.3 %). Target −25 % not reached: the rest is ~40 items of 100–900 Ir plus ~9 k Ir of lavapipe
+  driver work per draw.
+- **Derived, unverified:** heavy-frame worker ≈ 12.5 ms at 2000 draws, ≈ 14.5 ms at 2400 draws (HIRES5: 13.2 / 15.2).
+- **GPU (verified on a scale-2 synthetic stream, pixel-exact, sync validation silent):** full barriers 17 → 10 per frame
+  (switches `ANYPS3_RSX_BARRIER_DEDUPE`, `ANYPS3_RSX_PAIR_BARRIERS`, `ANYPS3_RSX_PASS_BARRIER`, default 1); clears and
+  copies without their own GPU mark were booked to the next native pass begin — **hypothesis** for the PC's unexplained
+  12.6 µs native begins; `PERF RENDER_SCALE_WORK` work counters per frame; no copy is removable. Visual 2× MSAA
+  plane→sample load path `ANYPS3_RENDER_SCALE_MSAA_LOAD=1` (default 0, **NVIDIA test pending**) — the only change aimed at
+  the second visual plane (2.3 ms). The −2.5 ms GPU target is not demonstrated here.
+- **Tests:** each agent's area modules OK on its branch; the coordinator's 40-module run on the merge is in progress
+  (record); full suite deferred to the end of HIRES7.
+Record: [cloud HIRES6](experiments/2026-10-31-cloud-hires6.md). First next actions on the PC: the integration build
+walks, a marks walk, `ANYPS3_RSX_BARRIER_DEDUPE=0` A/B and the NVIDIA MSAA test (record, "First next actions").
 
 ## Cloud round HIRES5 — 2026-10-31 (cloud container: no game, no NVIDIA; branch `ccr-b1a3987e-aypb5o`)
 
