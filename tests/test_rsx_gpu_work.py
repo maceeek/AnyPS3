@@ -98,6 +98,8 @@ int main(){try{
   std::printf("\n");
   g.vk.graphics_reset(*g.b);
  }
+ // Image copies/blits per call site (GraphicsSite id: commands/texels), all frames.
+ std::printf("SITES");for(unsigned k=0;k<16;++k)if(const auto n=NativeVulkan::graphics_site_work()[2*k].load())std::printf(" %u=%llu/%llu",k,(unsigned long long)n,(unsigned long long)NativeVulkan::graphics_site_work()[2*k+1].load());std::printf("\n");
  std::printf("WORK mean");for(unsigned k=0;k<NativeVulkan::WorkCount;++k)std::printf(" %s=%.2f",NativeVulkan::graphics_work_names[k],double(sum[k])/(frames-1));std::printf("\n");
  // ANYPS3_RSX_VK_MARKS=1: every clear and every image copy/blit carries its own mark (kinds 8 clear, 6 copy_image), also
  // when no barrier follows it (visual clears, the last copy before a pass begin).
@@ -113,6 +115,8 @@ int main(){try{
 def work_means(stdout):
     line = next(l for l in stdout.splitlines() if l.startswith('WORK mean'))
     means = {k: float(v) for k, v in re.findall(r'(\w+)=([0-9.]+)', line)}
+    sites = next(l for l in stdout.splitlines() if l.startswith('SITES'))
+    means.update({'site_' + k: float(v) for k, v in re.findall(r'(\d+)=(\d+)/', sites)})
     marks = next(l for l in stdout.splitlines() if l.startswith('MARKS'))
     means.update({'mark_' + k: float(v) for k, v in re.findall(r'(\w+)=([0-9.]+)', marks)})
     return means
@@ -179,6 +183,10 @@ MODES = [('defaults', {}), ('marks', {'ANYPS3_RSX_VK_MARKS': '1', 'ANYPS3_PERF_R
 
 def check_modes(test, means):
     test.assertGreater(means['defaults']['pass_visual'], 0)
+    # Image copies/blits per site over the 4 frames: surface_copy (2) = the copy pair, transfer (3) = upload + its visual
+    # rebuild, unpack (4) = unpack upload + its visual rebuild: 2 per frame each; their sum is every image copy and blit.
+    test.assertEqual((means['defaults']['site_2'], means['defaults']['site_3'], means['defaults']['site_4']), (8, 8, 8))
+    test.assertEqual(means['defaults']['site_2'] + means['defaults']['site_3'] + means['defaults']['site_4'], means['defaults']['mark_images'])
     # Marks change no recorded work; each clear/copy/blit gets its own mark (attribution, not the next pass begin).
     for key, value in means['defaults'].items():
         if not key.startswith(('marks_', 'mark_')):

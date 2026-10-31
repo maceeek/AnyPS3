@@ -354,6 +354,10 @@ public:
     static std::array<std::atomic<std::uint64_t>,WorkCount>& graphics_work(){static std::array<std::atomic<std::uint64_t>,WorkCount> values{};return values;}
     static void graphics_work_add(unsigned id,std::uint64_t n=1){auto& v=graphics_work()[id];v.store(v.load(std::memory_order_relaxed)+n,std::memory_order_relaxed);}
     static std::uint64_t graphics_work_value(unsigned id){return graphics_work()[id].load(std::memory_order_relaxed);}
+    // Image copy/blit/buffer-image commands and texels per call site (GraphicsSite): [2*site] commands, [2*site+1] texels.
+    static std::array<std::atomic<std::uint64_t>,32>& graphics_site_work(){static std::array<std::atomic<std::uint64_t>,32> values{};return values;}
+    static void graphics_site_copy(std::uint64_t texels){const unsigned site=std::min<unsigned>(graphics_site_ref(),15);auto& s=graphics_site_work();
+        s[2*site].store(s[2*site].load(std::memory_order_relaxed)+1,std::memory_order_relaxed);s[2*site+1].store(s[2*site+1].load(std::memory_order_relaxed)+texels,std::memory_order_relaxed);}
     // Bumped by every action command recorded outside a render pass and by every pass begin/end, on every thread and into every
     // command buffer (rsx_vk_resources.py wrappers; draws and queries only occur inside a pass whose begin is counted). A value
     // unchanged since a batch's last full barrier proves that nothing was recorded into that batch since (graphics_barrier).
@@ -1798,6 +1802,8 @@ public:
                     (unsigned long long)graphics_ms_draws.load(),(unsigned long long)graphics_ms_plane_draws.load(),(unsigned long long)graphics_ms_expands.load(),(unsigned long long)graphics_ms_bit_expands.load());
             if(b.frames && graphics_render_scale>1 && graphics_profile_frames%120==0){std::string line="PERF RENDER_SCALE_WORK frames="+std::to_string(graphics_profile_frames);
                 for(unsigned k=0;k<WorkCount;++k){line+=' ';line+=graphics_work_names[k];line+='=';line+=std::to_string(graphics_work_value(k));}
+                static const char* const site_names[]={"none","tex_upload","surface_copy","transfer","unpack","pack","aspect","decode","raw_buffer","device_upload","predicate","present","clear","device_copies","visual"};
+                for(unsigned k=0;k<SiteCount;++k)if(const auto n=graphics_site_work()[2*k].load(std::memory_order_relaxed)){line+=" site_";line+=site_names[k];line+='=';line+=std::to_string(n);line+='/';line+=std::to_string(graphics_site_work()[2*k+1].load(std::memory_order_relaxed));}
                 std::fprintf(stderr,"%s\n",line.c_str());}
             if(b.frames && graphics_render_scale>1 && graphics_profile_frames%120==0)for(const auto& r:graphics_visual_reasons)
                 std::fprintf(stderr,"PERF RENDER_SCALE_SYNC reason=%s count=%llu pixels=%llu\n",r.name.c_str(),(unsigned long long)r.count,(unsigned long long)r.pixels);
