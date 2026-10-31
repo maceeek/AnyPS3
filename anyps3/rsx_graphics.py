@@ -1076,22 +1076,27 @@ struct Session {
     // GPU-authoritative span is retired and republished via publish_gpu_write), then consumes the entry's CPU-dirty bit.
     // A miss registers the watch and consumes it BEFORE the transfer reads the bytes (index_prepare), and stores the
     // decoded list afterwards (index_store); an exception in between drops the token (its watch is unregistered).
+    // The list is kept as its complete triangles (an immutable shared vector) plus the 0..2 trailing indices: a triangle-list
+    // draw without restart takes exactly those triangles (rsx_execute_draw's assemble) and pins the vector for the draw
+    // (RsxDrawState::shared_triangles) instead of copying it twice; every other use copies the flat list out.
+    using TriangleList=std::vector<std::array<std::uint32_t,3>>;
     struct IndexEntry {
         std::shared_ptr<RawTexture::DirtyInputs> dirty;const std::uint8_t* data=nullptr;std::shared_ptr<GuestBacking> owner;
         std::uint64_t mapping_id=0,last_use=0;unsigned size=0,width=0,restart_index=0,base=0;bool restart=false,any=false;
-        std::uint32_t largest=0,smallest=0;std::vector<std::uint32_t> values;
+        std::uint32_t largest=0,smallest=0;std::size_t count=0;std::shared_ptr<const TriangleList> triangles;std::array<std::uint32_t,2> rest{};
     };
     std::unordered_map<std::uint64_t,IndexEntry> index_entries;std::uint64_t index_hits=0,index_misses=0;
     void index_erase(std::unordered_map<std::uint64_t,IndexEntry>::iterator it,bool rewritten){
         if(rewritten)(void)geometry_rewritten(it->first>>32);
-        geometry_bytes-=it->second.values.size()*4;index_entries.erase(it);
+        geometry_bytes-=it->second.count*4;index_entries.erase(it);
     }
     bool index_cacheable(unsigned bytes)const{
         return geometry_reuse && state.memory.concurrent() && bytes && bytes<=geometry_entry_bytes && (state.memory.memory_owner() || state.memory.renderer_owner());
     }
-    // The decoded list of the span [address,address+bytes) for these parameters into out; false = decode it (nothing changed).
+    // The decoded list of the span [address,address+bytes) for these parameters into out, or (shared, given by a triangle-list
+    // draw without restart) its triangles without a copy (out untouched); false = decode it (nothing changed).
     bool index_read(std::uint64_t address,unsigned bytes,unsigned width,bool restart,unsigned restart_index,unsigned base,
-                    std::vector<std::uint32_t>& out,std::uint32_t& largest,std::uint32_t& smallest,bool& any){
+                    std::vector<std::uint32_t>& out,std::uint32_t& largest,std::uint32_t& smallest,bool& any,std::shared_ptr<const TriangleList>* shared=nullptr){
         if(!index_cacheable(bytes))return false;
         const std::uint64_t key=(address<<32)|bytes;auto it=index_entries.find(key);
         if(it==index_entries.end())return false;
@@ -1100,7 +1105,10 @@ struct Session {
         if(range.parts.size()!=1 || range.parts[0].data!=e.data || range.parts[0].owner!=e.owner || range.parts[0].mapping_id!=e.mapping_id){index_erase(it,false);return false;}
         if(e.dirty->consume()){index_erase(it,true);return false;}
         if(e.width!=width || e.restart!=restart || e.restart_index!=restart_index || e.base!=base){index_erase(it,false);return false;}
-        e.last_use=++geometry_clock;out.assign(e.values.begin(),e.values.end());largest=e.largest;smallest=e.smallest;any=e.any;++index_hits;::RsxPerfCounters::add(::RsxPerfCounters::index_hits);return true;
+        e.last_use=++geometry_clock;
+        if(shared)*shared=e.triangles;
+        else{const auto* flat=reinterpret_cast<const std::uint32_t*>(e.triangles->data());out.assign(flat,flat+e.triangles->size()*3);out.insert(out.end(),e.rest.begin(),e.rest.begin()+e.count%3);}
+        largest=e.largest;smallest=e.smallest;any=e.any;++index_hits;::RsxPerfCounters::add(::RsxPerfCounters::index_hits);return true;
     }
     struct IndexToken {std::uint64_t key;std::shared_ptr<RawTexture::DirtyInputs> dirty;const std::uint8_t* data;std::shared_ptr<GuestBacking> owner;std::uint64_t mapping_id;};
     std::optional<IndexToken> index_prepare(std::uint64_t address,unsigned bytes){
@@ -1118,7 +1126,10 @@ struct Session {
         {auto old=index_entries.find(token.key);if(old!=index_entries.end())index_erase(old,false);}
         while(!(geometry_entries.empty() && index_entries.empty()) && (geometry_entries.size()+index_entries.size()>=geometry_entry_limit || geometry_bytes+values.size()*4>geometry_byte_limit))geometry_evict();
         IndexEntry e;e.dirty=std::move(token.dirty);e.data=token.data;e.owner=std::move(token.owner);e.mapping_id=token.mapping_id;e.last_use=++geometry_clock;
-        e.size=unsigned(token.key&UINT32_MAX);e.width=width;e.restart=restart;e.restart_index=restart_index;e.base=base;e.any=any;e.largest=largest;e.smallest=smallest;e.values=values;
+        e.size=unsigned(token.key&UINT32_MAX);e.width=width;e.restart=restart;e.restart_index=restart_index;e.base=base;e.any=any;e.largest=largest;e.smallest=smallest;
+        static_assert(sizeof(TriangleList::value_type)==3*sizeof(std::uint32_t),"packed triangle indices");
+        {const auto* first=reinterpret_cast<const TriangleList::value_type*>(values.data());e.triangles=std::make_shared<const TriangleList>(first,first+values.size()/3);}
+        e.count=values.size();std::copy(values.end()-values.size()%3,values.end(),e.rest.begin());
         geometry_bytes+=values.size()*4;index_entries.emplace(token.key,std::move(e));++index_misses;::RsxPerfCounters::add(::RsxPerfCounters::index_misses);
     }
     // Least recently used vertex or index entry.
