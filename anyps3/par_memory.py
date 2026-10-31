@@ -665,8 +665,29 @@ TYPES = RESERVATION_WAIT_TYPES + r'''
     // Ascending order: bytes up to the first 8-byte boundary, then aligned 8-byte words, then the tail bytes - the same
     // sequence of atomic accesses (and the same load-then-store interleaving) as one byte-or-word step per iteration. The word
     // body is unrolled by four instead of re-checking size and alignment per word (~3x faster in cache, HIRES2-W).
+#if defined(__x86_64__) && defined(__AVX__) && defined(__linux__)
+    // 16-byte body (x86 with AVX only): a naturally aligned 16-byte VMOVDQA load/store is one atomic access on every processor that
+    // enumerates AVX (Intel SDM vol. 3A 9.1.1; AMD APM vol. 2 7.3.2), so it covers its two 8-byte words in one indivisible access:
+    // every interleaving it allows is one the two 8-byte accesses allow (no byte outside [p,p+n) is touched, order stays ascending).
+    // A plain x86 load is an acquire and a plain store a release (TSO); the volatile asm with a memory clobber keeps the compiler from
+    // moving any other access across it, as the __atomic acquire loads / release stores do. Used only when the private buffer and
+    // the guest bytes do not overlap (an overlapping copy keeps the one-word-at-a-time source/store interleaving below).
+    [[gnu::always_inline]] static void atomic_load16(const std::uint8_t* p,std::uint8_t* out){
+        __m128i v;asm volatile("vmovdqa %1,%0":"=x"(v):"m"(*reinterpret_cast<const __m128i*>(p)):"memory");_mm_storeu_si128(reinterpret_cast<__m128i*>(out),v);}
+    [[gnu::always_inline]] static void atomic_store16(std::uint8_t* p,const std::uint8_t* in){
+        const __m128i v=_mm_loadu_si128(reinterpret_cast<const __m128i*>(in));asm volatile("vmovdqa %1,%0":"=m"(*reinterpret_cast<__m128i*>(p)):"x"(v):"memory");}
+    [[gnu::always_inline]] static bool atomic_wide(const std::uint8_t* p,const std::uint8_t* buffer,unsigned n){
+        const auto a=reinterpret_cast<std::uintptr_t>(p),b=reinterpret_cast<std::uintptr_t>(buffer);return n>=32 && (b+n<=a || a+n<=b);}
+#endif
     static void atomic_read(const std::uint8_t* p,std::uint8_t* out,unsigned n){
         while(n && (reinterpret_cast<std::uintptr_t>(p)&7)){*out++=__atomic_load_n(p++,__ATOMIC_ACQUIRE);--n;}
+#if defined(__x86_64__) && defined(__AVX__) && defined(__linux__)
+        if(atomic_wide(p,out,n)){
+            if(reinterpret_cast<std::uintptr_t>(p)&8){const auto word=__atomic_load_n(reinterpret_cast<const AtomicWord*>(p),__ATOMIC_ACQUIRE);std::memcpy(out,&word,8);p+=8;out+=8;n-=8;}
+            for(;n>=32;n-=32,p+=32,out+=32){atomic_load16(p,out);atomic_load16(p+16,out+16);}
+            if(n>=16){atomic_load16(p,out);p+=16;out+=16;n-=16;}
+        }
+#endif
         for(;n>=32;n-=32,p+=32,out+=32){
             std::uint64_t v;
             v=__atomic_load_n(reinterpret_cast<const AtomicWord*>(p),__ATOMIC_ACQUIRE);std::memcpy(out,&v,8);
@@ -679,6 +700,13 @@ TYPES = RESERVATION_WAIT_TYPES + r'''
     }
     static void atomic_write(std::uint8_t* p,const std::uint8_t* in,unsigned n){
         while(n && (reinterpret_cast<std::uintptr_t>(p)&7)){__atomic_store_n(p++,*in++,__ATOMIC_RELEASE);--n;}
+#if defined(__x86_64__) && defined(__AVX__) && defined(__linux__)
+        if(atomic_wide(p,in,n)){
+            if(reinterpret_cast<std::uintptr_t>(p)&8){std::uint64_t value;std::memcpy(&value,in,8);__atomic_store_n(reinterpret_cast<AtomicWord*>(p),value,__ATOMIC_RELEASE);p+=8;in+=8;n-=8;}
+            for(;n>=32;n-=32,p+=32,in+=32){atomic_store16(p,in);atomic_store16(p+16,in+16);}
+            if(n>=16){atomic_store16(p,in);p+=16;in+=16;n-=16;}
+        }
+#endif
         for(;n>=32;n-=32,p+=32,in+=32){
             // Each source word is read just before its store (as in the one-word loop), so an overlapping source keeps its result.
             std::uint64_t v;
@@ -932,14 +960,30 @@ TYPES = RESERVATION_WAIT_TYPES + r'''
         for(auto i=first;size && i<=last;++i){auto& v=map.state->versions[i];if(v==UINT32_MAX)throw std::runtime_error("guest write version overflow");++v;}
         parallel->notifications->notify(map.region.bytes->data()+address-map.region.base,size);
     }
+    // The stripe locks of every 128-byte host line the spans touch (stripe = line % 4096), each taken once, in ascending stripe
+    // order (the global order of every multi-stripe holder: ScalarLock/ScalarWrite take a<b) and released on destruction. The set
+    // is collected in a 4096-bit map: the same set and order as sorting and uniquing every line's stripe index, without the two
+    // heap vectors (SPU DMA PUTs take this per command). A span of >= 4096 lines covers every stripe.
     struct LineLocks {
-        GuestMemory& memory;std::vector<std::unique_lock<ParallelMemory::LineMutex>> locks;
-        explicit LineLocks(GuestMemory& m,const std::vector<HostSpan>& spans):memory(m){
-            std::vector<unsigned> indices;
+        static constexpr unsigned stripes=std::tuple_size<decltype(ParallelMemory::lines)>::value;
+        static_assert(stripes%64==0,"LineLocks bitmap granule");
+        ParallelMemory& parallel;std::array<std::uint64_t,stripes/64> held{};unsigned low=stripes/64,high=0;
+        explicit LineLocks(GuestMemory& m,const std::vector<HostSpan>& spans):parallel(*m.parallel){take(spans);}
+        template<class Spans> LineLocks(GuestMemory& m,const Spans& spans,int):parallel(*m.parallel){take(spans);}
+        ~LineLocks(){for(unsigned w=low;w<high;++w)for(auto bits=held[w];bits;bits&=bits-1)parallel.lines[w*64+unsigned(__builtin_ctzll(bits))].unlock();}
+        LineLocks(const LineLocks&)=delete;
+        // Stripes [begin,end), end <= stripes.
+        void mark(unsigned begin,unsigned end){
+            for(unsigned w=begin/64;w<(end+63)/64;++w){const unsigned lo=std::max(begin,w*64)-w*64,hi=std::min(end,w*64+64)-w*64;
+                held[w]|=(hi-lo==64?~UINT64_C(0):((UINT64_C(1)<<(hi-lo))-1)<<lo);}
+            low=std::min(low,begin/64);high=std::max(high,(end+63)/64);
+        }
+        template<class Spans> void take(const Spans& spans){
             for(const auto& span:spans)if(span.size){const auto first=reinterpret_cast<std::uintptr_t>(span.pointer)/128,last=(reinterpret_cast<std::uintptr_t>(span.pointer)+span.size-1)/128;
-                for(auto line=first;line<=last;++line)indices.push_back(line%m.parallel->lines.size());}
-            std::sort(indices.begin(),indices.end());indices.erase(std::unique(indices.begin(),indices.end()),indices.end());
-            for(auto i:indices)locks.emplace_back(m.parallel->lines[i]);
+                if(last-first>=stripes-1){mark(0,stripes);continue;}
+                const unsigned start=static_cast<unsigned>(first%stripes),count=static_cast<unsigned>(last-first+1);
+                if(start+count<=stripes)mark(start,start+count);else{mark(start,stripes);mark(0,start+count-stripes);}}
+            for(unsigned w=low;w<high;++w)for(auto bits=held[w];bits;bits&=bits-1)parallel.lines[w*64+unsigned(__builtin_ctzll(bits))].lock();
         }
     };
     HostSpan reservation_span(std::uint64_t address,unsigned size){
