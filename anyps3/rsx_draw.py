@@ -38,6 +38,11 @@ struct RsxDrawState {
     // scratch_triangles at its built size (extent_of/extent_size) only when every decoded index is in a triangle.
     // Reset at every index build; triangle_extent() hands it to IndexBounds instead of a second scan.
     bool extent_known=false;std::uint32_t extent_lo=0,extent_hi=0;const void* extent_of=nullptr;std::size_t extent_size=0;
+    // A triangle-list draw without restart served by the session's index reuse (Session::index_read) takes the entry's immutable
+    // triangles instead of building scratch_indices/scratch_triangles: the draw's triangle list is triangle_list(). Pinned until
+    // the next draw starts (or copied into the scratch lists before a CPU fallback); never guest state.
+    std::shared_ptr<const std::vector<std::array<std::uint32_t,3>>> shared_triangles;
+    const std::vector<std::array<std::uint32_t,3>>& triangle_list()const{return shared_triangles?*shared_triangles:scratch_triangles;}
     const std::pair<unsigned,unsigned>* triangle_extent(const std::vector<std::array<std::uint32_t,3>>& t,std::pair<unsigned,unsigned>& out)const{
         if(!extent_known || extent_of!=static_cast<const void*>(&t) || extent_size!=t.size() || t.empty())return nullptr;
         out={extent_lo,extent_hi};return &out;}
@@ -1406,14 +1411,17 @@ static void rsx_execute_draw(PpuState& s){
     PerfDraw perf;if(host_stats().enabled)++host_stats().draws;::RsxPerfCounters::add(::RsxPerfCounters::draws);
     HostPhase host_phase(HostStage::indices);
     // ---- indices
-    auto& indices=draw.scratch_indices;indices.clear();
+    auto& indices=draw.scratch_indices;indices.clear();draw.shared_triangles.reset();
     bool lazy_geometry=false;
+    // Only the eager index build of a triangle list may take the reuse entry's triangles (the device-geometry materializer
+    // fills the scratch lists that prepared() already holds).
+    [[maybe_unused]] bool share_triangles=graphics_backend && draw.indexed && draw.primitive==5;std::size_t shared_count=0;
 #ifdef ANYPS3_RSX_VK
     std::optional<rsxgraphics::DeviceGeometry> device_geometry;
     if(graphics_backend){device_geometry.emplace(draw);lazy_geometry=device_geometry->valid;}
 #endif
     auto build_indices=[&]{
-    draw.extent_known=false;draw.extent_of=nullptr;
+    draw.extent_known=false;draw.extent_of=nullptr;draw.shared_triangles.reset();
     const auto base_index=reg.get(0x173c,0);
     if(!draw.elements.empty()){
         const bool restart=reg.get(0x1dac,0)&1;
@@ -1454,7 +1462,9 @@ static void rsx_execute_draw(PpuState& s){
                     std::uint32_t largest=0,smallest=UINT32_MAX;bool any=false;bool served=false;
 #ifdef ANYPS3_RSX_VK
                     std::optional<rsxgraphics::Session::IndexToken> token;
-                    if(reuse){served=reuse->index_read(first_address,unsigned(total*width),width,restart,restart_index,base_index,indices,largest,smallest,any);
+                    if(reuse){served=reuse->index_read(first_address,unsigned(total*width),width,restart,restart_index,base_index,indices,largest,smallest,any,
+                            share_triangles && !restart?&draw.shared_triangles:nullptr);
+                        if(draw.shared_triangles)shared_count=std::size_t(total);
                         if(!served)token=reuse->index_prepare(first_address,unsigned(total*width));}
 #endif
                     auto& bytes=draw.scratch_index_bytes;
@@ -1471,7 +1481,7 @@ static void rsx_execute_draw(PpuState& s){
                     if(token)reuse->index_store(std::move(*token),width,restart,restart_index,base_index,indices,largest,smallest,any);
 #endif
                 }
-            }catch(...){indices.clear();draw.extent_known=false;}
+            }catch(...){indices.clear();draw.extent_known=false;draw.shared_triangles.reset();}
         }
         if(!merged)for(const auto& [first,count]:draw.ranges){
             const auto begin=std::uint64_t(offset)+std::uint64_t(first)*width;
@@ -1529,6 +1539,9 @@ static void rsx_execute_draw(PpuState& s){
     }
     };
     auto build_triangles=[&]{
+    // Served triangles (no restart): exactly assemble(indices) of the shared_count served indices.
+    if(draw.shared_triangles){if(draw.extent_known && shared_count%3==0){draw.extent_of=draw.shared_triangles.get();draw.extent_size=draw.shared_triangles->size();}
+        else{draw.extent_known=false;}return;}
     if(draw.indexed && (reg.get(0x1dac,0)&1)){
         std::vector<std::uint32_t> strip;
         for(const auto index:indices){if(index==UINT32_MAX){assemble(strip);strip.clear();}else strip.push_back(index);}
@@ -1898,11 +1911,15 @@ static void rsx_execute_draw(PpuState& s){
         if(!session){owned=std::make_unique<rsxgraphics::Session>(*gpu.renderer,s);session=owned.get();}
         // Materialize in the same attempt when a supported VP/alias path
         // needs CPU geometry. A rejected draw is never prepared a second time.
-        auto materialize=[&]{if(lazy_geometry){build_indices();build_triangles();lazy_geometry=false;}};
+        auto materialize=[&]{if(lazy_geometry){share_triangles=false;build_indices();build_triangles();lazy_geometry=false;}};
         using Materializer=decltype(materialize);
         const rsxgraphics::GeometryFallback fallback{&materialize,[](void* p){(*static_cast<Materializer*>(p))();}};
-        const bool done=rsxgraphics::prepared(*session,triangles,vertex,fp,textures,colors,depth,width,height,x0,y0,x1,y1,point_draw,line_draw?&line_geometry:nullptr,lazy_geometry?&*device_geometry:nullptr,fallback);
+        const bool done=rsxgraphics::prepared(*session,draw.triangle_list(),vertex,fp,textures,colors,depth,width,height,x0,y0,x1,y1,point_draw,line_draw?&line_geometry:nullptr,lazy_geometry?&*device_geometry:nullptr,fallback);
         if(!done)materialize();
+        if(!done && draw.shared_triangles){   // the CPU renderer below reads the scratch lists
+            triangles.assign(draw.shared_triangles->begin(),draw.shared_triangles->end());
+            const auto* flat=reinterpret_cast<const std::uint32_t*>(triangles.data());indices.assign(flat,flat+triangles.size()*3);
+            draw.shared_triangles.reset();draw.extent_known=false;}
         if(done){
             if(owned)session->flush(true,nullptr,0,"standalone_draw");
             ++draw.draws;draw.ranges.clear();draw.immediate_vertices.clear();draw.elements.clear();return;

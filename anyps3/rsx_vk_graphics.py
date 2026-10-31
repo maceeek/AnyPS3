@@ -803,10 +803,17 @@ public:
         GraphicsSite site(SiteDeviceCopies);
         graphics_begin(b);graphics_barrier(b);vkCmdCopyBuffer(b.command,b.data_buffer,b.data_buffer,unsigned(regions.size()),regions.data());graphics_barrier(b);
     }
+    // An upload slice that starts exactly where the batch's last copy region ends (in staging and in the device buffer: staging
+    // offsets equal device offsets) extends that region: the prelude copies the same bytes with one region less. Slices are
+    // disjoint and allocated in increasing order (graphics_space), so a merged region never overlaps another one.
+    void graphics_upload_region(GraphicsBatch& b,std::uint64_t at,std::uint64_t bytes){
+        if(!b.uploads.empty()){auto& last=b.uploads.back();if(last.srcOffset==last.dstOffset && last.srcOffset+last.size==at){last.size+=bytes;return;}}
+        b.uploads.push_back({at,at,bytes});
+    }
     // Immutable slice filled in place by the caller (staging map + offset);
     // the batch prelude copies it to the device buffer before any consumer.
     std::uint64_t graphics_reserve_upload(GraphicsBatch& b,std::uint64_t bytes){
-        graphics_begin(b);const auto at=graphics_space(b,bytes);b.uploads.push_back({at,at,bytes});b.upload_bytes+=bytes;
+        graphics_begin(b);const auto at=graphics_space(b,bytes);graphics_upload_region(b,at,bytes);b.upload_bytes+=bytes;
         ::RsxPerfCounters::add(::RsxPerfCounters::upload_bytes,bytes);return at;
     }
     std::uint64_t graphics_upload(GraphicsBatch& b,const void* data,std::uint64_t bytes){
@@ -821,7 +828,7 @@ public:
             if(b.state_versions[slot]==block.version){++b.state_block_hits;continue;}
             const auto size=std::uint64_t(block.words)*4,at=graphics_upload(b,block.data,size);
             b.state_versions[slot]=block.version;b.state_offsets[slot]=at/4;++b.state_block_uploads;::RsxPerfCounters::add(::RsxPerfCounters::state_uploads);
-            b.uploads.push_back({at,at,size});
+            graphics_upload_region(b,at,size);
         }
     }
     std::shared_ptr<GraphicsBuffer> graphics_buffer(GraphicsBatch& b,const void* data,std::uint64_t size){b.sync();
@@ -1594,7 +1601,7 @@ public:
         if(depth)b.pins.push_back(depth);
         for(const auto& image:textures)if(image)b.pins.push_back(image);
         for(const auto& raw:raw_textures)if(raw)b.buffer_pins.push_back(raw);
-        if(reuse==UINT64_MAX)b.uploads.push_back({at,at,bytes});
+        if(reuse==UINT64_MAX)graphics_upload_region(b,at,bytes);
         const bool counted=!s.visual_pass && s.visibility;
         if(counted && b.visibility_count+s.samples>1024)throw std::runtime_error("RSX graphics visibility budget");
         const auto query=counted?b.visibility_count++:UINT_MAX;::RsxPerfCounters::add(::RsxPerfCounters::draw_layers,s.samples);

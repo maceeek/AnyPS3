@@ -967,18 +967,34 @@ struct Session {
             for(auto bits=bank.written[block];bits;bits&=bits-1){const unsigned i=unsigned(__builtin_ctzll(bits));out[i]=source[i].second;}
             static constexpr std::uint32_t default_blocks=[]{std::uint32_t m=0;for(const auto& value:defaults)m|=1u<<(value.first/256);return m;}();
             if((default_blocks>>block)&1)for(const auto& value:defaults)if(value.first/256==block)register_prefix[16+value.first/4]=r.get(value.first,value.second);
+            // The transform-constant window (RsxRegisters::epoch_tracked) reads 0: no generated shader reads R/F/w[16+] of
+            // 0x1efc..0x1f7c (every R()/F() is a literal outside it, or 0xb40+4t, 0x2c0/0x2c4+8i, 0x1480+4(y&31), 0x32c..0x344
+            // (+offset 0/32); w[16u+] only 0x1fc0/0x1478/0x1ff4), and its stores do not move the epoch of blocks 30/31.
+            static_assert(0x1efc/256==30 && 0x1f00/256==31 && 0x1f7c/256==31,"constant window blocks");
+            if(block==30)out[(0x1efc/4)%64]=0;else if(block==31)std::memset(out,0,32*sizeof(unsigned));
         }
     }
     void serialize_registers(std::vector<unsigned>& data,unsigned width,unsigned height){
+        if(&data==&draw_data)draw_data_known=false;
         refresh_registers();const auto& bank=std::as_const(state.rsx).registers;
         data.assign(register_prefix.begin(),register_prefix.end());data[0]=width;data[1]=height;data[3]=data.size();
         for(unsigned i=0;i<8;++i)if(bank.count(0x2c0+8*i) && bank.count(0x2c4+8*i))data[8]|=1u<<i;
         data[9]=bank.count(0x8cc)!=0;
     }
+    // draw_data's 560-word head after the last serialize_draw_registers: only words 0..47 and the 32-word descriptor blocks of the
+    // units in draw_data_units can be non-zero (prepared() sets a unit's bit before it writes that block, and writes nothing else
+    // below word 560 on the non-alias path); draw_data_known is false while anything else may have written or moved draw_data
+    // (the alias path's serialize_registers and draw_alias, a fresh session).
+    bool draw_data_known=false;std::uint32_t draw_data_units=0;
     void serialize_draw_registers(std::vector<unsigned>& data,unsigned width,unsigned height){
         refresh_registers();const auto& bank=std::as_const(state.rsx).registers;
-        // Same contents as assign(560,0): shrinking keeps the capacity without writes, then every word is zeroed.
-        data.resize(48+16*32);zero_words(data.data(),data.size());data[0]=width;data[1]=height;data[3]=data.size();
+        // Same contents as assign(560,0): shrinking keeps the capacity without writes, then every possibly non-zero word is zeroed.
+        const bool known=&data==&draw_data && draw_data_known && data.size()>=48+16*32;
+        data.resize(48+16*32);
+        if(known){zero_words(data.data(),48);for(auto units=draw_data_units;units;units&=units-1)zero_words(data.data()+48+32*__builtin_ctz(units),32);}
+        else zero_words(data.data(),data.size());
+        draw_data_known=&data==&draw_data;draw_data_units=0;
+        data[0]=width;data[1]=height;data[3]=data.size();
         for(unsigned i=0;i<8;++i)if(bank.count(0x2c0+8*i) && bank.count(0x2c4+8*i))data[8]|=1u<<i;
         data[9]=bank.count(0x8cc)!=0;
     }
@@ -1076,22 +1092,27 @@ struct Session {
     // GPU-authoritative span is retired and republished via publish_gpu_write), then consumes the entry's CPU-dirty bit.
     // A miss registers the watch and consumes it BEFORE the transfer reads the bytes (index_prepare), and stores the
     // decoded list afterwards (index_store); an exception in between drops the token (its watch is unregistered).
+    // The list is kept as its complete triangles (an immutable shared vector) plus the 0..2 trailing indices: a triangle-list
+    // draw without restart takes exactly those triangles (rsx_execute_draw's assemble) and pins the vector for the draw
+    // (RsxDrawState::shared_triangles) instead of copying it twice; every other use copies the flat list out.
+    using TriangleList=std::vector<std::array<std::uint32_t,3>>;
     struct IndexEntry {
         std::shared_ptr<RawTexture::DirtyInputs> dirty;const std::uint8_t* data=nullptr;std::shared_ptr<GuestBacking> owner;
         std::uint64_t mapping_id=0,last_use=0;unsigned size=0,width=0,restart_index=0,base=0;bool restart=false,any=false;
-        std::uint32_t largest=0,smallest=0;std::vector<std::uint32_t> values;
+        std::uint32_t largest=0,smallest=0;std::size_t count=0;std::shared_ptr<const TriangleList> triangles;std::array<std::uint32_t,2> rest{};
     };
     std::unordered_map<std::uint64_t,IndexEntry> index_entries;std::uint64_t index_hits=0,index_misses=0;
     void index_erase(std::unordered_map<std::uint64_t,IndexEntry>::iterator it,bool rewritten){
         if(rewritten)(void)geometry_rewritten(it->first>>32);
-        geometry_bytes-=it->second.values.size()*4;index_entries.erase(it);
+        geometry_bytes-=it->second.count*4;index_entries.erase(it);
     }
     bool index_cacheable(unsigned bytes)const{
         return geometry_reuse && state.memory.concurrent() && bytes && bytes<=geometry_entry_bytes && (state.memory.memory_owner() || state.memory.renderer_owner());
     }
-    // The decoded list of the span [address,address+bytes) for these parameters into out; false = decode it (nothing changed).
+    // The decoded list of the span [address,address+bytes) for these parameters into out, or (shared, given by a triangle-list
+    // draw without restart) its triangles without a copy (out untouched); false = decode it (nothing changed).
     bool index_read(std::uint64_t address,unsigned bytes,unsigned width,bool restart,unsigned restart_index,unsigned base,
-                    std::vector<std::uint32_t>& out,std::uint32_t& largest,std::uint32_t& smallest,bool& any){
+                    std::vector<std::uint32_t>& out,std::uint32_t& largest,std::uint32_t& smallest,bool& any,std::shared_ptr<const TriangleList>* shared=nullptr){
         if(!index_cacheable(bytes))return false;
         const std::uint64_t key=(address<<32)|bytes;auto it=index_entries.find(key);
         if(it==index_entries.end())return false;
@@ -1100,7 +1121,10 @@ struct Session {
         if(range.parts.size()!=1 || range.parts[0].data!=e.data || range.parts[0].owner!=e.owner || range.parts[0].mapping_id!=e.mapping_id){index_erase(it,false);return false;}
         if(e.dirty->consume()){index_erase(it,true);return false;}
         if(e.width!=width || e.restart!=restart || e.restart_index!=restart_index || e.base!=base){index_erase(it,false);return false;}
-        e.last_use=++geometry_clock;out.assign(e.values.begin(),e.values.end());largest=e.largest;smallest=e.smallest;any=e.any;++index_hits;::RsxPerfCounters::add(::RsxPerfCounters::index_hits);return true;
+        e.last_use=++geometry_clock;
+        if(shared)*shared=e.triangles;
+        else{const auto* flat=reinterpret_cast<const std::uint32_t*>(e.triangles->data());out.assign(flat,flat+e.triangles->size()*3);out.insert(out.end(),e.rest.begin(),e.rest.begin()+e.count%3);}
+        largest=e.largest;smallest=e.smallest;any=e.any;++index_hits;::RsxPerfCounters::add(::RsxPerfCounters::index_hits);return true;
     }
     struct IndexToken {std::uint64_t key;std::shared_ptr<RawTexture::DirtyInputs> dirty;const std::uint8_t* data;std::shared_ptr<GuestBacking> owner;std::uint64_t mapping_id;};
     std::optional<IndexToken> index_prepare(std::uint64_t address,unsigned bytes){
@@ -1118,7 +1142,10 @@ struct Session {
         {auto old=index_entries.find(token.key);if(old!=index_entries.end())index_erase(old,false);}
         while(!(geometry_entries.empty() && index_entries.empty()) && (geometry_entries.size()+index_entries.size()>=geometry_entry_limit || geometry_bytes+values.size()*4>geometry_byte_limit))geometry_evict();
         IndexEntry e;e.dirty=std::move(token.dirty);e.data=token.data;e.owner=std::move(token.owner);e.mapping_id=token.mapping_id;e.last_use=++geometry_clock;
-        e.size=unsigned(token.key&UINT32_MAX);e.width=width;e.restart=restart;e.restart_index=restart_index;e.base=base;e.any=any;e.largest=largest;e.smallest=smallest;e.values=values;
+        e.size=unsigned(token.key&UINT32_MAX);e.width=width;e.restart=restart;e.restart_index=restart_index;e.base=base;e.any=any;e.largest=largest;e.smallest=smallest;
+        static_assert(sizeof(TriangleList::value_type)==3*sizeof(std::uint32_t),"packed triangle indices");
+        {const auto* first=reinterpret_cast<const TriangleList::value_type*>(values.data());e.triangles=std::make_shared<const TriangleList>(first,first+values.size()/3);}
+        e.count=values.size();std::copy(values.end()-values.size()%3,values.end(),e.rest.begin());
         geometry_bytes+=values.size()*4;index_entries.emplace(token.key,std::move(e));++index_misses;::RsxPerfCounters::add(::RsxPerfCounters::index_misses);
     }
     // Least recently used vertex or index entry.
@@ -2184,6 +2211,7 @@ template<class Vertex> static bool prepared(Session& session,const std::vector<s
     std::vector<unsigned> line_data;
     std::uint64_t tail_bytes=0;unsigned tail_attributes=0;std::array<unsigned,16> tail_rel{},group_rel{};std::array<bool,16> group_added{};
     struct TailPad {std::uint64_t at,n;};std::array<TailPad,16> tail_pads{};unsigned tail_pad_count=0;DrawReadBatch input_reads;
+    const std::uint8_t* index_tail=nullptr;std::uint64_t index_bytes=0;   // direct indexed draw: the triangle list as the blob slice's tail
     std::vector<std::array<unsigned,3>> accepted;
     phase.next(HostStage::g_data);
     unsigned vertices=0;
@@ -2233,7 +2261,9 @@ template<class Vertex> static bool prepared(Session& session,const std::vector<s
             for(const auto& range:device->ranges){data.push_back(range.first);data.push_back(range.second);}
             vertices=device->vertices;data[15]=2;attempt.path("gpu_array_topology");}
         else{static_assert(sizeof(std::array<unsigned,3>)==3*sizeof(unsigned),"packed triangle indices");
-            const auto* first=reinterpret_cast<const unsigned*>(indices.data());data.insert(data.end(),first,first+indices.size()*3);
+            // The triangle list is not copied into the blob: graphics_draw stores it as the slice's tail, directly behind the
+            // finished blob words, and data[13] (the index buffer offset, set below) names that position.
+            index_tail=reinterpret_cast<const std::uint8_t*>(indices.data());index_bytes=std::uint64_t(indices.size())*3*4;
             vertices=indices.size()*3;data[15]=1;}
         data[12]=data.size();const unsigned desc=data.size();data.resize(desc+16*8);
         std::uint64_t tail_used=0;
@@ -2298,11 +2328,12 @@ template<class Vertex> static bool prepared(Session& session,const std::vector<s
         data[14]=data.size();for(const auto& inst:fp)rsxvk::append(data,inst.constant);}
     else{session.refresh_vertex_constants();session.refresh_fragment_constants(fp);}
     const unsigned line_base=data.size();if(lines){data[10]=line_base;data.insert(data.end(),line_data.begin(),line_data.end());}
-    std::array<std::shared_ptr<NativeVulkan::GraphicsBuffer>,16> raw_buffers{};
+    static const std::array<std::shared_ptr<NativeVulkan::GraphicsBuffer>,16> raw_buffers{};   // no raw texture buffers on this path
     std::array<std::shared_ptr<NativeVulkan::GraphicsImage>,20> texture_images{};
     phase.next(HostStage::g_tex);
     for(unsigned unit=0;unit<16;++unit){const auto& t=textures[unit];if(!t.valid)continue;
         texture_images[unit]=t.resident_image?t.resident_image:(!alias?session.texture_image(t):nullptr);
+        if(!alias)session.draw_data_units|=1u<<unit;   // before the block is written (serialize_draw_registers zeroes it next draw)
         const unsigned desc=(alias?2064:48)+unit*32;data[desc]=data.size();data[desc+1]=t.mip_count;data[desc+2]=t.unnormalized;data[desc+3]=t.wrap_s;data[desc+4]=t.wrap_t;
         data[desc+5]=t.min;data[desc+6]=t.mag;data[desc+7]=float_bits(t.bias);data[desc+8]=float_bits(t.min_lod);data[desc+9]=float_bits(t.max_lod);
         data[desc+10]=t.gamma;data[desc+11]=t.features;data[desc+12]=t.signed_mask;data[desc+13]=t.biased;data[desc+14]=t.alpha_kill;
@@ -2316,13 +2347,15 @@ template<class Vertex> static bool prepared(Session& session,const std::vector<s
         data[desc]=data.size();const unsigned levels=data.size();data.resize(levels+t.levels.size()*4);
         for(unsigned l=0;l<t.levels.size();++l){const auto& level=t.levels[l];data[levels+4*l]=data.size();data[levels+4*l+1]=level.width;data[levels+4*l+2]=level.height;data[levels+4*l+3]=level.depth;
             if(alias && !t.resident_image)for(unsigned z=0;z<level.depth;++z)for(unsigned y=0;y<level.height;++y)for(unsigned x=0;x<level.width;++x){auto c=texel(t,level,x,y,z);rsxvk::append(data,t.shadow?c:texture_input(t,c,false));}}}
+    if(index_tail)data[13]=data.size();   // the blob is complete: its tail (the triangle list) starts here
+    const std::uint64_t blob_bytes=std::uint64_t(data.size())*4+index_bytes;
     if(vertices==0)return true;
     if(alias){bool parallel_alias=false;if(!draw_alias(session,std::move(data),*fs,colors,depth,width,height,samples,count,vertices,x0,y0,x1,y1,parallel_alias))return attempt.reject("color_depth_alias_device_capacity");
         attempt.path(parallel_alias?"parallel_attachment_alias":"component_attachment_alias");return true;}
     attempt.path("scalar_fragment");
-    const auto visual_blob_bytes=vk.graphics_render_scale>1?std::uint64_t(data.size())*4:0;
-    if(visual_blob_bytes && !session.ensure_upload_capacity(data.size()*4+tail_bytes+visual_blob_bytes+128*1024))throw std::runtime_error("RSX paired draw exceeds staging capacity");
-    if(session.batch->used+data.size()*4+visual_blob_bytes+32*1024*1024>session.batch->capacity || session.batch->visibility_count+samples>=1000 || session.batch->pipeline_pins.size()>=64)session.submit_async("batch_capacity");
+    const auto visual_blob_bytes=vk.graphics_render_scale>1?blob_bytes:0;
+    if(visual_blob_bytes && !session.ensure_upload_capacity(blob_bytes+tail_bytes+visual_blob_bytes+128*1024))throw std::runtime_error("RSX paired draw exceeds staging capacity");
+    if(session.batch->used+blob_bytes+visual_blob_bytes+32*1024*1024>session.batch->capacity || session.batch->visibility_count+samples>=1000 || session.batch->pipeline_pins.size()>=64)session.submit_async("batch_capacity");
     std::array<std::shared_ptr<NativeVulkan::GraphicsImage>,4> images{};std::shared_ptr<NativeVulkan::GraphicsImage> z;
     phase.next(HostStage::g_bind);
     for(unsigned i=0;i<count;++i)images[i]=colors[i].base?session.bind(colors[i],width,height,samples,format,false,srgb,packed).image:session.history_image(fixed.color,width,height,samples,4+i);
@@ -2334,7 +2367,7 @@ template<class Vertex> static bool prepared(Session& session,const std::vector<s
     if(packed)for(unsigned i=0;i<count;++i)texture_images[16+i]=session.history_image(fixed.color,width,height,samples,i);
     std::uint64_t reuse=UINT64_MAX;
     for(unsigned primitive=0;primitive<(sequential_packed?vertices/3:1u);++primitive){
-    if(session.batch->used+(reuse==UINT64_MAX?data.size()*4+tail_bytes:0)+visual_blob_bytes+128*1024>session.batch->capacity || session.batch->visibility_count+samples>=1000 || session.batch->pipeline_pins.size()>=64){session.submit_async("batch_capacity");reuse=UINT64_MAX;}
+    if(session.batch->used+(reuse==UINT64_MAX?blob_bytes+tail_bytes:0)+visual_blob_bytes+128*1024>session.batch->capacity || session.batch->visibility_count+samples>=1000 || session.batch->pipeline_pins.size()>=64){session.submit_async("batch_capacity");reuse=UINT64_MAX;}
     if(packed)for(unsigned i=0;i<count;++i){vk.graphics_copy(*session.batch,images[i],texture_images[16+i]);::RsxPerfCounters::add(::RsxPerfCounters::history_copies);}
     const auto first=session.batch->visibility_count;
     // graphics_draw allocates the descriptor blob at aligned staging offset.
@@ -2350,13 +2383,13 @@ template<class Vertex> static bool prepared(Session& session,const std::vector<s
         if(sequential_packed)std::memcpy(out,session.vertex_tail.data(),tail_bytes);
         else{session.read_inputs(input_reads,out);for(unsigned i=0;i<tail_pad_count;++i)std::memset(out+tail_pads[i].at,0,tail_pads[i].n);}
     }
-    ::RsxPerfCounters::add(::RsxPerfCounters::blob_bytes,data.size()*4);
+    ::RsxPerfCounters::add(::RsxPerfCounters::blob_bytes,blob_bytes);
     phase.next(HostStage::draw);
     const auto actual=[&]{
         NativeVulkan::ConditionalScope condition(vk,*session.batch,session.conditional?session.conditional->buffer:nullptr,session.conditional?session.conditional->offset:0);
-        return vk.graphics_draw(*session.batch,fixed,images,z,vertex_shader,*fs,data,sequential_packed?3:vertices,positions,bits_float(r(0xa7c)),bits_float(r(0xa78)),bits_float(r(0x384)),bits_float(r.get(0x388,0x3f800000)),texture_images,sequential_packed?primitive*3:0,reuse,raw_buffers,vertex_owner,fs,nullptr,0,true);
+        return vk.graphics_draw(*session.batch,fixed,images,z,vertex_shader,*fs,data,sequential_packed?3:vertices,positions,bits_float(r(0xa7c)),bits_float(r(0xa78)),bits_float(r(0x384)),bits_float(r.get(0x388,0x3f800000)),texture_images,sequential_packed?primitive*3:0,reuse,raw_buffers,vertex_owner,fs,index_tail,index_bytes,true);
     }();
-    if(actual+data.size()*4+tail_bytes>UINT_MAX)throw std::runtime_error("RSX graphics status offset overflow");
+    if(actual+blob_bytes+tail_bytes>UINT_MAX)throw std::runtime_error("RSX graphics status offset overflow");
     reuse=actual;
     session.pending.push_back({static_cast<unsigned>(actual+7*4),first,vk.graphics_last_queries,r(0x17cc)!=0});
     for(auto& surface:session.surfaces){for(unsigned i=0;i<count;++i)if(surface.image==images[i])session.dirty_surface(surface);

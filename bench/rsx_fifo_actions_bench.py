@@ -15,11 +15,17 @@ counters of the worker and main threads after WARM frames and dumps both after t
 the worker thread (the file whose profile holds rsx_run_impl) is steady-state cost only.
 
 Usage: python3 bench/rsx_fifo_actions_bench.py [-o OUT_DIR] [--no-run] [CXXFLAGS...]
-The binary takes key=value arguments: frames= warm= units= reports= backend= frontend= surfaces= zcull= turns= draw_every= indexed= dynamic=
+The binary takes key=value arguments: frames= warm= units= reports= backend= frontend= surfaces= zcull= turns= draw_every= indexed= dynamic= tracked=
 indexed=1 makes each drawing unit game-shaped: an indexed triangle list (1200 BE16 indices in local memory over a 20x20 vertex
 grid with positions and UVs in IO memory) with a sampled texture and the fragment program in local memory, all read by the
 draw from concurrent guest memory (the draw bench uses a non-concurrent GuestMemory). dynamic=1 additionally rewrites the vertex
 positions from the main thread before every frame (rewritten geometry; default 0 keeps the stream identical).
+tracked=1 is the game-shaped setup: the harness setup's mutable borrows (register bank operator[], transform program and constant
+arrays operator[]) mark their blocks/arrays exposed for the bank's lifetime, so the default modes make every draw take the exact
+compare paths. tracked=1 re-creates the register bank and the four shader arrays as never-borrowed (empty) objects and sends the
+same values through the FIFO in a setup turn before the warm frames (plain register stores, 0x1e9c/0xb80 program and 0x1efc/0x1f00
+constant uploads), as the game sets them: the worker then takes the tracked paths. Same frame stream and memory; tracked=0 (default)
+keeps every existing mode unchanged. The setup segment lies behind the frame stream's jump back, so the oracle never parses it.
 and prints ns/frame (wall, lavapipe included) and the worker-relevant counters.
 """
 import argparse
@@ -44,7 +50,7 @@ MAIN = r'''
 #define BENCH_DUMP() do{}while(0)
 #endif
 static const std::uint32_t BASE=0x20000,IO=0x70000000,REPORTS=0x80000000;
-struct Config {unsigned frames=6,warm=2,units=2000,reports=230,backend=16,frontend=8,surfaces=32,zcull=8,turns=32,draw_every=0,indexed=0,dynamic=0;};
+struct Config {unsigned frames=6,warm=2,units=2000,reports=230,backend=16,frontend=8,surfaces=32,zcull=8,turns=32,draw_every=0,indexed=0,dynamic=0,tracked=0;};
 struct Stream {
  PpuState& s;std::uint32_t at=BASE;std::vector<std::uint32_t> turn_ends;
  std::vector<std::pair<std::uint32_t,std::uint32_t>> values;   // (IO offset of a semaphore value word, base value)
@@ -56,7 +62,8 @@ struct Stream {
 static bool every(unsigned n,unsigned count,unsigned total){   // count events evenly spread over total units
  return count && (std::uint64_t(n)*count/total)!=(std::uint64_t(n+1)*count/total);}
 static void build(Stream& st,const Config& c){
- auto& R=st.s.rsx.registers;
+ auto& R=st.s.rsx.registers;const auto& T=std::as_const(R);   // tracked=1 reads without a borrow (same values)
+ auto reg=[&](std::uint32_t r){return c.tracked?T.at(r):R[r];};
  st.method(0x60,{0x66606660});st.method(0x1a4,{0x66606660});st.method(0x1a8,{0x66626660});st.method(0x17cc,{1});st.method(0x1804,{1});
  unsigned report=0,backend=0,frontend=0,surface=0;
  for(unsigned n=0;n<c.units;++n){
@@ -68,8 +75,8 @@ static void build(Stream& st,const Config& c){
   std::vector<std::uint32_t> constants{100+(n*4)%200};for(unsigned i=0;i<16;++i)constants.push_back(0x3f800000u+n+i);
   st.method(0x1efc,constants);                                                         // load position + one 4x4 matrix (unused slots)
   st.method(0x1a00+15*0x20,{0x1000u+n*64,0x18229u,0x30101u,0x80008000u,0x2aa0u,0x1u,0x00400040u,0});   // texture 15 (not sampled)
-  st.method(0x1680,{R[0x1680],R[0x1684]});st.method(0x1740,{R[0x1740],R[0x1744]});     // vertex arrays as configured
-  st.method(0x8e4,{R[0x8e4]});st.method(0x1d60,{R[0x1d60]});
+  st.method(0x1680,{reg(0x1680),reg(0x1684)});st.method(0x1740,{reg(0x1740),reg(0x1744)});     // vertex arrays as configured
+  st.method(0x8e4,{reg(0x8e4)});st.method(0x1d60,{reg(0x1d60)});
   st.method(0x310,{n&1});st.method(0x324,{0x01010101u});st.method(0xa74,{0});
   st.method(0x1808,{c.indexed?5u:8u});
   if(c.draw_every && n%c.draw_every==0){
@@ -90,7 +97,7 @@ int main(int argc,char** argv){try{
   const auto k=a.substr(0,eq);const unsigned v=unsigned(std::stoul(a.substr(eq+1)));
   if(k=="frames")c.frames=v;else if(k=="warm")c.warm=v;else if(k=="units")c.units=v;else if(k=="reports")c.reports=v;else if(k=="backend")c.backend=v;
   else if(k=="frontend")c.frontend=v;else if(k=="surfaces")c.surfaces=v;else if(k=="zcull")c.zcull=v;else if(k=="turns")c.turns=v;else if(k=="draw_every")c.draw_every=v;
-  else if(k=="indexed")c.indexed=v;else if(k=="dynamic")c.dynamic=v;
+  else if(k=="indexed")c.indexed=v;else if(k=="dynamic")c.dynamic=v;else if(k=="tracked")c.tracked=v;
   else throw std::runtime_error("unknown argument "+k);}
  setenv("ANYPS3_RSX_BACKEND","gpu",1);setenv("ANYPS3_RSX_WORKER","0",1);setenv("ANYPS3_SPU_THREADS","0",1);
  PpuState s;setup_draw(s,8,8,32,false);auto& g=s.rsx;auto& m=s.memory;
@@ -106,8 +113,34 @@ int main(int argc,char** argv){try{
  g.registers[0x8c0]=8u<<16;g.registers[0x8c4]=8u<<16;
  Stream st{s};build(st,c);
  m.store(g.dma+0x44,4,BASE);m.store(g.dma+0x40,4,BASE);
+ struct Saved {RsxRegisters registers;decltype(g.transform_program) program;decltype(g.transform_program_written) program_written;
+  decltype(g.transform_constants) constants;decltype(g.transform_constants_written) constants_written;};
+ std::unique_ptr<Saved> saved_banks;
+ if(c.tracked){   // game-shaped: never-borrowed banks, filled by a FIFO setup segment behind the frame stream (one turn, GET -> BASE)
+  saved_banks.reset(new Saved{std::as_const(g.registers),g.transform_program,g.transform_program_written,g.transform_constants,g.transform_constants_written});
+  const auto& saved=std::as_const(saved_banks->registers);const auto& program=std::as_const(saved_banks->program);const auto& program_written=std::as_const(saved_banks->program_written);
+  const auto& constants=std::as_const(saved_banks->constants);const auto& constants_written=std::as_const(saved_banks->constants_written);
+  auto renew=[](auto& a){using A=std::decay_t<decltype(a)>;a.~A();new(&a) A();};   // copies keep values only; the originals are borrowed
+  renew(g.registers);renew(g.transform_program);renew(g.transform_program_written);renew(g.transform_constants);renew(g.transform_constants_written);
+  const auto setup_at=st.at;
+  for(const auto& [r,v]:saved)st.method(r,{v});   // every harness register as one method (checked after the turn: same bank values)
+  for(unsigned i=0;i<program.size();i+=4){   // transform program: 0x1e9c load slot, then one 4-word instruction per 0xb80 packet
+   if(!(program_written[i] && program_written[i+1] && program_written[i+2] && program_written[i+3])){
+    if(program_written[i] || program_written[i+1] || program_written[i+2] || program_written[i+3])throw std::runtime_error("tracked setup: partial VP instruction");continue;}
+   st.method(0x1e9c,{i/4});st.method(0xb80,{program[i],program[i+1],program[i+2],program[i+3]});}
+  for(unsigned i=0;i<constants.size();++i)if(constants_written[i]){st.method(0x1efc,{i/4});st.method(0x1f00+(i%4)*4,{constants[i]});}
+  st.word(0x20000000u|BASE);m.store(g.dma+0x44,4,setup_at);m.store(g.dma+0x40,4,setup_at);}
  setenv("ANYPS3_RSX_WORKER","1",1);
  SpuWorkerSession life(s);auto& w=s.process.rsx_worker;if(!w.enabled)throw std::runtime_error("RSX worker not enabled");
+ if(c.tracked){m.store(g.dma+0x40,4,BASE);   // the setup turn: the segment ends in a jump to BASE = PUT
+  for(const auto until=std::chrono::steady_clock::now()+std::chrono::seconds(600);m.load(g.dma+0x44,4)!=BASE;){
+   (void)rsx_worker_request(s,1u<<30);if(std::chrono::steady_clock::now()>until)throw std::runtime_error("tracked setup did not reach BASE");std::this_thread::yield();}
+  w.queue->drain();
+  const auto& G=std::as_const(g);const auto& B=*saved_banks;   // the FIFO setup reproduced every value (plus its own load registers)
+  bool same=true;for(const auto& [r,v]:std::as_const(B.registers))same=same && G.registers.count(r) && G.registers.value_or(r,0)==v;
+  for(std::size_t i=0;i<G.transform_program.size();++i)same=same && G.transform_program[i]==std::as_const(B.program)[i] && G.transform_program_written[i]==std::as_const(B.program_written)[i];
+  for(std::size_t i=0;i<G.transform_constants.size();++i)same=same && G.transform_constants[i]==std::as_const(B.constants)[i] && G.transform_constants_written[i]==std::as_const(B.constants_written)[i];
+  if(!same)throw std::runtime_error("tracked setup did not reproduce the harness state");}
  auto frame=[&](unsigned f){
   for(const auto& [offset,base]:st.values)m.store(IO+offset,4,base+f);   // a new value per frame: no same-value release shortcut
   // dynamic=1 (with indexed=1): the main thread rewrites the 400 vertex positions (same values, 4-byte stores) before every
@@ -143,6 +176,8 @@ int main(int argc,char** argv){try{
  std::printf("frames=%u units=%u reports=%u backend=%u frontend=%u surfaces=%u zcull=%u turns=%u draw_every=%u packets/frame=%.0f %.3f ms/frame releases_checked=%u\n",
   c.frames,c.units,c.reports,c.backend,c.frontend,c.surfaces,c.zcull,c.turns,c.draw_every,double(g.commands-packets)/c.frames,ns/c.frames/1e6,checked);
  std::printf("indexed=%u draws/frame=%.0f\n",c.indexed,double(g.draw.draws-draws)/c.frames);
+ if(c.tracked){unsigned exposed=0;for(unsigned b=0;b<RsxRegisters::blocks;++b)exposed+=g.registers.block_exposed(b);
+  std::printf("tracked=1 exposed_blocks=%u program_borrowed=%d constants_borrowed=%d\n",exposed,int(g.transform_program.borrowed()),int(g.transform_constants.borrowed()));}
 }catch(const std::exception& e){std::fprintf(stderr,"STOP %s\n",e.what());return 1;}}
 '''
 

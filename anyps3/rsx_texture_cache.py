@@ -33,18 +33,29 @@ MEMBERS = r'''
         // Regions can be mutated directly. Compare exact mapping identities,
         // rights and lengths before reusing a validated plan, never just a hash.
         // The unchanged case (every FIFO turn) compares the word sequence in place; only a difference rebuilds the copy.
-        std::size_t at=0;bool same=true;
-        texture_context_words([&](std::uint64_t v){if(same && (at>=texture_context.size() || texture_context[at]!=v))same=false;++at;});
+        // The fixed head (local size, 256 IO offsets, 256 IO flags: words 0..512 of the sequence) is compared branch-free in one
+        // pass; the variable tail (tiles, maps) word by word. Same verdict as comparing the whole sequence.
+        std::size_t at=0;bool same=texture_context.size()>=context_head_words;
+        if(same){const auto* c=texture_context.data();const auto& g=state.rsx;std::uint64_t diff=c[0]^std::uint64_t(g.local_size);
+            for(unsigned i=0;i<256;++i)diff|=c[1+i]^std::uint64_t(g.io[i]);
+            for(unsigned i=0;i<256;++i)diff|=c[257+i]^std::uint64_t(g.io_flags[i]);
+            same=!diff;at=context_head_words;}
+        if(same)texture_context_tail([&](std::uint64_t v){if(same && (at>=texture_context.size() || texture_context[at]!=v))same=false;++at;});
         if(!same || at!=texture_context.size()){
             context_scratch.clear();texture_context_words([&](std::uint64_t v){context_scratch.push_back(v);});
             texture_plans.clear();++texture_plans_generation;layout_plans.clear();target_cache.entries.clear();texture_plan_bytes=layout_plan_bytes=0;texture_context=context_scratch;}
         context_validated=true;
     }
     // The validated texture context as one word sequence, in a fixed order.
+    static constexpr std::size_t context_head_words=1+256+256;
     template<class F> void texture_context_words(F&& f)const{
+        static_assert(std::tuple_size<decltype(state.rsx.io)>::value==256 && std::tuple_size<decltype(state.rsx.io_flags)>::value==256,"texture context head layout");
         f(state.rsx.local_size);
         for(auto v:state.rsx.io)f(v);
         for(auto v:state.rsx.io_flags)f(v);
+        texture_context_tail(f);
+    }
+    template<class F> void texture_context_tail(F&& f)const{
         for(const auto& t:state.rsx.tiles)for(std::uint64_t v:{std::uint64_t(t.bound),std::uint64_t(t.location),std::uint64_t(t.offset),std::uint64_t(t.size),std::uint64_t(t.pitch),std::uint64_t(t.compression),std::uint64_t(t.base),std::uint64_t(t.bank),std::uint64_t(t.range_word),std::uint64_t(t.format_word)})f(v);
         for(const auto& r:state.maps)for(std::uint64_t v:{std::uint64_t(r.base),std::uint64_t(r.flags),std::uint64_t(r.identity),std::uint64_t(reinterpret_cast<std::uintptr_t>(r.bytes.get())),std::uint64_t(reinterpret_cast<std::uintptr_t>(r.bytes->data())),std::uint64_t(r.bytes->size())})f(v);
     }

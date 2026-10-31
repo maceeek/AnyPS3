@@ -168,6 +168,7 @@ static void register_prefix(){
   session.refresh_registers();
   for(std::uint32_t r=0;r<0x2000;r+=4){std::uint32_t expect=0;
    if(R.count(r))expect=std::as_const(R).at(r);else if(defaults.count(r))expect=defaults.at(r);
+   if(r>=0x1efc && r<=0x1f7c)expect=0;   // the transform-constant window is serialized as 0 (no shader reads it)
    if(session.register_prefix[16+r/4]!=expect){std::fprintf(stderr,"prefix %04x=%08x expected %08x\n",r,session.register_prefix[16+r/4],expect);assert(false);}}
  }
  // A borrowed block compares against its last snapshot; that snapshot must not survive a period of tracked (never borrowed)

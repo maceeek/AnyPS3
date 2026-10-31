@@ -268,7 +268,29 @@ static void unsupported_in_packet(){
  }
  std::puts("PASS a packet naming an unsupported register stops before any of its words executes (incrementing, non-incrementing, past 0xfffc)");
 }
-int main(){try{unsupported_in_packet();extracted_are_special();plain_set();equal_paths();window_release_into_fifo();window_callbacks();window_claimed_page();paired_reads();}catch(const std::exception& e){std::fprintf(stderr,"FAIL %s\n",e.what());return 1;}}
+// GET publication points: GET is stored before every action method except BEGIN with a primitive (0x1808 != 0) and on return.
+// A filtered observer on the GET word records, at each GET store, which of the plain registers 0x300..0x30c the consumer has
+// executed. Independent expectation from the stream order: before INVALIDATE_L2 {0x300,0x304}, before END {.., 0x308}, at return
+// all four (no store before BEGIN). Serial memory, window on and off.
+static void get_publication(){
+ for(bool windowed:{false,true}){
+  rsx_fifo_window=windowed;
+  PpuState s;setup_fifo(s);auto& gpu=s.rsx;gpu.device=0x70000000;gpu.draw.primitive=0;gpu.draw.ranges.clear();   // END without ranges: no draw
+  Stream st;st.method(0x300,{1});st.method(0x1808,{5});st.method(0x304,{2});st.method(0x1fd8,{0});st.method(0x308,{3});st.method(0x1808,{0});st.method(0x30c,{4});
+  std::uint32_t at=BASE;for(auto w:st.words){put(s,at,w);at+=4;}
+  s.memory.store(gpu.dma+0x44,4,BASE);s.memory.store(gpu.dma+0x40,4,at);
+  std::vector<unsigned> seen;
+  s.memory.host_access_observer=[&](const void*,std::uint64_t,bool write){if(!write)return;unsigned mask=0;
+   for(unsigned i=0;i<4;++i){mask|=unsigned(std::as_const(gpu).registers.count(0x300+4*i))<<i;}seen.push_back(mask);};
+  s.memory.host_access_observer.filtered=true;s.memory.host_access_observer.watch(host_byte(s,gpu.dma+0x44),4);
+  (void)rsx_run_impl(s,1000000);s.memory.host_access_observer={};
+  if(s.memory.load(gpu.dma+0x44,4)!=at)throw std::runtime_error("GET publication: consumer did not reach PUT");
+  if(seen!=std::vector<unsigned>{3,7,15}){std::string got;for(auto v:seen)got+=std::to_string(v)+" ";throw std::runtime_error("GET publication masks "+got+"(expected 3 7 15)");}
+ }
+ rsx_fifo_window=true;
+ std::puts("PASS GET is published before every action except BEGIN, and on return");
+}
+int main(){try{unsupported_in_packet();extracted_are_special();plain_set();equal_paths();window_release_into_fifo();window_callbacks();window_claimed_page();paired_reads();get_publication();}catch(const std::exception& e){std::fprintf(stderr,"FAIL %s\n",e.what());return 1;}}
 '''
 
 
@@ -314,7 +336,7 @@ class RsxFifoPlainTests(unittest.TestCase):
             env = dict(os.environ, ANYPS3_VK_DEVICE='lavapipe', VK_DRIVER_FILES='/usr/share/vulkan/icd.d/lvp_icd.json')
             result = subprocess.run([str(root / 'test')], env=env, capture_output=True, text=True, timeout=300)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            self.assertEqual(result.stdout.count('PASS '), 8, result.stdout)
+            self.assertEqual(result.stdout.count('PASS '), 9, result.stdout)
 
 
 if __name__ == '__main__':

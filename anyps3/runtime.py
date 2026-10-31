@@ -598,9 +598,27 @@ struct GuestMemory {
             operator std::uint64_t()const{return value.load(std::memory_order_acquire);}
         };
         struct Part { unsigned offset,size; std::uint8_t* data; std::shared_ptr<GuestBacking> owner;std::uint64_t mapping_id=0; };
+        // The parts in address order, contiguous (pointer iteration) like the std::vector they replace. Almost every Range
+        // lies in one mapping: that part is stored inline (no heap block per creation); a second part moves all into `many`.
+        struct Parts {
+            Part one{};std::vector<Part> many;unsigned n=0;   // n<=1: `one` holds the part; n>1: `many` holds all n parts
+            Part* data(){return n>1?many.data():&one;}const Part* data()const{return n>1?many.data():&one;}
+            std::size_t size()const{return n;}bool empty()const{return !n;}
+            Part* begin(){return data();}Part* end(){return data()+n;}const Part* begin()const{return data();}const Part* end()const{return data()+n;}
+            Part& operator[](std::size_t i){return data()[i];}const Part& operator[](std::size_t i)const{return data()[i];}
+            Part& at(std::size_t i){if(i>=n)throw std::out_of_range("guest range part");return data()[i];}
+            const Part& at(std::size_t i)const{if(i>=n)throw std::out_of_range("guest range part");return data()[i];}
+            Part& front(){return data()[0];}const Part& front()const{return data()[0];}
+            Part& back(){return data()[n-1];}const Part& back()const{return data()[n-1];}
+            void push_back(Part part){
+                if(!n){one=std::move(part);n=1;return;}
+                if(n==1){many.reserve(4);many.push_back(std::move(one));one=Part{};}
+                many.push_back(std::move(part));++n;
+            }
+        };
         GuestMemory* memory=nullptr;
         unsigned size=0;bool writable=false;std::uint64_t address=0;mutable Epoch epoch;
-        std::vector<Part> parts;
+        Parts parts;
         std::uint8_t* pointer(unsigned offset,unsigned count)const{
             memory->require_raw();check_epoch();
             if(offset>size || count>size-offset)throw std::runtime_error("guest range bounds fault");

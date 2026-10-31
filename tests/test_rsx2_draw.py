@@ -303,7 +303,7 @@ static void geometry_reuse_(){
 }
 // Index list reuse (ANYPS3_RSX_GEOMETRY_REUSE, Session::index_read/index_prepare/index_store): a repeated draw of an
 // unchanged index span is served from the session's decoded list; every writer and every decode parameter change makes
-// the next draw decode the current bytes. Oracle: the triangle list the draw uploads (scratch_triangles) against the
+// the next draw decode the current bytes. Oracle: the triangle list the draw uploads (triangle_list()) against the
 // list computed here from the values the test stored (+ base index); each scenario uses its own index address.
 static void index_reuse_(){
  PpuState s;setup_draw(s,16,8,64,false);auto& m=s.memory;auto& R=s.rsx.registers;auto& d=s.rsx.draw;m.enable_concurrency();
@@ -315,10 +315,11 @@ static void index_reuse_(){
  auto start=[&](std::uint64_t base,unsigned location,const std::vector<unsigned>& v){at=base;R[0x181c]=unsigned(at-(location?0x70000000u:0xc0000000u));R[0x1820]=(width==2?0x10u:0u)|location;put(v);};
  auto draw=[&](const std::vector<unsigned>& v,unsigned base=0){R[0x173c]=base;d.indexed=true;d.primitive=5;d.ranges={{0,3},{3,3}};rsx_execute_draw(s);
   std::vector<std::array<unsigned,3>> expect;for(std::size_t i=0;i+3<=v.size();i+=3)expect.push_back({v[i]+base,v[i+1]+base,v[i+2]+base});
-  assert(d.scratch_triangles==expect);};
+  assert(d.triangle_list()==expect);};
  const std::vector<unsigned> quad{0,1,2,0,2,3},other{2,1,0,3,2,0},third{1,2,3,1,3,0};
  // (a) unchanged span: the second draw is a hit; (b) PPU stores into it: decoded afresh.
- start(0xc0003100,0,quad);draw(quad);auto hits=session.index_hits;draw(quad);assert(session.index_hits==hits+1);
+ start(0xc0003100,0,quad);draw(quad);assert(!d.shared_triangles);auto hits=session.index_hits;draw(quad);assert(session.index_hits==hits+1);
+ assert(d.shared_triangles && d.scratch_indices.empty() && d.scratch_triangles.empty());   // a hit hands over the entry's triangles, no copy
  put(other);draw(other);
  // (c) SPU-DMA-style bulk write from a foreign thread.
  start(0xc0003200,0,quad);draw(quad);draw(quad);
@@ -338,7 +339,7 @@ static void index_reuse_(){
  // (i) restart enabled: strips split at the restart value, no reuse of the restart-free list of the same span.
  {const std::vector<unsigned> strip{0,1,2,0xffff,2,3};start(0xc0003700,0,quad);draw(quad);put(strip);R[0x1dac]=1;R[0x1db0]=0xffff;
   R[0x173c]=0;d.indexed=true;d.primitive=5;d.ranges={{0,3},{3,3}};rsx_execute_draw(s);
-  const std::vector<std::array<unsigned,3>> one{{0,1,2}};assert(d.scratch_triangles==one);R[0x1dac]=0;put(quad);draw(quad);}
+  const std::vector<std::array<unsigned,3>> one{{0,1,2}};assert(d.triangle_list()==one);R[0x1dac]=0;put(quad);draw(quad);}
  // (j) unmap + map of the IO mapping holding the span (location 1) with new bytes: a new physical identity.
  start(0x70003800,1,quad);draw(quad);draw(quad);
  {auto it=std::find_if(m.regions.begin(),m.regions.end(),[](const auto& r){return r.base==0x70000000;});assert(it!=m.regions.end());
@@ -347,6 +348,17 @@ static void index_reuse_(){
   const auto b=be(other);std::copy(b.begin(),b.end(),bytes.begin()+(at-0x70000000u));
   m.allocated-=size;m.regions.erase(it);m.mapping_changed();m.map(0x70000000,size,6,bytes.data(),size);}
  draw(other);
+ // (l) a strip over a cached 7-index span (a hit copies the entry's flat triangles plus its trailing index): strip triangles of
+ // the stored values (odd ones with the first two swapped); then the same span as a triangle list shares the entry's two
+ // complete triangles (the 7th index dropped).
+ {const std::vector<unsigned> seven{0,1,2,3,0,1,2};start(0xc0003a00,0,seven);
+  auto strip=[&]{R[0x173c]=0;d.indexed=true;d.primitive=6;d.ranges={{0,7}};rsx_execute_draw(s);
+   std::vector<std::array<unsigned,3>> expect;
+   for(std::size_t i=0;i+2<seven.size();++i)expect.push_back(i%2?std::array<unsigned,3>{seven[i+1],seven[i],seven[i+2]}:std::array<unsigned,3>{seven[i],seven[i+1],seven[i+2]});
+   assert(!d.shared_triangles && d.triangle_list()==expect && d.scratch_indices==seven);};
+  strip();const auto h=session.index_hits;strip();assert(session.index_hits==h+1);
+  R[0x173c]=0;d.indexed=true;d.primitive=5;d.ranges={{0,7}};rsx_execute_draw(s);
+  const std::vector<std::array<unsigned,3>> two{{0,1,2},{3,0,1}};assert(session.index_hits==h+2 && d.shared_triangles && d.triangle_list()==two);}
  // (k) switch off: no entry.
  session.flush();session.geometry_reuse=false;const auto entries=session.index_entries.size();hits=session.index_hits;
  start(0xc0003900,0,quad);draw(quad);draw(quad);assert(session.index_entries.size()==entries && session.index_hits==hits);

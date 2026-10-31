@@ -48,7 +48,25 @@ static void epochs_(){
  assert(data[16+0x1d00/4]==0 && data[16+0x308/4]==0x207 && session.register_blocks_rebuilt>clear_before);
  std::puts("PASS tracked epochs, exposed borrows, identity on copy and clear/erase");
 }
-int main(){try{epochs_();}catch(const std::exception& e){std::fprintf(stderr,"FAIL %s\n",e.what());return 1;}}
+// The transform-constant window (0x1efc, 0x1f00..0x1f7c) keeps the block epochs and reads 0 in the serialized blocks, while
+// the bank holds the stored values; a store next to it (0x1ef8, 0x1f80) still rebuilds its block with its value.
+static void constant_window_(){
+ PpuState s;setup_draw(s,8,8,32,false);s.rsx.renderer=std::make_unique<NativeVulkan>();
+ rsxgraphics::Session session(*s.rsx.renderer,s);std::vector<unsigned> data;
+ auto& bank=s.rsx.registers;RsxRegisters copy=bank;bank=copy;bank.exposed.fill(0);
+ session.serialize_registers(data,8,8);const auto base=session.register_blocks_rebuilt;
+ const auto e30=bank.epochs[30],e31=bank.epochs[31];
+ bank.write(0x1efc,17);for(unsigned i=0;i<32;++i)bank.write(0x1f00+4*i,0x3f800000u+i);
+ assert(bank.epochs[30]==e30 && bank.epochs[31]==e31);
+ session.serialize_registers(data,8,8);assert(session.register_blocks_rebuilt==base);
+ assert(std::as_const(bank).at(0x1efc)==17 && std::as_const(bank).at(0x1f7c)==0x3f800000u+31);
+ bank.write(0x1ef8,5);bank.write(0x1f80,6);session.serialize_registers(data,8,8);assert(session.register_blocks_rebuilt==base+2);
+ assert(data[16+0x1ef8/4]==5 && data[16+0x1f80/4]==6 && data[16+0x1efc/4]==0);
+ for(unsigned i=0;i<32;++i)assert(data[16+0x1f00/4+i]==0);
+ assert(data[16+0x1ff0/4]==std::as_const(bank).at(0x1ff0));
+ std::puts("PASS constant window keeps block epochs, serializes as 0, bank keeps values");
+}
+int main(){try{epochs_();constant_window_();}catch(const std::exception& e){std::fprintf(stderr,"FAIL %s\n",e.what());return 1;}}
 '''
 
 
@@ -67,3 +85,4 @@ class RsxRegisterEpochs(unittest.TestCase):
             run = subprocess.run([str(root/'test')], env=env, capture_output=True, text=True, timeout=120)
             self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
             self.assertIn('PASS tracked epochs', run.stdout)
+            self.assertIn('PASS constant window keeps block epochs', run.stdout)

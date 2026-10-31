@@ -748,6 +748,8 @@ static bool rsx_run_impl(PpuState& s,unsigned budget,bool idle_poll=false){
     // register store or a transform-constant upload (below), by any other GuestMemory call (GET publication, PUT loads,
     // transfers it declines) and on leaving this scope, so nothing that can wait, block or call back runs while it is held.
     GuestMemory::RenderCursor fifo_reads(m);
+    // The method tables are immutable after their first construction: resolve them once per run, not per packet.
+    const auto& classes=rsx_method_class_table();const auto& plain=rsx_plain_table();
     for(unsigned step=0;step<budget;++step){
         if(__builtin_expect(rsx_host_waiters.load(std::memory_order_relaxed)!=0,0)){   // = rsx_owner_poll(); the request may change memory
             window.valid=false;fifo_reads.revoke();auto& hook=rsx_owner_hook();if(hook)hook();}
@@ -789,12 +791,18 @@ static bool rsx_run_impl(PpuState& s,unsigned budget,bool idle_poll=false){
                 }
                 std::uint32_t values[0x800];
                 // Hoisted table lookups (rsx_method_class without the per-call static guard); registers past 0xfffc take the predicate.
-                const auto& classes=rsx_method_class_table();
                 auto method_class=[&](std::uint32_t reg)->unsigned{return reg<0x10000?classes[reg>>2]:rsx_method_class(reg);};
                 // Every register of the packet supported (the common case): one pass over the table bytes, no per-word dispatch.
                 // Otherwise the per-word loop below stops (or, ANYPS3_RSX_DIAG_SKIP=1, logs) at each unsupported register as before.
-                bool supported=std::uint64_t(method)+std::uint64_t(count-1)*increment<0x10000;
-                if(supported){const auto* entry=classes.data()+(method>>2);const unsigned n=increment?count:1u;
+                // An all-plain packet (every register a plain store, the common state packet; plain implies class 1, so the packet
+                // is supported) stores its words in order without the per-method dispatch below: the same stores, as the dispatch's
+                // capture hook is off and a resumed packet (packet_index) is never all plain (only a semaphore wait resumes).
+                const bool in_bank=std::uint64_t(method)+std::uint64_t(count-1)*increment<0x10000;
+                bool all_plain=rsx_fifo_plain_fast && in_bank && !gpu.packet_index && !gpu.perf_capture.active;
+                if(all_plain){const auto* entry=plain.data()+(method>>2);const unsigned n=increment?count:1u;
+                    for(unsigned i=0;i<n;++i)all_plain&=entry[i]!=0;}
+                bool supported=in_bank;
+                if(supported && !all_plain){const auto* entry=classes.data()+(method>>2);const unsigned n=increment?count:1u;
                     for(unsigned i=0;i<n;++i)if(!entry[i]){supported=false;break;}}
                 if(!supported)for(unsigned i=0;i<count;++i){
                     const auto reg=method+i*increment;
@@ -819,8 +827,8 @@ static bool rsx_run_impl(PpuState& s,unsigned budget,bool idle_poll=false){
                 if(in_window(get+4,std::uint64_t(count)*4))std::copy_n(window.words+(get+4-window.base)/4,count,values);
                 else if(have_pair){window.valid=false;values[0]=paired;if(count>1)rsx_fifo_values(gpu,m,get+8,count-1,values+1,&fifo_reads);}
                 else{window.valid=false;rsx_fifo_values(gpu,m,get+4,count,values,&fifo_reads);}
-                const auto& plain=rsx_plain_table();
-                for(unsigned i=gpu.packet_index;i<count;++i){
+                if(all_plain){for(unsigned k=0;k<count;++k)gpu.registers.write(method+k*increment,values[k]);}
+                else for(unsigned i=gpu.packet_index;i<count;++i){
                     const auto reg=method+i*increment,value=values[i];
                     // rsx_capture_method returns at once without an active capture: test that here (no call per method).
                     if(rsx_fifo_plain_fast && reg<0x10000 && !(reg&3) && plain[reg>>2]){if(gpu.perf_capture.active){fifo_reads.revoke();rsx_capture_method(s,reg,value);}gpu.registers.write(reg,value);continue;}
@@ -829,13 +837,16 @@ static bool rsx_run_impl(PpuState& s,unsigned budget,bool idle_poll=false){
                     // 0x1f00..0x1f7c (class 1, no other case matches, rsx_vertex_data_register ignores it): constant + raw register.
                     if(rsx_fifo_plain_fast && reg>=0x1f00 && reg<=0x1f7c){
                         if(gpu.perf_capture.active){fifo_reads.revoke();rsx_capture_method(s,reg,value);}
-                        const std::uint64_t word=std::uint64_t(rsx_reg(gpu,0x1efc))*4+(reg-0x1f00)/4;
+                        const std::uint64_t word=std::uint64_t(gpu.registers.value_or(0x1efc,0u))*4+(reg-0x1f00)/4;   // = rsx_reg, inline
                         if(word>=gpu.transform_constants.size())throw std::runtime_error("RSX transform constant index outside bank");
                         gpu.transform_constants.write(word,value);gpu.transform_constants_written.write(word,true);
                         gpu.registers.write(reg,value);continue;
                     }
                     fifo_reads.revoke();   // every other method may wait, block, call back or access guest memory itself
-                    if(method_class(reg)==2)publish();
+                    // BEGIN (0x1808 with a primitive) is an action only for its END twin: it edits host draw state (or stops on a
+                    // nested begin, where the catch below publishes this same GET), touches no guest memory and cannot wait, so GET
+                    // may lag behind it as behind a state method; the END that follows publishes before the draw executes.
+                    if(method_class(reg)==2 && !(reg==0x1808 && value))publish();
                     if(reg!=0x68 && gpu.perf_capture.active)rsx_capture_method(s,reg,value);
                     if(reg==0 && value!=0x31337000)throw std::runtime_error("unsupported RSX channel object");
                     if(reg==0xe000 && value!=0xcafebabe)throw std::runtime_error("unsupported GCM driver object");
