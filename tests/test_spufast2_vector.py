@@ -90,8 +90,60 @@ FP_BODY = r'''
 '''
 
 
+UNDERFLOW_BODY = r'''
+ // HIRES7: lanes whose RZ result underflows (0 < |exact| < 2^-126: SPU +0 with FPSCR flags 3, ISA v1.2 PDF pp.195-196, 208-214) are
+ // decided in the vector paths. Oracle: spu_single_math on EVERY lane (the exact limb path, unchanged); candidates: spu_vfp<Kind>
+ // (AVX-512 on this host with -march=native) and spu_single_vector (the generic per-lane fast path). Operands: magnitudes around
+ // 2^-63..2^-75 (products near and below 2^-126), the normal-range boundary, exact cancellations and ordinary values.
+ std::uint64_t checked=0,under=0;std::uint32_t seed=0x2468ace1u;
+ auto next=[&]{seed=seed*1664525u+1013904223u;return seed;};
+ auto pick=[&]{const std::uint32_t r=next();const unsigned cls=r&7;const std::uint32_t mant=next()&0x7fffffu,sign=(r>>3&1)<<31;
+  if(cls<3)return sign|((0x30u+(next()%24))<<23)|mant;       // 2^-79..2^-56: products underflow or are tiny normals
+  if(cls==3)return sign|((1u+(next()%3))<<23)|mant;          // just above 2^-126: sums/differences underflow
+  if(cls==4)return (next()&1)?0u:0x80000000u;                // zeros
+  if(cls==5)return sign|0x3f800000u|(mant&0xf);              // ~1.0
+  return sign|((0x60u+(next()%40))<<23)|mant;};               // ordinary
+ auto one=[&](auto kind_tag,std::uint32_t av[4],std::uint32_t bv[4],std::uint32_t cv[4]){
+  constexpr unsigned Kind=decltype(kind_tag)::value;
+  SpuRegister fo{},f1{},f2{},ra,rb,rc;std::uint32_t want[4];
+  for(unsigned l=0;l<4;++l){want[l]=spu_single_math(fo,l,av[l],bv[l],cv[l],Kind);spu_word(ra,l,av[l]);spu_word(rb,l,bv[l]);spu_word(rc,l,cv[l]);
+   under+=want[l]==0 && (spu_word(fo,l)&2);}
+  const auto scalar=spu_single_vector(f1,ra,rb,rc,Kind);
+  const SpuV a=_mm_set_epi32(int(av[3]),int(av[2]),int(av[1]),int(av[0])),b=_mm_set_epi32(int(bv[3]),int(bv[2]),int(bv[1]),int(bv[0])),
+             c=_mm_set_epi32(int(cv[3]),int(cv[2]),int(cv[1]),int(cv[0]));
+  alignas(16) std::uint32_t g[4];_mm_store_si128(reinterpret_cast<__m128i*>(g),spu_vfp<Kind>(f2,a,b,c));
+  for(unsigned l=0;l<4;++l)if(g[l]!=want[l] || spu_word(scalar,l)!=want[l] || f1!=fo || f2!=fo){
+   std::fprintf(stderr,"UNDERFLOW MISMATCH kind=%u lane=%u a=%08x b=%08x c=%08x vfp=%08x scalar=%08x want=%08x fpscr want=%08x vfp=%08x scalar=%08x\n",
+    Kind,l,av[l],bv[l],cv[l],g[l],spu_word(scalar,l),want[l],spu_word(fo,l),spu_word(f2,l),spu_word(f1,l));std::abort();}
+  ++checked;
+ };
+ auto sweep=[&](auto kind_tag){
+  constexpr unsigned Kind=decltype(kind_tag)::value;
+  for(unsigned n=0;n<60000;++n){std::uint32_t av[4],bv[4],cv[4];
+   for(unsigned l=0;l<4;++l){av[l]=pick();bv[l]=pick();cv[l]=(Kind>=3)?pick():0;
+    const unsigned r=next()&15;
+    if(Kind<2 && r==0)bv[l]=av[l]^0x80000000u;                                   // exact cancellation
+    if(Kind<2 && r==1)bv[l]=(av[l]^0x80000000u)+((next()&1)?1u:0xffffffffu);       // near cancellation: subnormal difference
+    if(Kind>=3 && r==2){cv[l]=0;}
+    if(Kind>=3 && r==3){av[l]=0x3f800000u;cv[l]=Kind==3?bv[l]^0x80000000u:bv[l];}}            // exact cancellation 1*b -/+ b
+   one(std::integral_constant<unsigned,Kind>{},av,bv,cv);}
+ };
+ // Fixed groups: exact FMA/FMS/FNMS cancellations 1*b -/+ b (+0, no flags) next to underflowing products (+0, flags 3).
+ {std::uint32_t av[4]={0x3f800000u,0x1c800000u,0x3f800000u,0x3f800000u},bv[4]={0x1c800000u,0x1c800000u,0x01000000u,0x00c00000u},cp[4],cm[4];
+  for(unsigned l=0;l<4;++l){cm[l]=bv[l]^0x80000000u;cp[l]=bv[l];}cm[1]=cp[1]=0;
+  one(std::integral_constant<unsigned,3>{},av,bv,cm);one(std::integral_constant<unsigned,4>{},av,bv,cp);one(std::integral_constant<unsigned,5>{},av,bv,cp);}
+ sweep(std::integral_constant<unsigned,0>{});sweep(std::integral_constant<unsigned,1>{});sweep(std::integral_constant<unsigned,2>{});
+ sweep(std::integral_constant<unsigned,3>{});sweep(std::integral_constant<unsigned,4>{});sweep(std::integral_constant<unsigned,5>{});
+ if(under<1000){std::fprintf(stderr,"too few underflow lanes %llu\n",(unsigned long long)under);std::abort();}
+ std::fprintf(stderr,"underflow checked %llu groups, %llu underflow lanes\n",(unsigned long long)checked,(unsigned long long)under);
+'''
+
+
 @unittest.skipUnless(shutil.which('c++'), 'Requires native C++ compiler')
 class SpuFast2VectorTests(unittest.TestCase):
+    def test_underflow_lanes_match_exact_per_lane_oracle_native_isa(self):
+        build_and_run(self, (), UNDERFLOW_BODY, ('-O2', '-march=native', '-ffp-contract=off'))
+
     def test_float_to_int_vector_matches_scalar_native_isa(self):
         # -march=native selects the AVX2 four-lane implementation on this host (spu_vfloat_to_int).
         build_and_run(self, (), BODY + ' static_assert(sizeof(SpuV)==16);\n', ('-O2', '-march=native', '-ffp-contract=off'))

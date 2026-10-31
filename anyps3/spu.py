@@ -630,11 +630,13 @@ __attribute__((noinline)) static __m128 spu_single_sse(__m128 a,__m128 b,unsigne
             const auto x=spu_word(a,i),y=spu_word(b,i),z=spu_word(c,i),r=result[i],m=r&0x7fffffffu;
             // Denormal/extended inputs need DIFF. IEEE RZ overflow can also
             // produce 0x7f7fffff, so include that boundary in the slow path.
-            bool safe=!spu_single_diff(x) && !spu_single_diff(y) && (kind<3 || !spu_single_diff(z));
+            const bool ordinary=!spu_single_diff(x) && !spu_single_diff(y) && (kind<3 || !spu_single_diff(z));
             const bool exact_zero=kind<2?((x&0x7fffffff)==(y&0x7fffffff)):
                 ((!(x&0x7fffffff) || !(y&0x7fffffff)) && (kind==2 || !(z&0x7fffffff)));
-            safe=safe && ((m>=0x00800000u && m<0x7f7fffffu) || (!m && exact_zero));
-            if(safe){spu_word(out,i,m?r:0);if(spu_profile_on)++spu_profile.fp_fast_lanes;}
+            if(ordinary && ((m>=0x00800000u && m<0x7f7fffffu) || (!m && exact_zero))){spu_word(out,i,m?r:0);if(spu_profile_on)++spu_profile.fp_fast_lanes;}
+            // Proven underflow (as spu_vfp): ordinary inputs and a nonzero RZ result below 2^-126, or a zero FM product of
+            // nonzero inputs, is +0 with flags 3 in spu_single_round (exponent < -126).
+            else if(ordinary && ((m && m<0x00800000u) || (kind==2 && !m && !exact_zero))){spu_word(out,i,0);spu_fp_flag(fpscr,i,3);if(spu_profile_on)++spu_profile.fp_fast_lanes;}
             else slow|=1u<<i;
         }
         }

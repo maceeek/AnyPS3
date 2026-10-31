@@ -254,6 +254,10 @@ template<bool Magnitude,bool Equal> SPU_VI SpuV spu_vfcmp(SpuV a,SpuV b){
     for(unsigned i=0;i<4;++i)if(unsafe&(1u<<i))r[i]=spu_single_math(fpscr,i,x[i],y[i],z[i],kind);else if(!(r[i]&0x7fffffffu))r[i]=0;
     return _mm_load_si128(reinterpret_cast<const __m128i*>(r));
 }
+// FPSCR flags 3 (spu_single_round, exponent < -126) of the lanes in `lanes` (bit i = word i), for spu_vfp's proven underflows.
+[[gnu::noinline,gnu::cold,maybe_unused]] static void spu_vfp_underflow(SpuRegister& fpscr,unsigned lanes){
+    for(unsigned i=0;i<4;++i)if(lanes&(1u<<i))spu_fp_flag(fpscr,i,3);
+}
 // FA/FS/FM/FMA/FMS/FNMS on w-representation values. ISA v1.2 PDF pp.195-196, 208-214:
 // truncation, no denormal/Inf/NaN; extended-range exponent 255 and every lane that can
 // differ from an IEEE RZ computation (denormal or extended inputs, results outside the
@@ -288,9 +292,17 @@ template<unsigned Kind> SPU_VI SpuV spu_vfp(SpuRegister& fpscr,SpuV a,SpuV b,Spu
     else exact_zero=_mm_cmpeq_epi32_mask(x,_mm_setzero_si128())|_mm_cmpeq_epi32_mask(y,_mm_setzero_si128());
     if constexpr(Kind>=3){const auto z=_mm_and_si128(c,mag);safe&=ordinary(z);exact_zero&=_mm_cmpeq_epi32_mask(z,_mm_setzero_si128());}
     const __mmask8 normal=_mm_cmplt_epu32_mask(_mm_sub_epi32(m,low),_mm_set1_epi32(0x7f7fffff-0x00800000));
-    safe&=normal|(zero_result&exact_zero);
-    if(__builtin_expect((safe&15)!=15,0))return spu_vfp_slow(fpscr,a,b,c,r,unsigned(~safe)&15u,Kind);
-    return _mm_maskz_mov_epi32(__mmask8(~zero_result),r); // an architectural zero is +0
+    // Underflow proven from the RZ result (ordinary inputs only, i.e. spu_single_math raises no DIFF for the inputs): a nonzero
+    // result below 0x00800000 means 0 < |exact| < 2^-126 (RZ is monotone and 2^-126 is representable); for FM a zero result of two
+    // nonzero inputs too (an exact product of nonzero values is nonzero). spu_single_round returns +0 with flags 3 for exactly
+    // these lanes (exponent < -126). Zero FA/FS/FMA results without an exact-zero proof keep the exact path.
+    __mmask8 under=_mm_cmplt_epu32_mask(_mm_sub_epi32(m,_mm_set1_epi32(1)),_mm_set1_epi32(0x007fffff));
+    if constexpr(Kind==2)under|=zero_result&__mmask8(~exact_zero);
+    under&=safe&__mmask8(~normal);
+    safe&=normal|(zero_result&exact_zero)|under;
+    if(__builtin_expect((safe&15)!=15,0))return spu_vfp_slow(fpscr,a,b,c,r,unsigned(~safe|under)&15u,Kind);
+    if(__builtin_expect(under&15,0))spu_vfp_underflow(fpscr,under&15u);
+    return _mm_maskz_mov_epi32(__mmask8(~(zero_result|under)),r); // an architectural zero is +0
 #else
     SpuRegister x,y,z;spu_vst(x,spu_vswap32(a));spu_vst(y,spu_vswap32(b));spu_vst(z,spu_vswap32(c));
     return spu_vswap32(spu_vld(spu_single_vector(fpscr,x,y,z,Kind)));
