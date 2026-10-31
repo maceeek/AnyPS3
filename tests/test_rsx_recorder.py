@@ -4,7 +4,10 @@ The model-based oracle applies random draws (scissor rectangle, color), clears a
 GPU result must equal the model exactly in both modes (inline recording and recorder thread), so any draw that is recorded out of order with
 respect to a clear/copy (or lost, duplicated, recorded into the wrong batch) shows up as a pixel difference. Further cases: more draws than ring
 slots (producer back-pressure), a recorder failure (the next enqueue/drain/finish rethrows it, nothing hangs), teardown with queued draws. The
-validation layer (including its thread-safety checks) must stay silent.
+batch lifecycle jobs (graphics_reset's recorder-owned half as a Reset job, a front-half graphics_begin as a Begin job) are counted: with the
+recorder every reset runs on the recorder thread and the model sequences pass through Reset -> Begin -> draw and Reset -> inline begin (clear/
+copy after b.sync()); a failing Reset job stops the next enqueue and every later sync. The validation layer (including its thread-safety
+checks) must stay silent.
 """
 import os
 from pathlib import Path
@@ -60,11 +63,11 @@ static void read_back(Gpu& g,Model& got){
  g.vk.graphics_reset(*g.b);
 }
 static void model_sequence(const char* mode,unsigned seed,unsigned rounds,unsigned ops){
- Gpu g(mode);Model model{};std::uint32_t r=seed;unsigned draws=0;
+ Gpu g(mode);Model model{};std::uint32_t r=seed;unsigned draws=0,first_draws=0;
  {Model got{};g.clear(0,0);g.clear(1,0);read_back(g,got);assert(got==model);}
  for(unsigned round=0;round<rounds;++round){
   for(unsigned n=0;n<ops;++n){
-   const unsigned kind=lcg(r)%100,target=lcg(r)%2;
+   const unsigned kind=lcg(r)%100,target=lcg(r)%2;if(!n && kind<65)++first_draws;   // a round's first draw begins a freshly reset batch
    if(kind<65){unsigned x0=lcg(r)%16,x1=lcg(r)%16,y0=lcg(r)%16,y1=lcg(r)%16;if(x0>x1)std::swap(x0,x1);if(y0>y1)std::swap(y0,y1);++x1;++y1;
     const std::uint32_t color=lcg(r)|(lcg(r)<<16);g.draw(target,x0,y0,x1,y1,color);++draws;
     for(unsigned y=y0;y<y1;++y)for(unsigned x=x0;x<x1;++x)model[target][y*16+x]=color;}
@@ -75,7 +78,14 @@ static void model_sequence(const char* mode,unsigned seed,unsigned rounds,unsign
   for(unsigned t=0;t<2;++t)for(unsigned i=0;i<256;++i)if(got[t][i]!=model[t][i])
    throw std::runtime_error(std::string(mode)+": round "+std::to_string(round)+" image "+std::to_string(t)+" pixel "+std::to_string(i)+" got "+std::to_string(got[t][i])+" expected "+std::to_string(model[t][i]));
  }
- std::printf("PASS recorder=%s model sequence: %u rounds x %u ops (%u draws) equal the CPU model\n",mode,rounds,ops,draws);
+ // Lifecycle jobs: read_back resets once per round plus once for the initial clear; with the recorder each reset is a Reset job and a
+ // round whose first operation is a draw begins the reset batch through a Begin job (a clear/copy first begins inline after b.sync()).
+ g.b->sync();   // the last read_back's Reset job may still be queued
+ const auto resets=g.vk.graphics_recorder_resets.load(),begins=g.vk.graphics_recorder_begins.load();
+ const bool on=!std::strcmp(mode,"1");
+ if(resets!=(on?rounds+1:0) || begins!=(on?first_draws:0))
+  throw std::runtime_error(std::string(mode)+": recorder lifecycle jobs resets="+std::to_string(resets)+" begins="+std::to_string(begins)+" expected "+std::to_string(on?rounds+1:0)+"/"+std::to_string(on?first_draws:0));
+ std::printf("PASS recorder=%s model sequence: %u rounds x %u ops (%u draws) equal the CPU model, %llu Reset / %llu Begin jobs\n",mode,rounds,ops,draws,(unsigned long long)resets,(unsigned long long)begins);
 }
 static void back_pressure(){
  Gpu g("1");   // 900 tiny draws in one batch: more than the 256 ring slots
@@ -130,9 +140,22 @@ static void failure(){
  if(!stopped)throw std::runtime_error("recorder failure was forgotten");
  std::puts("PASS recorder failure: rethrown at the next enqueue/finish and by every later sync, no hang");
 }
+// A Reset job that fails on the recorder thread: the frontend half of the reset completed, the next enqueue (the draw's Begin job) or sync
+// rethrows the recorder's error, and every later sync reports it again (no hang, no silent reuse of an unreset command buffer).
+static void reset_failure(){
+ Gpu g("1");g.draw(0,0,0,16,16,0xff0000ffu);Model got{};read_back(g,got);assert(got[0][0]==0xff0000ffu);
+ g.vk.graphics_test_recorder_reset_fault=true;g.draw(0,0,0,16,16,0xff00ff00u);
+ bool stopped=false;std::string what;
+ try{read_back(g,got);g.draw(0,0,0,16,16,1);g.b->sync();}catch(const std::runtime_error& e){stopped=true;what=e.what();}
+ if(!stopped || what.find("reset test fault")==std::string::npos)throw std::runtime_error("recorder Reset failure was not reported: '"+what+"'");
+ stopped=false;try{g.b->sync();}catch(const std::runtime_error& e){stopped=std::string(e.what()).find("reset test fault")!=std::string::npos;}
+ if(!stopped)throw std::runtime_error("recorder Reset failure was forgotten");
+ std::puts("PASS recorder Reset failure: rethrown at the next enqueue and by every later sync");
+}
 static void teardown(){
  {Gpu g("1");for(unsigned i=0;i<200;++i)g.draw(0,0,0,16,16,0xff00ff00u);}   // destructors with queued draws
  {Gpu g("1");g.draw(0,0,0,16,16,1);g.b.reset();}                              // batch destroyed with a queued draw
+ {Gpu g("1");g.draw(0,0,0,16,16,1);g.vk.graphics_finish(*g.b);g.vk.graphics_reset(*g.b);g.b.reset();}   // ... with a queued Reset job
  std::puts("PASS recorder teardown with queued draws");
 }
 // RECORDER_BENCH=1: main-thread cost of a draw (frontend only) with and without the recorder; not an assertion.
@@ -152,7 +175,7 @@ int main(){try{
  if(std::getenv("RECORDER_BENCH")){bench();return 0;}
  for(const char* mode:{"0","1"})model_sequence(mode,12345,4,400);
  model_sequence("1",777,6,700);
- back_pressure();two_batches();completion();failure();teardown();
+ back_pressure();two_batches();completion();failure();reset_failure();teardown();
 }catch(const std::exception& e){std::fprintf(stderr,"FAIL %s\n",e.what());return 1;}}
 '''
 
@@ -179,7 +202,7 @@ class RsxRecorderTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertNotIn('Validation Error', result.stdout + result.stderr)
             self.assertNotIn('Validation Warning', result.stdout + result.stderr)
-            self.assertEqual(result.stdout.count('PASS '), 8, result.stdout)
+            self.assertEqual(result.stdout.count('PASS '), 9, result.stdout)
 
 
 if __name__ == '__main__':
