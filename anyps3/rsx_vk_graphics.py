@@ -277,6 +277,11 @@ private:
     std::map<std::string,std::shared_ptr<GraphicsPipeline>> graphics_pipelines;
     std::weak_ptr<GraphicsPipeline> last_pipeline_diagnostic;
     std::unordered_map<std::array<std::uint64_t,34>,std::weak_ptr<GraphicsPipeline>,GraphicsKeyHash<34>> graphics_pipeline_fast;
+    // The previous graphics_pipeline_fast lookup (key, element or nullptr = absent). Every insertion, assignment or erase of the
+    // map bumps graphics_pipeline_fast_version; an unchanged map gives an equal key the same find() result, and element
+    // pointers of an unordered_map stay valid until that element is erased (which bumps the version).
+    std::array<std::uint64_t,34> graphics_pipeline_last_key{};const std::weak_ptr<GraphicsPipeline>* graphics_pipeline_last_entry=nullptr;
+    std::uint64_t graphics_pipeline_fast_version=1,graphics_pipeline_last_version=0;
     // Device-wide framebuffer cache (recording thread only: the draw recorder, or the owner after GraphicsBatch::sync).
     std::unordered_map<std::array<std::uint64_t,10>,std::shared_ptr<typename GraphicsBatch::Framebuffer>,typename GraphicsBatch::FramebufferHash> graphics_framebuffers;
 public:
@@ -410,18 +415,26 @@ private:
         // Pointer equality with the canonical text owner proves equal bytes (shader_identity compared them once).
         const auto same_vs=[&](const GraphicsPipeline& p){return p.vs_source.get()==&vs || p.vs_source.get()==vs_canonical || (++shader_text_compares,*p.vs_source==vs);};
         const auto same_fs=[&](const GraphicsPipeline& p){return p.fs_source.get()==&fs || p.fs_source.get()==fs_canonical || (++shader_text_compares,*p.fs_source==fs);};
-        std::array<std::uint64_t,34> fast_key{};fast_key[0]=a;fast_key[1]=b;unsigned field=0;
-        auto field_=[&](unsigned v){const auto word=2+field/2;fast_key[word]|=std::uint64_t(v)<<(32*(field%2));++field;};
+        std::array<std::uint64_t,34> fast_key{};fast_key[0]=a;fast_key[1]=b;
+        // 32-bit fields in order: field n is the low (even n) or high (odd n) half of key word 2+n/2 -- on a little-endian host
+        // exactly the consecutive uint32 array copied over words 2..33 (at most 3+8*4+5+8+7=55 of 64 fields).
+        static_assert(__BYTE_ORDER__==__ORDER_LITTLE_ENDIAN__ && sizeof(fast_key)-16==64*sizeof(std::uint32_t),"pipeline key field packing");
+        std::array<std::uint32_t,64> fields{};unsigned field=0;
+        auto field_=[&](unsigned v){fields[field++]=v;};
         field_(s.colors);field_(s.color);field_(s.depth);
         for(unsigned i=0;i<s.colors;++i){const auto& v=s.blend[i];field_(v.blendEnable);field_(v.srcColorBlendFactor);field_(v.dstColorBlendFactor);field_(v.colorBlendOp);field_(v.srcAlphaBlendFactor);field_(v.dstAlphaBlendFactor);field_(v.alphaBlendOp);field_(v.colorWriteMask);}
         field_(s.z.depthTestEnable);field_(s.z.depthWriteEnable);field_(s.z.depthCompareOp);field_(s.z.stencilTestEnable);field_(s.z.depthBoundsTestEnable);
         for(const auto* v:{&s.z.front,&s.z.back}){field_(v->failOp);field_(v->passOp);field_(v->depthFailOp);field_(v->compareOp);}
         field_(s.raster.frontFace);field_(s.raster.cullMode);field_(s.raster.depthBiasEnable);field_(s.logic_enable);field_(s.logic);field_(multiview?s.samples:0);field_(s.raster_samples);
-        auto cached=graphics_pipeline_fast.find(fast_key);
-        if(cached!=graphics_pipeline_fast.end())if(auto hit=cached->second.lock()){
+        std::memcpy(fast_key.data()+2,fields.data(),sizeof(fields));
+        if(graphics_pipeline_last_version!=graphics_pipeline_fast_version || graphics_pipeline_last_key!=fast_key){
+            const auto found=graphics_pipeline_fast.find(fast_key);
+            graphics_pipeline_last_entry=found==graphics_pipeline_fast.end()?nullptr:&found->second;
+            graphics_pipeline_last_key=fast_key;graphics_pipeline_last_version=graphics_pipeline_fast_version;}
+        if(graphics_pipeline_last_entry)if(auto hit=graphics_pipeline_last_entry->lock()){
             if(same_vs(*hit) && same_fs(*hit)){
                 hit->last_use=++cache_clock;++compile_stats.graphics_hits;last_pipeline_diagnostic=hit;compile_stats_print();return hit;}}
-        if(graphics_pipeline_fast.size()>=graphics_pipeline_limit)graphics_pipeline_fast.erase(graphics_pipeline_fast.begin());
+        if(graphics_pipeline_fast.size()>=graphics_pipeline_limit){graphics_pipeline_fast.erase(graphics_pipeline_fast.begin());++graphics_pipeline_fast_version;}
         // Cold diagnostics retain the serialized field decomposition.
         std::string key;
         key.append(reinterpret_cast<const char*>(&a),sizeof(a));key.append(reinterpret_cast<const char*>(&b),sizeof(b));
@@ -440,7 +453,7 @@ private:
         // Hashes accelerate lookup; exact bytes remain authoritative even on a collision.
         if(it!=graphics_pipelines.end() && (!same_vs(*it->second) || !same_fs(*it->second))){
             key+='\0'+vs+'\0'+fs;it=graphics_pipelines.find(key);}
-        if(it!=graphics_pipelines.end()){it->second->last_use=++cache_clock;++compile_stats.graphics_hits;last_pipeline_parts=parts;last_pipeline_identity=std::string(reinterpret_cast<const char*>(&a),sizeof(a))+std::string(reinterpret_cast<const char*>(&b),sizeof(b));compile_stats_print();graphics_pipeline_fast[fast_key]=it->second;last_pipeline_diagnostic=it->second;return it->second;}
+        if(it!=graphics_pipelines.end()){it->second->last_use=++cache_clock;++compile_stats.graphics_hits;last_pipeline_parts=parts;last_pipeline_identity=std::string(reinterpret_cast<const char*>(&a),sizeof(a))+std::string(reinterpret_cast<const char*>(&b),sizeof(b));compile_stats_print();graphics_pipeline_fast[fast_key]=it->second;++graphics_pipeline_fast_version;last_pipeline_diagnostic=it->second;return it->second;}
         ++compile_stats.graphics_misses;::RsxPerfCounters::add(::RsxPerfCounters::pipeline_misses);
         const auto identity=key.substr(0,key.size()-state_key.size());
         if(auto last=last_pipeline_diagnostic.lock()){last_pipeline_parts=last->diagnostic_parts;last_pipeline_identity=last->diagnostic_identity;}
@@ -523,7 +536,7 @@ private:
             std::fprintf(stderr,"RSX FS PIPELINE glsl_bytes=%zu pipeline_ms=%.3f rss_bytes=%llu\n",fs.size(),pipeline_ns*1.e-6,(unsigned long long)(resident_pages*std::uint64_t(sysconf(_SC_PAGESIZE))));}
         ++compile_stats.graphics_pipelines;compile_stats.pipeline_ns+=pipeline_ns;pipeline_cache_created();
         save_pipeline_cache();compile_stats_print();
-        graphics_pipeline_fast[fast_key]=p;return graphics_pipelines.emplace(std::move(key),std::move(p)).first->second;
+        graphics_pipeline_fast[fast_key]=p;++graphics_pipeline_fast_version;return graphics_pipelines.emplace(std::move(key),std::move(p)).first->second;
     }
 public:
     // True when batch preludes run on the dedicated DMA queue (graphics_upload_submissions counts those submissions).

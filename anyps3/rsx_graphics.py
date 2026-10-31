@@ -931,20 +931,28 @@ struct Session {
     // Bank epochs at the last refresh (RsxRegisters change tracking). A block
     // whose epoch is unchanged and that was never mutably borrowed holds the
     // same presence and values; every other block is compared by value.
-    std::array<std::uint64_t,32> register_epochs{};std::uint64_t register_identity=0;
+    std::array<std::uint64_t,32> register_epochs{};std::uint64_t register_identity=0;std::uint32_t register_values_stale=0;
     void refresh_registers(){
         const auto& bank=std::as_const(state.rsx).registers;const Reg r{state.rsx};
         const bool fresh=register_prefix.empty() || register_identity!=bank.identity;if(fresh)register_prefix.assign(2576,0);
         register_identity=bank.identity;
         static constexpr std::pair<unsigned,unsigned> defaults[]={{0xa6c,0x207},{0x394,0},{0x398,0x3f800000},{0x368,0x1d01},{0x1834,0x901},{0x388,0x3f800000},{0x308,0x207},{0x324,0x01010101},{0x378,0x1503},{0x1d7c,0xffff0000}};
         for(unsigned block=0;block<32;++block){const auto* source=bank.values.data()+block*64;auto* previous=register_values.data()+block*64;
-            const bool tracked=!fresh && !bank.block_exposed(block) && register_epochs[block]==bank.epochs[block];
+            const bool exposed=bank.block_exposed(block),tracked=!fresh && !exposed && register_epochs[block]==bank.epochs[block];
             register_epochs[block]=bank.epochs[block];
             if(tracked)continue;
-            if(!fresh && register_presence[block]==bank.written[block] && !std::memcmp(source,previous,64*sizeof(*source)))continue;
-            ++register_blocks_rebuilt;++register_versions[block];std::copy_n(source,64,previous);register_presence[block]=bank.written[block];
-            for(unsigned i=0;i<64;++i)register_prefix[16+block*64+i]=(bank.written[block]&(UINT64_C(1)<<i))?source[i].second:0;
-            for(const auto& value:defaults)if(value.first/256==block)register_prefix[16+value.first/4]=r.get(value.first,value.second);
+            // A never-borrowed block whose epoch moved changed presence or a value since the last refresh (a write back to the
+            // old value is rebuilt too: the same words, one redundant upload), so only a borrowed block is compared, and only
+            // against a current snapshot: rebuilding a never-borrowed block leaves its snapshot stale (register_values_stale).
+            const bool stale=(register_values_stale>>block)&1;
+            if(!fresh && exposed && !stale && register_presence[block]==bank.written[block] && !std::memcmp(source,previous,64*sizeof(*source)))continue;
+            ++register_blocks_rebuilt;++register_versions[block];register_presence[block]=bank.written[block];
+            if(exposed){std::copy_n(source,64,previous);register_values_stale&=~(UINT32_C(1)<<block);}else register_values_stale|=UINT32_C(1)<<block;
+            // Absent registers read 0 except the reset defaults: zero the block, store present slots only (set presence bits).
+            auto* out=register_prefix.data()+16+block*64;std::memset(out,0,64*sizeof(unsigned));
+            for(auto bits=bank.written[block];bits;bits&=bits-1){const unsigned i=unsigned(__builtin_ctzll(bits));out[i]=source[i].second;}
+            static constexpr std::uint32_t default_blocks=[]{std::uint32_t m=0;for(const auto& value:defaults)m|=1u<<(value.first/256);return m;}();
+            if((default_blocks>>block)&1)for(const auto& value:defaults)if(value.first/256==block)register_prefix[16+value.first/4]=r.get(value.first,value.second);
         }
     }
     void serialize_registers(std::vector<unsigned>& data,unsigned width,unsigned height){
@@ -955,7 +963,8 @@ struct Session {
     }
     void serialize_draw_registers(std::vector<unsigned>& data,unsigned width,unsigned height){
         refresh_registers();const auto& bank=std::as_const(state.rsx).registers;
-        data.assign(48+16*32,0);data[0]=width;data[1]=height;data[3]=data.size();
+        // Same contents as assign(560,0): shrinking keeps the capacity without writes, then every word is zeroed.
+        data.resize(48+16*32);zero_words(data.data(),data.size());data[0]=width;data[1]=height;data[3]=data.size();
         for(unsigned i=0;i<8;++i)if(bank.count(0x2c0+8*i) && bank.count(0x2c4+8*i))data[8]|=1u<<i;
         data[9]=bank.count(0x8cc)!=0;
     }
@@ -1813,7 +1822,8 @@ template<class Vertex> static bool prepared(Session& session,const std::vector<s
     // re-decode) and the feedback snapshots. Every other draw reads the caller's array.
     bool edit_textures=alias || color_feedback;
     if(!edit_textures)for(const auto& texture:supplied_textures)if(texture.resident_image && texture.plan && texture.plan->gathered){edit_textures=true;break;}
-    std::optional<std::array<Texture,16>> owned_textures;if(edit_textures)owned_textures.emplace(supplied_textures);
+    // Heap copy only on the editing path: an empty std::optional of 16 Textures still cost ~500 instructions per draw.
+    std::unique_ptr<std::array<Texture,16>> owned_textures;if(edit_textures)owned_textures=std::make_unique<std::array<Texture,16>>(supplied_textures);
     const auto& textures=edit_textures?*owned_textures:supplied_textures;
     if(alias)for(const auto& texture:textures)if(texture.null_texture)return attempt.reject("alias_null_texture");
     if(color_feedback)attempt.path("texture_feedback_snapshot");
@@ -2060,10 +2070,13 @@ template<class Vertex> static bool prepared(Session& session,const std::vector<s
             }
             build_vertex_groups();
         }
-        for(unsigned a=0;a<16;++a){const unsigned d=desc+a*8,f=(r(0x1ff0)&(1u<<a))?r(0x1740+4*a):0;
+        const unsigned input_mask=r(0x1ff0);auto* words=data.data();
+        for(unsigned a=0;a<16;++a){const unsigned d=desc+a*8,f=(input_mask&(1u<<a))?r(0x1740+4*a):0;
             const unsigned type=f&15,n=(f>>4)&15,stride=(f>>8)&255,frequency=f>>16;
             data[d]=f;
-            if(!n){const auto v=(r(0x1ff0)&(1u<<a))?register_attribute(state.rsx.draw.immediate[a]):Vec4{0,0,0,1};
+            // A disabled input reads (0,0,0,1): its words directly (float_bits(1.f)==0x3f800000).
+            if(!(input_mask&(1u<<a))){words[d+4]=words[d+5]=words[d+6]=0;words[d+7]=0x3f800000u;continue;}
+            if(!n){const auto v=register_attribute(state.rsx.draw.immediate[a]);
                 for(unsigned c=0;c<4;++c)data[d+4+c]=float_bits(v[c]);
                 continue;}
             if(n>4 || type==0 || type>7)throw std::runtime_error("unsupported RSX vertex attribute type/size");
@@ -2112,7 +2125,8 @@ template<class Vertex> static bool prepared(Session& session,const std::vector<s
         const unsigned desc=(alias?2064:48)+unit*32;data[desc]=data.size();data[desc+1]=t.mip_count;data[desc+2]=t.unnormalized;data[desc+3]=t.wrap_s;data[desc+4]=t.wrap_t;
         data[desc+5]=t.min;data[desc+6]=t.mag;data[desc+7]=float_bits(t.bias);data[desc+8]=float_bits(t.min_lod);data[desc+9]=float_bits(t.max_lod);
         data[desc+10]=t.gamma;data[desc+11]=t.features;data[desc+12]=t.signed_mask;data[desc+13]=t.biased;data[desc+14]=t.alpha_kill;
-        for(unsigned c=0;c<4;++c){data[desc+15+c]=t.remap_channel[c];data[desc+19+c]=t.remap_control[c];data[desc+23+c]=float_bits((t.shadow?t.border:texture_input(t,t.border,true))[c]);}
+        const Vec4 border=t.shadow?t.border:texture_input(t,t.border,true);   // pure: once per unit, not per channel
+        for(unsigned c=0;c<4;++c){data[desc+15+c]=t.remap_channel[c];data[desc+19+c]=t.remap_control[c];data[desc+23+c]=float_bits(border[c]);}
         data[desc+27]=t.dimension;data[desc+28]=t.cube;data[desc+29]=t.shadow;data[desc+30]=t.wrap_r;
 
         const unsigned raw_levels=data.size();data[desc+31]=raw_levels;data.resize(raw_levels+t.levels.size()*8);

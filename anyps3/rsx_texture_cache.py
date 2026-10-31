@@ -5,7 +5,10 @@ MEMBERS = r'''
     // the cache unbounded. Metadata keeps its independent 64-MiB budgets.
     static constexpr unsigned texture_cache_entries=512;
     static constexpr std::uint64_t raw_cache_limit=UINT64_C(512)*1024*1024;
-    struct MetadataEntry {Texture texture;std::uint64_t used;};
+    // configured: texture after configure_texture_sampling for the sampling words (base+8/0xc/0x10/0x14/0x1c): that function
+    // is a pure function of the entry's texture (format) and those five register values (absent reads 0). Stored only after it
+    // succeeded, so a hit never skips one of its stops.
+    struct MetadataEntry {Texture texture;std::uint64_t used;Texture configured{};std::array<unsigned,5> sampling{};bool sampled=false;};
     // Looked up once per sampled texture unit and draw: a hash lookup instead of a 9-level ordered-tree walk. Eviction scans
     // for the least recently used entry (unique clock values), so iteration order is irrelevant.
     struct PlanKeyHash {std::size_t operator()(const std::array<unsigned,4>& k)const{
@@ -81,7 +84,10 @@ MEMBERS = r'''
         entry=&found->second;memo={key,entry,texture_plans_generation};
         }
         entry->used=++layout_clock;
-        auto t=entry->texture;configure_texture_sampling(t,r,unit);
+        const std::array<unsigned,5> sampling{r(base+8),r(base+0xc),r(base+0x10),r(base+0x14),r(base+0x1c)};
+        if(!entry->sampled || entry->sampling!=sampling){auto configured=entry->texture;configure_texture_sampling(configured,r,unit);
+            entry->configured=std::move(configured);entry->sampling=sampling;entry->sampled=true;}
+        auto t=entry->configured;
         const auto format=r(base+4),filter=r(base+0x14);
         const auto& level=static_cast<const Texture&>(t).levels[0];
         if(!t.cube && t.dimension==2 && t.mip_count==1 && !level.border && !(filter>>28))

@@ -90,6 +90,8 @@ struct RsxRegisters {
     RsxRegisters& operator=(std::initializer_list<value_type> init){clear();for(const auto& p:init)(*this)[p.first]=p.second;return *this;}
     std::size_t size()const{return count_;}bool empty()const{return !count_;}
     bool count(std::uint32_t r)const{return r<0x10000 && !(r&3) && (written[r/256]&(UINT64_C(1)<<((r/4)%64)));}
+    // The value of a present register, else fallback: exactly find(r)==end()?fallback:find(r)->second (const, no borrow).
+    [[gnu::always_inline]] std::uint32_t value_or(std::uint32_t r,std::uint32_t fallback)const{return count(r)?values[r/4].second:fallback;}
     // Mutable iteration can reach every slot.
     iterator begin(){expose_all();return {this,next(0)};}iterator end(){return {this,slots};}
     const_iterator begin()const{return {this,next(0)};}const_iterator end()const{return {this,slots};}

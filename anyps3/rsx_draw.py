@@ -58,8 +58,20 @@ CPP = r'''
 #if defined(__SSSE3__) && defined(__SSE4_1__)
 #include <immintrin.h>
 #endif
+#if defined(__SSE2__)
+#include <emmintrin.h>
+#endif
 namespace rsxdraw {
 using Vec4=std::array<float,4>;
+// Zero n words with 16-byte stores: the bytes of memset(p,0,4n). Kept a loop (no memset pattern): a memset of >= 2 KiB is
+// `rep stosb`, which valgrind counts per byte, and the per-draw blob is ~2.2 KiB.
+[[maybe_unused,gnu::optimize("no-tree-loop-distribute-patterns")]] static void zero_words(unsigned* p,std::size_t n){
+    std::size_t i=0;
+#if defined(__SSE2__)
+    for(;i+4<=n;i+=4)_mm_storeu_si128(reinterpret_cast<__m128i*>(p+i),_mm_setzero_si128());
+#endif
+    for(;i<n;++i)p[i]=0;
+}
 // Big-endian index decode: out[i]=raw+base, or UINT32_MAX for the restart value
 // when restart is enabled. largest/any cover the unrestarted raw values only,
 // for the caller's overflow check. Width is 2 or 4 bytes.
@@ -225,11 +237,10 @@ static unsigned logic_op(unsigned op,unsigned src,unsigned dst);
 ''' + GAPS_CPP + SWZ_CPP + r'''
 struct Reg { // gpu.registers access; unwritten registers hold reset value 0 (RPCS3 rsx_methods.cpp:137).
     const NativeRsx& gpu;
-    std::uint32_t operator()(std::uint32_t r)const{
-        auto it=gpu.registers.find(r);
-        return it==gpu.registers.end()?0u:it->second;
-    }
-    std::uint32_t get(std::uint32_t r,std::uint32_t fallback)const{auto it=gpu.registers.find(r);return it==gpu.registers.end()?fallback:it->second;}
+    // Inline presence test + slot load (RsxRegisters::value_or, the const find() result): a draw reads ~150 registers, almost
+    // all with constant addresses, so the bounds/alignment checks fold away instead of an out-of-line find per read.
+    [[gnu::always_inline]] std::uint32_t operator()(std::uint32_t r)const{return gpu.registers.value_or(r,0u);}
+    [[gnu::always_inline]] std::uint32_t get(std::uint32_t r,std::uint32_t fallback)const{return gpu.registers.value_or(r,fallback);}
 };
 
 static const std::vector<GuestMemory::Region>& rsx_maps(const PpuState& s){return s.memory.regions;}
@@ -1319,6 +1330,21 @@ static bool rsx_vertex_data_register(NativeRsx& gpu,std::uint32_t reg,std::uint3
     }
     return true;
 }
+namespace rsxdraw {
+// The 16 fragment texture units of one draw. Constructing and destroying 16 Textures per draw cost ~1k instructions; the
+// outermost draw of a thread reuses one array instead. Invariant: outside a draw every unit of that array is
+// default-constructed. The guard resets exactly the units the draw assigned (touched: every assignment site marks its unit
+// before assigning, the CPU path marks all 16) when the draw's scope ends, also by an exception, at the point where the
+// former local array was destroyed. A nested draw on the same thread gets its own array.
+struct DrawTextureUnits {
+    static std::array<Texture,16>& scratch(){static thread_local std::array<Texture,16> units;return units;}
+    static bool& busy(){static thread_local bool flag=false;return flag;}
+    std::unique_ptr<std::array<Texture,16>> nested;std::array<Texture,16>& units;unsigned touched=0;const bool outer;
+    DrawTextureUnits():nested(busy()?std::make_unique<std::array<Texture,16>>():nullptr),units(nested?*nested:scratch()),outer(!nested){if(outer)busy()=true;}
+    ~DrawTextureUnits(){if(!outer)return;for(unsigned u=0;u<16;++u)if(touched&(1u<<u)){units[u].~Texture();new(&units[u]) Texture();}busy()=false;}
+    DrawTextureUnits(const DrawTextureUnits&)=delete;DrawTextureUnits& operator=(const DrawTextureUnits&)=delete;
+};
+}
 static void rsx_execute_draw(PpuState& s){
     using namespace rsxdraw;
     GuestMemory::SplitReadScope split_reads(s.memory);
@@ -1412,7 +1438,7 @@ static void rsx_execute_draw(PpuState& s){
         if(draw.primitive==3 && n>1)lines.push_back({indices.back(),indices.front()});
         break;
     case 1:break; // expanded into squares after viewport/program state is known
-    case 5:{const auto at=triangles.size();triangles.resize(at+n/3);if(n/3)std::memcpy(triangles.data()+at,indices.data(),n/3*3*sizeof(std::uint32_t));}break;
+    case 5:{const auto* first=reinterpret_cast<const std::array<std::uint32_t,3>*>(indices.data());triangles.insert(triangles.end(),first,first+n/3);}break; // no zero-fill before the copy
     case 6:for(std::size_t i=0;i+2<n;++i)triangles.push_back(i&1?std::array<std::uint32_t,3>{indices[i+1],indices[i],indices[i+2]}:std::array<std::uint32_t,3>{indices[i],indices[i+1],indices[i+2]});break;
     case 7:case 10:for(std::size_t i=1;i+1<n;++i)triangles.push_back({indices[0],indices[i],indices[i+1]});break;
     case 8:for(std::size_t i=0;i+3<n;i+=4){triangles.push_back({indices[i],indices[i+1],indices[i+2]});triangles.push_back({indices[i],indices[i+2],indices[i+3]});}break;
@@ -1529,7 +1555,7 @@ static void rsx_execute_draw(PpuState& s){
     std::shared_ptr<const std::vector<FpInst>> fp_owner;if(color_target || alpha_test || depth_export)fp_owner=load_fragment_program_shared(s,reg);
     static const std::vector<FpInst> no_fragment_program;const auto& fp=fp_owner?*fp_owner:no_fragment_program;
     host_phase.next(HostStage::texture_metadata);
-    std::array<Texture,16> textures{};
+    DrawTextureUnits texture_units;auto& textures=texture_units.units;
     unsigned used_inputs=0;
 #ifdef ANYPS3_RSX_VK
     bool texture_context_validated=false;
@@ -1540,6 +1566,7 @@ static void rsx_execute_draw(PpuState& s){
         if((inst.s0&3)==1 || (inst.s1&3)==1 || (inst.s2&3)==1)used_inputs|=1u<<((inst.d>>13)&15);
         const unsigned opcode=((inst.d>>24)&63)|((inst.s1>>31)<<6);
         if(opcode==23 || opcode==24 || opcode==25 || opcode==47 || opcode==49){const unsigned unit=(inst.d>>17)&15;
+            texture_units.touched|=1u<<unit;
             if(!(reg.get(0x1a00+unit*32+0xc,0)>>31)){textures[unit].null_texture=true;continue;}
             if(!textures[unit].valid){
 #ifdef ANYPS3_RSX_VK
@@ -1806,6 +1833,7 @@ static void rsx_execute_draw(PpuState& s){
     }
     PerfTimer fallback_timer(fallback_time);
 #endif
+    texture_units.touched=0xffff;   // the CPU renderer below may edit any unit
     for(const auto& t:textures)if(t.null_texture)throw std::runtime_error("RSX FP samples a disabled texture unit on the CPU renderer");
     // Only the Vulkan graphics fragment path models 0x1d7c (sample mask, alpha-to-coverage/one).
     if(reg.get(0x1d7c,0xffff0000)!=0xffff0000)throw std::runtime_error("unsupported RSX multisample coverage/alpha control on the CPU renderer");
