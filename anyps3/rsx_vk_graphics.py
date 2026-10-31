@@ -378,12 +378,12 @@ private:
                 graphics_mark(b,MarkDraw);
             }
             b.dynamic_state=b.plane_draws.back().dynamic;b.dynamic_valid=true;
-            vkCmdEndRenderPass(b.command);graphics_mark(b,MarkPassEnd);::RsxPerfCounters::add(::RsxPerfCounters::pass_ends);
+            vkCmdEndRenderPass(b.command);graphics_pass_ended(b);graphics_mark(b,MarkPassEnd);::RsxPerfCounters::add(::RsxPerfCounters::pass_ends);
         }
         b.plane_draws.clear();b.plane_count=0;
     }
     static void graphics_close_pass_only(GraphicsBatch& b){
-        if(b.active_framebuffer){vkCmdEndRenderPass(b.command);graphics_mark(b,MarkPassEnd);b.active_framebuffer=VK_NULL_HANDLE;::RsxPerfCounters::add(::RsxPerfCounters::pass_ends);}
+        if(b.active_framebuffer){vkCmdEndRenderPass(b.command);graphics_pass_ended(b);graphics_mark(b,MarkPassEnd);b.active_framebuffer=VK_NULL_HANDLE;::RsxPerfCounters::add(::RsxPerfCounters::pass_ends);}
         if(!b.plane_draws.empty())graphics_replay_planes(b);
     }
     static void graphics_end_pass(GraphicsBatch& b){
@@ -411,6 +411,16 @@ private:
     static bool graphics_barrier_dedupe(){static const bool value=[]{const char* v=std::getenv("ANYPS3_RSX_BARRIER_DEDUPE");
         if(v && std::strcmp(v,"0") && std::strcmp(v,"1")){throw std::runtime_error("invalid ANYPS3_RSX_BARRIER_DEDUPE");}
         return !v || !std::strcmp(v,"1");}();return value;}
+    // ANYPS3_RSX_PASS_BARRIER=0: a full barrier right after a render pass end is still recorded (A/B). Default 1: the end of
+    // every generated pass counts as this batch's last full barrier. Exact: its begin dependency (EXTERNAL->0, src
+    // ALL_COMMANDS/MEMORY_WRITE) and its end dependency (0->EXTERNAL, ALL_GRAPHICS -> ALL_COMMANDS, dst MEMORY_READ|WRITE)
+    // chain through subpass 0: every command before the pass happens before every command after it, every earlier write
+    // is made available (begin) and all available writes visible to every later access (end) -- the same guarantees as a
+    // full barrier recorded after the end. Not with ANYPS3_RSX_BARRIER_HOST=1 (its HOST source is not in the dependencies).
+    static bool graphics_pass_barrier(){static const bool value=[]{const char* v=std::getenv("ANYPS3_RSX_PASS_BARRIER");
+        if(v && std::strcmp(v,"0") && std::strcmp(v,"1")){throw std::runtime_error("invalid ANYPS3_RSX_PASS_BARRIER");}
+        return !v || !std::strcmp(v,"1");}();return value;}
+    static void graphics_pass_ended(GraphicsBatch& b){if(graphics_pass_barrier() && !graphics_barrier_host())b.barrier_serial=graphics_command_serial().load(std::memory_order_acquire);}
     static void graphics_barrier(GraphicsBatch& b){
         graphics_end_pass(b);
         if(b.barrier_serial && b.barrier_serial==graphics_command_serial().load(std::memory_order_acquire) && graphics_barrier_dedupe()){graphics_work_add(WorkBarriersElided);return;}
@@ -1110,7 +1120,7 @@ public:
                 for(unsigned bit=0;bit<8;++bit){push.layers=bit;vkCmdSetStencilWriteMask(b.command,VK_STENCIL_FACE_FRONT_AND_BACK,1u<<bit);
                     vkCmdPushConstants(b.command,p.layout,VK_SHADER_STAGE_VERTEX_BIT|VK_SHADER_STAGE_FRAGMENT_BIT,0,sizeof(GraphicsPush),&push);
                     vkCmdDraw(b.command,3,1,0,0);graphics_mark(b,MarkDraw);}}
-            vkCmdEndRenderPass(b.command);graphics_mark(b,MarkPassEnd);::RsxPerfCounters::add(::RsxPerfCounters::pass_ends);
+            vkCmdEndRenderPass(b.command);graphics_pass_ended(b);graphics_mark(b,MarkPassEnd);::RsxPerfCounters::add(::RsxPerfCounters::pass_ends);
         }
         b.bound_graphics_pipeline=bits?v.ms_expand_bits->pipeline:p.pipeline;b.dynamic_valid=false;
         v.ms_current=false;++graphics_ms_expands;if(bits)++graphics_ms_bit_expands;

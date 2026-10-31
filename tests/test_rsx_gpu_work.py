@@ -170,7 +170,8 @@ class CommandSerialTests(unittest.TestCase):
 
 # (name, environment) per mode; check_modes compares their per-frame means.
 MODES = [('defaults', {}), ('marks', {'ANYPS3_RSX_VK_MARKS': '1', 'ANYPS3_PERF_REPORT': '1'}),
-         ('dedupe0', {'ANYPS3_RSX_BARRIER_DEDUPE': '0'}), ('pair0', {'ANYPS3_RSX_PAIR_BARRIERS': '0'})]
+         ('dedupe0', {'ANYPS3_RSX_BARRIER_DEDUPE': '0'}), ('pair0', {'ANYPS3_RSX_PAIR_BARRIERS': '0'}),
+         ('pass0', {'ANYPS3_RSX_PASS_BARRIER': '0'}), ('pair0pass0', {'ANYPS3_RSX_PAIR_BARRIERS': '0', 'ANYPS3_RSX_PASS_BARRIER': '0'})]
 
 
 def check_modes(test, means):
@@ -184,18 +185,24 @@ def check_modes(test, means):
     # the pending-kind mark the runs not followed by a barrier have none: their time goes to the next pass begin).
     test.assertEqual(means['marks']['mark_clear'], 8)
     test.assertEqual(means['marks']['mark_image'], 20)
-    # Barrier dedupe: per frame exactly one full barrier directly follows another with nothing between them (the unpack
-    # upload's final barrier and its visual rebuild's leading barrier); every other count is unchanged.
+    # Barrier dedupe (pass ends not counted as barriers): per frame exactly one full barrier directly follows another with
+    # nothing between them (the unpack upload's final barrier and its visual rebuild's leading barrier).
     test.assertEqual(means['dedupe0']['barriers_elided'], 0)
-    test.assertEqual(means['defaults']['barriers_elided'], 1)
-    test.assertEqual(means['defaults']['barriers'], means['dedupe0']['barriers'] - 1)
-    test.assertEqual(means['defaults']['pipeline_barriers'], means['dedupe0']['pipeline_barriers'] - 1)
+    test.assertEqual(means['pass0']['barriers_elided'], 1)
+    test.assertEqual(means['pass0']['barriers'], means['dedupe0']['barriers'] - 1)
+    test.assertEqual(means['pass0']['pipeline_barriers'], means['dedupe0']['pipeline_barriers'] - 1)
     # Grouped clears/copies: the visual halves of the three clears (scene colour, depth, post) and of the surface copy, and the
     # depth clear after the scene colour clear, record no barrier of their own: 5 fewer full barriers per frame.
-    test.assertEqual(means['defaults']['barriers'], means['pair0']['barriers'] - 5)
-    for key, value in means['pair0'].items():
-        if key not in ('barriers', 'pipeline_barriers') and not key.startswith('mark_'):
-            test.assertEqual(means['defaults'][key], value, key)
+    test.assertEqual(means['pass0']['barriers'], means['pair0pass0']['barriers'] - 5)
+    # A pass end is the batch's last full barrier: the leading barriers of the ops that directly follow draws (scene copy after
+    # the scene draws, upload after the copy's draws, unpack after the upload's draws, post clear after the unpack's draw)
+    # are not recorded: 4 per frame.
+    test.assertEqual(means['defaults']['barriers'], means['pass0']['barriers'] - 4)
+    test.assertEqual(means['defaults']['barriers_elided'], 5)
+    for mode in ('dedupe0', 'pair0', 'pass0', 'pair0pass0'):
+        for key, value in means[mode].items():
+            if key not in ('barriers', 'barriers_elided', 'pipeline_barriers') and not key.startswith('mark_'):
+                test.assertEqual(means['defaults'][key], value, mode + ' ' + key)
 
 
 if __name__ == '__main__':
