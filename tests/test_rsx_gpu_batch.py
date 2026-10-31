@@ -69,7 +69,42 @@ static void batch_oracle(unsigned samples){
  for(unsigned i=0;i<64*samples;++i)assert(word(again+i*4)==0xff0000ffu);
  std::printf("PASS batch samples=%u immutable generations, compatible pipelines, depth/stencil, exact queries and plane order\n",samples);
 }
-int main(){try{for(unsigned samples:{1u,2u,4u})batch_oracle(samples);}catch(const std::exception& e){std::fprintf(stderr,"BATCH TEST STOP %s\n",e.what());return 1;}}
+// Adjacent immutable slices share one copy region (graphics_upload_region): three 64-word state blocks, a reserved slice and
+// the draw blob. Independent expectations: the region list is the set of maximal runs of the returned offsets that touch
+// (computed here from the offsets and sizes), and the pixel the shader assembles from the last word of block 0, the first of
+// block 1 and the last of block 2 (R, G, B channels) plus a word of the reserved slice (alpha) is 0xffffffff on the device.
+static void merged_uploads(){
+ NativeVulkan vk;auto b=vk.graphics_batch(4*1024*1024);
+ NativeVulkan::GraphicsState s{};s.width=s.height=4;s.samples=1;s.colors=1;s.color=VK_FORMAT_R8G8B8A8_UNORM;s.scissor={{0,0},{4,4}};s.blend[0].colorWriteMask=15;
+ s.z.sType=VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+ auto color=vk.graphics_image(*b,s.color,4,4,1);std::array<std::shared_ptr<NativeVulkan::GraphicsImage>,4> images{color};
+ std::array<std::array<unsigned,64>,3> words{};for(unsigned k=0;k<3;++k)words[k].fill(0xffu<<(8*k));
+ const std::array<NativeVulkan::GraphicsStateBlock,3> blocks{{{1,words[0].data(),64},{1,words[1].data(),64},{1,words[2].data(),64}}};
+ assert(b->uploads.empty());vk.graphics_state_blocks(*b,blocks);
+ const auto slice=vk.graphics_reserve_upload(*b,100);std::memset(static_cast<char*>(b->map)+slice,0,100);
+ const unsigned alpha=0xff000000u;std::memcpy(static_cast<char*>(b->map)+slice+96,&alpha,4);
+ std::vector<std::pair<std::uint64_t,std::uint64_t>> slices;for(unsigned k=0;k<3;++k)slices.push_back({b->state_offsets[k]*4,256});slices.push_back({slice,100});
+ const std::string vs=R"GLSL(#version 450
+ void main(){vec2 p=vec2((gl_VertexIndex<<1)&2,gl_VertexIndex&2);gl_Position=vec4(p*2-1,0,1);}
+ )GLSL";
+ const std::string fs=R"GLSL(#version 450
+ layout(std430,binding=0) readonly buffer Data{uint w[];};layout(std430,binding=37) readonly buffer State{uint st[];};
+ layout(location=0) out vec4 c;
+ void main(){c=unpackUnorm4x8(st[w[0]+63u]|st[w[1]]|st[w[2]+63u]|st[w[3]]);}
+ )GLSL";
+ std::vector<unsigned> data(16,0);data[0]=b->state_offsets[0];data[1]=b->state_offsets[1];data[2]=b->state_offsets[2];data[3]=unsigned((slice+96)/4);
+ std::array<std::array<float,2>,4> positions{};for(auto& p:positions)p={.5f,.5f};
+ const auto at=vk.graphics_draw(*b,s,images,{},vs,fs,data,3,positions);slices.push_back({at,data.size()*4});
+ std::vector<VkBufferCopy> expect;for(const auto& [offset,size]:slices){
+  if(!expect.empty() && expect.back().srcOffset+expect.back().size==offset)expect.back().size+=size;else expect.push_back({offset,offset,size});}
+ assert(b->uploads.size()==expect.size() && expect.size()<slices.size());
+ for(std::size_t i=0;i<expect.size();++i)assert(b->uploads[i].srcOffset==expect[i].srcOffset && b->uploads[i].dstOffset==expect[i].dstOffset && b->uploads[i].size==expect[i].size);
+ const auto rgba=vk.graphics_transfer(*b,color,VK_IMAGE_ASPECT_COLOR_BIT,4);vk.graphics_finish(*b);
+ for(unsigned i=0;i<16;++i){unsigned v;std::memcpy(&v,static_cast<const char*>(b->map)+rgba+4*i,4);assert(v==0xffffffffu);}
+ assert(std::uint32_t(*reinterpret_cast<const std::uint32_t*>(static_cast<const char*>(b->map)+at+28))==0);
+ std::printf("PASS adjacent upload slices share copy regions (%zu regions for %zu slices), device words exact\n",expect.size(),slices.size());
+}
+int main(){try{for(unsigned samples:{1u,2u,4u})batch_oracle(samples);merged_uploads();}catch(const std::exception& e){std::fprintf(stderr,"BATCH TEST STOP %s\n",e.what());return 1;}}
 '''
 class GpuBatchTests(unittest.TestCase):
  def test_batch_fixed_oracles(self):
@@ -88,3 +123,4 @@ class GpuBatchTests(unittest.TestCase):
    if env.get('ANYPS3_REQUIRE_NVIDIA'):print(result.stdout,flush=True)
    self.assertNotIn('Validation Error',result.stdout+result.stderr);self.assertNotIn('Validation Warning',result.stdout+result.stderr)
    for samples in (1,2,4):self.assertIn(f'PASS batch samples={samples}',result.stdout)
+   self.assertIn('PASS adjacent upload slices share copy regions',result.stdout)
