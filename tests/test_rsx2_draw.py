@@ -225,7 +225,83 @@ static void ordered_bulk_writes_(){
   assert(lit==(rect[k][2]-rect[k][0])*(rect[k][3]-rect[k][1]) && outside==0);}
  std::puts("PASS ordered bulk guest writes (foreign writer thread, label handshakes) are seen completely and never overlap the vertex snapshot");
 }
-int main(){try{vertex_groups_();memory_reuse_();lease_vertex_reads_();ordered_bulk_writes_();}catch(const std::exception& e){std::fprintf(stderr,"FAIL %s\n",e.what());return 1;}
+// Vertex input reuse (ANYPS3_RSX_GEOMETRY_REUSE, Session::read_inputs): a repeated draw of unchanged vertex bytes is
+// served from the session's copy, and every kind of writer between two draws makes the next draw use the new bytes.
+// Oracle: the analytic rectangle of variant_bytes_(k) (each image lights exactly the pixels of the rectangle whose
+// bytes were in guest memory when it was drawn), independent of any renderer path. Each writer gets its own vertex
+// address, so the per-address rewrite limit never hides a writer behind the direct path.
+static bool lights_rect_(const std::vector<std::uint32_t>& image,unsigned k){
+ static const unsigned rect[4][4]={{0,0,16,8},{0,0,8,8},{8,0,16,4},{4,2,12,6}};unsigned lit=0,outside=0;
+ for(unsigned y=0;y<8;++y)for(unsigned x=0;x<16;++x){const bool in=x>=rect[k][0] && x<rect[k][2] && y>=rect[k][1] && y<rect[k][3];
+  const bool on=image[y*16+x]!=0;lit+=on;outside+=on && !in;}
+ return lit==(rect[k][2]-rect[k][0])*(rect[k][3]-rect[k][1]) && !outside;
+}
+static void geometry_reuse_(){
+ PpuState s;setup_draw(s,16,8,64,false);auto& m=s.memory;auto& R=s.rsx.registers;m.enable_concurrency();
+ s.rsx.renderer=std::make_unique<NativeVulkan>();auto session=std::make_unique<rsxgraphics::Session>(*s.rsx.renderer,s);session->observe();s.rsx.graphics_session=session.get();
+ setenv("ANYPS3_RSX_BACKEND","gpu",1);
+ assert(session->geometry_reuse);   // default 1
+ unsigned round=0;std::uint64_t at=0x70003000;
+ auto draw=[&]{R[0x210]=0x100000+round*0x4000;s.rsx.draw.primitive=8;s.rsx.draw.ranges={{0,4}};rsx_execute_draw(s);return round++;};
+ auto image=[&](unsigned r){session->flush();std::vector<std::uint32_t> out(128);GuestMemory::ObserverPause pause(m);
+  for(unsigned i=0;i<128;++i){out[i]=std::uint32_t(m.load(0xc0100000u+r*0x4000+4*i,4));}
+  return out;};
+ auto ppu=[&](unsigned k){const auto b=variant_bytes_(k);for(unsigned i=0;i<16;++i)m.store(at+4*i,4,(std::uint32_t(b[4*i])<<24)|(b[4*i+1]<<16)|(b[4*i+2]<<8)|b[4*i+3]);};
+ auto start=[&](unsigned k){at+=0x100;R[0x1680]=0x80000000u|unsigned(at-0x70000000u);ppu(k);};
+ auto key=[&](std::uint64_t address,unsigned size){return (address<<32)|size;};
+ // (a) PPU stores; the repeated unchanged draw is a hit (positions and uv groups).
+ start(0);auto r0=draw();const auto hits0=session->geometry_hits;auto r1=draw();
+ assert(session->geometry_hits==hits0+2 && session->geometry_entries.count(key(at,64)));
+ ppu(1);const auto rereads0=session->geometry_rereads;auto r2=draw();assert(session->geometry_rereads==rereads0+1);
+ assert(lights_rect_(image(r0),0) && lights_rect_(image(r1),0) && lights_rect_(image(r2),1));
+ // (b) SPU-DMA-style bulk write from a foreign thread (GuestMemory::transfer, the SPU PUT path), joined before the draw.
+ start(0);r0=draw();r1=draw();
+ std::thread([&]{const auto b=variant_bytes_(2);m.transfer(at,const_cast<std::uint8_t*>(b.data()),64,true);m.release_reader_slot();}).join();
+ r2=draw();assert(lights_rect_(image(r0),0) && lights_rect_(image(r1),0) && lights_rect_(image(r2),2));
+ // (c) RSX/GPU claim write into the cached span (ClaimTransfer: the blit/label commit path).
+ start(0);r0=draw();r1=draw();
+ {const auto range=m.range(at,64,true);rsxdraw::ClaimTransfer transfer(range,0,64);const auto b=variant_bytes_(3);transfer.write(0,b.data(),64);}
+ r2=draw();assert(lights_rect_(image(r1),0) && lights_rect_(image(r2),3));
+ // (d) raw-pointer write (RawPermit, the HLE/syscall buffer path): exposure of the writable pointer drops the entry.
+ start(0);r0=draw();r1=draw();
+ {GuestMemory::RawPermit raw(m);const auto range=m.range(at,64,true);auto* p=range.pointer(0,64);const auto b=variant_bytes_(1);std::memcpy(p,b.data(),64);}
+ r2=draw();assert(lights_rect_(image(r1),0) && lights_rect_(image(r2),1));
+ // (e) a write between two draws of one batch (no flush in between): each draw shows its own bytes.
+ start(0);r0=draw();r1=draw();ppu(2);r2=draw();assert(lights_rect_(image(r1),0) && lights_rect_(image(r2),2));
+ // (f) the vertex page becomes GPU-authoritative after the copy was taken (a dirty surface whose image holds variant 1):
+ // the draw's Range creation retires it into guest memory, which invalidates the copy.
+ start(0);r0=draw();r1=draw();assert(lights_rect_(image(r1),0));
+ {const std::uint64_t page=at&~std::uint64_t(4095);std::array<std::uint8_t,4096> bytes{};
+  {GuestMemory::ObserverPause pause(m);for(unsigned i=0;i<4096;++i)bytes[i]=std::uint8_t(m.load(page+i,1));}
+  const auto v=variant_bytes_(1);std::copy(v.begin(),v.end(),bytes.begin()+(at-page));
+  GuestMemory::RawPermit raw(m);
+  auto target=rsxdraw::bind_target(s,0xfeed0001,unsigned(page-0x70000000u),64,16,64,4);auto& surface=session->bind(target,16,64,1,8,false);
+  std::vector<std::uint8_t> texels(4096);for(unsigned i=0;i<4096;i+=4){texels[i]=bytes[i+1];texels[i+1]=bytes[i+2];texels[i+2]=bytes[i+3];texels[i+3]=bytes[i];}
+  s.rsx.renderer->graphics_transfer(*session->batch,surface.image,VK_IMAGE_ASPECT_COLOR_BIT,4,texels.data());session->dirty_surface(surface);}
+ r2=draw();assert(lights_rect_(image(r2),1));
+ // (g) unmap + map at the same address with a new backing holding variant 2: a new physical identity, never the copy.
+ start(0);r0=draw();r1=draw();
+ {auto it=std::find_if(m.regions.begin(),m.regions.end(),[](const auto& r){return r.base==0x70000000;});assert(it!=m.regions.end());
+  std::vector<std::uint8_t> bytes(it->bytes->begin(),it->bytes->end());const auto size=bytes.size();
+  {GuestMemory::ObserverPause pause(m);for(std::size_t i=0;i<size;++i)bytes[i]=std::uint8_t(m.load(0x70000000+i,1));}
+  const auto v=variant_bytes_(2);std::copy(v.begin(),v.end(),bytes.begin()+(at-0x70000000u));
+  m.allocated-=size;m.regions.erase(it);m.mapping_changed();m.map(0x70000000,size,6,bytes.data(),size);}
+ r2=draw();assert(lights_rect_(image(r1),0) && lights_rect_(image(r2),2));
+ // (h) a buffer rewritten before two draws is no longer cached: the direct path, still the current bytes.
+ start(0);r0=draw();ppu(1);r1=draw();ppu(2);r2=draw();assert(!session->geometry_entries.count(key(at,64)));
+ ppu(3);auto r3=draw();assert(!session->geometry_entries.count(key(at,64)));
+ assert(lights_rect_(image(r0),0) && lights_rect_(image(r1),1) && lights_rect_(image(r2),2) && lights_rect_(image(r3),3));
+ // (i) a format change at the same address (x,y only: 56-byte span) is its own entry and draws the same rectangle.
+ start(1);r0=draw();R[0x1740]=0x1022;r1=draw();r2=draw();R[0x1740]=0x1042;
+ assert(session->geometry_entries.count(key(at,56)) && lights_rect_(image(r0),1) && lights_rect_(image(r1),1) && lights_rect_(image(r2),1));
+ // (j) switch off (per-session copy of ANYPS3_RSX_GEOMETRY_REUSE=0): no entry, no hit.
+ session->flush();session.reset();session=std::make_unique<rsxgraphics::Session>(*s.rsx.renderer,s);session->observe();s.rsx.graphics_session=session.get();
+ session->geometry_reuse=false;start(3);r0=draw();r1=draw();assert(session->geometry_entries.empty() && !session->geometry_hits);
+ assert(lights_rect_(image(r0),3) && lights_rect_(image(r1),3));
+ session->flush();s.rsx.graphics_session=nullptr;
+ std::puts("PASS vertex input reuse: hits for unchanged bytes; PPU, foreign transfer, GPU claim, raw pointer, same-batch, GPU-owned, remap, rewrite limit, format change and switch-off draw the current bytes");
+}
+int main(){try{vertex_groups_();memory_reuse_();lease_vertex_reads_();ordered_bulk_writes_();geometry_reuse_();}catch(const std::exception& e){std::fprintf(stderr,"FAIL %s\n",e.what());return 1;}
 }
 '''
 
@@ -255,7 +331,7 @@ class Rsx2DrawTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 self.assertNotIn('Validation Error', result.stdout + result.stderr)
                 self.assertNotIn('Validation Warning', result.stdout + result.stderr)
-                self.assertEqual(result.stdout.count('PASS '), 4, result.stdout)
+                self.assertEqual(result.stdout.count('PASS '), 5, result.stdout)
 
 
 if __name__ == '__main__':

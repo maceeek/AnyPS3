@@ -333,7 +333,7 @@ struct DrawReadBatch {
         if(count==inputs.size())throw std::runtime_error("RSX draw input capacity");
         inputs[count++]={&range,destination};
     }
-    void read(std::uint8_t* output){
+    void read(std::uint8_t* output)const{
         if(!count)return;
         const auto& first=*inputs[0].range;
         if(!first.memory->concurrent()){
