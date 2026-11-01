@@ -654,3 +654,9 @@ CPU scaled blits (fast2/fix7-stutter). See knowledge/experiments/2026-10-23-fix7
   clears/copies — a hypothesis for the 12.6 µs native pass begins —, work counters, visual 2× MSAA load path default off,
   NVIDIA test pending). Derived worker ≈ 12.5 ms at 2000 draws; nothing measured in the game. Branch `ccr-b1a3987e-aypb5o`.
   [Record](knowledge/experiments/2026-10-31-cloud-hires6.md).
+- 2026-11-01: cloud round HIRES7 (no game/GPU): two Opus agents — SPU job speed (new synthetic SPU job through the production
+  lifter/runtime; DMA path without heap spans/locks and with a 16-byte atomic body, proven FP underflow lanes in the vector
+  path, BRSL chaining without the dispatcher: −16.6 % host Ir) and RSX worker work moved onto the draw recorder (batch
+  reset/begin, submit incl. the async DMA prelude, plane clears: worker draw unit −11.3 %). Full suite over HIRES6+7: no
+  regression. Derived worker ≈ 11.6 ms at 2000 draws; the main thread is the likely next limit; nothing measured in the game.
+  Branch `ccr-b1a3987e-aypb5o`. [Record](knowledge/experiments/2026-11-01-cloud-hires7.md).

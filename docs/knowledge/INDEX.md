@@ -10,6 +10,9 @@ runtime handoffs 198–246 on 2026-10-31.
 
 Each record describes its own snapshot, not the current runtime.
 
+- 2026-11-01 [cloud round HIRES7](experiments/2026-11-01-cloud-hires7.md): SPU job speed (synthetic job −16.6 % host Ir: DMA
+  path, FP underflow lanes, BRSL chaining) and RSX worker work moved onto the draw recorder (draw unit −11.3 %); full suite;
+  lavapipe/synthetic only.
 - 2026-10-31 [cloud round HIRES6](experiments/2026-10-31-cloud-hires6.md): RSX worker draw unit −9.9 % on a new game-shaped
   bench mode; exact GPU barrier cuts (17 → 10 per frame on a scale-2 stream), GPU mark attribution, work counters, visual 2×
   MSAA load path (default off, NVIDIA pending); lavapipe tests only.

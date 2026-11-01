@@ -14,16 +14,39 @@
   −24 % instructions per indexed draw, game-shaped −29 %; derived heavy-frame worker ≈ 13 ms only if the game's geometry
   is as static as the bench's) and HIRES6 (worker draw unit −9.9 % on the game-shaped bench, derived ≈ 12.5 ms at 2000
   draws / ≈ 14.5 ms at 2400; exact barrier cuts 17 → 10 per frame on a scale-2 stream; visual 2× MSAA load path default
-  off, NVIDIA test pending), all on branch `ccr-b1a3987e-aypb5o`.
+  off, NVIDIA test pending) and HIRES7 (SPU synthetic job −16.6 % host instructions; RSX worker draw unit −11.3 % by
+  moving batch reset/begin, submit and plane clears onto the draw recorder; derived worker ≈ 11.6 ms at 2000 draws /
+  ≈ 13.3 ms at 2400), all on branch `ccr-b1a3987e-aypb5o`. The main guest thread (~14.8 ms) is now the likely critical path.
 - **First next action on the PC:** one integration build of `ccr-b1a3987e-aypb5o`, QUIET alternating 1440p walks against
   1031/1034, then the same binary with `ANYPS3_RSX_VK_MARKS=1` (does the 12.6 µs "native pass begin" move to clears/copies?),
-  `ANYPS3_RSX_BARRIER_DEDUPE=0`, `ANYPS3_RSX_GEOMETRY_REUSE=0`, `test_rsx_visual_msaa` on NVIDIA, and the switch A/B runs
-  listed in the HIRES6, HIRES5, HIRES4 and HIRES3 sections below.
+  `ANYPS3_RSX_BARRIER_DEDUPE=0`, `ANYPS3_RSX_GEOMETRY_REUSE=0`, `ANYPS3_RSX_RECORDER_SUBMIT=0`, `ANYPS3_SPU_CHAIN=0`,
+  `test_rsx_visual_msaa` on NVIDIA, and the switch A/B runs listed in the HIRES7–HIRES3 sections below (walks with
+  `ANYPS3_RSX_RECORDER=1`, as the walking wrapper sets it).
 - **Builds cited as baselines or pending measurement:** 706 (60 FPS reference), 960 (= main f92681c at 1440p), 1031, 1034
   (1440p), 1002 and 1035 (to be measured, HIRES2). Which binaries still exist on the PC is not recorded after the
   2026-10-25 cleanup ([history](history/CURRENT-2026-10-21-to-10-25.md#local-data-cleanup--2026-10-25-user-request)); a
   further `local/ratchet` cleanup must run on the PC and keep these.
 - **Not verified:** physical gamepad acceptance at 1440p, stable 60 FPS at 1440p.
+
+## Cloud round HIRES7 — 2026-10-31/11-01 (cloud container: no game, no NVIDIA; branch `ccr-b1a3987e-aypb5o`)
+
+Two Opus agents on top of HIRES6 (8126bbc): SPU job speed for the main thread's SPU wait (H) and moving work off the RSX
+worker thread (I); every cut has a native test (independent oracle) and mutation checks; **no game build, run or FPS figure**.
+- **SPU (verified, callgrind on a new synthetic job through the production lifter and runtime, `bench/spu7_job_bench.py`):**
+  non-FP host instructions per job iteration 136,500 → **113,884 (−16.6 %)**; DMA path −47 % (`LineLocks` without heap
+  vectors, span-free concurrent writes, 16-byte atomic copy body on AVX); proven FP underflow lanes decided in the vector
+  path; BRSL calls between native functions chained without the dispatcher (`ANYPS3_SPU_CHAIN=1`, 0 disables). Native
+  AVX-512 time about −12 % (noisy here).
+- **RSX worker (verified, FIFO bench, recorder on):** game-shaped draw unit 37,399 → **33,155 Ir (−11.3 %)**, default mode
+  −9.5 %; the draw recorder takes ~5.2 k per unit (≈ 11.3 k, a third of the worker). Batch reset/begin, the submit (incl.
+  the async DMA-queue prelude NVIDIA uses) and plane clears run as queued recorder jobs (`ANYPS3_RSX_RECORDER_SUBMIT=1`,
+  0 = inline submit); only with `ANYPS3_RSX_RECORDER=1` (runtime default still off: 624b teal-frame question).
+- **Derived, unverified:** worker heavy frame ≈ 11.6 ms at 2000 draws, ≈ 13.3 ms at 2400; the main guest thread (~14.8 ms,
+  ~3.9 ms of it SPU wait) is the likely next critical path. A prepare-stage split of the worker (−22 % estimated) is designed,
+  not implemented.
+- **Suite (203 modules, covers HIRES6 + HIRES7):** 179 OK, no regression; one false positive in HIRES6's command-name scan
+  (a comment) fixed in d1177e9; three load-dependent failures pass alone (record).
+Record: [cloud HIRES7](experiments/2026-11-01-cloud-hires7.md).
 
 ## Cloud round HIRES6 — 2026-10-31 (cloud container: no game, no NVIDIA; branch `ccr-b1a3987e-aypb5o`)
 

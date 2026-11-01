@@ -1,5 +1,20 @@
 # Handoff to the next instance
 
+## Cloud round HIRES7 — 2026-10-31/11-01 (cloud container; goal NOT reached, nothing measured in the game)
+
+Branch `ccr-b1a3987e-aypb5o` (pushed): HIRES6 8126bbc + merges of `cloud/hires7-worker` (agent I, c6e633d) and
+`cloud/hires7-spu` (agent H, 7a98527), plus d1177e9 (comment fix for HIRES6's command-name scan). Read the
+[record](experiments/2026-11-01-cloud-hires7.md): the synthetic SPU job, the per-thread worker/recorder figures, the ownership
+rules of the recorder jobs, the SPU chaining and DMA exactness arguments, the prepare-stage design, the full suite.
+Both agents were stopped once by an API usage limit and resumed from their saved state. A follow-up round HIRES8 (generated
+SPU code; PPU main thread) started from d1177e9 in the same container.
+
+First next actions on the real PC: (1) one integration build; QUIET alternating 1440p walks with `ANYPS3_RSX_RECORDER=1` vs
+1031/1034 — rsx_worker and rsx-record ms/frame, µs/draw, main-thread ms and its SPU wait, GPU busy; image check with the
+recorder on; (2) same binary with `ANYPS3_RSX_RECORDER_SUBMIT=0` and with `ANYPS3_SPU_CHAIN=0`; (3) `ANYPS3_WAKETRACE` or the
+sampler: lane 0x2000200 ms/frame and its shares; (4) `tests.test_rsx_async_upload` / `tests.test_rsx_recorder` on NVIDIA
+(real DMA queue); (5) the HIRES6 items (marks walk, barrier A/B, MSAA test on NVIDIA).
+
 ## Cloud round HIRES6 — 2026-10-31 (cloud container; goal NOT reached, nothing measured in the game)
 
 Branch `ccr-b1a3987e-aypb5o` (pushed): HIRES5 46aa60f + merges of `cloud/hires6-gpu` (agent G, b577d49) and
