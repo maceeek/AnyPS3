@@ -1164,7 +1164,7 @@ struct GuestMemory {
                 // holds (LineLocks above), so no line changes state during the write. The versions and the touch counters are read
                 // only by reservation tokens and the reservation-lost filter / watches (observe, ReservationWatch), all sampled for a
                 // tracked line after its tracking (an untracked scalar store skips them the same way, ScalarWrite + bump_scalar).
-                if(write_tracked_only){bool any=false;for(auto i=first;i<=last && !any;++i)any=part.map->state->tracked[i].load(std::memory_order_acquire);if(!any)continue;}
+                if(write_tracked_only){const auto* tracked=part.map->state->tracked.get();bool any=false;for(auto i=first;i<=last && !any;++i)any=tracked[i].load(std::memory_order_acquire);if(!any)continue;}
                 for(auto i=first;i<=last;++i){if(versions[i]==UINT32_MAX)throw std::runtime_error("guest write version overflow");++versions[i];}
                 parallel->notifications->notify(part.pointer,part.size);
             }
