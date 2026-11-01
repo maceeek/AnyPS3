@@ -1140,10 +1140,26 @@ struct GuestMemory {
         const bool one_page=size && address<=UINT32_MAX && (address>>12)==((address+size-1)>>12);
         Lease lease(*this,address,size,write,true,true,one_page);
         if(concurrent()){
-            if(one_page && !write){read_admitted(address,buffer,size);return;}
-            const auto spans=parallel_spans(address,size,write,true);
-            if(write){LineLocks locks(*this,spans);bump_parallel(spans);for(const auto& part:spans){atomic_write(byte_pointer(part.pin,part.pointer),buffer,part.size);buffer+=part.size;publish_cpu_write(part.pointer,part.size);}}
-            else for(const auto& part:spans){atomic_read(byte_pointer(part.pin,part.pointer),buffer,part.size);buffer+=part.size;}
+            // Reads: read_admitted resolves every mapping (read permission) before the first destination byte, as parallel_spans did.
+            if(!write){read_admitted(address,buffer,size);return;}
+            // Writes: the spans of parallel_spans (same translations, permission/self-modifying-code checks and errors, all before
+            // any stripe, version or byte changes), but held without the span vector and its shared_ptr copies: the Lease pins the
+            // admitted map snapshot, whose Mapping owns the backing and is the BackingState parallel->backings names (publish_maps;
+            // entries are never replaced while a snapshot holds them), so versions are bumped through it without the hash lookup.
+            // Then, as before: all stripes, all version bumps (+ notifications), then the bytes span by span.
+            if(address>UINT32_MAX || size>UINT64_C(0x100000000)-address)throw std::runtime_error("guest transfer outside 32-bit space");
+            struct Part {std::uint8_t* pointer=nullptr;unsigned size=0;const ParallelMemory::Mapping* map=nullptr;};
+            SmallList<Part,4> parts;auto next=address;unsigned left=size;
+            while(left){const auto& map=translate_parallel(next,1,true);const auto& r=map.region;
+                const unsigned n=std::min<std::uint64_t>(left,r.bytes->size()-(next-r.base));
+                parts.push_back({r.bytes->data()+next-r.base,n,&map});next+=n;left-=n;}
+            LineLocks locks(*this,parts,0);
+            for(const auto& part:parts){
+                auto& versions=part.map->state->versions;const auto offset=static_cast<std::size_t>(part.pointer-part.map->region.bytes->data());
+                for(auto i=offset/128;i<=(offset+part.size-1)/128;++i){if(versions[i]==UINT32_MAX)throw std::runtime_error("guest write version overflow");++versions[i];}
+                parallel->notifications->notify(part.pointer,part.size);
+            }
+            for(const auto& part:parts){atomic_write(byte_pointer(part.map->region.bytes,part.pointer),buffer,part.size);buffer+=part.size;publish_cpu_write(part.pointer,part.size);}
             return;
         }
         if(address>UINT32_MAX || size>UINT64_C(0x100000000)-address)

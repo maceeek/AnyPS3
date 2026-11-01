@@ -93,6 +93,32 @@ int main(){struct {std::array<SpuRegister,128> gpr{};SpuRegister fpscr{};unsigne
         body += expect(3, (0, 0, 0x7f000000, 0))
         self.run_native(body)
 
+    def test_underflow_below_normal_range_is_positive_zero_with_flags(self):
+        # ISA v1.2 PDF pp.195-196, 208-214: a result below the smallest normal 2^-126 (after truncation) is +0 with the underflow
+        # flags (FPSCR word value 3 here); exactly 2^-126 stays; an exact zero raises nothing. Constants written out by hand:
+        # 2^-70=0x1c800000, 2^-100=0x0d800000, 2^-60=0x21800000, -2^-63=0xa0000000, 2^-63=0x20000000, 1.5*2^-126=0x00c00000.
+        body = 't.fpscr={};'
+        body += words(1, (0x1c800000, 0x0d800000, 0xa0000000, 0x1c800000))
+        body += words(2, (0x1c800000, 0x21800000, 0x20000000, 0x3f800000))
+        body += instruction(rr(0x2c6))                                                   # FM
+        body += expect(3, (0, 0, 0x80800000, 0x1c800000))
+        body += 'assert(spu_word(t.fpscr,0)==3 && spu_word(t.fpscr,1)==3 && spu_word(t.fpscr,2)==0 && spu_word(t.fpscr,3)==0);'
+        body += 't.fpscr={};'
+        body += words(1, (0x00c00000, 0x00c00000, 0x80c00000, 0x3f800000))
+        body += words(2, (0x80800000, 0x80c00000, 0x00800000, 0x3f800000))
+        body += instruction(rr(0x2c4))                                                   # FA
+        body += expect(3, (0, 0, 0, 0x40000000))
+        body += 'assert(spu_word(t.fpscr,0)==3 && spu_word(t.fpscr,1)==0 && spu_word(t.fpscr,2)==3 && spu_word(t.fpscr,3)==0);'
+        # FMA: 2^-70*2^-70+0 underflows; 1*2^-125 - 2^-125*(1+2^-23) = -2^-148 underflows; 2^-100*2^-20 - 2^-120 is an exact zero.
+        body += 't.fpscr={};'
+        body += words(1, (0x1c800000, 0x3f800000, 0x0d800000, 0x3f800000))
+        body += words(2, (0x1c800000, 0x01000000, 0x35800000, 0x3f800000))
+        body += words(3, (0x00000000, 0x81000001, 0x83800000, 0x3f800000))
+        body += instruction(rrr(0xe))
+        body += expect(4, (0, 0, 0, 0x40000000))
+        body += 'assert(spu_word(t.fpscr,0)==3 && spu_word(t.fpscr,1)==3 && spu_word(t.fpscr,2)==0 && spu_word(t.fpscr,3)==0);'
+        self.run_native(body)
+
     def test_fused_single_one_rounding_unbounded_product_and_aliases(self):
         body = ''
         # (1+2^-23)*(1-2^-23)-1 = -2^-46, lost with intermediate rounding.

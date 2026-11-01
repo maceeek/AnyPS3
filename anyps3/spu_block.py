@@ -33,6 +33,7 @@ from . import spu_simd
 
 MAX_BLOCK = 64
 MAX_FUNCTION = 1024
+SPU_CHAIN = True  # emit chained BRSL calls (spu_chain_call); ANYPS3_SPU_CHAIN=0 disables them at run time
 REGION = 64  # validation granule (bytes) of the per-call validated-region bitmap
 _EFFECT_TOKENS = ('spu_stop(', 'channel', 'throw', 'spu_dynamic_fault', 'spu_external_event', 'spu_interrupt_return')
 _INDIRECT = (0x1a8, 0x1a9, 0x128, 0x129, 0x12a, 0x12b, 0x1ab, 0x1aa)
@@ -309,10 +310,12 @@ def address_taken(insns):
     return {v for v in ((x.word >> 7) & 0x3ffff for x in insns if x.word >> 25 == 0x21) if not v & 3}
 
 
-def emit_function(name, code_name, lo, words, lift_parts, templates=True, insns=None, extra_leaders=()):
+def emit_function(name, code_name, lo, words, lift_parts, templates=True, insns=None, extra_leaders=(), chain=None):
     """One native function for source bytes [lo, lo+4*len(words)) at original address lo.
 
-    extra_leaders: direct branch targets and source leaders known from all sources."""
+    extra_leaders: direct branch targets and source leaders known from all sources.
+    chain: {target: native function} for BRSL targets outside this function that one native function of the same source
+    serves (generate_blocks); such a call runs that function nested (spu_chain_call) instead of returning to the dispatcher."""
     hi = lo + 4 * len(words)
     if insns is None:
         insns = [decode(lo + 4 * i, w, lift_parts) for i, w in enumerate(words)]
@@ -329,7 +332,10 @@ def emit_function(name, code_name, lo, words, lift_parts, templates=True, insns=
     if current:
         blocks.append(current)
     starts = {b[0].pc for b in blocks}
-    used_dispatch = any(b[-1].kind == 'ind' for b in blocks)
+    chain = chain or {}
+    chained = lambda x: x.kind == 'br' and x.op >> 2 == 0x66 and x.target not in starts and x.target in chain
+    callees = sorted({chain[b[-1].target] for b in blocks if chained(b[-1])})
+    used_dispatch = any(b[-1].kind == 'ind' for b in blocks) or bool(callees)
     flen = 4 * len(words)
     if flen > 64 * REGION:
         raise AnyPS3Error('SPU native function exceeds the validation bitmap')
@@ -338,7 +344,8 @@ def emit_function(name, code_name, lo, words, lift_parts, templates=True, insns=
     # regions of this function whose LS bytes were proven equal to the translated bytes since the last event that
     # can change LS (a store of this function into its own range, a channel/effect instruction).  Both live in
     # registers; block.executed is only synchronised where the scope or a callee can observe it.
-    lines = [f'void {name}(PpuState& s,NativeSpu::Thread& t,std::uint8_t* ls) {{',
+    lines = [f'void {callee}(PpuState&,NativeSpu::Thread&,std::uint8_t*);' for callee in callees]
+    lines += [f'void {name}(PpuState& s,NativeSpu::Thread& t,std::uint8_t* ls) {{',
              'auto& g=t.gpr;(void)g;(void)s;SpuBlockScope block(t);const std::uint32_t delta=t.reloc_delta;'
              f'const std::uint8_t* const code={code_name};',
              # flo = LS address of the function start in this call.  With a relocation the function's window
@@ -425,7 +432,14 @@ def emit_function(name, code_name, lo, words, lift_parts, templates=True, insns=
             if last.op >> 2 in (0x62, 0x66):  # BRASL/BRSL link: word 0 = next actual address
                 values.set(last.word & 127, 'b', f'spu_vlink({here(last.pc + 4)}&0x3fffc)')
             values.flush()
-            if last.kind == 'br':
+            if chained(last):
+                # Chained call (spu_chain_call): the callee runs nested with this function's relocation; when it returns with
+                # budget left and no control exit, this function continues at the new t.pc as a fresh dispatch would: the
+                # local switch (continuation block or return), every region revalidated (vm=0), the budget re-derived.
+                lines.append(f'ex+={n};block.executed=ex;t.pc={_relocated(last.target)};'
+                             f'if(!spu_chain_call(s,t,ls,{chain[last.target]},delta,block))return;'
+                             'ex=0;vm=0;lim=spu_block_lim(t,block);goto spu_dispatch_local;}')
+            elif last.kind == 'br':
                 lines.append(f'ex+={n};{edge(last.target)}}}')
             else:
                 lines.append(f'block.executed=ex+{n};t.pc=0x{last.target:x}u;return;}}')
@@ -475,6 +489,7 @@ def generate_blocks(images, overlays, lift_parts):
     functions = []
     ranges = []
     chunks = {}
+    chunk_sources = {}
     decoded = {}
     sources = []
     own_targets = []
@@ -508,6 +523,28 @@ def generate_blocks(images, overlays, lift_parts):
                 chunks[key][1].update(leaders)
             else:
                 chunks[key] = (insns[at // 4:at // 4 + MAX_FUNCTION], set(leaders))
+            chunk_sources.setdefault(key, []).append((base, payload))
+    # Chained calls: a BRSL whose target lies outside its own chunk but inside its source, where every source this chunk was
+    # translated from has the same chunk at the target (deduplicated chunks may come from several sources). The target is a
+    # leader of that chunk (a direct target of the source). Only a speed hint: the callee validates its bytes on entry and a
+    # mismatch falls back to the generic dispatcher (spu_chain_call).
+    names = {key: f'spu_fn_{number}' for number, key in enumerate(chunks)}
+    def chain_map(key, insns):
+        lo, data = key
+        result = {}
+        for x in insns:
+            if x.kind != 'br' or x.op >> 2 != 0x66 or lo <= x.target < lo + len(data):
+                continue
+            homes = set()
+            for base, payload in chunk_sources[key]:
+                if not base <= x.target < base + len(payload):
+                    homes = None
+                    break
+                at = (x.target - base) // (4 * MAX_FUNCTION) * (4 * MAX_FUNCTION)
+                homes.add((base + at, payload[at:at + 4 * MAX_FUNCTION]))
+            if homes is not None and len(homes) == 1:
+                result[x.target] = names[homes.pop()]
+        return result
     for number, ((lo, data), (insns, leaders)) in enumerate(chunks.items()):
         code = f'spu_code_{number}'
         name = f'spu_fn_{number}'
@@ -515,7 +552,8 @@ def generate_blocks(images, overlays, lift_parts):
         literal = '\n'.join('"' + ''.join(f'\\x{b:02x}' for b in data[i:i + 64]) + '"'
                             for i in range(0, len(data), 64))
         text = (f'extern const std::uint8_t {code}[];\nconst std::uint8_t {code}[]=\n{literal};\n'
-                + emit_function(name, code, lo, words, lift_parts, insns=insns, extra_leaders=leaders))
+                + emit_function(name, code, lo, words, lift_parts, insns=insns, extra_leaders=leaders,
+                                chain=chain_map((lo, data), insns) if SPU_CHAIN else None))
         starts = emit_function.last_starts
         bits = bytearray((len(words) + 7) // 8)
         for pc in starts:
@@ -565,6 +603,8 @@ struct SpuSlow {std::uint64_t vm;std::uint32_t lim,ok;};
 // Slow tier of the per-block guard (see spu_block.py): block.executed is already synchronised by the caller.
 SpuSlow spu_block_slow(PpuState&,NativeSpu::Thread&,SpuBlockScope&,const std::uint8_t* ls,unsigned flo,const std::uint8_t* code,unsigned flen,
                        unsigned a,unsigned offset,unsigned length,unsigned count,unsigned lim,std::uint64_t vm,std::uint64_t mask);
+// Chained BRSL into another native function (spu_block.py chain_map); true: the caller continues at t.pc (see DISPATCH_CPP).
+bool spu_chain_call(PpuState&,NativeSpu::Thread&,std::uint8_t*,SpuNativeFunction,std::uint32_t,SpuBlockScope&);
 // Number of instructions a call may retire before the exact block-entry guard must run again: the soft/hard
 // budget (scope.fast) and, with interrupts enabled, the distance to the next interrupt sampling point.  Equivalent
 // to the conditions `executed<fast && (!interrupts_enabled || steps+executed<irq_next)` the guard used per block.
@@ -666,6 +706,37 @@ static void spu_note_entry(NativeSpu::Thread& t,std::uint32_t pc){
         const auto v=table[h].load(std::memory_order_relaxed);
         if(!v || (v>>32)==pc+1){table[h].store((std::uint64_t(pc+1)<<32)|((v&0xffffffffu)+1),std::memory_order_relaxed);break;}
     }
+}
+// SPU function chaining (HIRES7): a BRSL into another native function of the same source runs that function nested instead of
+// returning to spu_step and re-entering through spu_native_enter. Step by step the same as the generic path:
+//  * the caller's retired instructions are published first (SpuBlockScope::commit = what its return does), and the callee is
+//    entered only when spu_step would enter anything: budget left, below the step limit, no control exit; otherwise the caller
+//    returns as before;
+//  * the callee is entered through spu_native_call with the caller's relocation (t.pc = target already set), so it validates its
+//    own bytes; which matching native function serves a PC is a hint in both paths (each validates exactly the bytes it executes);
+//  * callee without progress (miss, decline, interrupt redirect): the caller returns and the generic dispatcher handles t.pc;
+//  * callee with progress: the caller continues only under spu_step's conditions for its next entry and an unchanged control
+//    generation, with its scope re-derived as a fresh entry would (rearm), the caller's relocation restored and miss/decline
+//    cleared; the generated code drops every validated region (the callee may have written LS) and dispatches t.pc through its
+//    local switch (the continuation after the BRSL, another block of this function, or a return to the dispatcher);
+//  * exceptions (STOP, blocking channel, faults) unwind through the caller, whose scope holds nothing uncommitted;
+//  * nesting is bounded (SPU_CHAIN_DEPTH host frames, then the generic return); ANYPS3_SPU_CHAIN=0 disables it (A/B).
+static constexpr unsigned SPU_CHAIN_DEPTH=16;
+static thread_local std::uint64_t spu_chain_returns=0;   // TEST HOOK: chained calls whose caller continued
+static const bool spu_chain_enabled=[]{const char* v=std::getenv("ANYPS3_SPU_CHAIN");
+    if(v && std::strcmp(v,"0") && std::strcmp(v,"1")){throw std::runtime_error("invalid ANYPS3_SPU_CHAIN");}return !v || !std::strcmp(v,"1");}();
+bool spu_chain_call(PpuState& s,NativeSpu::Thread& t,std::uint8_t* ls,SpuNativeFunction fn,std::uint32_t delta,SpuBlockScope& block){
+    block.commit();
+    if(!spu_chain_enabled || t.chain_depth>=SPU_CHAIN_DEPTH || !t.block_budget || t.steps>=t.block_limit || t.block_control_exit || t.block_trace)return false;
+    struct Depth {unsigned& depth;explicit Depth(unsigned& d):depth(d){++depth;}~Depth(){--depth;}} nested(t.chain_depth);
+    t.block_decline=false;
+    if(__builtin_expect(spu_stats_on,0))spu_note_entry(t,t.pc);
+    const auto before=t.steps;
+    spu_native_call(s,t,ls,fn,delta);
+    if(t.steps==before || !t.block_budget || t.steps>=t.block_limit || t.block_control_exit || t.control_generation!=block.generation)return false;
+    t.reloc_delta=delta;t.dynamic_miss=false;t.block_decline=false;block.rearm();
+    if(__builtin_expect(spu_stats_on,0))spu_note_entry(t,t.pc);
+    ++spu_chain_returns;return true;
 }
 // True when native code made progress or changed state; false: interpret.
 static bool spu_native_enter(PpuState& s,NativeSpu::Thread& t,std::uint8_t* ls){

@@ -630,11 +630,13 @@ __attribute__((noinline)) static __m128 spu_single_sse(__m128 a,__m128 b,unsigne
             const auto x=spu_word(a,i),y=spu_word(b,i),z=spu_word(c,i),r=result[i],m=r&0x7fffffffu;
             // Denormal/extended inputs need DIFF. IEEE RZ overflow can also
             // produce 0x7f7fffff, so include that boundary in the slow path.
-            bool safe=!spu_single_diff(x) && !spu_single_diff(y) && (kind<3 || !spu_single_diff(z));
+            const bool ordinary=!spu_single_diff(x) && !spu_single_diff(y) && (kind<3 || !spu_single_diff(z));
             const bool exact_zero=kind<2?((x&0x7fffffff)==(y&0x7fffffff)):
                 ((!(x&0x7fffffff) || !(y&0x7fffffff)) && (kind==2 || !(z&0x7fffffff)));
-            safe=safe && ((m>=0x00800000u && m<0x7f7fffffu) || (!m && exact_zero));
-            if(safe){spu_word(out,i,m?r:0);if(spu_profile_on)++spu_profile.fp_fast_lanes;}
+            if(ordinary && ((m>=0x00800000u && m<0x7f7fffffu) || (!m && exact_zero))){spu_word(out,i,m?r:0);if(spu_profile_on)++spu_profile.fp_fast_lanes;}
+            // Proven underflow (as spu_vfp): ordinary inputs and a nonzero RZ result below 2^-126, or a zero FM product of
+            // nonzero inputs, is +0 with flags 3 in spu_single_round (exponent < -126).
+            else if(ordinary && ((m && m<0x00800000u) || (kind==2 && !m && !exact_zero))){spu_word(out,i,0);spu_fp_flag(fpscr,i,3);if(spu_profile_on)++spu_profile.fp_fast_lanes;}
             else slow|=1u<<i;
         }
         }
@@ -980,7 +982,13 @@ struct SpuBlockScope {
     explicit SpuBlockScope(NativeSpu::Thread& t):thread(t),limit(static_cast<unsigned>(std::min<std::uint64_t>(t.block_budget,t.block_limit-t.steps))),
         hard(static_cast<unsigned>(std::min<std::uint64_t>(t.block_limit-t.steps,UINT32_MAX))),fast(t.block_exact?0u:std::min(limit,hard>=64u?hard-63u:0u)),
         generation(t.control_generation),origin(HostAccessOrigin::Engine::Spu,t.id,t.pc,&t.steps,&executed){}
-    ~SpuBlockScope(){if(thread.control_generation==generation){thread.steps+=executed;thread.published_steps.value.store(thread.steps,std::memory_order_relaxed);thread.block_budget-=std::min(executed,thread.block_budget);}}
+    ~SpuBlockScope(){commit();}
+    // Publish the instructions retired so far exactly as the destructor does (used before a chained call, spu_chain_call).
+    void commit(){if(thread.control_generation==generation){thread.steps+=executed;thread.published_steps.value.store(thread.steps,std::memory_order_relaxed);thread.block_budget-=std::min(executed,thread.block_budget);}executed=0;}
+    // The budget fields a fresh scope would compute now (the caller continues after a chained call as a new entry would).
+    void rearm(){limit=static_cast<unsigned>(std::min<std::uint64_t>(thread.block_budget,thread.block_limit-thread.steps));
+        hard=static_cast<unsigned>(std::min<std::uint64_t>(thread.block_limit-thread.steps,UINT32_MAX));fast=thread.block_exact?0u:std::min(limit,hard>=64u?hard-63u:0u);
+        generation=thread.control_generation;}
 };
 
 // SPU ISA v1.2 PDF pp.178-181,251-252; Cell BE Handbook v1.1 pp.470-471.
