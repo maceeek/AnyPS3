@@ -48,7 +48,8 @@
     `test_rsx_perf_decode`, `test_rsx_pipeline_cache`;
   - compile limits too short for the container (vary with load): `test_program`, `test_services`, `test_native_audio*`,
     `test_spufast_blocks`, `test_vulkan`.
-- **HIRES9 suite result:** running at the time of the cleanup commit (117 of 204 modules, failures identical to HIRES7); the final result is in the [HIRES9 record](experiments/2026-11-01-cloud-hires9.md#regression-tests).
+- **HIRES9 suite result** (merge e896fed, 204 modules): 188 OK, 16 failing, all 16 identical to HIRES7 and all in the list above;
+  8 HIRES7 failures now pass. Details: [HIRES9 record](experiments/2026-11-01-cloud-hires9.md#regression-tests).
 
 ## Template for an experiment or handoff
 

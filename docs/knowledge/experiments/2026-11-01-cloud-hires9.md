@@ -165,10 +165,27 @@ Native (L, `-march=native`, median of 3 alternating rounds, 4 shared vCPUs; nois
     list is covered by the full suite below.
   - All mutation checks were killed by behavioural assertions.
 - **Full suite on the merge e896fed** (204 modules, `git archive` snapshot, one process per module, 3 in parallel,
-  `nice -n 5`, `ANYPS3_REQUIRE_VULKAN=1`, lavapipe): **running when this record was committed.** At 117 of 204 modules
-  every failure (`test_ppu_fp_lazy`, `test_ppuperf3`, `test_present_window`, `test_program`, `test_rsx_fp_cache`,
-  `test_rsx_perf_decode`) had the same failing tests and error lines as in the HIRES7 suite (mechanical comparison). The
-  final result follows in the next commit.
+  `nice -n 5`, `ANYPS3_REQUIRE_VULKAN=1`, lavapipe; ~8.9 h of module time, finished 2026-11-01 21:48 UTC): **188 OK,
+  16 failing, no regression found.**
+  - **All 16 fail exactly as in the HIRES7 suite** (same failing tests and the same FAIL/ERROR lines, compared mechanically
+    with `cmp_fail.sh`). They are the container-only modules listed in [HANDOFF](../HANDOFF.md):
+    - `local/` tools missing: `test_sample_profile`, `test_sample_profile_integration`, `test_spudyn_profile`,
+      `test_spuperf2_capture`;
+    - SDL offscreen: `test_present_window`;
+    - GCC 13 `-Werror`: `test_ppu_fp_lazy`, `test_ppuperf3`, `test_savedata_vsh`, `test_rsx_residency`;
+    - lavapipe cache asserts: `test_rsx_fp_cache`, `test_rsx_sampler_identity`, `test_rsx_resident_sampler`,
+      `test_rsx_perf_decode`, `test_rsx_pipeline_cache`;
+    - compile limits: `test_program`, `test_services`.
+  - **8 HIRES7 failures now pass** with unchanged limits: `test_spufast_blocks`, `test_native_audio`,
+    `test_native_audio_full`, `test_vulkan` (compile limits in HIRES7), `test_rsx_gpu_work`, `test_rsx_perf`,
+    `test_spu_pool_poll`, `test_spuperf2_simd` (load-dependent in HIRES7). They vary with container load, so this is not
+    evidence of a fix.
+  - **Agent N's area:** all 20 modules it had not run are OK (`test_par2/4/6/8`, `test_spu`, `test_spu_gaps`,
+    `test_spudyn_*`, `test_spufast2_blocks`, `test_spufast3_leaders`, `test_spuperf2_blocks`, `test_spureloc_split`,
+    `test_spu_pool_quantum`, `test_spu_pool_poll`, `test_mainslack_reloc_index`, `test_guest_memory_rsxmem`,
+    `test_rsx_subword_alias`, `test_rsx_gpu_batch`).
+  - The one module new since HIRES7, `test_ppu_ret_predict`, is OK.
+  - Not covered: anything that needs the game, the PC's NVIDIA driver or `local/`; the PC's suite remains the authority.
 
 ## Risks
 
