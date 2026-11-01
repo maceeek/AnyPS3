@@ -142,7 +142,9 @@ public:
         // Batch lifecycle jobs share the ring (FIFO with the draws): Reset = the recorder-owned half of graphics_reset
         // (graphics_reset_commands), Begin = the command-buffer half of a front-half graphics_begin (graphics_begin_commands).
         // Submit = graphics_submit_commands for the timeline value in `at` (graphics_submit booked it on the frontend).
-        enum Kind:unsigned char{Draw,Reset,Begin,Submit};Kind kind=Draw;
+        // Clear = the commands of a plane clear (graphics_clear_commands): image `depth`, the clear_* values.
+        enum Kind:unsigned char{Draw,Reset,Begin,Submit,Clear};Kind kind=Draw;
+        VkClearColorValue clear_color{};float clear_depth=0;unsigned clear_stencil=0;VkImageAspectFlags clear_aspects=0;bool clear_lead=true;
         void reset(){batch=nullptr;pipeline.reset();ms_pipeline.reset();depth=nullptr;colors={};textures={};raw_textures={};kind=Draw;}
     };
     struct GraphicsBatch {
@@ -987,7 +989,20 @@ public:
         if(lead){graphics_barrier(b);return;}
         if(b.active_framebuffer || !b.visual_jobs.empty() || !b.plane_draws.empty())throw std::runtime_error("RSX grouped clear/copy without its leading barrier");
     }
-    void graphics_clear_image(GraphicsBatch& b,const std::shared_ptr<GraphicsImage>& image,const VkClearColorValue& color,float depth,unsigned stencil,VkImageAspectFlags aspects,bool lead=true){b.sync();
+    // With the draw recorder a plane clear (no visual-MSAA working images: graphics_visual_msaa() off) is a Clear job: the frontend
+    // begins the batch (front), pins the image before the job names it, keeps its bookkeeping (counters, visual taint) and queues the
+    // clear commands (leading barrier/group check, vkCmdClear*) in ring order with the draws, so a clear no longer waits for the
+    // recorder to drain. The paired visual clear is the next job (lead=false), exactly as the inline order. Inline otherwise.
+    void graphics_clear_image(GraphicsBatch& b,const std::shared_ptr<GraphicsImage>& image,const VkClearColorValue& color,float depth,unsigned stencil,VkImageAspectFlags aspects,bool lead=true){
+        if(draw_recorder && !in_recorder_thread() && !graphics_visual_msaa() && !b.queries && !b.marks && !b.inline_draws){
+            graphics_begin(b,true);graphics_work_add(WorkClearTexels,std::uint64_t(image->width)*image->height*image->layers);b.pins.push_back(image);
+            auto& job=recorder_slot();job.batch=&b;job.kind=DrawJob::Clear;job.depth=image.get();job.clear_color=color;job.clear_depth=depth;job.clear_stencil=stencil;
+            job.clear_aspects=aspects;job.clear_lead=lead;b.pending_jobs.fetch_add(1,std::memory_order_relaxed);recorder_publish();
+            ++graphics_full_clears;graphics_visual_taint(*image,0,true);
+            if(image->visual)graphics_clear_image(b,image->visual,color,depth,stencil,aspects,false);
+            return;
+        }
+        b.sync();
         GraphicsSite site(SiteClear);
         graphics_begin(b);graphics_group_lead(b,lead||!graphics_pair_barriers());
         // Visual MSAA: a clear of every aspect makes the working image current (its planes are then stale); a partial clear
@@ -1008,6 +1023,14 @@ public:
         else vkCmdClearColorImage(b.command,image->image,VK_IMAGE_LAYOUT_GENERAL,&color,1,&range);
         b.pins.push_back(image);++graphics_full_clears;graphics_visual_taint(*image,0,true);
         if(image->visual)graphics_clear_image(b,image->visual,color,depth,stencil,aspects,false);
+    }
+    // Recorder half of a queued plane clear (graphics_clear_image): the same commands as its inline path.
+    void graphics_clear_commands(DrawJob& j){
+        GraphicsSite site(SiteClear);auto& b=*j.batch;const auto& image=*j.depth;graphics_recorder_clears.fetch_add(1,std::memory_order_relaxed);
+        graphics_group_lead(b,j.clear_lead||!graphics_pair_barriers());
+        const VkImageSubresourceRange range{j.clear_aspects,0,1,0,image.layers};
+        if(image.depth){const VkClearDepthStencilValue value{j.clear_depth,j.clear_stencil};vkCmdClearDepthStencilImage(b.command,image.image,VK_IMAGE_LAYOUT_GENERAL,&value,1,&range);}
+        else vkCmdClearColorImage(b.command,image.image,VK_IMAGE_LAYOUT_GENERAL,&j.clear_color,1,&range);
     }
     // ANYPS3_RSX_PAIR_BARRIERS=0: the visual half of a clear/copy and later clears of one guest clear record their own leading
     // barrier again (former behaviour, A/B). Default 1 (graphics_group_lead).
@@ -1283,7 +1306,7 @@ public:
     // TEST HOOK (tests/test_rsx_recorder.py): the Nth recorded draw (0 = off) throws on the recorder thread.
     std::atomic<unsigned> graphics_test_recorder_fault{0};
     std::atomic<bool> graphics_test_recorder_reset_fault{false};   // TEST HOOK: the next Reset job throws on the recorder thread
-    std::atomic<std::uint64_t> graphics_recorder_resets{0},graphics_recorder_begins{0},graphics_recorder_submits{0};   // lifecycle jobs run on the recorder thread
+    std::atomic<std::uint64_t> graphics_recorder_resets{0},graphics_recorder_begins{0},graphics_recorder_submits{0},graphics_recorder_clears{0};   // lifecycle jobs run on the recorder thread
     std::atomic<unsigned> graphics_test_recorder_submit_delay_ms{0};   // TEST HOOK: the recorder sleeps before every Submit job (ordering tests)
     bool graphics_recorder_submit=true;   // ANYPS3_RSX_RECORDER_SUBMIT (default 1): graphics_submit queues a Submit job (see graphics_submit)
     std::uint64_t recorder_clock=0;   // LRU stamps of the batch-local caches, recorder-thread only
@@ -1314,6 +1337,7 @@ public:
                                 if(owner->graphics_test_recorder_reset_fault.exchange(false,std::memory_order_relaxed))throw std::runtime_error("RSX draw recorder reset test fault");
                                 owner->graphics_reset_commands(*job.batch);}
                             else if(job.kind==DrawJob::Begin)owner->graphics_begin_commands(*job.batch);
+                            else if(job.kind==DrawJob::Clear)owner->graphics_clear_commands(job);
                             else if(job.kind==DrawJob::Submit){
                                 if(const auto ms=owner->graphics_test_recorder_submit_delay_ms.load(std::memory_order_relaxed))std::this_thread::sleep_for(std::chrono::milliseconds(ms));
                                 owner->graphics_submit_commands(*job.batch,job.at);}

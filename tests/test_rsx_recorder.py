@@ -66,15 +66,15 @@ static void read_back(Gpu& g,Model& got){
  g.vk.graphics_reset(*g.b);
 }
 static void model_sequence(const char* mode,unsigned seed,unsigned rounds,unsigned ops){
- Gpu g(mode);Model model{};std::uint32_t r=seed;unsigned draws=0,first_draws=0;
+ Gpu g(mode);Model model{};std::uint32_t r=seed;unsigned draws=0,first_clear_or_draw=0,clears=2;   // 2: the initial clears
  {Model got{};g.clear(0,0);g.clear(1,0);read_back(g,got);assert(got==model);}
  for(unsigned round=0;round<rounds;++round){
   for(unsigned n=0;n<ops;++n){
-   const unsigned kind=lcg(r)%100,target=lcg(r)%2;if(!n && kind<65)++first_draws;   // a round's first draw begins a freshly reset batch
+   const unsigned kind=lcg(r)%100,target=lcg(r)%2;if(!n && kind<80)++first_clear_or_draw;   // a round's first draw/clear begins a freshly reset batch
    if(kind<65){unsigned x0=lcg(r)%16,x1=lcg(r)%16,y0=lcg(r)%16,y1=lcg(r)%16;if(x0>x1)std::swap(x0,x1);if(y0>y1)std::swap(y0,y1);++x1;++y1;
     const std::uint32_t color=lcg(r)|(lcg(r)<<16);g.draw(target,x0,y0,x1,y1,color);++draws;
     for(unsigned y=y0;y<y1;++y)for(unsigned x=x0;x<x1;++x)model[target][y*16+x]=color;}
-   else if(kind<80){const std::uint32_t color=lcg(r)|(lcg(r)<<16);g.clear(target,color);model[target].fill(color);}
+   else if(kind<80){const std::uint32_t color=lcg(r)|(lcg(r)<<16);g.clear(target,color);model[target].fill(color);++clears;}
    else{g.vk.graphics_copy(*g.b,g.image[target],g.image[1-target]);model[1-target]=model[target];}
   }
   Model got{};read_back(g,got);
@@ -84,10 +84,11 @@ static void model_sequence(const char* mode,unsigned seed,unsigned rounds,unsign
  // Lifecycle jobs: read_back resets once per round plus once for the initial clear; with the recorder each reset is a Reset job and a
  // round whose first operation is a draw begins the reset batch through a Begin job (a clear/copy first begins inline after b.sync()).
  g.b->sync();   // the last read_back's Reset job may still be queued
- const auto resets=g.vk.graphics_recorder_resets.load(),begins=g.vk.graphics_recorder_begins.load(),submits=g.vk.graphics_recorder_submits.load();
+ const auto resets=g.vk.graphics_recorder_resets.load(),begins=g.vk.graphics_recorder_begins.load(),submits=g.vk.graphics_recorder_submits.load(),queued_clears=g.vk.graphics_recorder_clears.load();
  const bool on=!std::strcmp(mode,"1");   // one graphics_finish (Submit job) per read_back
- if(resets!=(on?rounds+1:0) || begins!=(on?first_draws:0) || submits!=(on?rounds+1:0))
-  throw std::runtime_error(std::string(mode)+": recorder lifecycle jobs resets="+std::to_string(resets)+" begins="+std::to_string(begins)+" submits="+std::to_string(submits)+" expected "+std::to_string(on?rounds+1:0)+"/"+std::to_string(on?first_draws:0)+"/"+std::to_string(on?rounds+1:0));
+ // A round whose first operation is a clear now also begins through a Begin job (the clear is queued too).
+ if(resets!=(on?rounds+1:0) || begins!=(on?first_clear_or_draw:0) || submits!=(on?rounds+1:0) || queued_clears!=(on?clears:0))
+  throw std::runtime_error(std::string(mode)+": recorder lifecycle jobs resets="+std::to_string(resets)+" begins="+std::to_string(begins)+" submits="+std::to_string(submits)+" clears="+std::to_string(queued_clears)+" expected "+std::to_string(on?rounds+1:0)+"/"+std::to_string(on?first_clear_or_draw:0)+"/"+std::to_string(on?rounds+1:0)+"/"+std::to_string(on?clears:0));
  std::printf("PASS recorder=%s model sequence: %u rounds x %u ops (%u draws) equal the CPU model, %llu Reset / %llu Begin / %llu Submit jobs, async prelude %d\n",mode,rounds,ops,draws,(unsigned long long)resets,(unsigned long long)begins,(unsigned long long)submits,int(g.vk.graphics_async_upload()));
 }
 static void back_pressure(){
