@@ -1,10 +1,12 @@
 """Dynamic fetch boundaries, real DMA provenance and precise retirement."""
 import hashlib
+import os
 import json
 from pathlib import Path
 import shutil
 import tempfile
 import unittest
+from unittest import mock
 
 from tests import test_spu_block, test_runtime_objects
 
@@ -183,6 +185,67 @@ class SpuDynamicRuntimeTests(unittest.TestCase):
  spu_ls_write(t,0x0,0x40000,UINT64_MAX);expect({});
 '''
             test_spu_block.SpuBlockTests().native({0x100:0x40200000}, body)
+
+    # HIRES8 STQ loop for the deferred provenance forget (spu_ls_forget_quad): STQD r7,0(r8); A r8,r8,r10; AI r4,r4,-1;
+    # BRNZ r4 back (a native self-loop block with a template store), then BR self at 0x110.
+    STQ_LOOP = {0x100:(0x24<<24)|(8<<7)|7, 0x104:(0x0c0<<21)|(10<<14)|(8<<7)|8, 0x108:(0x1c<<24)|(0x3ff<<14)|(4<<7)|4,
+                0x10c:(0x042<<23)|((-3&0xffff)<<7)|4, 0x110:0x064<<23}
+    STQ_RUN = r'''
+ for(unsigned i=0;i<16;++i)t.gpr[7][i]=0xa0+i;
+ auto run=[&](unsigned base,unsigned stride,unsigned n){
+   t.pc=0x100;spu_word(t.gpr[8],0,base);spu_word(t.gpr[10],0,stride);spu_word(t.gpr[4],0,n);spu_step(s,t,ls,4096);
+   assert(t.pc==0x110 && spu_word(t.gpr[4],0)==0 && spu_word(t.gpr[8],0)==base+n*stride);
+   for(unsigned k=0;k<n;++k)for(unsigned i=0;i<16;++i)assert(ls[base+k*stride+i]==0xa0+i);};
+ auto get=[&](unsigned local,std::uint64_t ea,unsigned size){t.dma={local,0,std::uint32_t(ea),size,0};spu_write_channel(s,t,ls,21,0x40);};
+'''
+
+    def test_native_quadword_stores_forget_provenance_for_every_reader(self):
+        # With ANYPS3_SPU_DYNAMIC_LOG set at process start (generated code reads it once), native STQs forget the provenance
+        # of the stored lines without a call; every reader (fault message, dynamic log, the next GET/forget) must see the map
+        # the eager per-store forget produced: the spans minus the stored 16-byte lines, EAs offset accordingly (computed by
+        # hand below), and a GET after a store keeps its new span.
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {'ANYPS3_SPU_DYNAMIC_LOG': ''}):
+            log = Path(directory)/'dynamic.jsonl'
+            os.environ['ANYPS3_SPU_DYNAMIC_LOG'] = str(log)
+            body = self.STQ_RUN + r'''
+ assert(spu_provenance_on);t.id=0x100;
+ auto expect=[&](std::initializer_list<std::array<std::uint64_t,3>> rows){
+   assert(t.dma_writes.size()==rows.size());std::size_t i=0;
+   for(const auto& row:rows){const auto& w=t.dma_writes[i++];assert(w.base==row[0] && w.end==row[1] && w.ea==row[2]);}
+ };
+ auto fault_text=[&](unsigned pc){t.pc=pc;try{spu_dynamic_fault(t,ls,"probe");}catch(const std::runtime_error& e){return std::string(e.what());}return std::string();};
+ auto drain=[&]{spu_ls_write(t,0x3fff0,16,UINT64_MAX);assert(!t.ls_forget_pending);};
+ get(0x5600,0x10100,64);get(0x5680,0x10200,32);
+ run(0x5600,0x20,2);assert(t.interpreted_instructions.value.load()==0 && t.ls_forget_pending);
+ // Reader 1: the fault message (pending lines applied to a copy).
+ assert(fault_text(0x5634).find("last_DMA ls=05630 size=10 ea=0000000000010130 pc_ea=0000000000010134")!=std::string::npos);
+ assert(fault_text(0x5604).find("last_DMA")==std::string::npos && fault_text(0x5624).find("last_DMA")==std::string::npos);
+ assert(fault_text(0x5684).find("last_DMA ls=05680 size=20 ea=0000000000010200")!=std::string::npos);
+ // Reader 2: the next provenance write drains first.
+ drain();expect({{0x5610,0x5620,0x10110},{0x5630,0x5640,0x10130},{0x5680,0x56a0,0x10200}});
+ // A store, then a GET of the same line: the forget happened before the GET, the new span stays whole.
+ run(0x5680,0x10,1);get(0x5680,0x10300,32);
+ assert(fault_text(0x5684).find("last_DMA ls=05680 size=20 ea=0000000000010300")!=std::string::npos);
+ // Reader 3: the dynamic log of interpreted code (IL r3,7 at EA 0x10400) after a store into its cell.
+ mem.store(0x10400,4,0x40800383);get(0x5700,0x10400,64);run(0x5730,0x10,1);
+ t.pc=0x5700;spu_step(s,t,ls);assert(t.pc==0x5704 && spu_word(t.gpr[3],0)==7 && !t.ls_forget_pending);
+ // Runs of stored lines across mark words (line 63 of one word, a full word, lines 0..4 of the next).
+ get(0x8000,0x10000,0x800);run(0x83f0,0x10,70);drain();
+ expect({{0x5610,0x5620,0x10110},{0x5630,0x5640,0x10130},{0x5680,0x56a0,0x10300},{0x5700,0x5730,0x10400},{0x8000,0x83f0,0x10000}});
+'''
+            test_spu_block.SpuBlockTests().native(self.STQ_LOOP, body)
+            rows = [json.loads(line) for line in log.read_text().splitlines()]
+            self.assertEqual([(r['ls_base'], r['last_dma']) for r in rows], [(0x5700, [dict(ls_base=0x5700,size=0x30,ea=0x10400)])])
+
+    def test_native_quadword_stores_keep_the_map_off_without_dynamic_log(self):
+        with mock.patch.dict(os.environ):
+            os.environ.pop('ANYPS3_SPU_DYNAMIC_LOG', None)
+            body = self.STQ_RUN + r'''
+ assert(!spu_provenance_on);
+ get(0x5600,0x10100,64);run(0x5600,0x20,2);
+ assert(t.interpreted_instructions.value.load()==0 && t.dma_writes.empty() && !t.ls_forget_pending);
+'''
+            test_spu_block.SpuBlockTests().native(self.STQ_LOOP, body)
 
 
 if __name__ == '__main__':

@@ -1,6 +1,8 @@
 """Native SPU threaded-block regressions with fixed independent results."""
+import os
 import shutil
 import unittest
+from unittest import mock
 from anyps3.elf import ElfImage, Segment
 from anyps3.spu import generate_parts
 from tests import test_runtime_objects
@@ -45,6 +47,84 @@ def chained_recursion():
     return w
 
 
+def _rr(op,rb,ra,rt):return (op<<21)|(rb<<14)|(ra<<7)|rt
+def _rrr(op,rt,rb,ra,rc):return (op<<28)|(rt<<21)|(rb<<14)|(ra<<7)|rc
+
+
+def _words(b):return [int.from_bytes(b[i:i+4],'big') for i in range(0,16,4)]
+def _bytes(w):return b''.join((x&0xffffffff).to_bytes(4,'big') for x in w)
+def _cpp_reg(b):return 'SpuRegister{{'+','.join(map(str,b))+'}}'
+
+
+# HIRES8 self-loop block (spu_block.self_loop): 14 instructions at 0x100, the BRNZ targets the block's own start, then BR self.
+# Classes: LS load/store, word/halfword arithmetic, shuffle (with the special 0x80/0xc0/0xe0 controls), two lifted bodies without a
+# template (ORX, ADDX: they read g[] directly), a constant set inside the loop after a store (an early exit point precedes it),
+# live-in counters, a read-only invariant (r5, r40) and registers set before every exit point (r30..r33).
+SELF_LOOP_ITERATIONS = 20
+SELF_LOOP = [_ri10(0x34,0,3,30),_rr(0x0c0,5,30,31),_rr(0x241,6,31,32),_rrr(0xb,33,30,32,40),_rr(0x0c8,34,33,34),_rr(0x1f0,0,34,35),
+             _rr(0x340,31,35,36),_rr(0x0c0,31,6,6),_ri10(0x24,0,9,33),_ri16(0x081,-3,37),_ri10(0x1c,16,3,3),_ri10(0x1c,16,9,9),
+             _ri10(0x1c,-1,4,4),_ri16(0x042,-13,4),_ri16(0x064,0,0)]
+
+
+def self_loop_initial():
+    regs={3:_bytes([0x2000,0xdead0001,0xdead0002,0xdead0003]),9:_bytes([0x3000,7,8,9]),4:_bytes([SELF_LOOP_ITERATIONS,0x55,0x66,0x77]),
+          5:_bytes([0x01020304*(w+1) for w in range(4)]),6:_bytes([0x9e3779b9+w for w in range(4)]),34:_bytes([0x7fff8001^w for w in range(4)]),
+          36:_bytes([2,5,4,7]),37:_bytes([0x11111111]*4),
+          40:bytes([0x03,0x12,0x80,0x1f,0xc0,0x05,0xe0,0x14,0x0a,0x9f,0x1b,0xdf,0x00,0x11,0xff,0x0e])}
+    data=bytes((i*37+11)&255 for i in range(0x200))
+    return regs,data
+
+
+def self_loop_model():
+    # Independent model of the loop from the SPU ISA v1.2 instruction definitions (a/ah/xor/shufb/orx/addx/lqd/stqd/il/ai/brnz).
+    regs,data=self_loop_initial()
+    r={k:bytearray(v) for k,v in regs.items()}
+    ls=bytearray(0x40000);ls[0x2000:0x2200]=data
+    word=lambda b:_words(bytes(b))
+    while True:
+        r[30]=bytearray(ls[(word(r[3])[0])&0x3fff0:][:16])
+        r[31]=bytearray(_bytes([x+y for x,y in zip(word(r[30]),word(r[5]))]))
+        r[32]=bytearray(_bytes([x^y for x,y in zip(word(r[31]),word(r[6]))]))
+        both=bytes(r[32])+bytes(r[30])
+        r[33]=bytearray((0x80 if c>=0xe0 else 0xff if c>=0xc0 else 0) if c&0x80 else both[c&0x1f] for c in r[40])
+        half=lambda b:[int.from_bytes(b[i:i+2],'big') for i in range(0,16,2)]
+        r[34]=bytearray(b''.join(((x+y)&0xffff).to_bytes(2,'big') for x,y in zip(half(r[33]),half(r[34]))))
+        w=word(r[34]);r[35]=bytearray(_bytes([w[0]|w[1]|w[2]|w[3],0,0,0]))
+        r[36]=bytearray(_bytes([x+y+(z&1) for x,y,z in zip(word(r[35]),word(r[31]),word(r[36]))]))
+        r[6]=bytearray(_bytes([x+y for x,y in zip(word(r[6]),word(r[31]))]))
+        a=word(r[9])[0]&0x3fff0;ls[a:a+16]=r[33]
+        r[37]=bytearray(_bytes([0xfffffffd]*4))
+        for reg,k in ((3,16),(9,16),(4,-1)):r[reg]=bytearray(_bytes([x+k for x in word(r[reg])]))
+        if not word(r[4])[0]:break
+    return {k:bytes(v) for k,v in r.items()},bytes(ls[0x3000:0x3200])
+
+
+# Self-store exit in the SECOND iteration of a self loop (spu_block.self_loop early exits): STQD r7 hits the loop's own quadword
+# then; the stored bytes put ADD r13,r13,r12 right behind the store, which the interpreter runs after the exit and which reads r12
+# from the register file.  r12 is set by IL after the store in every iteration (not live-in); the exit must store the value of the
+# first iteration (77).  Then AI r4; AI r14; BRNZ falls through to BR self at 0x414: 5 + 5 instructions.
+SELF_STORE_LOOP = [_ri10(0x24,0,8,7),_ri10(0x1c,0x1f0,8,8),_ri10(0x1c,-1,4,4),_ri16(0x081,77,12),_ri16(0x042,-4,4),_ri16(0x064,0,0)]
+SELF_STORE_QUAD = [_ri10(0x24,0,8,7),_rr(0x0c0,12,13,13),_ri10(0x1c,-1,4,4),_ri10(0x1c,1,14,14)]
+
+SELF_LOOP_COMMON = r'''
+ struct State {std::array<SpuRegister,128> gpr;std::uint32_t pc;std::uint64_t steps;std::vector<std::uint8_t> ls;};
+ auto snap=[&]{return State{t.gpr,t.pc,t.steps,std::vector<std::uint8_t>(ls,ls+0x40000)};};
+ auto restore=[&](const State& x){t.gpr=x.gpr;t.pc=x.pc;t.steps=x.steps;std::copy(x.ls.begin(),x.ls.end(),ls);};
+ const auto initial=snap();
+ auto reset=[&]{restore(initial);t.stopped=false;t.reloc_delta=0;t.dispatch_cache.clear();};
+ // oracle: the exact interpreter (trace mode, no native code) retires exactly k instructions from the same initial state
+ auto oracle=[&](std::uint64_t k){reset();if(k)spu_step(s,t,ls,unsigned(k),UINT64_MAX,true);assert(t.steps==k);return snap();};
+ auto check=[&](const char* what){
+  const auto mine=snap();const auto want=oracle(mine.steps);
+  if(mine.gpr!=want.gpr || mine.pc!=want.pc || mine.ls!=want.ls){
+   unsigned reg=0;while(reg<128 && mine.gpr[reg]==want.gpr[reg])++reg;
+   std::fprintf(stderr,"MISMATCH %s steps=%llu pc %x/%x first differing gpr %u ls %d\n",what,(unsigned long long)mine.steps,mine.pc,want.pc,reg,int(mine.ls!=want.ls));
+   throw std::runtime_error("self-loop state differs from the exact interpreter");
+  }
+  restore(mine);};
+'''
+
+
 @unittest.skipUnless(shutil.which('c++'),'Requires native C++ compiler')
 class SpuBlockTests(unittest.TestCase):
     def test_chained_calls_keep_exact_steps_registers_and_fallbacks(self):
@@ -70,6 +150,83 @@ class SpuBlockTests(unittest.TestCase):
  reset();assert(spu_run(s,4096));check(59,314);
 ''')
 
+
+    def test_self_loop_keeps_exact_state_at_every_slice_boundary(self):
+        # The self-loop block continues without guard/register-file round trip only while the guard would pass; every slice end
+        # (exact budgets < 64 decline the block, soft budgets end at ex>=lim inside the loop, hard step limits) must show the
+        # exact interpreter's full state (all GPRs, pc, steps, all LS).  The final registers and output also match an
+        # independent Python model of the instruction definitions.
+        regs,data=self_loop_initial()
+        final,out=self_loop_model()
+        words={0x100+4*i:w for i,w in enumerate(SELF_LOOP)}
+        body=''.join(f't.gpr[{k}]={_cpp_reg(v)};' for k,v in regs.items())
+        body+='{const std::uint8_t d[]={'+','.join(map(str,data))+'};std::copy(d,d+sizeof(d),ls+0x2000);}'
+        body+=SELF_LOOP_COMMON
+        body+='const std::uint8_t out[]={'+','.join(map(str,out))+'};'
+        body+='auto final_check=[&]{assert(t.pc==0x138 && std::equal(out,out+sizeof(out),ls+0x3000));'
+        body+=''.join(f'assert((t.gpr[{k}]=={_cpp_reg(final[k])}));' for k in (3,4,6,9,30,31,32,33,34,35,36,37))+'};'
+        body+=f'const std::uint64_t total={14*SELF_LOOP_ITERATIONS};'
+        body+=r'''
+ const unsigned budgets[]={1,2,3,5,7,11,13,14,15,16,17,27,28,29,30,41,63,64,65,100,127,200};
+ for(unsigned phase=0;phase<3;++phase){
+  reset();unsigned i=phase;
+  while(t.steps<total+20){
+   const unsigned b=budgets[i++%(sizeof(budgets)/sizeof(budgets[0]))];const auto before=t.steps;
+   spu_step(s,t,ls,b);
+   assert(b<64?t.steps==before+b:t.steps>=before+b && t.steps<before+b+64);
+   check("slice");
+  }
+  final_check();
+ }
+ for(const std::uint64_t limit:{150u,157u,169u,279u,280u,281u}){
+  reset();spu_step(s,t,ls,4096,limit);assert(t.steps==limit);check("hard limit");
+ }
+ reset();spu_step(s,t,ls,4096);assert(t.steps>=4096 && t.steps<4096+64);check("one slice");final_check();
+'''
+        self.native(words,body)
+
+    def test_self_loop_early_exit_stores_registers_of_the_previous_iteration(self):
+        words={0x400+4*i:w for i,w in enumerate(SELF_STORE_LOOP)}
+        quad=_bytes(SELF_STORE_QUAD)
+        body=f't.gpr[7]={_cpp_reg(quad)};spu_word(t.gpr[8],0,0x210);spu_word(t.gpr[4],0,2);t.pc=0x400;'
+        body+=SELF_LOOP_COMMON+r'''
+ spu_step(s,t,ls,100);assert(t.pc==0x414 && t.steps>=100);
+ assert(spu_word(t.gpr[13],0)==77 && spu_word(t.gpr[12],0)==77 && spu_word(t.gpr[14],0)==1 && spu_word(t.gpr[4],0)==0 && spu_word(t.gpr[8],0)==0x400);
+ check("self store");
+ reset();for(unsigned b=1;t.steps<12;b=b%5+1)spu_step(s,t,ls,b);check("exact budgets");
+'''
+        self.native(words,body)
+
+    def test_self_loop_block_keeps_registers_in_locals(self):
+        # Generated form: one guarded entry, carried locals, a back edge that continues only while the guard would pass, no
+        # register-file access inside the iteration of a loop without lifted bodies, the flush only on the exit path.
+        loop=[_ri10(0x34,0,3,30),_rr(0x0c0,5,30,31),_ri10(0x24,0,9,31),_ri10(0x1c,16,3,3),_ri10(0x1c,16,9,9),_ri10(0x1c,-1,4,4),
+              _ri16(0x042,-6,4),_ri16(0x064,0,0)]
+        _,functions,_=generate_parts((image({0x100+4*i:w for i,w in enumerate(loop)}),))
+        text=functions[0][1].split('spu_b_100:')[1].split('spu_b_11c:')[0]
+        head,rest=text.split('for(;;){')
+        iteration,tail=rest.split('continue;}')
+        self.assertIn('c3w=spu_vswap32(spu_vld(g[3]))',head)
+        self.assertNotIn('c30',head)          # set before every exit point: not carried
+        self.assertNotIn('g[',iteration.replace('spu_vst(g[','EXIT['))
+        self.assertIn('llim=(vm&0x1ull)==0x1ull?lim:0u;',head)   # back-edge bound fixed before the loop (lim, vm invariant)
+        self.assertIn('ex<llim){c3w=',iteration)
+        self.assertIn('spu_vst(g[30],',tail)
+        self.assertIn('goto spu_b_100;',tail)
+
+    def test_self_loop_without_valid_region_runs_the_exact_guard_every_iteration(self):
+        # AI r3,r3,1; AI r4,r4,-1; BRNZ r4 back (self loop); STOP 0x100.  A changed word at 0x13c (same 64-byte region, never
+        # executed) keeps the region unproven, so every entry of the loop block runs the exact guard (spu_block_enter, stat 26):
+        # 10 loop entries + the STOP block = 11 by hand.  With the bytes unchanged the region is proven once: no exact guard.
+        words={0x100:_ri10(0x1c,1,3,3),0x104:_ri10(0x1c,-1,4,4),0x108:_ri16(0x042,-2,4),0x10c:0x100,0x13c:0x00200000}
+        with mock.patch.dict(os.environ,{'ANYPS3_SPU_STATS':'1'}):
+            self.native(words,r'''
+ auto go=[&]{t.pc=0x100;t.steps=0;spu_word(t.gpr[3],0,0);spu_word(t.gpr[4],0,10);t.stats[26].value.store(0);
+   assert(spu_run(s,4096) && t.steps==31 && t.pc==0x110 && spu_word(t.gpr[3],0)==10 && spu_word(t.gpr[4],0)==0);
+   return t.stats[26].value.load();};
+ assert(go()==0);
+ ls[0x13f]^=1;t.dispatch_cache.clear();assert(go()==11);
+''')
 
     def native(self,words,body,overlays=()):
         img=image(words)
