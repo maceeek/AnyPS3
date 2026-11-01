@@ -158,6 +158,14 @@ class AsyncUploadTests(unittest.TestCase):
   # review-gpufast2-1: a failing diagnostic loop submission leaves earlier iterations pending; both queues are drained before release.
   out=self.run_variant(None,('loopfault',),'PASS loop fault injection',{'ANYPS3_RSX_GPU_LOOP':'4'})
   if os.environ.get('ANYPS3_REQUIRE_NVIDIA'):self.assertIn('async=1',out)
+ def test_same_queue_hook(self):
+  # ANYPS3_RSX_TEST_ASYNC_SAME_QUEUE=1 runs the async-prelude path (transfer command buffers, DMA-queue submissions, upload timeline
+  # waits) on a device without a transfer-only family (lavapipe: the graphics queue serves as the DMA queue), inline and with the draw
+  # recorder's Submit jobs; the pixel oracle and the one-prelude-per-batch count are the same as on a real DMA queue.
+  for recorder in ('0','1'):
+   out=self.run_variant(None,(),'PASS async upload',{'ANYPS3_RSX_TEST_ASYNC_SAME_QUEUE':'1','ANYPS3_RSX_RECORDER':recorder})
+   self.assertIn('async=1',out)
+  out=self.run_variant(None,('fault',),'PASS fault injection rounds=4 async=1',{'ANYPS3_RSX_TEST_ASYNC_SAME_QUEUE':'1','ANYPS3_RSX_RECORDER':'0'})
  def test_single_queue_fallback(self):
   out=self.run_variant('0');self.assertIn('async=0',out)
 if __name__=='__main__':unittest.main()

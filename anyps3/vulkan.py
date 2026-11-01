@@ -259,8 +259,14 @@ public:
                 if(!v || !std::strcmp(v,"1")){
                     std::uint32_t n=0;vkGetPhysicalDeviceQueueFamilyProperties(physical,&n,nullptr);std::vector<VkQueueFamilyProperties> families(n);vkGetPhysicalDeviceQueueFamilyProperties(physical,&n,families.data());
                     for(std::uint32_t i=0;i<n;++i)if(i!=family && families[i].queueCount && (families[i].queueFlags&VK_QUEUE_TRANSFER_BIT) &&
-                        !(families[i].queueFlags&~(VK_QUEUE_TRANSFER_BIT|VK_QUEUE_SPARSE_BINDING_BIT)) && families[i].timestampValidBits){transfer_family=i;transfer_timestamp_bits=families[i].timestampValidBits;break;}}}
-            if(transfer_family!=UINT32_MAX){queue_infos[1].queueFamilyIndex=transfer_family;di.queueCreateInfoCount=2;di.pQueueCreateInfos=queue_infos;}
+                        !(families[i].queueFlags&~(VK_QUEUE_TRANSFER_BIT|VK_QUEUE_SPARSE_BINDING_BIT)) && families[i].timestampValidBits){transfer_family=i;transfer_timestamp_bits=families[i].timestampValidBits;break;}
+                    // TEST HOOK (ANYPS3_RSX_TEST_ASYNC_SAME_QUEUE=1; tests/test_rsx_async_upload.py, test_rsx_recorder.py): a device without a
+                    // transfer-only family (lavapipe) runs the async-prelude code path with the graphics queue itself as the "DMA queue": the
+                    // same submissions, upload timeline waits, per-batch transfer command buffers and timestamps, executed by one queue.
+                    const char* same=std::getenv("ANYPS3_RSX_TEST_ASYNC_SAME_QUEUE");
+                    if(same && std::strcmp(same,"0") && std::strcmp(same,"1"))throw std::runtime_error("invalid ANYPS3_RSX_TEST_ASYNC_SAME_QUEUE");
+                    if(transfer_family==UINT32_MAX && same && !std::strcmp(same,"1") && families[family].timestampValidBits){transfer_family=family;transfer_timestamp_bits=families[family].timestampValidBits;}}}
+            if(transfer_family!=UINT32_MAX && transfer_family!=family){queue_infos[1].queueFamilyIndex=transfer_family;di.queueCreateInfoCount=2;di.pQueueCreateInfos=queue_infos;}
             #endif
             #ifdef ANYPS3_RSX_VK
             VkPhysicalDeviceTimelineSemaphoreFeatures timeline{};timeline.sType=VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES;

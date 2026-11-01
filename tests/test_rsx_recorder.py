@@ -88,7 +88,7 @@ static void model_sequence(const char* mode,unsigned seed,unsigned rounds,unsign
  const bool on=!std::strcmp(mode,"1");   // one graphics_finish (Submit job) per read_back
  if(resets!=(on?rounds+1:0) || begins!=(on?first_draws:0) || submits!=(on?rounds+1:0))
   throw std::runtime_error(std::string(mode)+": recorder lifecycle jobs resets="+std::to_string(resets)+" begins="+std::to_string(begins)+" submits="+std::to_string(submits)+" expected "+std::to_string(on?rounds+1:0)+"/"+std::to_string(on?first_draws:0)+"/"+std::to_string(on?rounds+1:0));
- std::printf("PASS recorder=%s model sequence: %u rounds x %u ops (%u draws) equal the CPU model, %llu Reset / %llu Begin / %llu Submit jobs\n",mode,rounds,ops,draws,(unsigned long long)resets,(unsigned long long)begins,(unsigned long long)submits);
+ std::printf("PASS recorder=%s model sequence: %u rounds x %u ops (%u draws) equal the CPU model, %llu Reset / %llu Begin / %llu Submit jobs, async prelude %d\n",mode,rounds,ops,draws,(unsigned long long)resets,(unsigned long long)begins,(unsigned long long)submits,int(g.vk.graphics_async_upload()));
 }
 static void back_pressure(){
  Gpu g("1");   // 900 tiny draws in one batch: more than the 256 ring slots
@@ -232,11 +232,16 @@ class RsxRecorderTests(unittest.TestCase):
             env.pop('ANYPS3_AUDIO_AUDIBLE', None)
             if not env.get('ANYPS3_REQUIRE_NVIDIA') and not env.get('VK_DRIVER_FILES') and not env.get('VK_ICD_FILENAMES'):
                 env.update(ANYPS3_VK_DEVICE='lavapipe', VK_DRIVER_FILES='/usr/share/vulkan/icd.d/lvp_icd.json')
-            result = subprocess.run([str(root / 'test')], capture_output=True, text=True, env=env, timeout=600)
-            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            self.assertNotIn('Validation Error', result.stdout + result.stderr)
-            self.assertNotIn('Validation Warning', result.stdout + result.stderr)
-            self.assertEqual(result.stdout.count('PASS '), 11, result.stdout)
+            # Second pass: the async DMA-queue prelude path (ANYPS3_RSX_TEST_ASYNC_SAME_QUEUE=1 on a device without a transfer-only
+            # family), so the Submit jobs also own the transfer command buffers and the DMA-queue submissions.
+            for extra in ({}, {'ANYPS3_RSX_TEST_ASYNC_SAME_QUEUE': '1'}):
+                result = subprocess.run([str(root / 'test')], capture_output=True, text=True, env=dict(env, **extra), timeout=600)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertNotIn('Validation Error', result.stdout + result.stderr)
+                self.assertNotIn('Validation Warning', result.stdout + result.stderr)
+                self.assertEqual(result.stdout.count('PASS '), 11, result.stdout)
+                if extra:   # the hook pass must run the DMA-prelude path (a device with a transfer-only family runs it in both)
+                    self.assertEqual(result.stdout.count('async prelude 1'), 3, result.stdout)
 
 
 if __name__ == '__main__':
