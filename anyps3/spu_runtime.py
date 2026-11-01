@@ -87,7 +87,9 @@ struct NativeSpu {
         std::uint32_t decrementer=0;std::uint64_t decrementer_tick=0;
         bool decrementer_running=false;
         std::uint32_t exit_status=0,receive_key=0;
-        std::array<SpuRegister,128> gpr{};
+        // One register never straddles a host cache line (HIRES9: at offset 4 mod 16 every fourth 16-byte access of generated code was a
+        // split load/store, and GCC split the stores of known-misaligned registers into two 8-byte halves); layout only.
+        alignas(64) std::array<SpuRegister,128> gpr{};
         SpuRegister fpscr{};
         std::uint32_t pc=0,image_index=UINT32_MAX;std::uint64_t steps=0;
         SpuPublished<std::uint64_t> published_steps{0};
