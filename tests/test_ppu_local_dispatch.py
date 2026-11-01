@@ -2,7 +2,9 @@
 
 Same expectations as the cross-page call loop of test_ppufast_codegen (r3=3000,
 r4=1000, 6005 steps), and an indirect jump to an untranslated address in the
-same page stops with that PC and the counted failing step.
+same page stops with that PC and the counted failing step. A misaligned entry PC
+(0x10042, inside the page and two bytes past the head 0x10040) has no block
+either: it stops the same way and never runs the 0x10040 block (no ctr write).
 """
 from pathlib import Path
 import os
@@ -45,6 +47,9 @@ int main(){
     {PpuState s;s.memory.map(0x10000,0x1000,5,code,sizeof(code));s.pc=0x10040;s.r[5]=0x10048;bool failed=false;
      try{anyps3_entry(s,false);}catch(const std::runtime_error& e){failed=std::string(e.what())=="target has no statically translated block";}
      assert(failed && s.pc==0x10048 && s.steps==3 && s.ctr==0x10048 && !s.returned);}
+    {PpuState s;s.memory.map(0x10000,0x1000,5,code,sizeof(code));s.pc=0x10042;s.r[5]=0x10048;bool failed=false;
+     try{anyps3_entry(s,false);}catch(const std::runtime_error& e){failed=std::string(e.what())=="target has no statically translated block";}
+     assert(failed && s.pc==0x10042 && s.steps==1 && s.ctr==0 && !s.returned);}
     std::puts("ok");
 }
 '''
@@ -57,7 +62,8 @@ class PpuLocalDispatch(unittest.TestCase):
         image = make_image([(0x10000, 5, payload), (0x40000, 6, struct.pack('>II', 0x10000, 0))], entry=0x40000)
         source = compile_program(image, process_entry=True, extra_entries=(0x10000, 0x10040)).cpp().replace(
             'int main(int argc, char** argv)', 'int original_main(int argc, char** argv)')
-        self.assertNotIn('case 0x10048:', source)
+        self.assertNotIn('/* 0x10048 */', source)
+        self.assertIn('switch (ppu_page_slot(pc_v,0x10000u))', source)
         self.assertIn('goto ppu_dispatch_local;', source)
         source += MAIN.replace('@CODE@', ','.join(str(b) for b in payload))
         with tempfile.TemporaryDirectory() as directory:
