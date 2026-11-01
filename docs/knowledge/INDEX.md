@@ -10,6 +10,9 @@ runtime handoffs 198–246 on 2026-10-31.
 
 Each record describes its own snapshot, not the current runtime.
 
+- 2026-11-01 [cloud round HIRES8](experiments/2026-11-01-cloud-hires8.md): main guest thread — generated SPU code without
+  stack homes and self loops in host locals (synthetic job −39 % native, −34 % non-FP Ir), PPU page jump tables and host-call
+  return prediction (call kernels −7..−14 % Ir); lavapipe/synthetic only.
 - 2026-11-01 [cloud round HIRES7](experiments/2026-11-01-cloud-hires7.md): SPU job speed (synthetic job −16.6 % host Ir: DMA
   path, FP underflow lanes, BRSL chaining) and RSX worker work moved onto the draw recorder (draw unit −11.3 %); full suite;
   lavapipe/synthetic only.

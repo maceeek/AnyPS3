@@ -1,5 +1,19 @@
 # Handoff to the next instance
 
+## Cloud round HIRES8 — 2026-11-01 (cloud container; goal NOT reached, nothing measured in the game)
+
+Branch `ccr-b1a3987e-aypb5o` (pushed): d1177e9 + merges of `cloud/hires8-ppu` (agent K, b68e12a) and `cloud/hires8-spugen2`
+(agents J/J2, abaeba4; J's self-loop cut c74b9c9 was committed by the coordinator after J ended twice with work
+uncommitted). Read the [record](experiments/2026-11-01-cloud-hires8.md): the stack-home finding for generated SPU code,
+the deferred provenance forgets, the self-loop exactness, the PPU return-prediction invariant, the valgrind `mremap`
+finding for PPU benches. A follow-up round HIRES9 (PPU inline guest loads/stores and block heads; the rest of the SPU job)
+started from abaeba4 in the same container.
+
+First next actions on the real PC: (1) one integration build; QUIET alternating 1440p walks vs the HIRES7 tip or 1031/1034
+— `main_ppu` ms/frame in heavy frames, the SPU-wait shares (0x666068, 0x5564d4) and the awaited lane's time, `PERF
+PPU_THREAD` ns/instr; (2) same binary with `ANYPS3_PPU_RET_DEPTH=0`; (3) a run with `ANYPS3_SPU_DYNAMIC_LOG` set: rows equal
+to the base build; (4) compile time and `.text` of the ppu-*/spu-* units vs base; (5) the HIRES7/HIRES6 items below.
+
 ## Cloud round HIRES7 — 2026-10-31/11-01 (cloud container; goal NOT reached, nothing measured in the game)
 
 Branch `ccr-b1a3987e-aypb5o` (pushed): HIRES6 8126bbc + merges of `cloud/hires7-worker` (agent I, c6e633d) and

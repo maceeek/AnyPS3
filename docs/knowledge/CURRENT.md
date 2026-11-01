@@ -1,6 +1,6 @@
 # Current state and goal
 
-## Summary — 2026-10-31
+## Summary — 2026-11-01
 
 - **Goal (user, since 2026-10-25):** the original ACIT level at true 1440p (render scale 2) and a stable 60 FPS, playable
   with a physical gamepad; acceptance in the root `AGENTS.md` (mean >= 59.7 FPS, >= 99 % one-vblank flips, main thread and
@@ -16,10 +16,14 @@
   draws / ≈ 14.5 ms at 2400; exact barrier cuts 17 → 10 per frame on a scale-2 stream; visual 2× MSAA load path default
   off, NVIDIA test pending) and HIRES7 (SPU synthetic job −16.6 % host instructions; RSX worker draw unit −11.3 % by
   moving batch reset/begin, submit and plane clears onto the draw recorder; derived worker ≈ 11.6 ms at 2000 draws /
-  ≈ 13.3 ms at 2400), all on branch `ccr-b1a3987e-aypb5o`. The main guest thread (~14.8 ms) is now the likely critical path.
+  ≈ 13.3 ms at 2400) and HIRES8 (main guest thread: synthetic SPU job −39 % native AVX-512 time / −34 % non-FP host Ir,
+  mostly generated SPU code without stack homes; PPU cross-page call kernels −14 %, other call kernels −7..−9 % Ir), all on
+  branch `ccr-b1a3987e-aypb5o`. Derived, unverified: main thread ≈ 13 ms per heavy frame if the game's awaited SPU job
+  scales like the synthetic one.
 - **First next action on the PC:** one integration build of `ccr-b1a3987e-aypb5o`, QUIET alternating 1440p walks against
   1031/1034, then the same binary with `ANYPS3_RSX_VK_MARKS=1` (does the 12.6 µs "native pass begin" move to clears/copies?),
   `ANYPS3_RSX_BARRIER_DEDUPE=0`, `ANYPS3_RSX_GEOMETRY_REUSE=0`, `ANYPS3_RSX_RECORDER_SUBMIT=0`, `ANYPS3_SPU_CHAIN=0`,
+  `ANYPS3_PPU_RET_DEPTH=0`,
   `test_rsx_visual_msaa` on NVIDIA, and the switch A/B runs listed in the HIRES7–HIRES3 sections below (walks with
   `ANYPS3_RSX_RECORDER=1`, as the walking wrapper sets it).
 - **Builds cited as baselines or pending measurement:** 706 (60 FPS reference), 960 (= main f92681c at 1440p), 1031, 1034
@@ -27,6 +31,22 @@
   2026-10-25 cleanup ([history](history/CURRENT-2026-10-21-to-10-25.md#local-data-cleanup--2026-10-25-user-request)); a
   further `local/ratchet` cleanup must run on the PC and keep these.
 - **Not verified:** physical gamepad acceptance at 1440p, stable 60 FPS at 1440p.
+
+## Cloud round HIRES8 — 2026-11-01 (cloud container: no game, no NVIDIA; branch `ccr-b1a3987e-aypb5o`)
+
+Three Opus agents on top of HIRES7 (d1177e9), both aimed at the main guest thread: generated SPU code of the awaited job
+(J, then J2) and PPU page dispatch (K); every cut has a native test and mutation checks; **no game build, run or FPS figure**.
+- **SPU (verified, synthetic job, coordinator integration d1177e9 vs abaeba4):** native AVX-512 time 15.7–15.9 k →
+  **9.5–9.7 k ns/iteration (−39 %)**, non-FP host Ir 114.3 k → 75.4 k (−34 %), generated code 84.2 k → 45.2 k (−46 %),
+  `spu_fn_*` host bytes −2.4 %, digest identical. Self loops keep SPU registers in host locals (`ANYPS3_GEN_SPU_SELF_LOOP=0`
+  at generation time restores the old form); store checks no longer call the provenance diagnostic. **Finding:** a call
+  that returns into a hot generated path makes GCC home every live vector on the stack (`[[gnu::cold]]` does not help).
+- **PPU (verified, callgrind, new game-shaped kernels):** per page one jump table instead of compare trees; host-call return
+  prediction for calls out of the page (`ANYPS3_PPU_RET_DEPTH`, 0 = old tail calls): k_xcall −14 %, k_calltree/k_virtual/
+  k_switch/k_calls −7..−9 %, memory kernels ±1 %, page text −2.2 %; target −25 % missed. Every earlier PPU callgrind figure
+  measured the slow memory path (valgrind rejects the flat view's `mremap` duplication; the bench now shims it).
+- **Tests:** each agent's area list OK on its branch; 10 cross-area modules OK on the merge; full suite deferred to HIRES9.
+Record: [cloud HIRES8](experiments/2026-11-01-cloud-hires8.md).
 
 ## Cloud round HIRES7 — 2026-10-31/11-01 (cloud container: no game, no NVIDIA; branch `ccr-b1a3987e-aypb5o`)
 

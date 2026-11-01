@@ -660,3 +660,9 @@ CPU scaled blits (fast2/fix7-stutter). See knowledge/experiments/2026-10-23-fix7
   reset/begin, submit incl. the async DMA prelude, plane clears: worker draw unit −11.3 %). Full suite over HIRES6+7: no
   regression. Derived worker ≈ 11.6 ms at 2000 draws; the main thread is the likely next limit; nothing measured in the game.
   Branch `ccr-b1a3987e-aypb5o`. [Record](knowledge/experiments/2026-11-01-cloud-hires7.md).
+- 2026-11-01: cloud round HIRES8 (no game/GPU): three Opus agents on the main guest thread — generated SPU code (self loops
+  keep registers in host locals; no call returning into the store checks, so GCC stops homing live vectors on the stack:
+  synthetic job −39 % native AVX-512 time, −34 % non-FP host Ir, code −2.4 %) and PPU page dispatch (one jump table per page,
+  host-call return prediction `ANYPS3_PPU_RET_DEPTH`: call kernels −7..−14 % Ir, target −25 % missed). Earlier PPU callgrind
+  figures had measured the slow memory path (valgrind `mremap`). Nothing measured in the game. Branch `ccr-b1a3987e-aypb5o`.
+  [Record](knowledge/experiments/2026-11-01-cloud-hires8.md).
