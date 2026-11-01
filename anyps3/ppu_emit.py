@@ -81,6 +81,12 @@ HELPERS_CPP = r'''
 #else
 #define ANYPS3_SPIN_HINT() ((void)0)
 #endif
+// Page switch selector: word slot of pc in the page at base (0..1023 for an
+// aligned in-page pc). Rotating instead of shifting keeps it a bijection:
+// misaligned or out-of-page values land at >= 1024, never on a case.
+[[maybe_unused,gnu::always_inline]] static inline std::uint32_t ppu_page_slot(std::uint32_t pc,std::uint32_t base){
+    const std::uint32_t offset=pc-base;return (offset>>2)|(offset<<30);
+}
 // PPUFAST local-register forms of the flow.py CR/XER/CTR helpers.
 [[maybe_unused,gnu::always_inline]] static inline unsigned ppu_cmp(std::uint64_t a,std::uint64_t b,bool wide,bool signed_compare,std::uint64_t xer){
     if(!wide){a&=UINT32_MAX;b&=UINT32_MAX;}
@@ -249,7 +255,7 @@ class PageEmitter:
         count = len(block)
         first = block[0]
         page = self.page(first.address >> 12)
-        page['cases'].append(f"    case 0x{first.address:x}: goto ppu_{first.address:x};")
+        page['cases'].append((first.address, f"goto ppu_{first.address:x};"))
         limit = self.options.max_steps - count if count <= self.options.max_steps else -1
         code = [f"ppu_{first.address:x}:",
                 f"    if(steps_v>=slice_v || state.reschedule){{pc_v=0x{first.address:x};goto out;}}"]
@@ -336,14 +342,14 @@ class PageEmitter:
 
     def emit_trap(self, address, reason):
         page = self.page(address >> 12)
-        page['cases'].append(f"    case 0x{address:x}: goto ppu_{address:x};")
+        page['cases'].append((address, f"goto ppu_{address:x};"))
         page['body'].append(
             f"ppu_{address:x}: state.pc=0x{address:x};state.steps=steps_v;"
             f"if(steps_v>=UINT64_C({self.options.max_steps}))throw std::runtime_error(\"execution step limit reached\");"
             f"state.steps=steps_v+1;throw std::runtime_error({json.dumps(reason)});")
 
     def emit_lifecycle(self, address, call):
-        self.page(address >> 12)['cases'].append(f"    case 0x{address:x}: {call} return;")
+        self.page(address >> 12)['cases'].append((address, f"{call} return;"))
 
     def functions(self):
         """(page, C++ text) for every page.
@@ -361,6 +367,15 @@ class PageEmitter:
             return f"{{pc_v=0x{target:x};goto out;}}"
         for number, code in sorted(self.pages.items()):
             code['body'] = [re.sub(r'@@XFER_([0-9a-f]+)@@', xfer, line) for line in code['body']]
+            # Word slots, not raw PCs: GCC lowers a 4-byte-strided switch on
+            # pc_v to a compare tree, the dense slot switch to one jump table.
+            # ppu_page_slot is a bijection, so exactly the same pc_v values
+            # reach each case and the default as with switch (pc_v).
+            aligned = all(not address & 3 for address, _ in code['cases'])
+            base = number << 12
+            selector = f'ppu_page_slot(pc_v,0x{base:x}u)' if aligned else 'pc_v'
+            cases = [f"    case 0x{(address - base) >> 2 if aligned else address:x}: /* 0x{address:x} */ {action}"
+                     for address, action in code['cases']]
             missing = (f"    default: state.pc=pc_v;state.steps=steps_v;"
                        f"if(steps_v>=UINT64_C({self.options.max_steps}))throw std::runtime_error(\"execution step limit reached\");"
                        f"state.steps=steps_v+1;throw std::runtime_error(\"target has no statically translated block\");")
@@ -370,7 +385,7 @@ class PageEmitter:
                 '    std::uint64_t steps_v=state.steps;[[maybe_unused]] const std::uint64_t slice_v=state.ppu_slice_end;[[maybe_unused]] const bool trace_v=state.ppu_trace;',
                 '    std::uint32_t pc_v=state.pc;[[maybe_unused]] bool slow=false;',
                 '    ppu_dispatch_local: __attribute__((unused));',
-                '    switch (pc_v) {', *code['cases'], missing, '    }',
+                f'    switch ({selector}) {{', *cases, missing, '    }',
                 *code['body'],
                 '    out: __attribute__((unused)); state.steps=steps_v;state.pc=pc_v;return;',
                 '}'])))

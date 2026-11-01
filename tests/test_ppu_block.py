@@ -41,8 +41,8 @@ class PpuBlockTests(unittest.TestCase):
         segments.append((0x20000,6,struct.pack('>II',0x10000,0)+bytes(0x100)))
         translated=compile_program(make_image(segments,entry=0x20000),process_entry=True,extra_entries=tuple(code))
         source=translated.cpp()
-        self.assertIn('case 0x10010:',source)
-        self.assertNotIn('case 0x13004:',source) # ordinary instruction has no dispatch entry
+        self.assertIn('/* 0x10010 */ goto ppu_10010;',source)
+        self.assertNotIn('/* 0x13004 */',source) # ordinary instruction has no dispatch entry
         self.assertLess(translated.report()['ppu_dispatch_entries'],len(translated.operations))
         self.native(translated,r'''
  {PpuState s;s.pc=0x10000;anyps3_entry(s,false);assert(s.r[3]==42 && s.steps==5 && s.returned);}
