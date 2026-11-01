@@ -25,11 +25,18 @@ or limit check.  Correctness arguments (see docs in RESULT.md):
   computed jumps into a block) use the exact interpreter until the next leader.
 """
 import json
+import os
 import re
 
 from .errors import AnyPS3Error
 from .spu_interp import Expr
 from . import spu_simd
+
+# Self-loop blocks keep their registers in host locals across iterations (self_loop).  Generation-time switch for A/B:
+# ANYPS3_GEN_SPU_SELF_LOOP=0 when the bundle is generated emits the previous per-iteration register file round trip.
+SPU_SELF_LOOP = {None: True, '1': True, '0': False}.get(os.environ.get('ANYPS3_GEN_SPU_SELF_LOOP'), None)
+if SPU_SELF_LOOP is None:
+    raise AnyPS3Error('invalid ANYPS3_GEN_SPU_SELF_LOOP (expected 0 or 1)')
 
 MAX_BLOCK = 64
 MAX_FUNCTION = 1024
@@ -90,6 +97,9 @@ class Values:
 
     def __init__(self, lines):
         self.lines, self.regs, self.count = lines, {}, 0
+        # Self-loop analysis (emit_function): registers set in this block, registers read before being set (live-in),
+        # and the set registers at every early exit (pending_stores).
+        self.written, self.livein, self.exits = set(), set(), []
 
     def emit(self, text):
         self.lines.append(text)
@@ -116,6 +126,8 @@ class Values:
     def _entry(self, reg):
         entry = self.regs.get(reg)
         if entry is None:
+            if reg not in self.written:
+                self.livein.add(reg)
             name = self.fresh()
             self.emit(f'[[maybe_unused]] const SpuV {name}=spu_vld(g[{reg}]);')
             entry = self.regs[reg] = dict(reps={'b': name}, const=None, dirty=False)
@@ -152,10 +164,12 @@ class Values:
         name = self.fresh()
         self.emit(f'[[maybe_unused]] const SpuV {name}={expr};')
         self.regs[reg] = dict(reps={rep: name}, const=None, dirty=True)
+        self.written.add(reg)
         return name
 
     def set_const(self, reg, words):
         self.regs[reg] = dict(reps={}, const=tuple(w & 0xffffffff for w in words), dirty=True)
+        self.written.add(reg)
 
     def choose(self, regs):
         score = {'w': 0, 'b': 0, 'h': 0}
@@ -216,6 +230,7 @@ class Values:
                 entry['dirty'] = False
 
     def pending_stores(self):
+        self.exits.append(frozenset(self.written))
         return ''.join(f'spu_vst(g[{reg}],{self.materialize_b(reg)});'
                        for reg, entry in sorted(self.regs.items()) if entry['dirty'])
 
@@ -273,6 +288,65 @@ class BlockValues(Values):
         self.emit(f'const unsigned a{name}={address};spu_vstp(ls+a{name},{value});')
         # One unlikely branch for both rare conditions: provenance logging (diagnostic) and a store into the function's own range.
         self.emit(self.self_store_exit(f'a{name}', pc, provenance=True))
+
+
+def self_loop(block_values, emit_body, last, n, mask, exit_edge):
+    """C++ for a block whose conditional branch targets its own start (a loop body without inner control flow).
+
+    Iterations after the first run without the block-entry guard and without the register file round trip: registers
+    the body reads before setting them (live-in) stay in host locals (`c<reg><rep>`, the representations the previous
+    iteration ended with), and registers set before every exit point of the body are not stored at the back edge at
+    all (the next iteration sets them again before anything can observe them).  Exactness:
+    * the back edge continues only when the guard of the next entry would take its fast path without effect,
+      ex<lim && (vm&mask)==mask (vm cannot change inside the block: every exit that could change LS code returns);
+      otherwise the registers are flushed and the block is entered through its label, exactly as before;
+    * every point inside the body that can observe the register file (self-store exit, interrupt sampling boundary,
+      a lifted body without template, the final flush) sees the architectural value of every register: carried locals
+      are marked dirty when the body sets them, so pending_stores/flush write them; a register not carried is set
+      before each of those points in every iteration (checked on the first pass, asserted on the second);
+    * the first iteration loads the carried registers from g[] (also those only needed by an early exit), so its
+      early exits store unchanged values where nothing was set yet."""
+    probe = block_values([])
+    emit_body(probe)
+    cond = last.word & 127
+    probe.word0(cond)
+    carried = {}
+    for reg, entry in sorted(probe.regs.items()):
+        if reg in probe.livein or any(reg not in seen for seen in probe.exits):
+            reps = ('b',) if entry['const'] is not None else tuple(sorted(entry['reps']))
+            carried[reg] = (reps, entry['dirty'])
+    dead = {reg for reg, entry in probe.regs.items() if entry['dirty'] and reg not in carried}
+    out = []
+    values = block_values(out)
+    load = {'b': 'spu_vld(g[{r}])', 'w': 'spu_vswap32(spu_vld(g[{r}]))', 'h': 'spu_vswap16(spu_vld(g[{r}]))'}
+    init = [f'c{reg}{rep}={load[rep].format(r=reg)}' for reg, (reps, _) in carried.items() for rep in reps]
+    for reg, (reps, dirty) in carried.items():
+        values.regs[reg] = dict(reps={rep: f'c{reg}{rep}' for rep in reps}, const=None, dirty=dirty)
+    out.append(('[[maybe_unused]] SpuV ' + ','.join(init) + ';' if init else '') + 'for(;;){')
+    emit_body(values)
+    values.current = last.pc
+    kind = last.op >> 2
+    value = values.word0(cond)
+    if kind in (0x44, 0x46):
+        value = f'({value}&0xffffu)'
+    relation = '==' if kind in (0x40, 0x44) else '!='
+    back = []
+    for reg, (reps, _) in carried.items():
+        for rep in reps:
+            var, expr = f'c{reg}{rep}', values.get(reg, rep)
+            if expr != var:
+                if expr.startswith('c'):
+                    raise AssertionError('SPU self loop: carried value aliases another local')
+                back.append(f'{var}={expr};')
+    for reg, entry in values.regs.items():
+        if entry['dirty'] and (carried[reg][1] is False if reg in carried else reg not in dead):
+            raise AssertionError(f'SPU self loop: register {reg} dirty at the back edge but not carried')
+    if any(dead - seen for seen in values.exits):
+        raise AssertionError('SPU self loop: an early exit precedes the setting of an uncarried register')
+    out.append(f'ex+={n};if(({value}{relation}0u)&&ex<lim&&(vm&0x{mask:x}ull)==0x{mask:x}ull){{{"".join(back)}continue;}}')
+    values.flush()
+    out.append(f'if({value}{relation}0u)goto spu_b_{last.target:x};else {exit_edge}}}}}')
+    return out
 
 
 def _relocated(target):
@@ -387,8 +461,6 @@ def emit_function(name, code_name, lo, words, lift_parts, templates=True, insns=
         else:
             lines.append(f'if(__builtin_expect((ex>=lim)|((vm&0x{mask:x}ull)!=0x{mask:x}ull),0)){{{slow_call}}}')
         index = {x.pc: i for i, x in enumerate(block)}
-        values = BlockValues(lines, end, lambda pc: index[pc], flen)
-        values.block_start = start
         last = block[-1]
         here = lambda pc: f'(a+0x{pc - start:x}u)'
         if last.kind == 'effect':
@@ -398,30 +470,46 @@ def emit_function(name, code_name, lo, words, lift_parts, templates=True, insns=
             lines.append(edge((last.pc + 4) & 0x3fffc) + '}')
             continue
         body_insns = block if last.kind in ('plain', 'store') else block[:-1]
-        for x in body_insns:
-            values.current = x.pc
-            fn = spu_simd.template(x.word) if templates else None
-            emitted = False
-            if fn is not None:
-                mark = len(lines)
-                saved = {r: dict(e, reps=dict(e['reps'])) for r, e in values.regs.items()}
-                saved_count = values.count
-                try:
-                    fn(values, x.word, f'(0x{x.pc:x}u+delta)')
-                    emitted = True
-                except spu_simd.Unsupported:
-                    del lines[mark:]
-                    values.regs, values.count = saved, saved_count
-            if not emitted:
-                used = {int(r) for r in re.findall(r'g\[(\d+)\]', x.body)}
-                values.flush(used)
-                if x.kind == 'store':
-                    lines.append(f'{{[[maybe_unused]] SpuRegister out{{}};{x.body}{values.self_store_exit("address", x.pc)}}}')
-                else:
-                    lines.append(f'{{[[maybe_unused]] SpuRegister out{{}};{x.body}}}')
-                values.drop(used)
-            if is_mfc_parameter_wrch(x.word):
-                lines.append(values.interrupt_boundary(x.pc))
+
+        def emit_body(values):
+            out = values.lines
+            for x in body_insns:
+                values.current = x.pc
+                fn = spu_simd.template(x.word) if templates else None
+                emitted = False
+                if fn is not None:
+                    mark = len(out)
+                    saved = {r: dict(e, reps=dict(e['reps'])) for r, e in values.regs.items()}
+                    saved_state = values.count, set(values.written), set(values.livein), list(values.exits)
+                    try:
+                        fn(values, x.word, f'(0x{x.pc:x}u+delta)')
+                        emitted = True
+                    except spu_simd.Unsupported:
+                        del out[mark:]
+                        values.regs = saved
+                        values.count, values.written, values.livein, values.exits = saved_state
+                if not emitted:
+                    used = {int(r) for r in re.findall(r'g\[(\d+)\]', x.body)}
+                    values.livein |= used - values.written  # the lifted body reads g[] directly
+                    values.flush(used)
+                    if x.kind == 'store':
+                        out.append(f'{{[[maybe_unused]] SpuRegister out{{}};{x.body}{values.self_store_exit("address", x.pc)}}}')
+                    else:
+                        out.append(f'{{[[maybe_unused]] SpuRegister out{{}};{x.body}}}')
+                    values.drop(used)
+                if is_mfc_parameter_wrch(x.word):
+                    out.append(values.interrupt_boundary(x.pc))
+
+        def block_values(out):
+            values = BlockValues(out, end, lambda pc: index[pc], flen)
+            values.block_start = start
+            return values
+
+        if SPU_SELF_LOOP and last.kind == 'brc' and last.target == start:
+            lines.extend(self_loop(block_values, emit_body, last, len(block), mask, edge((last.pc + 4) & 0x3fffc)))
+            continue
+        values = block_values(lines)
+        emit_body(values)
         n = len(block)
         if last.kind in ('plain', 'store'):
             values.flush()
