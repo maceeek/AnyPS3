@@ -87,6 +87,30 @@ HELPERS_CPP = r'''
 [[maybe_unused,gnu::always_inline]] static inline std::uint32_t ppu_page_slot(std::uint32_t pc,std::uint32_t base){
     const std::uint32_t offset=pc-base;return (offset>>2)|(offset<<30);
 }
+// Host-call return prediction. A call (bl to another page, bctrl out of the
+// page) whose continuation C is a head of the calling page pushes C and calls
+// the callee as a host function; a bclr whose next PC equals the innermost
+// pushed C pops it and returns to that host frame, which continues at C's
+// block head by goto, the block ppu_dispatch(C) reaches. Only equality with
+// the actual next PC is used, so any guest LR value stays exact.
+// Invariant while guest code runs: ppu_ret_depth equals the number of live
+// host call frames since anyps3_entry (its base). A pop returns exactly one
+// frame. Every other page-function return (slice cut, runtime call, guest
+// return to the host, STOP) leaves depth above the returning frame's own
+// slot, so each frame passes it on unchanged up to anyps3_entry, which
+// restores the base before it dispatches again (exceptions unwind the frames
+// the same way). A full stack keeps the tail-call transfer.
+constexpr std::uint32_t PPU_RET_FULL=UINT32_MAX;
+template<class S> [[maybe_unused,gnu::always_inline]] static inline std::uint32_t ppu_ret_push(S& state,std::uint32_t continuation){
+    const std::uint32_t depth=state.ppu_ret_depth;
+    if(depth>=sizeof(state.ppu_ret_stack)/sizeof(state.ppu_ret_stack[0]))return PPU_RET_FULL;
+    state.ppu_ret_stack[depth]=continuation;state.ppu_ret_depth=depth+1;return depth;
+}
+template<class S> [[maybe_unused,gnu::always_inline]] static inline bool ppu_ret_pop(S& state,std::uint32_t pc){
+    const std::uint32_t depth=state.ppu_ret_depth;
+    if(!depth || state.ppu_ret_stack[depth-1]!=pc)return false;
+    state.ppu_ret_depth=depth-1;return true;
+}
 // PPUFAST local-register forms of the flow.py CR/XER/CTR helpers.
 [[maybe_unused,gnu::always_inline]] static inline unsigned ppu_cmp(std::uint64_t a,std::uint64_t b,bool wide,bool signed_compare,std::uint64_t xer){
     if(!wide){a&=UINT32_MAX;b&=UINT32_MAX;}
@@ -112,6 +136,17 @@ HELPERS_CPP = r'''
     return amount?(value>>amount)|(negative?UINT64_MAX<<(64-amount):0):value;
 }
 '''
+
+
+def ret_call(callee, continuation):
+    """Host call of `callee` with `continuation` pushed (HELPERS_CPP ppu_ret_*).
+
+    Matched return: continue at the continuation's block head, as ppu_dispatch
+    would. Any other return of the callee chain is passed on unchanged; a full
+    stack falls through to the caller's tail transfer.
+    """
+    return (f"if(const std::uint32_t ppu_d=ppu_ret_push(state,0x{continuation:x}u);ppu_d!=PPU_RET_FULL){{{callee};"
+            f"if(state.ppu_ret_depth!=ppu_d)return;steps_v=state.steps;goto ppu_{continuation:x};}}")
 
 
 def step_slow_cpp(max_steps: int) -> str:
@@ -324,13 +359,25 @@ class PageEmitter:
             if target in self.heads and target >> 12 == inst.address >> 12:
                 return f"goto ppu_{target:x};"
             return f"@@XFER_{target:x}@@"
+        continuation = (inst.address + 4) & 0xffffffff
+        # Host-call form (functions(), HELPERS_CPP ppu_ret_*): only for a call
+        # whose continuation is a head of this page, so the return can goto it.
+        host_call = bool(inst.word & 1) and continuation in self.heads and continuation >> 12 == inst.address >> 12
         if indirect:
+            if xo == 16:
+                code.append("    if(ppu_ret_pop(state,pc_v)){state.steps=steps_v;state.pc=pc_v;return;}")
             # A target in this page re-enters the page's own dispatch switch; it
             # resolves heads and missing blocks exactly as ppu_dispatch would.
             code.append(f"    if((pc_v>>12)==0x{inst.address >> 12:x}u)goto ppu_dispatch_local;")
-            code.append("    {state.steps=steps_v;state.pc=pc_v;[[gnu::musttail]] return ppu_dispatch(state);}")
+            if xo == 528 and host_call:
+                code.append("    {state.steps=steps_v;state.pc=pc_v;" + ret_call('anyps3_dispatch_page(state)', continuation) +
+                            "[[gnu::musttail]] return ppu_dispatch(state);}")
+            else:
+                code.append("    {state.steps=steps_v;state.pc=pc_v;[[gnu::musttail]] return ppu_dispatch(state);}")
         elif primary == 18:
-            code.append("    " + transfer(inst.successors[0]))
+            target = inst.successors[0]
+            local = target in self.heads and target >> 12 == inst.address >> 12
+            code.append("    " + (f"@@CALL_{target:x}_{continuation:x}@@" if host_call and not local else transfer(target)))
         elif primary == 16:
             target, fallthrough = inst.successors
             code.extend([f"    if(pc_v==0x{target:x}){transfer(target)}", "    " + transfer(fallthrough)])
@@ -365,8 +412,15 @@ class PageEmitter:
             if target >> 12 in self.pages:
                 return f"{{state.steps=steps_v;state.pc=0x{target:x};[[gnu::musttail]] return page_{target >> 12:x}(state);}}"
             return f"{{pc_v=0x{target:x};goto out;}}"
+        def call(m):
+            target, continuation = int(m[1], 16), int(m[2], 16)
+            if target >> 12 not in self.pages:
+                return xfer(m)
+            callee = f"page_{target >> 12:x}(state)"
+            return f"{{state.steps=steps_v;state.pc=0x{target:x};{ret_call(callee, continuation)}[[gnu::musttail]] return {callee};}}"
         for number, code in sorted(self.pages.items()):
-            code['body'] = [re.sub(r'@@XFER_([0-9a-f]+)@@', xfer, line) for line in code['body']]
+            code['body'] = [re.sub(r'@@CALL_([0-9a-f]+)_([0-9a-f]+)@@', call, re.sub(r'@@XFER_([0-9a-f]+)@@', xfer, line))
+                            for line in code['body']]
             # Word slots, not raw PCs: GCC lowers a 4-byte-strided switch on
             # pc_v to a compare tree, the dense slot switch to one jump table.
             # ppu_page_slot is a bijection, so exactly the same pc_v values

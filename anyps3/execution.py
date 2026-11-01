@@ -27,7 +27,9 @@ struct ProcessState {
     ProcessState(const ProcessState&)=delete; ProcessState& operator=(const ProcessState&)=delete;
 };
 // Per-executor facade. Shared services never follow a PpuContext assignment.
-struct PpuCpu : PpuContext { bool ppu_trace=false,ppu_defer_allowed=false,ppu_block_pending=false; std::uint64_t ppu_slice_end=UINT64_MAX; };
+struct PpuCpu : PpuContext { bool ppu_trace=false,ppu_defer_allowed=false,ppu_block_pending=false; std::uint64_t ppu_slice_end=UINT64_MAX;
+    // Host-call return prediction of translated pages (ppu_emit.py); not guest state.
+    std::uint32_t ppu_ret_depth=0; std::uint32_t ppu_ret_stack[64]={}; };
 struct PpuState : PpuCpu {
 private:
     std::unique_ptr<ProcessState> owned_process;
