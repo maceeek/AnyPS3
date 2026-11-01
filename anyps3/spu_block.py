@@ -255,7 +255,8 @@ class BlockValues(Values):
         hit = f'((({address}+15u-flo)&0x3ffffu)<0x{self.flen + 15:x}u)'
         leave = f'{self.pending_stores()}block.executed=ex+{self.insn_index(pc) + 1};t.pc={nxt};return;'
         if provenance:
-            return (f'if(__builtin_expect(prov|({hit}),0)){{if(prov)spu_ls_forget(t,{address},16);if({hit}){{{leave}}}}}')
+            # The provenance forget is deferred without a call (spu_ls_forget_quad): no call returns into the block.
+            return (f'if(__builtin_expect(prov|({hit}),0)){{if(prov)spu_ls_forget_quad(t,{address});if({hit}){{{leave}}}}}')
         return f'if(__builtin_expect({hit},0)){{{leave}}}'
 
     def interrupt_boundary(self, pc):

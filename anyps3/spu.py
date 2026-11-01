@@ -162,7 +162,7 @@ def lift_parts(pc, word, *, runtime=False):
         relative=op>>2 in (0x47,0x67)
         address=f'({w(a,0)}+{uint32((i10*16)&0xffffffff)})&0x3fff0' if op>>3 in (0x24,0x34) else f'{hex_value(((pc if relative else 0)+si16*4)&0x3fff0)}'
         if op in (0x144,0x1c4):address=f'({w(a,0)}+{w(b,0)})&0x3fff0'
-        if op>>2 in (0x41,0x47) or op>>3==0x24 or op==0x144:body=f'const unsigned address={address};std::copy(g[{t}].begin(),g[{t}].end(),ls+address);spu_ls_forget(t,address,16);'
+        if op>>2 in (0x41,0x47) or op>>3==0x24 or op==0x144:body=f'const unsigned address={address};std::copy(g[{t}].begin(),g[{t}].end(),ls+address);spu_ls_forget_quad(t,address);'
         else:body=f'const unsigned address={address};std::copy_n(ls+address,16,g[{t}].begin());'
     elif op>>2 in (0x40,0x42,0x44,0x46,0x60,0x62,0x64,0x66):
         kind=op>>2;target=((0 if kind in (0x60,0x62) else pc)+si16*4)&0x3fffc
@@ -909,6 +909,15 @@ void spu_interpret(PpuState&,NativeSpu::Thread&,std::uint8_t*);
 void spu_ls_write(NativeSpu::Thread&,unsigned,unsigned,std::uint64_t);
 static inline void spu_ls_forget(NativeSpu::Thread& t,unsigned base,unsigned size){
     if(!t.dma_writes.empty())spu_ls_write(t,base,size,UINT64_MAX);
+}
+// The forget of a quadword store (16-byte aligned `base`), deferred without a call: generated code must not call out of its
+// hot path (a call that returns clobbers every vector register, so GCC homes all live SPU values on the stack).  The line is
+// marked under the same condition as spu_ls_forget (a map that is empty before draining stays empty after it).  Exact for
+// every reader: forgets only remove bytes and commute with each other (the remainder of each span does not depend on their
+// order or grouping), and spu_ls_drain applies the pending lines before every insert or other forget (spu_ls_write) and
+// before every reader (spu_dynamic_record, spu_dynamic_fault), so each sees the map of eager forgets.
+[[gnu::always_inline]] static inline void spu_ls_forget_quad(NativeSpu::Thread& t,unsigned base){
+    if(!t.dma_writes.empty()){t.ls_forget[base>>10]|=std::uint64_t(1)<<((base>>4)&63);t.ls_forget_pending=true;}
 }
 // Diagnostic capture is TLS and disabled by default. It observes one scheduler
 // slice, including attempted blocking instructions and the actual DMA payloads.
