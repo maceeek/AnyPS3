@@ -70,6 +70,9 @@ class PpuBlockTests(unittest.TestCase):
  // A bclr to a target above 32 bits stops at the bclr, counted, with LR written by mtlr.
  {PpuState s;s.pc=0x18000;bool failed=false;try{anyps3_entry(s,false);}catch(const std::runtime_error& e){failed=std::string(e.what())=="branch target outside 32-bit space";}
  assert(failed && s.pc==0x18008 && s.steps==3 && s.lr==UINT64_C(0xfffffffffffffffc) && s.r[5]==UINT64_C(0xfffffffffffffffc));}
+ // Inside the last 63 steps before the budget a block that fits still runs
+ // (19950+3 <= 20000-3 at both heads) and returns: 5 steps, as from 0.
+ {PpuState s;s.pc=0x10000;s.steps=19950;anyps3_entry(s,false);assert(s.r[3]==42 && s.steps==19955 && s.returned);}
  // Trace requests need a trace build; they are never silently ignored.
  {PpuState s;s.pc=0x10000;bool failed=false;try{anyps3_entry(s,true);}catch(const std::runtime_error& e){failed=std::string(e.what()).find("trace build")!=std::string::npos;}
  assert(failed && s.steps==0);}

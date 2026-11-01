@@ -175,6 +175,7 @@ def declaration(name):
 
 
 LOCAL = re.compile(r'\b(gpr\d+|fpr\d+|cr_l|lr_l|ctr_l|xer_l)\b')
+STEPS = re.compile(r'\bstate\.steps\b')
 
 
 def written_locals(body):
@@ -295,7 +296,7 @@ class PageEmitter:
         page['cases'].append((first.address, f"goto ppu_{first.address:x};"))
         limit = self.options.max_steps - count if count <= self.options.max_steps else -1
         code = [f"ppu_{first.address:x}:",
-                f"    if(steps_v>=slice_v || state.reschedule){{pc_v=0x{first.address:x};goto out;}}"]
+                f"    if(steps_v>=slice_v || *resched_v){{pc_v=0x{first.address:x};goto out;}}"]
         if self.options.trace:
             code.append(f"    slow=trace_v || steps_v>UINT64_C({limit});" if limit >= 0 else "    slow=true;")
         else:
@@ -441,14 +442,19 @@ class PageEmitter:
             missing = (f"    default: state.pc=pc_v;state.steps=steps_v;"
                        f"if(steps_v>=UINT64_C({self.options.max_steps}))throw std::runtime_error(\"execution step limit reached\");"
                        f"state.steps=steps_v+1;throw std::runtime_error(\"target has no statically translated block\");")
+            # steps and reschedule are reference members: their addresses are
+            # fixed, so the page reads/publishes them without reloading the
+            # reference each time (every state.steps of the page goes through steps_p).
+            body = [STEPS.sub('(*steps_p)', line) for line in
+                    (*cases, missing, '    }', *code['body'], '    out: __attribute__((unused)); state.steps=steps_v;state.pc=pc_v;return;')]
             result.append((number, '\n'.join([
                 f'void page_{number:x}(PpuState& state) {{',
                 '    [[maybe_unused]] auto& r=state.r;',
-                '    std::uint64_t steps_v=state.steps;[[maybe_unused]] const std::uint64_t slice_v=state.ppu_slice_end;[[maybe_unused]] const bool trace_v=state.ppu_trace;',
+                '    std::uint64_t* const steps_p=&state.steps;',
+                '    std::uint64_t steps_v=*steps_p;[[maybe_unused]] const std::uint64_t slice_v=state.ppu_slice_end;[[maybe_unused]] const bool trace_v=state.ppu_trace;',
+                '    [[maybe_unused]] const bool* const resched_v=&state.reschedule;',
                 '    std::uint32_t pc_v=state.pc;[[maybe_unused]] bool slow=false;',
                 '    ppu_dispatch_local: __attribute__((unused));',
-                f'    switch ({selector}) {{', *cases, missing, '    }',
-                *code['body'],
-                '    out: __attribute__((unused)); state.steps=steps_v;state.pc=pc_v;return;',
+                f'    switch ({selector}) {{', *body,
                 '}'])))
         return result
