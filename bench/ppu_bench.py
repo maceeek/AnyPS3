@@ -7,6 +7,8 @@ blocked PPU thread), BENCH_SERIAL=1 (no concurrent memory protocol), BENCH_REPS=
 BENCH_CALLGRIND=DIV: compile with -g and run each kernel once under callgrind (iterations / DIV, collection
 only inside anyps3_entry); prints host Ir per guest instruction and its split into page-function parts
 (block bodies, block heads, page entry/switch, indirect/cross-page exits), ppu_dispatch and the runtime.
+BENCH_BRANCH=1 adds callgrind's branch simulation per guest instruction (Bcm mispredicted conditional, Bi/Bim
+indirect jumps/calls executed/mispredicted; returns are not indirect branches there).
 Symbols e_* are indirect-call targets (extra translation entries); only k_* kernels run.
 Prints ns per guest instruction per kernel. Not a game measurement.
 """
@@ -116,8 +118,8 @@ def category(fn, fl, line_no):
     if t.startswith('switch (') or t.startswith('case 0x') or t.startswith('default: state.pc=pc_v') or t.startswith('ppu_dispatch_local') or \
             'const std::uint32_t offset=pc-base' in t:
         return 'switch'
-    if t.startswith('void page_') or t.startswith('[[maybe_unused]] auto& r=state.r') or t.startswith('std::uint64_t steps_v=state.steps') or \
-            t.startswith('std::uint32_t pc_v=state.pc') or t.startswith('out:') or t == '}':
+    if t.startswith(('void page_', '[[maybe_unused]] auto& r=state.r', 'std::uint64_t steps_v=', 'std::uint64_t* const steps_p')) or \
+            t.startswith('std::uint32_t pc_v=state.pc') or t.startswith('out:') or t == '}' or t.startswith(('[[maybe_unused]] const std::uint64_t head_v', '[[maybe_unused]] const bool* const resched_v')):
         return 'entry'
     if 'goto ppu_dispatch_local' in t or 'return ppu_dispatch(state)' in t or 'return page_' in t or t.startswith('if(pc_v==0x') or \
             t.startswith('{pc_v=0x') or 'ppu_ret_' in t:
@@ -157,12 +159,15 @@ def parse(path):
             continue
     return per_line, per_fn
 
-print(f'{"kernel":<11} {"Ir/instr":>8} {"body":>6} {"head":>6} {"entry":>6} {"switch":>6} {"exit":>6} {"disp":>6} {"runtime":>7}')
+branch = bool(os.environ.get('BENCH_BRANCH'))
+print(f'{"kernel":<11} {"Ir/instr":>8} {"body":>6} {"head":>6} {"entry":>6} {"switch":>6} {"exit":>6} {"disp":>6} {"runtime":>7}' +
+      (f' {"Bcm":>6} {"Bi":>6} {"Bim":>6}' if branch else ''))
 for name in sorted(n for n in syms if n.startswith('k_')):
     if os.environ.get('BENCH_ONLY') and os.environ['BENCH_ONLY'] != name:
         continue
     cg = os.path.join(out, f'callgrind.{name}')
     r = subprocess.run(['valgrind', '--tool=callgrind', '--toggle-collect=anyps3_entry*', '--compress-strings=no', '--compress-pos=no',
+                        *(['--branch-sim=yes'] if branch else []),
                         f'--callgrind-out-file={cg}', os.path.join(out, 'bench')], capture_output=True, text=True,
                        env=dict(os.environ, ANYPS3_PERF_REPORT='0', BENCH_ONLY=name, BENCH_REPS='1'))
     m = re.search(r'(\d+) instr', r.stdout)
@@ -177,7 +182,13 @@ for name in sorted(n for n in syms if n.startswith('k_')):
         split[cat] = split.get(cat, 0) + ir
     total = sum(split.values())
     cols = ' '.join(f'{split.get(c, 0) / steps:6.2f}' for c in ('body', 'head', 'entry', 'switch', 'exit', 'dispatch'))
-    print(f'{name:<11} {total / steps:8.2f} {cols} {split.get("runtime", 0) / steps:7.2f}')
+    events = {}
+    if branch:  # callgrind's simulated predictor: mispredicted conditional, indirect executed / mispredicted
+        lines = open(cg).read().splitlines()
+        names = next(l.split()[1:] for l in lines if l.startswith('events:'))
+        events = dict(zip(names, map(int, next(l.split()[1:] for l in lines if l.startswith(('summary:', 'totals:'))))))
+    print(f'{name:<11} {total / steps:8.2f} {cols} {split.get("runtime", 0) / steps:7.2f}' +
+          (''.join(f' {events.get(e, 0) / steps:6.3f}' for e in ('Bcm', 'Bi', 'Bim')) if branch else ''))
     if os.environ.get('BENCH_FUNCS'):
         for fn, ir in sorted(per_fn.items(), key=lambda kv: -kv[1])[:8]:
             print(f'    {ir / steps:7.3f}  {fn[:110]}')
