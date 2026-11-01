@@ -36,6 +36,7 @@ class PpuBlockTests(unittest.TestCase):
             0x15000:[0x60000000]*70+[BLR],
             0x16000:[0x90a40000,0x48000000], # other PPU writes reserved word
             0x17000:[0x60000000,0x48000000], # other PPU leaves reservation alone
+            0x18000:[0x38a0fffc,0x7ca803a6,BLR], # li r5,-4; mtlr r5; blr to a 64-bit target
         }
         segments=[(a,5,struct.pack('>'+str(len(w))+'I',*w)) for a,w in code.items()]
         segments.append((0x20000,6,struct.pack('>II',0x10000,0)+bytes(0x100)))
@@ -66,6 +67,9 @@ class PpuBlockTests(unittest.TestCase):
  // that would cross it is not entered; PC/steps are those of its head.
  {PpuState s;s.pc=0x15000;s.steps=19997;bool failed=false;try{anyps3_entry(s,false);}catch(const std::runtime_error& e){failed=std::string(e.what())=="execution step limit reached";}
  assert(failed && s.steps==19997 && s.pc==0x15000);}
+ // A bclr to a target above 32 bits stops at the bclr, counted, with LR written by mtlr.
+ {PpuState s;s.pc=0x18000;bool failed=false;try{anyps3_entry(s,false);}catch(const std::runtime_error& e){failed=std::string(e.what())=="branch target outside 32-bit space";}
+ assert(failed && s.pc==0x18008 && s.steps==3 && s.lr==UINT64_C(0xfffffffffffffffc) && s.r[5]==UINT64_C(0xfffffffffffffffc));}
  // Trace requests need a trace build; they are never silently ignored.
  {PpuState s;s.pc=0x10000;bool failed=false;try{anyps3_entry(s,true);}catch(const std::runtime_error& e){failed=std::string(e.what()).find("trace build")!=std::string::npos;}
  assert(failed && s.steps==0);}

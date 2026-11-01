@@ -81,6 +81,8 @@ HELPERS_CPP = r'''
 #else
 #define ANYPS3_SPIN_HINT() ((void)0)
 #endif
+// flow.py checked_target's stop, raised after the caller published PC/steps.
+[[noreturn,gnu::noinline,gnu::cold]] inline void ppu_target_range(){throw std::runtime_error("branch target outside 32-bit space");}
 // Page switch selector: word slot of pc in the page at base (0..1023 for an
 // aligned in-page pc). Rotating instead of shifting keeps it a bijection:
 // misaligned or out-of-page values land at >= 1024, never on a case.
@@ -329,7 +331,13 @@ class PageEmitter:
             body = self.rewrite(body, inst.address)
             locals_ |= set(LOCAL.findall(body))
             sync = publish(inst.address, index + 1)
-            if self.needs_sync(body):
+            # bclr/bcctr: the 32-bit target check publishes only on its throw
+            # path (the only reader of the published PC/steps there).
+            body = body.replace('checked_target(target)', 'PPU_CHECKED_TARGET')
+            calls = self.needs_sync(body)
+            body = body.replace('PPU_CHECKED_TARGET', f'({{if(__builtin_expect(target>UINT32_MAX,0)){{{sync}ppu_target_range();}}'
+                                                      'static_cast<std::uint32_t>(target);})')
+            if calls:
                 lines.append(sync)
             body = expand_memory(body, sync, inst.address)
             written = store(written_locals(body))
