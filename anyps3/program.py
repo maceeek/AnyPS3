@@ -321,6 +321,15 @@ class Program:
                       "    auto& r = state.r; (void)r; for (;;) {",
                       "    state.ppu_slice_end=(state.steps/256+1)*256;" if self.process_entry else "    state.ppu_slice_end=UINT64_MAX;",
                       f'    if (state.steps >= UINT64_C({max_steps})) throw std::runtime_error("execution step limit reached");',
+                      # Block heads exit at ppu_head_end (ppu_emit.py). Below K=head_bound() no block crosses the
+                      # budget: the slice end bounded by K. From K on one block per dispatch: the head at state.pc
+                      # exits once to record its count, then it runs only if steps+count<=max_steps (else the same
+                      # stop as its old head check: this PC and steps, after the same engine polls), with the bound
+                      # one past the current steps so the next head exits again.
+                      f"    if(state.steps<UINT64_C({emitter.head_bound()}))state.ppu_head_end=std::min(state.ppu_slice_end,UINT64_C({emitter.head_bound()}));"
+                      "else if(static_cast<std::uint32_t>(state.ppu_head_exit)==state.pc && (state.ppu_head_exit>>32)){"
+                      f'if(state.steps+(state.ppu_head_exit>>32)>UINT64_C({max_steps}))throw std::runtime_error("execution step limit reached");'
+                      "state.ppu_head_end=state.steps+1;}else state.ppu_head_end=0;",
                       "    const auto before=state.steps; state.memory.inline_enter_dispatch(); state.ppu_ret_depth=ppu_ret_base; try { ExecutionPpuPage ppu_perf_page(state.execution,state.thread_id,state.steps); { anyps3_dispatch_page(state);" if self.process_entry else "    state.memory.inline_enter_dispatch(); state.ppu_ret_depth=ppu_ret_base; { anyps3_dispatch_page(state);"])
         ending = "    } } catch (const PpuBlocked&) { state.memory.inline_suspend(); ppu_schedule(state,true); continue; } if(state.steps/256!=before/256 || state.ppu_block_pending || state.reschedule || state.returned)state.memory.inline_suspend(); if(state.ppu_block_pending){state.ppu_block_pending=false;ppu_schedule(state,true);continue;} if(state.steps/256!=before/256){spu_run(state,1024);if(anyps3_rsx_poll_due(state,before))rsx_run(state,1024);if(state.steps/4096!=before/4096)audio_run(state);if(state.steps/65536!=before/65536)anyps3_perf_report(state);if(anyps3_dump_requested.load(std::memory_order_relaxed) && anyps3_dump_requested.exchange(false))anyps3_dump_threads(state);} if(state.reschedule || (!state.module_loading && state.ppu_threads.size()>1 && state.steps/4096!=before/4096)) ppu_schedule(state); if(state.returned) { if(state.thread_id!=1) throw std::runtime_error(\"PPU thread returned without thread-exit service\"); worker_session.finish();return; } } }" if self.process_entry else "    } if (state.returned) return; } }"
         lines.extend([ending, TIMER_SLACK_CPP, "int main(int argc, char** argv) {",

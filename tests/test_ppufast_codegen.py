@@ -12,6 +12,7 @@ import unittest
 
 from anyps3.program import compile_program
 from anyps3.prx import make_image
+from tests.test_ppufast_memory import host_has_movbe
 
 BLR = 0x4E800020
 CODE = {
@@ -46,6 +47,15 @@ CODE = {
     # li r3,0; li r4,0; mflr r31; loop: bl 0x14000; addi r4,r4,1; cmpwi r4,1000; blt loop; mtlr r31; blr
     0x13000: [0x38600000, 0x38800000, 0x7fe802a6, 0x48000ff5, 0x38840001, 0x2c0403e8, 0x4180fff4, 0x7fe803a6, BLR],
     0x14000: [0x38630003, BLR],                           # addi r3,r3,3; blr
+    # A blocker published mid-run: lwarx tracks page 0x20000, so the next stores
+    # to that page leave the inline path (medium for untracked lines, admitted for
+    # the reserved line) while loads stay inline.
+    # lis r4,2; lwarx r6,0,r4; stw r6,0x80(r4); lwz r7,0x80(r4); stb r7,0x101(r4); stw r6,0(r4); blr
+    0x15000: [0x3c800002, 0x7cc02028, 0x90c40080, 0x80e40080, 0x98e40101, 0x90c40000, BLR],
+    # Effective address above 4 GiB whose low half is mapped data: must miss and
+    # stop on the admitted path's own error, counted, with the PC of the lwz.
+    # li r16,1; sldi r16,r16,32; oris r16,r16,2; li r3,9; lwz r3,0(r16)
+    0x16000: [0x3a000001, 0x7a1007c6, 0x66100002, 0x38600009, 0x80700000, BLR],
 }
 
 
@@ -101,6 +111,15 @@ static void check(bool parallel){
     {PpuState s;setup(s,parallel);s.pc=0x11000;bool failed=false;
     try{anyps3_entry(s,false);}catch(const std::runtime_error& e){failed=std::string(e.what()).find("unmapped")!=std::string::npos;}
     assert(failed && s.pc==0x11008 && s.steps==3 && s.r[3]==1 && !s.returned && !s.memory.inline_view.active);}
+    {PpuState s;setup(s,parallel);s.pc=0x15000;anyps3_entry(s,false);
+    assert(s.returned && s.steps==7 && s.r[6]==0x01234567 && s.r[7]==0x01234567);
+    assert(s.memory.load(0x20080,4)==0x01234567 && s.memory.load(0x20084,4)==0x5a5a5a5a && s.memory.load(0x20100,4)==0x00670000 && s.memory.load(0x20000,4)==0x01234567);
+    if(parallel){const auto& c=s.memory.inline_counters;std::printf("blocker medium=%llu/%llu slow=%llu/%llu\n",(unsigned long long)c.medium_loads,
+        (unsigned long long)c.medium_stores,(unsigned long long)c.slow_loads,(unsigned long long)c.slow_stores);
+        assert(c.resumes>=1 && c.medium_stores==2 && c.slow_stores==1 && c.slow_loads==0 && c.medium_loads==0);}}
+    {PpuState s;setup(s,parallel);s.pc=0x16000;bool failed=false;
+    try{anyps3_entry(s,false);}catch(const std::runtime_error& e){failed=std::string(e.what())=="guest address outside 32-bit space";}
+    assert(failed && s.pc==0x16010 && s.steps==5 && s.r[3]==9 && s.r[16]==UINT64_C(0x100020000) && !s.returned && !s.memory.inline_view.active);}
     {PpuState s;setup(s,parallel);s.pc=0x12000;s.r[3]=5;bool failed=false;
     try{anyps3_entry(s,false);}catch(const std::runtime_error& e){failed=std::string(e.what()).find("self-modifying")!=std::string::npos;std::fprintf(stderr,"smc parallel=%d what=%s pc=%x steps=%llu\n",int(parallel),e.what(),s.pc,(unsigned long long)s.steps);}
     std::fprintf(stderr,"after smc failed=%d pc=%x steps=%llu returned=%d\n",int(failed),s.pc,(unsigned long long)s.steps,int(s.returned));
@@ -108,16 +127,19 @@ static void check(bool parallel){
 }
 int main(){check(false);check(true);std::puts("ok");}
 '''
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            (root / 'test.cpp').write_text(source)
-            build = subprocess.run(['c++', '-std=c++17', '-O2', '-Wall', '-Wextra', '-Werror', '-pthread', str(root / 'test.cpp'),
-                                    '-o', str(root / 'test')], capture_output=True, text=True, timeout=600)
-            self.assertEqual(build.returncode, 0, build.stderr[-8000:])
-            run = subprocess.run([str(root / 'test')], capture_output=True, text=True, timeout=60,
-                                 env={'SDL_AUDIODRIVER': 'dummy', 'ANYPS3_AUDIO_SINK': 'null', 'PATH': '/usr/bin:/bin'})
-            self.assertEqual(run.returncode, 0, run.stderr[-8000:] + run.stdout[-2000:])
-            self.assertIn('ok', run.stdout)
+        # Default ISA (volatile load/store plus byte swap) and, where the host
+        # has it, MOVBE (the -march=native / x86-64-v3 inline form).
+        for flags in ([], *([['-mmovbe']] if host_has_movbe() else [])):
+            with self.subTest(flags=flags), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                (root / 'test.cpp').write_text(source)
+                build = subprocess.run(['c++', '-std=c++17', '-O2', *flags, '-Wall', '-Wextra', '-Werror', '-pthread', str(root / 'test.cpp'),
+                                        '-o', str(root / 'test')], capture_output=True, text=True, timeout=600)
+                self.assertEqual(build.returncode, 0, build.stderr[-8000:])
+                run = subprocess.run([str(root / 'test')], capture_output=True, text=True, timeout=60,
+                                     env={'SDL_AUDIODRIVER': 'dummy', 'ANYPS3_AUDIO_SINK': 'null', 'PATH': '/usr/bin:/bin'})
+                self.assertEqual(run.returncode, 0, run.stderr[-8000:] + run.stdout[-2000:])
+                self.assertIn('ok', run.stdout)
 
 
 if __name__ == '__main__':

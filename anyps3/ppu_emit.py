@@ -243,6 +243,12 @@ class PageEmitter:
         self.by_address = by_address
         self.runtime_operation = runtime_operation
         self.pages = {}
+        # Largest block count; anyps3_entry derives the budget bound from it (head_bound()).
+        self.max_count = 0
+
+    def head_bound(self):
+        """K: below K steps no block can cross the budget (steps<K implies steps+count<=max_steps)."""
+        return max(0, self.options.max_steps - self.max_count + 1)
 
     def page(self, number):
         return self.pages.setdefault(number, dict(cases=[], body=[]))
@@ -296,13 +302,21 @@ class PageEmitter:
         page = self.page(first.address >> 12)
         page['cases'].append((first.address, f"goto ppu_{first.address:x};"))
         limit = self.options.max_steps - count if count <= self.options.max_steps else -1
-        code = [f"ppu_{first.address:x}:",
-                f"    if(steps_v>=slice_v || *resched_v){{pc_v=0x{first.address:x};goto out;}}"]
+        code = [f"ppu_{first.address:x}:"]
+        self.max_count = max(self.max_count, count)
+        if self.options.trace:
+            code.append(f"    if(steps_v>=slice_v || *resched_v){{pc_v=0x{first.address:x};goto out;}}")
+        else:
+            # Budget at the head without a per-block compare: head_v (ppu_head_end,
+            # anyps3_entry) is min(slice end, K) while steps<K, so no block below
+            # it can cross the budget; from K on anyps3_entry admits one block per
+            # dispatch by its recorded count (head_out: pc and count of this head).
+            code.append(f"    if(steps_v>=head_v || *resched_v){{pc_v=0x{first.address:x};cnt_v={count};goto head_out;}}")
         if self.options.trace:
             code.append(f"    slow=trace_v || steps_v>UINT64_C({limit});" if limit >= 0 else "    slow=true;")
         else:
-            code.append(f"    if(__builtin_expect(steps_v>UINT64_C({limit}),0)){{state.pc=0x{first.address:x};state.steps=steps_v;ppu_step_limit();}}"
-                        if limit >= 0 else f"    state.pc=0x{first.address:x};state.steps=steps_v;ppu_step_limit();")
+            if limit < 0:
+                code.append(f"    state.pc=0x{first.address:x};state.steps=steps_v;ppu_step_limit();")
         if any(inst.word in SPIN_HINTS for inst in block):
             code.append("    ANYPS3_SPIN_HINT();")
         locals_ = {'lr_l', 'gpr1', 'gpr3'} if self.options.trace and self.options.gpr_locals else set()
@@ -447,14 +461,15 @@ class PageEmitter:
             # fixed, so the page reads/publishes them without reloading the
             # reference each time (every state.steps of the page goes through steps_p).
             body = [STEPS.sub('(*steps_p)', line) for line in
-                    (*cases, missing, '    }', *code['body'], '    out: __attribute__((unused)); state.steps=steps_v;state.pc=pc_v;return;')]
+                    (*cases, missing, '    }', *code['body'], '    head_out: __attribute__((unused)); state.ppu_head_exit=(std::uint64_t(cnt_v)<<32)|pc_v;',
+                     '    out: __attribute__((unused)); state.steps=steps_v;state.pc=pc_v;return;')]
             result.append((number, '\n'.join([
                 f'void page_{number:x}(PpuState& state) {{',
                 '    [[maybe_unused]] auto& r=state.r;',
                 '    std::uint64_t* const steps_p=&state.steps;',
-                '    std::uint64_t steps_v=*steps_p;[[maybe_unused]] const std::uint64_t slice_v=state.ppu_slice_end;[[maybe_unused]] const bool trace_v=state.ppu_trace;',
+                '    std::uint64_t steps_v=*steps_p;[[maybe_unused]] const std::uint64_t slice_v=state.ppu_slice_end,head_v=state.ppu_head_end;[[maybe_unused]] const bool trace_v=state.ppu_trace;',
                 '    [[maybe_unused]] const bool* const resched_v=&state.reschedule;',
-                '    std::uint32_t pc_v=state.pc;[[maybe_unused]] bool slow=false;',
+                '    std::uint32_t pc_v=state.pc;[[maybe_unused]] std::uint32_t cnt_v=0;[[maybe_unused]] bool slow=false;',
                 '    ppu_dispatch_local: __attribute__((unused));',
                 f'    switch ({selector}) {{', *body,
                 '}'])))

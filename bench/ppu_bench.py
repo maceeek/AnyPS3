@@ -113,7 +113,7 @@ def category(fn, fl, line_no):
     if not PAGE_FN.match(fn):
         return 'runtime'
     t = src_lines[line_no - 1].strip() if fl.endswith('bench.cpp') and 0 < line_no <= len(src_lines) else ''
-    if 'steps_v>=slice_v' in t or 'ppu_step_limit' in t or t.startswith('steps_v+='):
+    if 'steps_v>=slice_v' in t or 'steps_v>=head_v' in t or t.startswith('head_out:') or 'ppu_step_limit' in t or t.startswith('steps_v+='):
         return 'head'
     if t.startswith('switch (') or t.startswith('case 0x') or t.startswith('default: state.pc=pc_v') or t.startswith('ppu_dispatch_local') or \
             'const std::uint32_t offset=pc-base' in t:
