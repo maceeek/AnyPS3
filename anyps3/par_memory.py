@@ -1175,10 +1175,17 @@ TYPES = RESERVATION_WAIT_TYPES + r'''
     // access, is never merged, dropped, duplicated or moved across another
     // volatile access, and its "m" operand names exactly the N guest bytes.
     template<unsigned N> [[gnu::always_inline]] static std::uint64_t inline_read(const std::uint8_t* p){
+#if defined(__x86_64__)
+        // One byte: the same single access, with base+index addressing. movzbl
+        // and the 32-bit movbe zero-extend; the stated range keeps the compiler
+        // from extending the value again.
+        if constexpr(N==1){std::uint64_t v;asm volatile("movzbl %1,%k0":"=r"(v):"m"(*p));if(v>0xff)__builtin_unreachable();return v;}
+#else
         if constexpr(N==1)return *reinterpret_cast<const volatile std::uint8_t*>(p);
+#endif
 #if defined(__MOVBE__) && defined(__x86_64__)
         else if constexpr(N==2){typedef std::uint16_t U __attribute__((aligned(1)));std::uint16_t v;asm volatile("movbew %1,%0":"=r"(v):"m"(*reinterpret_cast<const U*>(p)));return v;}
-        else if constexpr(N==4){typedef std::uint32_t U __attribute__((aligned(1)));std::uint64_t v;asm volatile("movbel %1,%k0":"=r"(v):"m"(*reinterpret_cast<const U*>(p)));return v;}
+        else if constexpr(N==4){typedef std::uint32_t U __attribute__((aligned(1)));std::uint64_t v;asm volatile("movbel %1,%k0":"=r"(v):"m"(*reinterpret_cast<const U*>(p)));if(v>0xffffffff)__builtin_unreachable();return v;}
         else{static_assert(N==8,"inline scalar width");typedef std::uint64_t U __attribute__((aligned(1)));std::uint64_t v;asm volatile("movbeq %1,%0":"=r"(v):"m"(*reinterpret_cast<const U*>(p)));return v;}
 #else
         else if constexpr(N==2){typedef std::uint16_t U __attribute__((aligned(1)));return __builtin_bswap16(*reinterpret_cast<const volatile U*>(p));}
@@ -1187,7 +1194,11 @@ TYPES = RESERVATION_WAIT_TYPES + r'''
 #endif
     }
     template<unsigned N> [[gnu::always_inline]] static void inline_write(std::uint8_t* p,std::uint64_t value){
+#if defined(__x86_64__)
+        if constexpr(N==1)asm volatile("movb %b1,%0":"=m"(*p):"r"(value));
+#else
         if constexpr(N==1)*reinterpret_cast<volatile std::uint8_t*>(p)=static_cast<std::uint8_t>(value);
+#endif
 #if defined(__MOVBE__) && defined(__x86_64__)
         else if constexpr(N==2){typedef std::uint16_t U __attribute__((aligned(1)));asm volatile("movbew %w1,%0":"=m"(*reinterpret_cast<U*>(p)):"r"(value));}
         else if constexpr(N==4){typedef std::uint32_t U __attribute__((aligned(1)));asm volatile("movbel %k1,%0":"=m"(*reinterpret_cast<U*>(p)):"r"(value));}
