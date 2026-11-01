@@ -178,7 +178,7 @@ public:
             vkCmdPipelineBarrier(a.command,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_HOST_BIT,0,1,&b,0,nullptr,0,nullptr);
             check(vkEndCommandBuffer(a.command),"resident end");a.recording=false;
             VkSubmitInfo si{};si.sType=VK_STRUCTURE_TYPE_SUBMIT_INFO;si.commandBufferCount=1;si.pCommandBuffers=&a.command;
-            check(vkQueueSubmit(queue,1,&si,a.fence),"resident submit");a.submitted=true;++a.submissions;
+            recorder_queue_order();check(vkQueueSubmit(queue,1,&si,a.fence),"resident submit");a.submitted=true;++a.submissions;
             const auto t=std::chrono::steady_clock::now();check(vkWaitForFences(device,1,&a.fence,VK_TRUE,UINT64_MAX),"resident wait");a.wait_cpu_ms+=resident_ms(t);a.submitted=false;
             if(!a.download_coherent){VkMappedMemoryRange r{};r.sType=VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;r.memory=a.download_memory;r.size=VK_WHOLE_SIZE;
                 check(vkInvalidateMappedMemoryRanges(device,1,&r),"resident invalidate");}

@@ -720,7 +720,7 @@ struct Session {
             retire_work(*flight.batch,flight.pending,flight.results,flight.labels,flight.report_floor);
             for(auto& completion:flight.completions)completion(*flight.batch);
             if(rsx_poll_adaptive())flight_ns=0.8*flight_ns+0.2*double(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-flight.submitted).count());
-            vk.graphics_reset(*flight.batch);vk.graphics_move_stats(*flight.batch,*batch);
+            vk.graphics_move_stats(*flight.batch,*batch);vk.graphics_reset(*flight.batch);   // disjoint fields; move_stats first: its sync would wait for the queued Reset
             if(flight.labels.empty() && flight.labels.capacity() && label_pool.size()<4)label_pool.push_back(std::move(flight.labels));
             if(flight.pending.capacity() && pending_pool.size()<4){flight.pending.clear();pending_pool.push_back(std::move(flight.pending));}
             spare_batches.push_back(std::move(flight.batch));flights.pop_front();++async_retires;
@@ -741,7 +741,7 @@ struct Session {
             return;
         }
         // A label with no preceding GPU command still has a completion point.
-        if(!batch->recording && !batch->submitted){const unsigned zero=0;vk.graphics_upload(*batch,&zero,4);}
+        if(!batch->recording && !batch->submitted){const unsigned zero=0;vk.graphics_upload(*batch,&zero,4,true);}   // graphics_submit syncs next
         auto& stats=fallback_stats();if(stats.enabled){++stats.flush_calls[reason];++stats.flush_submits[reason];}
         ::RsxPerfCounters::add(!std::strcmp(reason,"draw_prefix")?::RsxPerfCounters::submit_draw_prefix:!std::strcmp(reason,"fifo_labels")?::RsxPerfCounters::submit_labels: ::RsxPerfCounters::submit_other);
         try{

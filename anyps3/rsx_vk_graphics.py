@@ -139,13 +139,20 @@ public:
         unsigned vertices=0,first_vertex=0,query=0,passes=1;bool indexed=false,layered=false,multiview=false,defer_planes=false;
         std::uint64_t at=0,range=0,index_offset=0;
         std::shared_ptr<GraphicsPipeline> ms_pipeline;   // set: this visual half may draw into its attachments' MSAA working images
-        void reset(){batch=nullptr;pipeline.reset();ms_pipeline.reset();depth=nullptr;colors={};textures={};raw_textures={};}
+        // Batch lifecycle jobs share the ring (FIFO with the draws): Reset = the recorder-owned half of graphics_reset
+        // (graphics_reset_commands), Begin = the command-buffer half of a front-half graphics_begin (graphics_begin_commands).
+        // Submit = graphics_submit_commands for the timeline value in `at` (graphics_submit booked it on the frontend).
+        // Clear = the commands of a plane clear (graphics_clear_commands): image `depth`, the clear_* values.
+        enum Kind:unsigned char{Draw,Reset,Begin,Submit,Clear};Kind kind=Draw;
+        VkClearColorValue clear_color{};float clear_depth=0;unsigned clear_stencil=0;VkImageAspectFlags clear_aspects=0;bool clear_lead=true;
+        void reset(){batch=nullptr;pipeline.reset();ms_pipeline.reset();depth=nullptr;colors={};textures={};raw_textures={};kind=Draw;}
     };
     struct GraphicsBatch {
         NativeVulkan* owner;
         VkBuffer buffer=VK_NULL_HANDLE,data_buffer=VK_NULL_HANDLE;VkDeviceMemory memory=VK_NULL_HANDLE,data_memory=VK_NULL_HANDLE;void* map=nullptr;
         VkCommandBuffer command=VK_NULL_HANDLE,upload_command=VK_NULL_HANDLE,transfer_command=VK_NULL_HANDLE;VkFence fence=VK_NULL_HANDLE;
         VkCommandPool command_pool=VK_NULL_HANDLE;   // owns `command`: the draw recorder records it while the frontend resets/frees other batches' buffers
+        VkCommandPool transfer_command_pool=VK_NULL_HANDLE;   // owns `transfer_command` (DMA-queue family), same reason
         // Async prelude (NativeVulkan::transfer_queue): staging->device copies on the DMA queue, timestamps in their own 2-slot pool.
         VkQueryPool transfer_queries=VK_NULL_HANDLE;bool transfer_pending=false;std::uint64_t upload_wait=0;VkDescriptorPool descriptors=VK_NULL_HANDLE;
         // Further pools chained when one batch records more sets than `descriptors` holds.
@@ -168,6 +175,7 @@ public:
         // kind of the later mark (GraphicsMark). Serializes the pipeline at every mark: attribution, not a performance mode.
         VkQueryPool marks=VK_NULL_HANDLE;unsigned mark_count=0;std::vector<unsigned> mark_kinds;
         bool coherent=false,recording=false,submitted=false,failed=false;
+        bool submit_failed=false;   // recorder-written: a queued Submit job threw before vkQueueSubmit (the fence was never submitted)
         std::uint64_t capacity=0,used=0;
         // Shader failures are consumed only after batch completion. Keep the
         // device words live until then instead of a graphics->transfer turn
@@ -229,11 +237,16 @@ public:
         bool inline_draws=false;   // ConditionalScope: draws are recorded inline while a conditional-rendering scope is open
         // Waits until the draw recorder has recorded every queued draw (see DrawJob). Required before any use of recorder-owned state.
         std::atomic<unsigned> pending_jobs{0};   // queued, not yet recorded draws of this batch
-        void sync(){if(pending_jobs.load(std::memory_order_acquire) || owner->recorder_failed())owner->recorder_drain();}
+        // sync() waits for EVERY queued job (as before the lifecycle jobs, when only the recording batch had queued jobs): an entry
+        // point that records on the frontend may touch device-wide recorder state (framebuffer cache, visual/plane replays at a pass
+        // end) that a queued Submit job of another batch also touches. settle() waits only while this batch has queued jobs: the
+        // non-recording frontend uses of an in-flight batch (graphics_collect, graphics_reset, graphics_move_stats).
+        void sync(){owner->recorder_drain();}
+        void settle(){if(pending_jobs.load(std::memory_order_acquire) || owner->recorder_failed())owner->recorder_drain();}
         explicit GraphicsBatch(NativeVulkan* o):owner(o){}
         ~GraphicsBatch(){
             if(pending_jobs.load(std::memory_order_acquire))owner->recorder_quiesce();
-            if(submitted)vkWaitForFences(owner->device,1,&fence,VK_TRUE,UINT64_MAX);
+            if(submitted && !submit_failed)vkWaitForFences(owner->device,1,&fence,VK_TRUE,UINT64_MAX);
             // A prelude submitted on the DMA queue before a failing graphics submit (or before an abandoned batch) still reads our staging
             // buffer and writes our device buffer: wait for its upload timeline value before anything is freed. upload_wait is set by
             // the submission itself, independently of profiling, and cleared by graphics_reset after retirement.
@@ -247,8 +260,9 @@ public:
             if(descriptors)vkDestroyDescriptorPool(owner->device,descriptors,nullptr);
             for(auto pool:overflow_descriptors)vkDestroyDescriptorPool(owner->device,pool,nullptr);
             if(fence)vkDestroyFence(owner->device,fence,nullptr);
-            if(upload_command)vkFreeCommandBuffers(owner->device,owner->pool,1,&upload_command);
-            if(transfer_command)vkFreeCommandBuffers(owner->device,owner->transfer_pool,1,&transfer_command);
+            if(upload_command)vkFreeCommandBuffers(owner->device,command_pool,1,&upload_command);
+            if(transfer_command)vkFreeCommandBuffers(owner->device,transfer_command_pool,1,&transfer_command);
+            if(transfer_command_pool)vkDestroyCommandPool(owner->device,transfer_command_pool,nullptr);
             if(transfer_queries)vkDestroyQueryPool(owner->device,transfer_queries,nullptr);
             if(command)vkFreeCommandBuffers(owner->device,command_pool,1,&command);
             if(command_pool)vkDestroyCommandPool(owner->device,command_pool,nullptr);
@@ -448,13 +462,28 @@ private:
             VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,0,1,&m,0,nullptr,0,nullptr);graphics_mark(b,MarkBarrier);
         b.barrier_serial=b.pass_chain=graphics_command_serial().load(std::memory_order_acquire);graphics_work_add(WorkBarriers);
     }
-    void graphics_begin(GraphicsBatch& b){
+    // front: the caller is a frontend-only entry point (graphics_draw's front half, graphics_upload/reserve_upload from the
+    // draw path, graphics_state_blocks) that records no command itself. With the draw recorder such a begin only marks the
+    // batch recording and queues the command-buffer half (graphics_begin_commands) as a Begin job: every later command of
+    // this batch is either a queued job (FIFO) or recorded after b.sync(). Every other caller records commands itself right
+    // after graphics_begin, so it first drains this batch's queued jobs (a Reset from graphics_reset) and begins inline.
+    void graphics_begin(GraphicsBatch& b,bool front=false){
         if(b.owner!=this || b.failed)throw std::runtime_error("RSX graphics batch owner/failure");
         if(b.recording)return;
         if(b.submitted || b.completion)throw std::runtime_error("RSX graphics begin before retirement/reset");
+        const bool deferred=front && draw_recorder && !in_recorder_thread() && !b.inline_draws && !b.queries && !b.marks;
+        if(!deferred)b.sync();
+        // plane_draws is recorder-written only while draws of this batch are queued; none are (it is not recording).
         if(!b.plane_draws.empty())throw std::runtime_error("RSX graphics deferred MSAA planes outlived their batch");
+        if(deferred){auto& job=recorder_slot();job.batch=&b;job.kind=DrawJob::Begin;b.recording=true;++graphics_recordings;
+            b.pending_jobs.fetch_add(1,std::memory_order_relaxed);recorder_publish();return;}
+        graphics_begin_commands(b);b.recording=true;++graphics_recordings;
+    }
+    // Command-buffer half of graphics_begin (inline, or the Begin job on the draw recorder thread).
+    void graphics_begin_commands(GraphicsBatch& b){
         VkCommandBufferBeginInfo i{};i.sType=VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;i.flags=graphics_gpu_loop()?VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT:VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-        check(vkBeginCommandBuffer(b.command,&i),"graphics begin");b.recording=true;++graphics_recordings;b.barrier_serial=b.pass_chain=0;
+        if(in_recorder_thread())graphics_recorder_begins.fetch_add(1,std::memory_order_relaxed);
+        check(vkBeginCommandBuffer(b.command,&i),"graphics begin");b.barrier_serial=b.pass_chain=0;
         if(b.queries)vkCmdResetQueryPool(b.command,b.queries,0,4096);
         vkCmdResetQueryPool(b.command,b.occlusion,0,1024);
         if(transfer_queue && b.busy_queries){vkCmdResetQueryPool(b.command,b.busy_queries,0,3);vkCmdWriteTimestamp(b.command,VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,b.busy_queries,0);}
@@ -664,7 +693,7 @@ public:
         VkBufferCreateInfo bi{};bi.sType=VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;bi.size=bytes;bi.usage=VK_BUFFER_USAGE_STORAGE_BUFFER_BIT|VK_BUFFER_USAGE_INDEX_BUFFER_BIT|VK_BUFFER_USAGE_TRANSFER_SRC_BIT|VK_BUFFER_USAGE_TRANSFER_DST_BIT;
         // Both queue families touch these two buffers (prelude on the DMA queue, batch on the graphics queue); no ownership transfer needed.
         const std::uint32_t sharing_families[2]={family,transfer_family};
-        if(transfer_queue){bi.sharingMode=VK_SHARING_MODE_CONCURRENT;bi.queueFamilyIndexCount=2;bi.pQueueFamilyIndices=sharing_families;}
+        if(transfer_queue && transfer_family!=family){bi.sharingMode=VK_SHARING_MODE_CONCURRENT;bi.queueFamilyIndexCount=2;bi.pQueueFamilyIndices=sharing_families;}
         check(vkCreateBuffer(device,&bi,nullptr,&b->buffer),"graphics staging buffer");
         VkMemoryRequirements r{};vkGetBufferMemoryRequirements(device,b->buffer,&r);
         VkMemoryAllocateInfo ai{};ai.sType=VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;ai.allocationSize=r.size;ai.memoryTypeIndex=host_read_memory_type(r.memoryTypeBits);
@@ -677,9 +706,15 @@ public:
         VkCommandBufferAllocateInfo ci{};ci.sType=VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;ci.commandPool=pool;ci.level=VK_COMMAND_BUFFER_LEVEL_PRIMARY;ci.commandBufferCount=1;
         {VkCommandPoolCreateInfo pi{};pi.sType=VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;pi.queueFamilyIndex=family;pi.flags=VK_COMMAND_POOL_CREATE_TRANSIENT_BIT|VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
             check(vkCreateCommandPool(device,&pi,nullptr,&b->command_pool),"graphics batch command pool");}
-        ci.commandPool=b->command_pool;check(vkAllocateCommandBuffers(device,&ci,&b->command),"graphics command buffer");ci.commandPool=pool;
-        check(vkAllocateCommandBuffers(device,&ci,&b->upload_command),"graphics upload command buffer");
-        if(transfer_queue){ci.commandPool=transfer_pool;check(vkAllocateCommandBuffers(device,&ci,&b->transfer_command),"graphics transfer command buffer");ci.commandPool=pool;}
+        // `upload_command` shares the batch's own pool with `command`: the draw recorder records/resets both (Submit/Reset jobs) while the
+        // frontend records other command buffers from the shared pools.
+        ci.commandPool=b->command_pool;check(vkAllocateCommandBuffers(device,&ci,&b->command),"graphics command buffer");
+        check(vkAllocateCommandBuffers(device,&ci,&b->upload_command),"graphics upload command buffer");ci.commandPool=pool;
+        // The DMA-queue prelude buffer lives in its own per-batch pool (like `command`/`upload_command`): the draw recorder records, submits
+        // and resets it in Submit/Reset jobs while the frontend creates and frees other batches.
+        if(transfer_queue){VkCommandPoolCreateInfo pi{};pi.sType=VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;pi.queueFamilyIndex=transfer_family;pi.flags=VK_COMMAND_POOL_CREATE_TRANSIENT_BIT|VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+            check(vkCreateCommandPool(device,&pi,nullptr,&b->transfer_command_pool),"graphics batch transfer pool");
+            ci.commandPool=b->transfer_command_pool;check(vkAllocateCommandBuffers(device,&ci,&b->transfer_command),"graphics transfer command buffer");ci.commandPool=pool;}
         VkFenceCreateInfo fi{};fi.sType=VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;check(vkCreateFence(device,&fi,nullptr,&b->fence),"graphics fence");
         b->descriptors=graphics_descriptor_pool();
         VkQueryPoolCreateInfo oi{};oi.sType=VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;oi.queryType=VK_QUERY_TYPE_OCCLUSION;oi.queryCount=1024;
@@ -813,11 +848,11 @@ public:
     // Immutable slice filled in place by the caller (staging map + offset);
     // the batch prelude copies it to the device buffer before any consumer.
     std::uint64_t graphics_reserve_upload(GraphicsBatch& b,std::uint64_t bytes){
-        graphics_begin(b);const auto at=graphics_space(b,bytes);graphics_upload_region(b,at,bytes);b.upload_bytes+=bytes;
+        graphics_begin(b,true);const auto at=graphics_space(b,bytes);graphics_upload_region(b,at,bytes);b.upload_bytes+=bytes;
         ::RsxPerfCounters::add(::RsxPerfCounters::upload_bytes,bytes);return at;
     }
-    std::uint64_t graphics_upload(GraphicsBatch& b,const void* data,std::uint64_t bytes){
-        graphics_begin(b);const auto at=graphics_space(b,bytes);std::memcpy(static_cast<char*>(b.map)+at,data,bytes);b.upload_bytes+=bytes;::RsxPerfCounters::add(::RsxPerfCounters::upload_bytes,bytes);return at;
+    std::uint64_t graphics_upload(GraphicsBatch& b,const void* data,std::uint64_t bytes,bool front=false){
+        graphics_begin(b,front);const auto at=graphics_space(b,bytes);std::memcpy(static_cast<char*>(b.map)+at,data,bytes);b.upload_bytes+=bytes;::RsxPerfCounters::add(::RsxPerfCounters::upload_bytes,bytes);return at;
     }
     struct GraphicsStateBlock {std::uint64_t version;const unsigned* data;unsigned words;};
     template<std::size_t N> void graphics_state_blocks(GraphicsBatch& b,const std::array<GraphicsStateBlock,N>& blocks,unsigned first=0){
@@ -826,7 +861,7 @@ public:
         for(unsigned index=0;index<blocks.size();++index){const auto& block=blocks[index];const unsigned slot=first+index;
             if(!block.version || !block.words)throw std::runtime_error("RSX invalid immutable state block");
             if(b.state_versions[slot]==block.version){++b.state_block_hits;continue;}
-            const auto size=std::uint64_t(block.words)*4,at=graphics_upload(b,block.data,size);
+            const auto size=std::uint64_t(block.words)*4,at=graphics_upload(b,block.data,size,true);
             b.state_versions[slot]=block.version;b.state_offsets[slot]=at/4;++b.state_block_uploads;::RsxPerfCounters::add(::RsxPerfCounters::state_uploads);
             graphics_upload_region(b,at,size);
         }
@@ -954,7 +989,20 @@ public:
         if(lead){graphics_barrier(b);return;}
         if(b.active_framebuffer || !b.visual_jobs.empty() || !b.plane_draws.empty())throw std::runtime_error("RSX grouped clear/copy without its leading barrier");
     }
-    void graphics_clear_image(GraphicsBatch& b,const std::shared_ptr<GraphicsImage>& image,const VkClearColorValue& color,float depth,unsigned stencil,VkImageAspectFlags aspects,bool lead=true){b.sync();
+    // With the draw recorder a plane clear (no visual-MSAA working images: graphics_visual_msaa() off) is a Clear job: the frontend
+    // begins the batch (front), pins the image before the job names it, keeps its bookkeeping (counters, visual taint) and queues the
+    // clear commands (leading barrier/group check, vkCmdClear*) in ring order with the draws, so a clear no longer waits for the
+    // recorder to drain. The paired visual clear is the next job (lead=false), exactly as the inline order. Inline otherwise.
+    void graphics_clear_image(GraphicsBatch& b,const std::shared_ptr<GraphicsImage>& image,const VkClearColorValue& color,float depth,unsigned stencil,VkImageAspectFlags aspects,bool lead=true){
+        if(draw_recorder && !in_recorder_thread() && !graphics_visual_msaa() && !b.queries && !b.marks && !b.inline_draws){
+            graphics_begin(b,true);graphics_work_add(WorkClearTexels,std::uint64_t(image->width)*image->height*image->layers);b.pins.push_back(image);
+            auto& job=recorder_slot();job.batch=&b;job.kind=DrawJob::Clear;job.depth=image.get();job.clear_color=color;job.clear_depth=depth;job.clear_stencil=stencil;
+            job.clear_aspects=aspects;job.clear_lead=lead;b.pending_jobs.fetch_add(1,std::memory_order_relaxed);recorder_publish();
+            ++graphics_full_clears;graphics_visual_taint(*image,0,true);
+            if(image->visual)graphics_clear_image(b,image->visual,color,depth,stencil,aspects,false);
+            return;
+        }
+        b.sync();
         GraphicsSite site(SiteClear);
         graphics_begin(b);graphics_group_lead(b,lead||!graphics_pair_barriers());
         // Visual MSAA: a clear of every aspect makes the working image current (its planes are then stale); a partial clear
@@ -975,6 +1023,14 @@ public:
         else vkCmdClearColorImage(b.command,image->image,VK_IMAGE_LAYOUT_GENERAL,&color,1,&range);
         b.pins.push_back(image);++graphics_full_clears;graphics_visual_taint(*image,0,true);
         if(image->visual)graphics_clear_image(b,image->visual,color,depth,stencil,aspects,false);
+    }
+    // Recorder half of a queued plane clear (graphics_clear_image): the same commands as its inline path.
+    void graphics_clear_commands(DrawJob& j){
+        GraphicsSite site(SiteClear);auto& b=*j.batch;const auto& image=*j.depth;graphics_recorder_clears.fetch_add(1,std::memory_order_relaxed);
+        graphics_group_lead(b,j.clear_lead||!graphics_pair_barriers());
+        const VkImageSubresourceRange range{j.clear_aspects,0,1,0,image.layers};
+        if(image.depth){const VkClearDepthStencilValue value{j.clear_depth,j.clear_stencil};vkCmdClearDepthStencilImage(b.command,image.image,VK_IMAGE_LAYOUT_GENERAL,&value,1,&range);}
+        else vkCmdClearColorImage(b.command,image.image,VK_IMAGE_LAYOUT_GENERAL,&j.clear_color,1,&range);
     }
     // ANYPS3_RSX_PAIR_BARRIERS=0: the visual half of a clear/copy and later clears of one guest clear record their own leading
     // barrier again (former behaviour, A/B). Default 1 (graphics_group_lead).
@@ -1234,7 +1290,10 @@ public:
     // visibility_count/draws and the staging bytes; the recorder owns the command buffer, descriptor cache and pools, framebuffers,
     // framebuffer_pins, active_framebuffer, bound pipeline, dynamic state, plane runs, timestamps and marks. Every other entry point that
     // receives a GraphicsBatch calls b.sync() first, which waits until all queued draws are recorded (and rethrows a recorder failure);
-    // the frontend-only entry points (graphics_begin of a fresh batch, graphics_space/upload/reserve_upload/state_blocks) do not.
+    // the frontend-only entry points (graphics_begin(b,true) of a fresh batch, graphics_space/upload/reserve_upload/state_blocks) do not.
+    // Batch lifecycle: graphics_reset queues the recorder-owned reset (Reset job) and a front-half begin queues the command-buffer
+    // begin (Begin job), both counted in pending_jobs like draws, so the recorder owns the batch's command buffer from its reset
+    // through its last queued draw; graphics_submit/collect sync first as before.
     // Each batch records into its own command pool, so resetting/freeing another batch never races with the recorder.
     static bool& in_recorder_thread(){static thread_local bool recorder=false;return recorder;}
     static void recorder_relax(){
@@ -1246,6 +1305,10 @@ public:
     }
     // TEST HOOK (tests/test_rsx_recorder.py): the Nth recorded draw (0 = off) throws on the recorder thread.
     std::atomic<unsigned> graphics_test_recorder_fault{0};
+    std::atomic<bool> graphics_test_recorder_reset_fault{false};   // TEST HOOK: the next Reset job throws on the recorder thread
+    std::atomic<std::uint64_t> graphics_recorder_resets{0},graphics_recorder_begins{0},graphics_recorder_submits{0},graphics_recorder_clears{0};   // lifecycle jobs run on the recorder thread
+    std::atomic<unsigned> graphics_test_recorder_submit_delay_ms{0};   // TEST HOOK: the recorder sleeps before every Submit job (ordering tests)
+    bool graphics_recorder_submit=true;   // ANYPS3_RSX_RECORDER_SUBMIT (default 1): graphics_submit queues a Submit job (see graphics_submit)
     std::uint64_t recorder_clock=0;   // LRU stamps of the batch-local caches, recorder-thread only
     struct DrawRecorder {
         static constexpr std::size_t slots=256;
@@ -1270,9 +1333,17 @@ public:
                     auto& job=ring[c%slots];
                     if(!failed.load(std::memory_order_acquire)){
                         try{
-                            const auto fault=owner->graphics_test_recorder_fault.load(std::memory_order_relaxed);
-                            if(fault && ++recorded==fault)throw std::runtime_error("RSX draw recorder test fault");
-                            owner->graphics_record_draw(job);
+                            if(job.kind==DrawJob::Reset){
+                                if(owner->graphics_test_recorder_reset_fault.exchange(false,std::memory_order_relaxed))throw std::runtime_error("RSX draw recorder reset test fault");
+                                owner->graphics_reset_commands(*job.batch);}
+                            else if(job.kind==DrawJob::Begin)owner->graphics_begin_commands(*job.batch);
+                            else if(job.kind==DrawJob::Clear)owner->graphics_clear_commands(job);
+                            else if(job.kind==DrawJob::Submit){
+                                if(const auto ms=owner->graphics_test_recorder_submit_delay_ms.load(std::memory_order_relaxed))std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+                                owner->graphics_submit_commands(*job.batch,job.at);}
+                            else{const auto fault=owner->graphics_test_recorder_fault.load(std::memory_order_relaxed);
+                                if(fault && ++recorded==fault)throw std::runtime_error("RSX draw recorder test fault");
+                                owner->graphics_record_draw(job);}
                         }catch(...){{std::lock_guard<std::mutex> lock(mutex);error=std::current_exception();}failed.store(true,std::memory_order_release);}
                     }
                     auto* batch=job.batch;job.reset();
@@ -1299,7 +1370,13 @@ public:
         const char* v=std::getenv("ANYPS3_RSX_RECORDER");
         if(v && std::strcmp(v,"0") && std::strcmp(v,"1"))throw std::runtime_error("invalid ANYPS3_RSX_RECORDER");
         if(v && !std::strcmp(v,"1") && !graphics_gpu_loop())draw_recorder=std::make_unique<DrawRecorder>(this);
+        const char* s=std::getenv("ANYPS3_RSX_RECORDER_SUBMIT");
+        if(s && std::strcmp(s,"0") && std::strcmp(s,"1"))throw std::runtime_error("invalid ANYPS3_RSX_RECORDER_SUBMIT");
+        graphics_recorder_submit=!s || !std::strcmp(s,"1");
     }
+    // Queue order with deferred submissions: every other submission to, wait on or presentation through the graphics queue (and every
+    // device-wide idle wait) first lets the recorder submit what the frontend already queued, so the queue sees the program order.
+    void recorder_queue_order(){if(draw_recorder && !in_recorder_thread())recorder_drain();}
     // Waits until every queued draw is recorded. No-op on the recorder thread and without a recorder.
     void recorder_drain(){
         if(!draw_recorder || in_recorder_thread())return;
@@ -1588,7 +1665,7 @@ public:
         std::shared_ptr<GraphicsPipeline> paired;
         const auto words=data.size()*4,bytes=words+tail_bytes;if(bytes>graphics_properties.limits.maxStorageBufferRange)throw std::runtime_error("RSX graphics storage range limit");
         std::uint64_t at=reuse;
-        if(reuse==UINT64_MAX){graphics_begin(b);at=graphics_space(b,bytes);auto* out=static_cast<char*>(b.map)+at;std::memcpy(out,data.data(),words);if(tail_bytes)std::memcpy(out+words,tail,tail_bytes);
+        if(reuse==UINT64_MAX){graphics_begin(b,true);at=graphics_space(b,bytes);auto* out=static_cast<char*>(b.map)+at;std::memcpy(out,data.data(),words);if(tail_bytes)std::memcpy(out+words,tail,tail_bytes);
             b.upload_bytes+=bytes;::RsxPerfCounters::add(::RsxPerfCounters::upload_bytes,bytes);}
         // The dynamic blob binding's range is not observable by the shaders
         // (no length(), no robust access): round it to a power-of-two bucket
@@ -1635,7 +1712,7 @@ public:
         job->bias_constant=bias_constant;job->bias_slope=bias_slope;job->min_bounds=min_bounds;job->max_bounds=max_bounds;job->vertices=vertices;job->first_vertex=first_vertex;
         job->query=query;job->passes=passes;job->layered=layered;job->multiview=multiview;job->defer_planes=defer_planes;job->at=at;job->range=range;
         job->indexed=data.size()>15 && data[15]==1;job->index_offset=job->indexed?std::uint64_t(data[13])*4:0;
-        if(asynchronous){b.pending_jobs.fetch_add(1,std::memory_order_relaxed);recorder_publish();}else graphics_record_draw(*job);
+        if(asynchronous){b.pending_jobs.fetch_add(1,std::memory_order_relaxed);recorder_publish();}else{recorder_queue_order();graphics_record_draw(*job);}
         if(!s.visual_pass && !s.raster_width && graphics_render_scale>1 && !s.visual_external){
             if(s.scale_visual){
                 auto scaled=s;scaled.visual_pass=true;scaled.raster_width=s.width*graphics_render_scale;scaled.raster_height=s.height*graphics_render_scale;
@@ -1658,9 +1735,36 @@ public:
         return at;
     }
     // A value identifies one queue prefix. Submission never waits for it.
-    std::uint64_t graphics_submit(GraphicsBatch& b){b.sync();
+    // With the draw recorder (ANYPS3_RSX_RECORDER_SUBMIT=1, default) the frontend books the submission -- the next timeline value,
+    // completion, submitted, recording=false -- and queues a Submit job: the recorder records the batch tail and the upload prelude
+    // and calls vkQueueSubmit right after the batch's last queued draw, so the RSX worker neither waits for the recorder nor pays the
+    // tail/submit. Ownership: from graphics_submit on, the batch's command buffers, status_offsets, uploads and staging bytes belong
+    // to the recorder until graphics_collect's b.sync(); the frontend writes nothing of the batch before that (it is in flight).
+    // Order: Submit jobs run in ring order (submission order = program order) and every other queue user drains the recorder first
+    // (recorder_queue_order: an inline graphics_submit, compute/resident/clear submissions, presentation, idle waits). A timeline
+    // value not yet submitted only reads as incomplete (graphics_completed is a poll; graphics_collect syncs before it waits). A
+    // Submit failure stops the run at the next sync/enqueue (recorder_failed) with the submit's own error. The async DMA prelude
+    // (transfer_queue) goes with it: each batch's transfer command buffer has its own pool, the transfer queue is only submitted to here
+    // (and by the GPU-loop diagnostic, which runs without the recorder), and graphics_upload_serial/upload_wait/transfer_pending are
+    // written by the submission and read after a drain/settle (graphics_collect, graphics_reset, ~GraphicsBatch). Not deferred: batches
+    // with timestamps/marks/inline draws and a present semaphore (b.signal), which keep the inline path below.
+    std::uint64_t graphics_submit(GraphicsBatch& b){
+        const bool deferred=draw_recorder && !in_recorder_thread() && graphics_recorder_submit && !b.queries && !b.marks && !b.inline_draws && !b.signal;
+        if(draw_recorder && !in_recorder_thread()){if(!deferred)recorder_queue_order();}else b.sync();
         if(b.failed)throw std::runtime_error("RSX graphics batch poisoned");
         if(!b.recording)return b.completion;
+        if(deferred){
+            if(graphics_serial==UINT64_MAX)throw std::runtime_error("RSX graphics timeline exhausted");
+            const std::uint64_t value=graphics_serial+1;auto& job=recorder_slot();job.batch=&b;job.kind=DrawJob::Submit;job.at=value;
+            b.recording=false;graphics_serial=value;b.completion=value;b.submitted=true;++b.submissions;
+            b.pending_jobs.fetch_add(1,std::memory_order_relaxed);recorder_publish();completion_watch(value);return value;
+        }
+        return graphics_submit_commands(b);
+    }
+    // The recording/submission half of graphics_submit: inline (queued==0: books the value itself) or as a Submit job (queued = the
+    // value graphics_submit booked; the frontend state of the submission is already set and is not touched here).
+    std::uint64_t graphics_submit_commands(GraphicsBatch& b,std::uint64_t queued=0){
+        if(queued)graphics_recorder_submits.fetch_add(1,std::memory_order_relaxed);
         try{
             graphics_end_pass(b);
             if(!b.status_offsets.empty()){
@@ -1684,7 +1788,7 @@ public:
             VkMemoryBarrier m{};m.sType=VK_STRUCTURE_TYPE_MEMORY_BARRIER;m.srcAccessMask=VK_ACCESS_MEMORY_WRITE_BIT;m.dstAccessMask=VK_ACCESS_HOST_READ_BIT;
             vkCmdPipelineBarrier(b.command,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,VK_PIPELINE_STAGE_HOST_BIT,0,1,&m,0,nullptr,0,nullptr);graphics_mark(b,MarkTail);
             if(b.busy_queries)vkCmdWriteTimestamp(b.command,VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,b.busy_queries,1);
-            check(vkEndCommandBuffer(b.command),"graphics end");b.recording=false;
+            check(vkEndCommandBuffer(b.command),"graphics end");if(!queued)b.recording=false;
             // Recording is complete, so every immutable slice is known. Upload
             // them once before all consumers instead of breaking every draw's
             // pass. Distinct allocations never overlap, even across versions.
@@ -1723,8 +1827,8 @@ public:
             check(vkEndCommandBuffer(b.upload_command),"graphics uploads end");
             commands[command_count++]=b.upload_command;commands[command_count++]=b.command;
             }
-            if(graphics_serial==UINT64_MAX)throw std::runtime_error("RSX graphics timeline exhausted");
-            const std::uint64_t value=graphics_serial+1,values[]={value,0};const VkSemaphore signals[]={graphics_timeline,b.signal};
+            if(!queued && graphics_serial==UINT64_MAX)throw std::runtime_error("RSX graphics timeline exhausted");
+            const std::uint64_t value=queued?queued:graphics_serial+1,values[]={value,0};const VkSemaphore signals[]={graphics_timeline,b.signal};
             const std::uint64_t wait_values[]={b.upload_wait};const VkSemaphore waits[]={graphics_upload_timeline};const VkPipelineStageFlags wait_stages[]={VK_PIPELINE_STAGE_ALL_COMMANDS_BIT};
             const bool wait_upload=transfer_queue && !b.uploads.empty();
             VkTimelineSemaphoreSubmitInfo timeline{};timeline.sType=VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;timeline.signalSemaphoreValueCount=b.signal?2:1;timeline.pSignalSemaphoreValues=values;
@@ -1753,7 +1857,7 @@ public:
                     if(graphics_loop_scratch_size<b.capacity){
                         if(graphics_loop_scratch){vkDeviceWaitIdle(device);vkDestroyBuffer(device,graphics_loop_scratch,nullptr);vkFreeMemory(device,graphics_loop_scratch_memory,nullptr);}
                         VkBufferCreateInfo sbi{};sbi.sType=VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;sbi.size=b.capacity;sbi.usage=VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-                        const std::uint32_t fam[2]={family,transfer_family};sbi.sharingMode=VK_SHARING_MODE_CONCURRENT;sbi.queueFamilyIndexCount=2;sbi.pQueueFamilyIndices=fam;
+                        const std::uint32_t fam[2]={family,transfer_family};if(transfer_family!=family){sbi.sharingMode=VK_SHARING_MODE_CONCURRENT;sbi.queueFamilyIndexCount=2;sbi.pQueueFamilyIndices=fam;}
                         check(vkCreateBuffer(device,&sbi,nullptr,&graphics_loop_scratch),"loop scratch");
                         VkMemoryRequirements r{};vkGetBufferMemoryRequirements(device,graphics_loop_scratch,&r);VkMemoryAllocateInfo mi{};mi.sType=VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;mi.allocationSize=r.size;mi.memoryTypeIndex=memory_type(r.memoryTypeBits,VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
                         check(vkAllocateMemory(device,&mi,nullptr,&graphics_loop_scratch_memory),"loop scratch memory");check(vkBindBufferMemory(device,graphics_loop_scratch,graphics_loop_scratch_memory,0),"loop scratch bind");graphics_loop_scratch_size=b.capacity;
@@ -1766,7 +1870,7 @@ public:
                         if(graphics_loop_snapshot_memory){vkFreeMemory(device,graphics_loop_snapshot_memory,nullptr);graphics_loop_snapshot_memory=VK_NULL_HANDLE;}
                         graphics_loop_snapshot_size=0;
                         VkBufferCreateInfo sbi{};sbi.sType=VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;sbi.size=b.capacity;sbi.usage=VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
-                        const std::uint32_t fam[2]={family,transfer_family};sbi.sharingMode=VK_SHARING_MODE_CONCURRENT;sbi.queueFamilyIndexCount=2;sbi.pQueueFamilyIndices=fam;
+                        const std::uint32_t fam[2]={family,transfer_family};if(transfer_family!=family){sbi.sharingMode=VK_SHARING_MODE_CONCURRENT;sbi.queueFamilyIndexCount=2;sbi.pQueueFamilyIndices=fam;}
                         check(vkCreateBuffer(device,&sbi,nullptr,&graphics_loop_snapshot),"loop snapshot");
                         VkMemoryRequirements r{};vkGetBufferMemoryRequirements(device,graphics_loop_snapshot,&r);VkMemoryAllocateInfo mi{};mi.sType=VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;mi.allocationSize=r.size;mi.memoryTypeIndex=host_read_memory_type(r.memoryTypeBits);
                         graphics_loop_snapshot_coherent=memory.memoryTypes[mi.memoryTypeIndex].propertyFlags&VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
@@ -1810,11 +1914,14 @@ public:
                 std::fprintf(stderr,"PERF GPU_LOOP batches=%llu steady_ns=%llu warm_ns=%llu\n",(unsigned long long)graphics_loop_batches,(unsigned long long)graphics_loop_ns,(unsigned long long)graphics_loop_warm_ns);
             }
             if(graphics_test_submit_fault){graphics_test_submit_fault=false;throw std::runtime_error("injected graphics submit failure (test hook)");}
-            check(vkQueueSubmit(queue,1,&si,b.fence),"graphics submit");::RsxPerfCounters::add(::RsxPerfCounters::submits);graphics_serial=value;b.completion=value;b.submitted=true;++b.submissions;completion_watch(value);return value;
-        }catch(...){b.failed=true;throw;}
+            check(vkQueueSubmit(queue,1,&si,b.fence),"graphics submit");::RsxPerfCounters::add(::RsxPerfCounters::submits);if(queued)return value;
+            graphics_serial=value;b.completion=value;b.submitted=true;++b.submissions;completion_watch(value);return value;
+        }catch(...){if(!queued)b.failed=true;else b.submit_failed=true;throw;}
     }
     std::uint64_t graphics_completed(){::RsxPerfCounters::add(::RsxPerfCounters::timeline_polls);std::uint64_t value=0;check(vkGetSemaphoreCounterValue(device,graphics_timeline,&value),"graphics timeline counter");return value;}
-    bool graphics_collect(GraphicsBatch& b,bool wait=true){b.sync();
+    bool graphics_collect(GraphicsBatch& b,bool wait=true){
+        if(!wait && b.submitted && b.pending_jobs.load(std::memory_order_acquire) && !recorder_failed())return false;   // its Submit job is still queued: not complete
+        b.settle();
         if(b.failed)throw std::runtime_error("RSX graphics batch poisoned");
         if(!b.submitted)return true;
         try{
@@ -1897,9 +2004,11 @@ public:
     }
     void graphics_finish(GraphicsBatch& b){::RsxPerfCounters::add(::RsxPerfCounters::finish_waits);graphics_submit(b);graphics_collect(b);}
     static void graphics_move_stats(GraphicsBatch& from,GraphicsBatch& to){
-        from.sync();
+        // A batch with queued jobs (a Submit job after graphics_submit) keeps the counters the recorder writes until a later move
+        // (Session::retire moves them after graphics_collect synced it); the frontend counters move now, without waiting.
+        if(from.pending_jobs.load(std::memory_order_acquire)){if(from.owner->recorder_failed())from.owner->recorder_drain();}else from.settle();
         // Counters the draw recorder increments move only while the destination has no queued draws (otherwise they stay with `from`).
-        if(!to.pending_jobs.load(std::memory_order_acquire)){
+        if(!from.pending_jobs.load(std::memory_order_acquire) && !to.pending_jobs.load(std::memory_order_acquire)){
             to.visual_queued+=from.visual_queued;to.visual_drains+=from.visual_drains;to.visual_run_max=std::max(to.visual_run_max,from.visual_run_max);
             from.visual_queued=from.visual_drains=from.visual_run_max=0;
             to.draws+=from.draws;to.record_back_ms+=from.record_back_ms;to.descriptor_hits+=from.descriptor_hits;to.descriptor_misses+=from.descriptor_misses;to.framebuffer_hits+=from.framebuffer_hits;to.framebuffer_misses+=from.framebuffer_misses;
@@ -1932,17 +2041,31 @@ public:
             ++b.overflow_used;fresh=true;
         }
     }
-    void graphics_reset(GraphicsBatch& b){b.sync();
+    // The frontend half (pins, fence, the shared-pool upload/transfer buffers, front-owned bookkeeping) runs here; the recorder-owned
+    // half (graphics_reset_commands: the batch's own command pool buffer, its descriptor pools and cache, framebuffer pins, bound
+    // state) is queued as a Reset job when the draw recorder runs, so the driver's command-buffer/pool reset leaves the RSX worker
+    // thread. Nothing of that half is used before the job ran: the batch's next begin is either a queued Begin job (FIFO after the
+    // Reset) or inline after b.sync(), and every other entry point syncs first. A Reset failure stops the run at the next sync or
+    // enqueue (recorder_failed). Images can now be released (pins) before the framebuffer pins: a Framebuffer holds its images
+    // weakly and the device-wide cache already outlives the images it names (live() check), so no command uses a stale framebuffer.
+    void graphics_reset(GraphicsBatch& b){b.settle();
         if(b.recording || b.submitted || b.failed)throw std::runtime_error("RSX graphics reset pending/failed batch");
-        b.framebuffer_pins.clear();b.pipeline_pins.clear();b.pins.clear();b.buffer_pins.clear();b.compute_pins.clear();
-        check(vkResetFences(device,1,&b.fence),"graphics reset fence");check(vkResetCommandBuffer(b.command,0),"graphics reset commands");
-        check(vkResetCommandBuffer(b.upload_command,0),"graphics reset uploads");if(b.transfer_command)check(vkResetCommandBuffer(b.transfer_command,0),"graphics reset transfer");b.upload_wait=0;
+        b.pipeline_pins.clear();b.pins.clear();b.buffer_pins.clear();b.compute_pins.clear();
+        check(vkResetFences(device,1,&b.fence),"graphics reset fence");
+        b.upload_wait=0;
+        b.used=0;b.status_offsets.clear();b.visual_status_offsets.clear();b.paired_status_offsets.clear();b.uploads.clear();b.completion=0;b.frames=0;b.signal=VK_NULL_HANDLE;b.visibility_count=0;b.visibility.clear();b.query_count=0;b.phases.clear();b.phase_pipelines.clear();b.phase_visual.clear();
+        b.state_versions.fill(0);b.state_offsets.fill(0);
+        if(draw_recorder && !in_recorder_thread()){auto& job=recorder_slot();job.batch=&b;job.kind=DrawJob::Reset;b.pending_jobs.fetch_add(1,std::memory_order_relaxed);recorder_publish();}
+        else graphics_reset_commands(b);
+    }
+    void graphics_reset_commands(GraphicsBatch& b){
+        if(in_recorder_thread())graphics_recorder_resets.fetch_add(1,std::memory_order_relaxed);
+        b.framebuffer_pins.clear();check(vkResetCommandBuffer(b.command,0),"graphics reset commands");check(vkResetCommandBuffer(b.upload_command,0),"graphics reset uploads");
+        if(b.transfer_command)check(vkResetCommandBuffer(b.transfer_command,0),"graphics reset transfer");
         check(vkResetDescriptorPool(device,b.descriptors,0),"graphics reset descriptors");
         for(std::size_t i=0;i<b.overflow_used;++i){check(vkResetDescriptorPool(device,b.overflow_descriptors[i],0),"graphics reset descriptors");}
         if(!b.visual_jobs.empty())throw std::runtime_error("RSX pending visual draws at batch reset");
-        b.overflow_used=0;b.used=0;b.status_offsets.clear();b.visual_status_offsets.clear();b.paired_status_offsets.clear();b.uploads.clear();b.active_framebuffer=VK_NULL_HANDLE;b.completion=0;b.frames=0;b.descriptor_cache.clear();b.signal=VK_NULL_HANDLE;b.visibility_count=0;b.visibility.clear();b.query_count=0;b.phases.clear();b.phase_pipelines.clear();b.phase_visual.clear();
-        b.bound_graphics_pipeline=VK_NULL_HANDLE;b.dynamic_valid=false;b.state_versions.fill(0);b.state_offsets.fill(0);
-
+        b.overflow_used=0;b.active_framebuffer=VK_NULL_HANDLE;b.descriptor_cache.clear();b.bound_graphics_pipeline=VK_NULL_HANDLE;b.dynamic_valid=false;
     }
 private:
 #endif

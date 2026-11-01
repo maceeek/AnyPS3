@@ -129,8 +129,9 @@ static void dynamic_state(){
  s.rsx.registers[0x310]=1;s.rsx.registers[0x314]=0x10001;s.rsx.registers[0x318]=0;s.rsx.registers[0x320]=0x80068006;run();session.batch->sync();
  assert(s.rsx.renderer->compile_stats.graphics_pipelines==pipelines+1 && session.batch->descriptor_misses==descriptors);s.rsx.registers[0x310]=0;
  session.flush();assert(near_argb(s.memory.load(0xc0100000,4),0x80ff8040));
- // Command reset must re-emit state even when values/pipeline are identical.
- assert(!session.batch->dynamic_valid && session.batch->bound_graphics_pipeline==VK_NULL_HANDLE);run();session.batch->sync();assert(session.batch->dynamic_valid);
+ // Command reset must re-emit state even when values/pipeline are identical. The bound state is recorder-owned (with
+ // ANYPS3_RSX_RECORDER=1 the reset's recorder half is a queued Reset job): read it after a sync.
+ session.batch->sync();assert(!session.batch->dynamic_valid && session.batch->bound_graphics_pipeline==VK_NULL_HANDLE);run();session.batch->sync();assert(session.batch->dynamic_valid);
  session.flush();
  // Change a dynamic scissor and the shader constant independently. Only the
  // right half changes, with a fixed final guest pixel at each side.

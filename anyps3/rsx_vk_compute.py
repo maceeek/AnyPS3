@@ -170,7 +170,7 @@ public:
         VkFenceCreateInfo fi{};fi.sType=VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
         check(vkCreateFence(device,&fi,nullptr,&work.fence),"vkCreateFence(compute)");
         VkSubmitInfo submit{};submit.sType=VK_STRUCTURE_TYPE_SUBMIT_INFO;submit.commandBufferCount=1;submit.pCommandBuffers=&work.command;
-        check(vkQueueSubmit(queue,1,&submit,work.fence),"vkQueueSubmit(compute)");
+        recorder_queue_order();check(vkQueueSubmit(queue,1,&submit,work.fence),"vkQueueSubmit(compute)");
         check(vkWaitForFences(device,1,&work.fence,VK_TRUE,UINT64_MAX),"vkWaitForFences(compute)");
         if(!coherent)check(vkInvalidateMappedMemoryRanges(device,1,&range),"vkInvalidateMappedMemoryRanges(compute)");
         std::memcpy(words.data(),work.mapped,bytes);++compute_dispatches;
