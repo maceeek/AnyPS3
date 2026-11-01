@@ -1,6 +1,8 @@
 """Native SPU threaded-block regressions with fixed independent results."""
+import os
 import shutil
 import unittest
+from unittest import mock
 from anyps3.elf import ElfImage, Segment
 from anyps3.spu import generate_parts
 from tests import test_runtime_objects
@@ -207,9 +209,24 @@ class SpuBlockTests(unittest.TestCase):
         self.assertIn('c3w=spu_vswap32(spu_vld(g[3]))',head)
         self.assertNotIn('c30',head)          # set before every exit point: not carried
         self.assertNotIn('g[',iteration.replace('spu_vst(g[','EXIT['))
-        self.assertIn('ex<lim&&(vm&0x1ull)==0x1ull){c3w=',iteration)
+        self.assertIn('llim=(vm&0x1ull)==0x1ull?lim:0u;',head)   # back-edge bound fixed before the loop (lim, vm invariant)
+        self.assertIn('ex<llim){c3w=',iteration)
         self.assertIn('spu_vst(g[30],',tail)
         self.assertIn('goto spu_b_100;',tail)
+
+    def test_self_loop_without_valid_region_runs_the_exact_guard_every_iteration(self):
+        # AI r3,r3,1; AI r4,r4,-1; BRNZ r4 back (self loop); STOP 0x100.  A changed word at 0x13c (same 64-byte region, never
+        # executed) keeps the region unproven, so every entry of the loop block runs the exact guard (spu_block_enter, stat 26):
+        # 10 loop entries + the STOP block = 11 by hand.  With the bytes unchanged the region is proven once: no exact guard.
+        words={0x100:_ri10(0x1c,1,3,3),0x104:_ri10(0x1c,-1,4,4),0x108:_ri16(0x042,-2,4),0x10c:0x100,0x13c:0x00200000}
+        with mock.patch.dict(os.environ,{'ANYPS3_SPU_STATS':'1'}):
+            self.native(words,r'''
+ auto go=[&]{t.pc=0x100;t.steps=0;spu_word(t.gpr[3],0,0);spu_word(t.gpr[4],0,10);t.stats[26].value.store(0);
+   assert(spu_run(s,4096) && t.steps==31 && t.pc==0x110 && spu_word(t.gpr[3],0)==10 && spu_word(t.gpr[4],0)==0);
+   return t.stats[26].value.load();};
+ assert(go()==0);
+ ls[0x13f]^=1;t.dispatch_cache.clear();assert(go()==11);
+''')
 
     def native(self,words,body,overlays=()):
         img=image(words)

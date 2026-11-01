@@ -245,6 +245,7 @@ class BlockValues(Values):
     def __init__(self, lines, block_end, insn_index, flen):
         super().__init__(lines)
         self.block_end, self.insn_index, self.current, self.flen = block_end, insn_index, None, flen
+        self.slim = 'slim'  # name of the store-check bound (self_loop: a loop-local copy)
 
     def self_store_exit(self, address, pc, provenance=False):
         """A store overlapping this function's own (relocated) code range ends the call after the storing instruction:
@@ -255,8 +256,11 @@ class BlockValues(Values):
         hit = f'((({address}+15u-flo)&0x3ffffu)<0x{self.flen + 15:x}u)'
         leave = f'{self.pending_stores()}block.executed=ex+{self.insn_index(pc) + 1};t.pc={nxt};return;'
         if provenance:
-            # The provenance forget is deferred without a call (spu_ls_forget_quad): no call returns into the block.
-            return (f'if(__builtin_expect(prov|({hit}),0)){{if(prov)spu_ls_forget_quad(t,{address});if({hit}){{{leave}}}}}')
+            # One unlikely compare for both rare conditions: slim (function prologue) is the hit bound, or 0x40000 with provenance
+            # logging on (the masked offset is always below it).  The forget is deferred without a call (spu_ls_forget_quad):
+            # no call returns into the block.
+            any_ = f'((({address}+15u-flo)&0x3ffffu)<{self.slim})'
+            return (f'if(__builtin_expect({any_},0)){{if(prov)spu_ls_forget_quad(t,{address});if({hit}){{{leave}}}}}')
         return f'if(__builtin_expect({hit},0)){{{leave}}}'
 
     def interrupt_boundary(self, pc):
@@ -287,7 +291,6 @@ class BlockValues(Values):
         name = self.fresh()
         pc = self.current
         self.emit(f'const unsigned a{name}={address};spu_vstp(ls+a{name},{value});')
-        # One unlikely branch for both rare conditions: provenance logging (diagnostic) and a store into the function's own range.
         self.emit(self.self_store_exit(f'a{name}', pc, provenance=True))
 
 
@@ -323,8 +326,20 @@ def self_loop(block_values, emit_body, last, n, mask, exit_edge):
     init = [f'c{reg}{rep}={load[rep].format(r=reg)}' for reg, (reps, _) in carried.items() for rep in reps]
     for reg, (reps, dirty) in carried.items():
         values.regs[reg] = dict(reps={rep: f'c{reg}{rep}' for rep in reps}, const=None, dirty=dirty)
-    out.append(('[[maybe_unused]] SpuV ' + ','.join(init) + ';' if init else '') + 'for(;;){')
+    # lim and vm are invariant inside the body (only block ends and calls re-derive them; every body exit returns): the back-edge
+    # test ex<lim && (vm&mask)==mask is one compare against a bound fixed before the loop.  The store checks of the body compare
+    # against lslim, a copy of slim behind an empty asm: a value of its own, live only in the loop, that GCC keeps in a register
+    # where the loop has no call (slim itself is live across every call of the function and stays in its stack home).
+    out.append(('[[maybe_unused]] SpuV ' + ','.join(init) + ';' if init else '')
+               + f'const unsigned llim=(vm&0x{mask:x}ull)==0x{mask:x}ull?lim:0u;')
+    head = len(out) - 1
+    values.slim = 'lslim'
     emit_body(values)
+    if any(re.search(r'(?<![\w.])(lim|vm)\s*[|&]?=(?!=)', line) for line in out[head + 1:]):
+        raise AssertionError('SPU self loop: the body changes lim or vm')
+    if any('<lslim)' in line for line in out[head + 1:]):
+        out[head] += 'unsigned lslim=slim;__asm__("":"+r"(lslim));'
+    out[head] += 'for(;;){'
     values.current = last.pc
     kind = last.op >> 2
     value = values.word0(cond)
@@ -344,7 +359,7 @@ def self_loop(block_values, emit_body, last, n, mask, exit_edge):
             raise AssertionError(f'SPU self loop: register {reg} dirty at the back edge but not carried')
     if any(dead - seen for seen in values.exits):
         raise AssertionError('SPU self loop: an early exit precedes the setting of an uncarried register')
-    out.append(f'ex+={n};if(({value}{relation}0u)&&ex<lim&&(vm&0x{mask:x}ull)==0x{mask:x}ull){{{"".join(back)}continue;}}')
+    out.append(f'ex+={n};if(({value}{relation}0u)&&ex<llim){{{"".join(back)}continue;}}')
     values.flush()
     out.append(f'if({value}{relation}0u)goto spu_b_{last.target:x};else {exit_edge}}}}}')
     return out
@@ -426,7 +441,7 @@ def emit_function(name, code_name, lo, words, lift_parts, templates=True, insns=
              # flo = LS address of the function start in this call.  With a relocation the function's window
              # [flo, flo+flen) may wrap around the end of the 256 KB LS (code linked above the lowest loaded
              # address): every LS address derived from it is therefore masked (region compares, self-store check).
-             f'const unsigned flo=(0x{lo:x}u+delta)&0x3ffffu;const bool prov=spu_provenance_on;(void)flo;(void)prov;'
+             f'const unsigned flo=(0x{lo:x}u+delta)&0x3ffffu;const bool prov=spu_provenance_on;const unsigned slim=prov?0x40000u:0x{flen + 15:x}u;(void)flo;(void)prov;(void)slim;'
              'unsigned ex=0,lim=spu_block_lim(t,block);std::uint64_t vm=0;(void)vm;']
     if used_dispatch:
         lines.append('spu_dispatch_local:')
