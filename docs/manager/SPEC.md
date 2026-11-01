@@ -18,7 +18,7 @@ Everything else is a requirement or a proposal.
    - **CPU sets.** Compiles and tests run on `AllowedCPUs=6-11,18-23`; measured game runs use `0-5,12-17`.
    - **No forcing GPU clocks or power settings.**
    - **Kill by PID**, never with `pkill -f`.
-3. Project goal context: the original Ratchet & Clank: A Crack in Time (BCES00511) reaches its menu and a level with the virtual pad. Best steady run so far is 54 FPS (build 603).
+3. Project goal context: the original Ratchet & Clank: A Crack in Time (BCES00511) reaches its menu and a level with the virtual pad. Native resolution holds 60 FPS (build 706, 2026-10-21); 1440p walks at ~40 FPS (build 1031, 2026-10-27).
    - **Physical gamepad navigation is still unverified.** It is part of the project's completion criterion, and section 8 closes it.
    - **Only this title has a profile** (`profiles/ratchet-acit.json`). Any other disc is expected to stop explicitly somewhere. The manager must never claim compatibility it has not observed.
 4. **Path ownership.** Performance work on the runtime (`anyps3/rsx_*`, `spu_*`, `par_*`) runs in parallel on other branches.
@@ -301,10 +301,10 @@ The GUI shows a guest STOP prominently with its reason and log excerpt. It is no
 
 - **Backend.** SDL2 GameController via `dlopen("libSDL2-2.0.so.0")`. On this PC that is `sdl2-compat 2.32.74` over `SDL3 3.4.18`.
 - **Ports and mapping.** Up to 7 ports, assigned in SDL enumeration order with hotplug polling. The button and axis mapping is fixed.
-- **Advertised capabilities.** `PS3_CONFORMITY | HP_ANALOG_STICK` only. The game ignores ports without the conformity bit (`native_pad.py:118–122`).
+- **Advertised capabilities.** `PS3_CONFORMITY | HP_ANALOG_STICK`, plus the sensor and actuator bits for a device that supports them. The game ignores ports without the conformity bit (`native_pad.py:276–279`).
 - **Pressure.** Pressure-sensitive values are 0/255 from the digital state; L2/R2 come from the triggers.
-- **Rumble.** `cellPadSetActDirect` returns `UNSUPPORTED_GAMEPAD`. No actuator is advertised.
-- **Motion.** Requesting sensor mode throws "native controller motion input is not implemented", an explicit stop.
+- **Rumble and motion** (superseded 2026-10-21 by PADMOTION): `cellPadSetActDirect` drives SDL rumble, and the actuator and
+  sensor bits are advertised per device that supports them. See [DUALSENSE.md](DUALSENSE.md).
 - **Evidence and diagnostics.**
   - Menu and level evidence so far uses the diagnostic SDL virtual pad (`local/ratchet/tools/virtual_pad.py`) or a uinput pad (`uinput_pad.py`).
   - **No physical controller has been verified in the game.**
@@ -324,7 +324,6 @@ The GUI shows a guest STOP prominently with its reason and log excerpt. It is no
   - Confirm the bit layout of the capability and actuator fields from the SDK/RPCS3 references before implementing.
 - **P5: motion (DualSense, lower priority).** SDL sensor API (accelerometer and gyro) mapped to the cellPad sensor fields when a game enables sensor mode.
   - Exact value scaling must come from the documentation, with a recorded source.
-  - Until implemented, the current explicit stop stays. It is not replaced by zeros.
   - Ratchet ACIT has not been seen requesting it.
 - **P6: DualSense extras.** Lightbar colour and player LEDs per port as a cosmetic setting. Adaptive triggers are out of scope.
 - **P7: configuration transport.** The manager writes `pads.json` for the run and passes `ANYPS3_PAD_CONFIG=<path>`.

@@ -1,7 +1,7 @@
 # Cloud round HIRES3: device-memory pool, per-draw CPU cuts — 2026-10-28
 
 **Author/model:** Claude (cloud container), branch `ccr-8139488c-79xg7b` based on main 95756e2 (= `claude/hires2-wave`
-merged). **Scope:** the cloud-instance list in [HANDOFF](../HANDOFF.md#cloud-instance-next-steps-no-game-data-no-nvidia-gpu-lavapipe--validation-only--2026-10-27).
+merged). **Scope:** the cloud-instance list in [HANDOFF](../../archive/knowledge/history/HANDOFF-2026-10-25-to-11-01.md#cloud-instance-next-steps-no-game-data-no-nvidia-gpu-lavapipe--validation-only--2026-10-27).
 The container has **no game data, no `local/` tree and no NVIDIA GPU** (4 vCPU, 15 GB): no game build, run, FPS or
 frame figure was produced. Every runtime statement below is a native unit test on **lavapipe (llvmpipe, LLVM 20.1.2)**,
 mostly with `VK_LAYER_KHRONOS_validation` + sync validation, or a synthetic micro-benchmark. The real PC must build and

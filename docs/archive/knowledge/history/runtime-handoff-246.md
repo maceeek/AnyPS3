@@ -232,10 +232,10 @@ without verifying the original guard/base/offset/count/targets and identity.
 - [244: callbacks, virtual pad, actual FP stop](../experiments/2026-10-14-virtual-pad-and-callbacks-244.md)
 - [245: FP semantics and regressions](../experiments/2026-10-14-fp-zero-divide-245.md)
 - [246: table and interruption](../experiments/2026-10-14-byte-switch-246.md)
-- [Previous progress 198–237](runtime-handoff-237.md), [brief history](../../menu-progress.md)
+- [Previous progress 198–237](runtime-handoff-237.md), [brief history](../../menu-progress-to-2026-11-01.md)
 - [RSX semantics and limitations](../experiments/2026-10-14-rsx-software-draw.md),
   [PRX/trophy/PPU details](../experiments/2026-10-14-prx-import-references.md)
-- [Primary sources, exact paths and revisions of the references](../SOURCES.md)
+- [Primary sources, exact paths and revisions of the references](../../../knowledge/SOURCES.md)
 
 Evidence files in `local/ratchet/`: `target-240-evidence.txt`,
 `target-241-evidence.txt`, `loader-vtables-242-evidence.json`,

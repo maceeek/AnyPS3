@@ -94,7 +94,7 @@ DMA, events and the stop without every single instruction.
 - `diagnostic.cpp` in the same directory: a reading observer added only
   for data comparison. The regular runtime receives no pre-decompressed output.
 - `local/ratchet/tests-native-190.log`: the complete regression suite.
-- [Detailed procedure](menu-progress.md) and [Vulkan verification](vulkan-rendering.md).
+- [Detailed procedure](menu-progress-to-2026-11-01.md) and [Vulkan verification](vulkan-rendering-2026-10-14.md).
 
 Further work begins with the SPU run budget when reading the global archives.
 After that it is necessary to track the game's actual requests for further services and RSX

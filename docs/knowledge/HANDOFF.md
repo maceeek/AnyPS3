@@ -1,169 +1,54 @@
 # Handoff to the next instance
 
-## Cloud round HIRES8 — 2026-11-01 (cloud container; goal NOT reached, nothing measured in the game)
+## State at the end of the cloud rounds — 2026-11-01
 
-Branch `ccr-b1a3987e-aypb5o` (pushed): d1177e9 + merges of `cloud/hires8-ppu` (agent K, b68e12a) and `cloud/hires8-spugen2`
-(agents J/J2, abaeba4; J's self-loop cut c74b9c9 was committed by the coordinator after J ended twice with work
-uncommitted). Read the [record](experiments/2026-11-01-cloud-hires8.md): the stack-home finding for generated SPU code,
-the deferred provenance forgets, the self-loop exactness, the PPU return-prediction invariant, the valgrind `mremap`
-finding for PPU benches. A follow-up round HIRES9 (PPU inline guest loads/stores and block heads; the rest of the SPU job)
-started from abaeba4 in the same container.
+- **Goal not reached.** Nothing has been measured in the game since HIRES2 (2026-10-27, PC). Read [CURRENT.md](CURRENT.md):
+  the last PC numbers, the cloud changes since, the switch table and **one ordered PC measurement plan**. The next step
+  belongs on the PC. Another cloud round before that measurement would optimise blind: the H8/H9 targets were already
+  missed, and only the PC shows which thread is still critical.
+- **Branches:**
+  - `main` = 95756e2 (HIRES2 merged, PR #14).
+  - The work branch `ccr-b1a3987e-aypb5o` = main + HIRES3–HIRES9 + the documentation cleanup of 2026-11-01. It is pushed; no PR
+    is open.
+  - The remote branch `ccr-8139488c-79xg7b` (HIRES3) is fully contained in the work branch; the user deletes it, since the
+    cloud session may not.
+- **Live processes:** none from the cloud rounds. Agents, benches and the suite have ended, and their worktrees and branches
+  are removed. The PC's state (builds, queued jobs) is not visible from the cloud.
+- **Documentation:** cleaned up on 2026-11-01. Superseded material is in [../archive/](../archive/README.md), which also gives the
+  pre-cleanup commit.
 
-First next actions on the real PC: (1) one integration build; QUIET alternating 1440p walks vs the HIRES7 tip or 1031/1034
-— `main_ppu` ms/frame in heavy frames, the SPU-wait shares (0x666068, 0x5564d4) and the awaited lane's time, `PERF
-PPU_THREAD` ns/instr; (2) same binary with `ANYPS3_PPU_RET_DEPTH=0`; (3) a run with `ANYPS3_SPU_DYNAMIC_LOG` set: rows equal
-to the base build; (4) compile time and `.text` of the ppu-*/spu-* units vs base; (5) the HIRES7/HIRES6 items below.
+## If another cloud round is started (what worked, what the container can do)
 
-## Cloud round HIRES7 — 2026-10-31/11-01 (cloud container; goal NOT reached, nothing measured in the game)
-
-Branch `ccr-b1a3987e-aypb5o` (pushed): HIRES6 8126bbc + merges of `cloud/hires7-worker` (agent I, c6e633d) and
-`cloud/hires7-spu` (agent H, 7a98527), plus d1177e9 (comment fix for HIRES6's command-name scan). Read the
-[record](experiments/2026-11-01-cloud-hires7.md): the synthetic SPU job, the per-thread worker/recorder figures, the ownership
-rules of the recorder jobs, the SPU chaining and DMA exactness arguments, the prepare-stage design, the full suite.
-Both agents were stopped once by an API usage limit and resumed from their saved state. A follow-up round HIRES8 (generated
-SPU code; PPU main thread) started from d1177e9 in the same container.
-
-First next actions on the real PC: (1) one integration build; QUIET alternating 1440p walks with `ANYPS3_RSX_RECORDER=1` vs
-1031/1034 — rsx_worker and rsx-record ms/frame, µs/draw, main-thread ms and its SPU wait, GPU busy; image check with the
-recorder on; (2) same binary with `ANYPS3_RSX_RECORDER_SUBMIT=0` and with `ANYPS3_SPU_CHAIN=0`; (3) `ANYPS3_WAKETRACE` or the
-sampler: lane 0x2000200 ms/frame and its shares; (4) `tests.test_rsx_async_upload` / `tests.test_rsx_recorder` on NVIDIA
-(real DMA queue); (5) the HIRES6 items (marks walk, barrier A/B, MSAA test on NVIDIA).
-
-## Cloud round HIRES6 — 2026-10-31 (cloud container; goal NOT reached, nothing measured in the game)
-
-Branch `ccr-b1a3987e-aypb5o` (pushed): HIRES5 46aa60f + merges of `cloud/hires6-gpu` (agent G, b577d49) and
-`cloud/hires6-worker` (agent F, 8126bbc; no conflicts). Read the [record](experiments/2026-10-31-cloud-hires6.md): the
-game-shaped `tracked=1` bench mode, F's exact worker cuts and G's barrier/marks/MSAA-load changes, the combined callgrind
-table (two alternating rounds), the coordinator's review of the barrier-skip and constant-window arguments, risks.
-A follow-up round HIRES7 (SPU job speed for the main thread's SPU wait; moving work off the RSX worker thread) was started
-in the cloud container on the same day from 8126bbc; its state is in its own section once it is merged.
-
-First next actions on the real PC: (1) one integration build; QUIET alternating 1440p walks vs 1031/1034 — rsx_worker
-ms/frame and µs/draw in heavy frames, main-thread ms, GPU busy ms/frame; (2) an `ANYPS3_RSX_VK_MARKS=1` scale-2 walk:
-`PERF GPU_MARKS` vs 1031sm1 (native `pass_begin` per begin should fall towards ~1.5 µs if the attribution hypothesis holds)
-and `PERF RENDER_SCALE_WORK` (barriers, barriers_elided, site_* copies); (3) defaults vs `ANYPS3_RSX_BARRIER_DEDUPE=0`, then
-`ANYPS3_RSX_PASS_BARRIER=0` / `ANYPS3_RSX_PAIR_BARRIERS=0`; (4) `tests/test_rsx_visual_msaa.py` on NVIDIA, then
-`ANYPS3_RENDER_SCALE_MSAA=1` with `ANYPS3_RENDER_SCALE_MSAA_LOAD=1` vs 0 vs MSAA off; (5) the HIRES5/HIRES4/HIRES3 A/B runs
-still open.
-
-## Cloud round HIRES5 — 2026-10-31 (cloud container; goal NOT reached, nothing measured in the game)
-
-Branch `ccr-b1a3987e-aypb5o` (pushed): HIRES4 990c799 + merges of `cloud/hires5-state` (agent E, 8a03614) and
-`cloud/hires5-data` (agent D, 1c102a6; conflict only in `tests/test_rsx_perf_draw.py`, both sides kept). Read the
-[record](experiments/2026-10-31-cloud-hires5.md): changes, per-agent and combined callgrind tables, the bench-borrow finding,
-the coordinator's review of both invalidation arguments, risks. Agent worktrees and branches were removed after the
-merges (all commits are in the pushed branch). No process of this round is live.
-
-First next actions on the real PC: (1) one integration build; QUIET alternating 1440p walks vs 1031/1034 — rsx_worker
-ms/frame and µs/draw in heavy frames, main-thread ms and RsxWait; (2) the same binary alternating with
-`ANYPS3_RSX_GEOMETRY_REUSE=0`, plus a `-DANYPS3_RSX_PERF_COUNTERS` build for geometry/index hit rates and PPU medium/slow
-stores (reuse 1 vs 0); (3) `ANYPS3_RSX_RTT_PREFILTER=0 ANYPS3_RSX_TEXTURE_IMAGE_MEMO=0`; (4) a visual check of animated or
-skinned geometry with reuse on; (5) the HIRES4/HIRES3 switch A/B runs still open; (6) if the worker is <= 13 ms, the next
-blockers are the main guest thread (SPU-job wait) and the scale-2 GPU.
-
-## Cloud round HIRES4 — 2026-10-30/31 (cloud container; goal NOT reached, nothing measured in the game)
-
-Branch `ccr-b1a3987e-aypb5o` (pushed; HIRES3 de6bc4f + merges of `cloud/hires4-fifo` (fast-forward, b602751),
-`cloud/hires4-draw` (ceab1ba) and `cloud/hires4-mem` (b694994)). Read the [record](experiments/2026-10-30-cloud-hires4.md):
-per-draw cuts (agent A), FIFO decode/non-draw cuts (agent B), renderer guest-memory admission (agent C), the combined
-callgrind table, the suite result and the coordinator's review notes. The agent branches remain local to the cloud
-container (not pushed); their commits are all in the pushed branch. No process of this round is live.
-
-First next actions on the real PC: (1) one integration build; QUIET alternating 1440p walks vs 1031/1034 — rsx_worker
-ms/frame and µs/draw in heavy frames, main-thread RsxWait, `PERF GUEST_MEMORY`; (2) the same binary with
-`ANYPS3_RSX_RENDER_BATCH=0`, then all three memory switches 0 (`ANYPS3_GUEST_PAGE_READ`, `ANYPS3_RSX_RENDER_BATCH`,
-`ANYPS3_GUEST_RANGE_ADMISSION`), and `ANYPS3_RSX_FIFO_PAIR=0`; (3) GCC 15 compile time/size; (4) still open from HIRES3:
-pool A/B, 1035 MSAA, the recorder teal-frame check (if clean, recorder on by default in runtime and GUI); (5) if the worker
-is still > 13 ms, the per-draw designs in the record and HIRES3's two-thread worker.
-
-## Cloud round HIRES3 — 2026-10-28 (cloud container; goal NOT reached, nothing measured in the game)
-
-Branch `ccr-8139488c-79xg7b` (pushed; based on main 95756e2). Read the
-[record](experiments/2026-10-28-cloud-hires3.md): device-memory pool, DrawJob borrowed pointers, report floors,
-vertex-constant chunks, typed-RTT literals, `bench/rsx_fifo_bench.py`. Cloud items done from the 2026-10-27 list: 1 (suite: 17 pre-existing failures also on base, 1 regression fixed;
-see record), 2 (three of the five per-draw cuts; FIFO decode measured and left unchanged), 5 (pool). Not started: 3
-(two-thread worker; the record adds the derived constraint that a decode-only front saves ~1 µs/draw), 4 (visual MSAA load
-path, constants via UBO, pass-begin cost — finding documented), 6 (horizontal 8/3). No process of this round is live.
-
-First next actions on the real PC: (1) one integration build of the branch; QUIET alternating 1440p walks against
-1031/1034; the same binary with `ANYPS3_RSX_MEMORY_POOL=0`; (2) full frame ring + `hitch_marks.py` to see whether stutter
-classes A/B disappear (B persisting refutes the first-touch hypothesis); (3) scale-1 walks for rsx_worker ms/frame and
-µs/draw; (4) `ANYPS3_RSX_RTT_LITERALS=0/1` with `ANYPS3_RSX_VK_MARKS`.
-
-## HIRES2 wave — 2026-10-27 evening (ended on user instruction; goal NOT reached)
-
-Read the top of [CURRENT.md](CURRENT.md) and the
-[HIRES2 record](experiments/2026-10-25-hires-wave.md#hires2-wave-result-2026-10-27-evening-coordinator-claude-opus-55-agents-opus-55-high-goal-not-reached).
-Branch `claude/hires2-wave` merges `fast2/hires2w` + `fast2/hires2s` into main f92681c (no overlapping files). Rules
-for the agents: `local/ratchet/work/COMMON-HIRES2.md`; agent handoffs (with exact commands and tools):
-`local/ratchet/work/hires2w/RESULT.md` (instance 2 section), `local/ratchet/work/hires2s/RESULT.md` (instance 5 section).
-On the user's instruction all queued detached builds/runs were stopped at session end; runs cut short are invalid
-(listed in the record). No agent, build or game run is live.
-
-First next actions: (0) repeat 1002 vs 960 alternating at scale 1 (1002a1s1 looked slower, probably disturbed — must be
-resolved before merging cf7a6ef to main) and measure the already-built 1035 (MSAA on/off) vs 1031; (1) build the merged branch as one integration build and measure it alternating with 1031 at scale 2
-(QUIET, `work/hires2s/measure-walk-*.sh` pattern), then with `ANYPS3_RENDER_SCALE_MSAA=1`; (2) main-thread SPU-job wait
-(~3.9 ms/heavy frame): analyse `work/hires2w/tools/wallsplit.py 1000w1s1` (what the SPU lanes run while thread 1 spins; a first attempt
-under `timeout 1500` produced no output — run it without the timeout, redirected to `work/hires2w/logs/`);
-(3) RSX worker heavy frames 21 ms → ≤ 13 ms (ranked cuts in hires2w/RESULT.md, or a front/back thread split);
-(4) GPU at scale 2: second sample plane via MSAA, native pass-begin cost; (5) attribute the 140–180 ms walking hitches
-with a full frame ring (not pipeline compiles). Open user decision: horizontal scale 8/3 for full 2560-column detail.
-
-### Cloud instance next steps (no game data, no NVIDIA GPU; lavapipe + validation only) — 2026-10-27
-
-Status 2026-10-31: items 1 and 5 done in HIRES3; item 2 largely done (HIRES3: DrawJob borrowed pointers, report floors;
-HIRES4: FIFO decode and actions, renderer guest-memory admission; the texture-unit memo is in HIRES5); items 3, 4 and 6 open.
-
-A cloud instance cannot run the game or measure FPS. It should deliver **exact, gated, unit-tested source changes on its
-own `claude/*` branch based on `claude/hires2-wave`**, each with a native regression test (independent expectation) and
-a micro-benchmark where it targets CPU cost; the real PC then builds and measures them alternating. Priorities, from the
-verified HIRES2 evidence (`local/ratchet/work/hires2{w,s}/RESULT.md` exist only on the PC; the record
-`experiments/2026-10-25-hires-wave.md` has the numbers):
-
-1. **Full regression suite on `claude/hires2-wave` (lavapipe).** Only targeted modules ran after the merge. Report
-   failures with the first differing value; fix or rebut each.
-2. **RSX worker per-draw CPU cuts (target: heavy frames 21 → ≤ 13 ms, ~9.1 µs/draw marginal; each cut is ~0.3–1 ms):**
-   - per-draw `shared_ptr` / `GraphicsImage` array copies into `graphics_draw`/DrawJob (~5.4 % of the worker): pass
-     borrowed references or a pooled draw descriptor; keep lifetimes explicit (the recorder thread consumes them);
-   - `texture_image` per-unit memo (like the texture-metadata memo 7375cb6, generation-bumped on erase/clear) and caching
-     the fragment-shader string that `rtt_image` rebuilds;
-   - batch label/report publication (~230 occlusion reports/frame: Label construction, vector growth, GpuPages claim per
-     publish) into one publish per FIFO run, keeping guest-visible order and values exact;
-   - `rsx_fifo_values` FIFO word reads (~2.6 %) and the decode of non-draw methods (~23 % of heavy-frame worker time):
-     add a per-method cost counter (gated) and a faster register-only path;
-   - clears (~2.8 %).
-3. **Design + prototype behind a switch: a two-thread RSX worker (front: FIFO decode/state/guest reads; back:
-   prepare/record).** Estimated alone to leave ~16–17 ms in heavy frames, so it combines with item 2. Write the ordering
-   rules (Session, guest-memory admission, labels/reports, HostObserver) first; tests must cover label/report ordering
-   and guest-visible memory under concurrent writes.
-4. **GPU at scale 2 (correctness testable on lavapipe):**
-   - visual 2× MSAA (a57960b): add the plane→sample load path so a target that is not fully cleared each frame can still
-     use the working image (lavapipe lacks 2× MSAA — test the fallback path there, mark the NVIDIA check as pending);
-   - typed-RTT raw-byte decoder shader: per-byte integer div/mod addressing at 3840×1408 — restructure (exact output,
-     compare against the current shader byte-for-byte on lavapipe);
-   - shader constants read through a storage buffer with dependent loads → uniform-buffer layout (exact; image tests);
-   - native render-pass begin costs 12.6 µs vs 1.55 µs visual (1031sm1): read the code for per-begin framebuffer/image
-     work, load ops and barriers; propose a fix with a test.
-5. **Stutter class A/B (Vulkan device memory, testable on lavapipe):** the 384 MB memory cache in
-   `rsx_vk_resources.py` reuses exact-size blocks only and holds ~4 visual images at scale 2; frees evict via
-   vkFreeMemory (up to 16.8 ms per call) and ~240 new allocations occur in streaming frames. Implement sub-allocation
-   from large blocks (size classes / a buddy or linear allocator per memory type) with bounded, deferred frees off the
-   worker's critical path; unit-test aliasing/lifetime with fences and the allocation counts.
-6. **Design note only (user decision pending): horizontal scale 8/3** so 1440p shows 2560 genuine columns (today the
-   960×704 scene renders at 1920×1408 and is resampled 4:3). Describe what anisotropic visual companions would change
-   (sample grid, typed RTT, history copies, presentation) and the expected GPU cost.
-
-Not suitable for the cloud: the main-thread SPU-job wait (needs the game and the `wallsplit.py` analysis of
-`1000w1s1`), PPU codegen changes that need the original ELF, the 1002/1035 measurements and stutter attribution.
-
-## Older handoffs
-
-- 2026-10-21 to 2026-10-25 (wave 6, resolution scaling, cloud follow-up, FIX7, performance milestone, HIRES wave):
-  [history/HANDOFF-2026-10-21-to-10-25.md](history/HANDOFF-2026-10-21-to-10-25.md) (moved 2026-10-31).
-- FAST2 wave 4, installer, manager worktree, the sandbox assessment and the handoffs of 2026-10-14 to 2026-10-20:
-  [history/HANDOFF-2026-10-14-to-10-20.md](history/HANDOFF-2026-10-14-to-10-20.md).
-- Runtime handoffs 198–246 (superseded): [246](history/runtime-handoff-246.md), [237](history/runtime-handoff-237.md),
-  [198](history/runtime-handoff-198.md). Full previous wording of this file: `local/ratchet/HANDOFF-before-cleanup-2026-10-14.md`.
+- **Container:** 4 vCPU, lavapipe only, GCC 13, valgrind; no game data, no `local/` tree, no NVIDIA. Deliver exact or gated
+  source changes, each with a native test against an independent oracle plus mutation checks. The PC measures.
+- **Benches (in `bench/`):**
+  - `rsx_fifo_bench.py`: the real RSX worker on synthetic FIFO streams. Use mode `tracked=1`; it is game-shaped.
+  - `rsx_draw_bench.py`, `rsx_fifo_actions_bench.py`.
+  - `spu7_job_bench.py`: a synthetic SPU job through the production lifter and runtime. The metric is non-FP Ir = `spu_step`
+    inclusive minus `spu_single_vector`, since valgrind has no AVX-512, plus native AVX-512 ns/iteration over three alternating
+    rounds; also compare the output digest.
+  - `ppu_bench.py`: run with `BENCH_CALLGRIND=20`, `-O2 -march=x86-64-v3 -ffp-contract=off -DBENCH_MREMAP_SHIM`; it reports host
+    Ir per guest instruction per kernel and the page text.
+  - Always run base vs merge alternating on snapshots of both trees.
+- **Agents:**
+  - Each agent works in its own worktree and branch from the coordinator's tip and writes a result file.
+  - The coordinator reviews every exactness argument against the code, merges, and repeats the integration bench.
+  - At most two agents in parallel on 4 vCPU.
+- **Full suite:**
+  - Run every `tests/test_*.py` module in its own process, 3 in parallel, `nice -n 5`, `ANYPS3_REQUIRE_VULKAN=1`, on a
+    `git archive` snapshot. It takes ~4 h.
+  - Compare the FAIL/ERROR lines mechanically with the previous suite.
+  - Re-run alone the modules that fail only under load (`test_rsx_perf`, `test_spu_pool_poll`, `test_spuperf2_simd`, compile limits).
+- **Modules that cannot pass in the container** (they fail on every base the same way):
+  - `local/` tools missing: `test_sample_profile`, `test_sample_profile_integration`, `test_spudyn_profile`,
+    `test_spuperf2_capture`;
+  - SDL offscreen without Vulkan: `test_present_window`;
+  - GCC 13 `-Werror`: `test_ppu_fp_lazy`, `test_ppuperf3`, `test_savedata_vsh`, `test_rsx_residency`;
+  - lavapipe-sensitive cache asserts: `test_rsx_fp_cache`, `test_rsx_sampler_identity`, `test_rsx_resident_sampler`,
+    `test_rsx_perf_decode`, `test_rsx_pipeline_cache`;
+  - compile limits too short for the container (vary with load): `test_program`, `test_services`, `test_native_audio*`,
+    `test_spufast_blocks`, `test_vulkan`.
+- **HIRES9 suite result:** running at the time of the cleanup commit (117 of 204 modules, failures identical to HIRES7); the final result is in the [HIRES9 record](experiments/2026-11-01-cloud-hires9.md#regression-tests).
 
 ## Template for an experiment or handoff
 
@@ -187,6 +72,7 @@ Limitations: what the test does not cover
 
 - The paths actually exist; the reference checkout has a recorded revision.
 - A fact comes from a specific source or a runtime artifact.
-- The result matches the criterion of the original menu and gamepad; a diagnostic presentation is not mistaken for guest rendering.
+- The result matches the goal's criterion (1440p, 60 FPS acceptance, gamepad); a diagnostic presentation is not mistaken for
+  guest rendering.
 - Failed attempts and hypotheses are visibly separated from confirmed behavior.
 - The next step addresses the real last blocker, not a long-removed error.

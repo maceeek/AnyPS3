@@ -20,8 +20,8 @@ A hypothesis must have a reason, an alternative and a further distinguishing tes
 
 ## Durable handoff
 
-CURRENT contains only the current goal, the last valid evidence, active questions and the next step; long logs belong in artifacts. The CELL/SPU/PPU/RSX topics contain more stable conclusions and a map of sources. Records of individual experiments can be stored as `docs/knowledge/experiments/YYYY-MM-DD-short-name.md` and linked from CURRENT.
+CURRENT contains only the current goal, the last valid evidence, active questions and the next step; long logs belong in artifacts. The CELL/SPU/PPU/RSX topics contain more stable conclusions and a map of sources. Records of individual experiments can be stored as `docs/knowledge/experiments/YYYY-MM-DD-short-name.md` and linked from CURRENT. When a record or a CURRENT/HANDOFF section is superseded, move it to `docs/archive/` (mirroring its path) instead of letting CURRENT grow; CURRENT keeps one consolidated next-action plan.
 
-Record a change of the deciding blocker as you go; do not wait until the model ends. Before a handoff, distinguish the changes made, the verification actually run, and the plan. Do not report a test as successful merely because it was prepared. The end of the goal is counted as the original ACIT menu and verified gamepad interaction, not merely reaching boot, a callback or a flip.
+Record a change of the deciding blocker as you go; do not wait until the model ends. Before a handoff, distinguish the changes made, the verification actually run, and the plan. Do not report a test as successful merely because it was prepared. The end of the current goal is the acceptance in the root `AGENTS.md` and [CURRENT.md](CURRENT.md) (the level at 60 FPS with headroom, now at render scale 2, playable with a verified physical gamepad), not a build, a synthetic benchmark, a clear or a flip.
 
 Do not write project knowledge into the user's system memories. Do not include secrets, keys, game content, firmware or a proprietary SDK. Publicly available manuals in the local library retain their original copyright; assess their own terms before public redistribution.

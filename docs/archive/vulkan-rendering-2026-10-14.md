@@ -90,7 +90,7 @@ samples, scissor and unchanged surrounding bytes.
 For supported compressible tiles we keep the uncompressed values; this is not a
 decoder of compressed data. Later reads, blits and rendering must respect this
 representation. An overview of the further progress is in
-[progress toward the menu](menu-progress.md).
+[progress toward the menu](menu-progress-to-2026-11-01.md).
 
 Build 138 further completed four real game flips. The headless sink selects the
 buffer designated by the game's command, converts its tiled X8R8G8B8 pixels,

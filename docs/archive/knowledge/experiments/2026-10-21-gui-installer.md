@@ -7,8 +7,8 @@ by the coordinator on the user's instruction 2026-10-21 and the worktree removed
 
 ## Implementation (verified in source and integration tests)
 
-- [README](../../../README.md) starts with install, desktop launch, import, Play and update instructions.
-- [Installer](../../../scripts/install.sh) creates a fresh Git clone without shared objects and its own
+- [README](../../../../README.md) starts with install, desktop launch, import, Play and update instructions.
+- [Installer](../../../../scripts/install.sh) creates a fresh Git clone without shared objects and its own
   Python venv on every installation/update. Editable package registration points only into that private
   snapshot so the existing manager can find profiles and snapshot its runtime sources.
 - Launchers pin the selected release, use isolated Python imports and a fixed tool PATH, clear development
@@ -24,7 +24,7 @@ by the coordinator on the user's instruction 2026-10-21 and the worktree removed
 
 ## Verification (verified, 4 tests passed, 0 skipped)
 
-Test: [tests/manager/test_installer.py](../../../tests/manager/test_installer.py).
+Test: [tests/manager/test_installer.py](../../../../tests/manager/test_installer.py).
 Saved summary: [installer-suite.log](../../manager/evidence/installer-suite.log).
 Source and evidence hashes: [installer-verification.json](../../manager/evidence/installer-verification.json).
 At the merge the hashes of `scripts/install.sh`, the test, both READMEs and the suite log still matched; the knowledge

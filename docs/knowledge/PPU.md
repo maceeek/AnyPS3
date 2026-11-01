@@ -24,7 +24,22 @@ Before adding a static callback target, verify the original OPD bytes, entry, TO
 
 Record the HLE return and the guest reaction separately: a known `NOT_IMPLEMENTED`/error may be handled by the guest, but by itself it does not confirm that the service completed. On an `unmapped read`, record the fault address, PC, LR, GPRs and the call chain; distinguish null + offset from a corrupted pointer from the actual registers. Do not determine the cause from a low fault address alone.
 
-The exact current ACIT stop is maintained in [CURRENT.md](CURRENT.md), with a link to the actual log.
+The current state (the game reaches the menu and the level; no open stop) is in [CURRENT.md](CURRENT.md).
+
+## Runtime structure (verified in the code, 2026-11-01)
+
+- **No interpreter:** all PPU code is translated ahead of time into page functions. There is no interpreter fallback, and an
+  untranslated target stops the run.
+- **Dispatch:** each page has one jump table for its block heads (HIRES8). Calls out of a page use host-call return
+  prediction up to `ANYPS3_PPU_RET_DEPTH` frames (0..64, default 64; 0 = old tail calls).
+- **Block heads:** since HIRES9 they test only the head bound and the reschedule flag. `anyps3_entry` sets the bound so that
+  no block can cross the step budget, then admits blocks near the budget one at a time.
+- **Guest threads:** guest PPU threads are cooperative contexts on one host thread (`anyps3/threads.py`). Equal priorities
+  alternate between the best two ready contexts to approximate the Cell's two hardware threads. This host thread is the
+  "main guest thread" of the performance records.
+- **Inline memory:** loads and stores read one blocker byte per 4 KiB page and access the flat guest view through one pointer
+  (`anyps3/ppu_memory.py`, `GuestMemory::InlineFlat` in `anyps3/par_memory.py`). A blocker, a page crossing or an address
+  above 4 GiB takes the out-of-line admitted path.
 
 ## PPU floating divide and the subsequent game clamp
 
@@ -33,14 +48,14 @@ handle infinities, ZX and invalid VXZDZ/VXIDI/VXISI with the correct classificat
 and sticky FPSCR. The original sequence `0x69f2b0..0x69f2c0` after 154/+0
 produces +Infinity, the original FSEL limits the value to 0.75 and stores it via the guest
 big-endian STFS. The change is in the runtime; the original game instructions are preserved.
-This is a test of the ISA sequence, not evidence of the menu; the actual 245 is
-still loading at the time of writing. Detailed sources, scope and limitations of the download of the original Book I,
-the regression and the runtime: [FP experiment 245](experiments/2026-10-14-fp-zero-divide-245.md).
+This is a test of the ISA sequence, not evidence of the menu. Detailed sources, scope and limitations of the download of the original Book I,
+the regression and the runtime: [FP experiment 245](../archive/knowledge/experiments/2026-10-14-fp-zero-divide-245.md).
 
 ## Host cost of the translation: cloud optimization round (2026-10-19/20)
 
-Scope: AnyPS3 runtime and its native tests; nothing here is verified in the game. Evidence, benchmarks and limitations:
-[cloud optimization record, PPU](experiments/2026-10-19-cloud-optimization.md#ppu).
+Scope: native tests only. The code has been in every game build since 2026-10-20 (706 included); no per-item game A/B is
+recorded. Evidence, benchmarks and limitations:
+[cloud optimization record, PPU](../archive/knowledge/experiments/2026-10-19-cloud-optimization.md#ppu).
 
 - **Lazy FR/FI/FPRF (verified by `tests/test_ppu_fp_lazy.py`, exactness conditions):** only with XX already set, round-to-nearest
   (RN=0b00) and the five exception enables VE/OE/UE/ZE/XE clear (`(fpscr&0x020000fb)==0x02000000`), and in-range operands (zero or normal, exponent in [-400,400], no zero divisor, no negative sqrt;
@@ -56,4 +71,4 @@ Scope: AnyPS3 runtime and its native tests; nothing here is verified in the game
 - **Reservation fast path (verified by `tests/test_reservation_fast_path.py`, fails on a mutant that skips the version bump):**
   taken only when the access and its whole 128-byte granule lie in one mapping; same stripe set, token and permission checks as the
   general path; a granule clipped by its mapping keeps the general path. Synthetic lwarx/stwcx. kernel 70.7 → 40.5 ns per guest
-  instruction ([record, Memory](experiments/2026-10-19-cloud-optimization.md#memory-ppu-and-spu-reservations)).
+  instruction ([record, Memory](../archive/knowledge/experiments/2026-10-19-cloud-optimization.md#memory-ppu-and-spu-reservations)).

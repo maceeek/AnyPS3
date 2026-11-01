@@ -45,7 +45,7 @@ Earlier failures exposed staged-rename permissions, a signal shadowing
 `QObject.event`, a self-retaining Qt cleanup callback, and test-harness deferred
 destruction. The successful suite and preview exited normally.
 
-Commands and usage: [manager README](../../manager/README.md).
+Commands and usage: [manager README](../../../manager/README.md).
 Evidence: [suite after review](../../manager/evidence/suite-after-review.log),
 [GUI integration](../../manager/evidence/preview-after-review.log),
 [synthetic title screenshot](../../manager/evidence/preview-after-review.png),

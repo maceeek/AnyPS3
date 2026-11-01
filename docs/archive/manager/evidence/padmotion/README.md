@@ -63,4 +63,4 @@ pad-only task. Native tests that load the full runtime do so using a tiny BLR
 fixture, not the game's ELF. Physical USB/Bluetooth input, hardware calibration,
 GUIDE delivery and the game's use of motion/rumble remain unverified. No
 PADMOTION worker or test scope is left running at handoff. Existing team game
-processes were observed and left alone. See [behavior and provenance](../../DUALSENSE.md).
+processes were observed and left alone. See [behavior and provenance](../../../../manager/DUALSENSE.md).

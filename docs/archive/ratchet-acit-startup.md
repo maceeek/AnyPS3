@@ -3,10 +3,10 @@
 Verified 2026-10-14 on Linux x86-64, build `native-bundle-121`. **The game is not playable and did not produce a game frame.**
 The goal of "getting into the game" remains unmet.
 
-The subsequent graphics milestone added [Vulkan surface clear](vulkan-rendering.md),
+The subsequent graphics milestone added [Vulkan surface clear](vulkan-rendering-2026-10-14.md),
 verified by a separate synthetic RSX FIFO and a check of all pixels. The
 numbers below describe the game start of build 121, before this backend was added.
-The current [progress toward the menu](menu-progress.md) already includes the game clear
+The current [progress toward the menu](menu-progress-to-2026-11-01.md) already includes the game clear
 and four captured black frames; the menu is still missing.
 
 ## What actually ran

@@ -18,7 +18,7 @@ BUTTONS = {"start": (0x0008, 0), "cross": (0, 0x0040)}
 
 # Per-title data (the only game-specific part). The thresholds are rendering
 # telemetry heuristics, not visual state detection; their evidence:
-# local/ratchet/tools/fast_menu.md, docs/knowledge/experiments/2026-10-23-render-scale.md
+# local/ratchet/tools/fast_menu.md, docs/archive/knowledge/experiments/2026-10-23-render-scale.md
 # (runs 705a-d, 706fastmenu1 and 800a reached the original menu with START only).
 RECIPES = {
     "BCES00511": dict(

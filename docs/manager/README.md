@@ -227,7 +227,7 @@ directories and reject symlinks. ZIP publication uses an atomic hard link when
 supported; FAT/exFAT-style filesystems use exclusive copying with cleanup on
 failure (the destination is visible during that fallback copy).
 
-The [GUIFIX report and screenshots](evidence/guifix/README.md) record the defects,
+The [GUIFIX report and screenshots](../archive/manager/evidence/guifix/README.md) record the defects,
 regressions, original-game acceptance and remaining visual-platform limits.
 
 ## Builds and saves
@@ -270,8 +270,8 @@ A build containing render-scale support is required; older builds disable this
 setting. Scaling preserves native guest readback and adds higher-resolution
 visual rendering. It does not replace original textures. Some surface aliases
 and unsupported texture conversions still reconstruct native detail, and GPU
-cost rises with resolution. The verified2× Great Clock run averaged45.52FPS;
-full-scene high-resolution detail and stable60FPS are not yet established.
+cost rises with resolution. A 2× Great Clock run averaged 45.52 FPS standing (build 803)
+and ~40 FPS walking (build 1031); stable 60 FPS at 2× is not yet established.
 
 ### Game audio
 
@@ -345,7 +345,7 @@ requires SDL >= 2.0.18. Manager diagnostics require SDL >= 2.0.18 and report
 missing required symbols before initializing the controller subsystem. Diagnostics
 initialise no audio. Default SDL mapping remains in use. See
 [DualSense behavior, scales and limits](DUALSENSE.md)
-and [PADMOTION verification](evidence/padmotion/README.md). Existing game builds
+and [PADMOTION verification](../archive/manager/evidence/padmotion/README.md). Existing game builds
 need rebuilding by their owner before they include this runtime change.
 
 Physical Xbox and DualSense gameplay acceptance, the original-game
@@ -368,7 +368,7 @@ systemd-run --user --scope -p MemoryMax=4G -p MemorySwapMax=0 \
 
 These opt-in tests cover installation, update, failed-update preservation, GUI/CLI launch under a
 conflicting development environment, independent data, launcher collisions and truncated downloads.
-See the [installer evidence](../knowledge/experiments/2026-10-21-gui-installer.md).
+See the [installer evidence](../archive/knowledge/experiments/2026-10-21-gui-installer.md).
 
 Run on the development PC:
 
@@ -388,12 +388,12 @@ Focused regressions also cover supervisor death, cancellation during launch,
 alternate source snapshots, runtime helper capabilities, adoption recovery, and
 firmware-job completion in the import wizard.
 Key setup tests generate synthetic encrypted headers and mock all downloads;
-see [GUIKEYS verification and limits](evidence/guikeys.md).
+see [GUIKEYS verification and limits](../archive/manager/evidence/guikeys.md).
 `tests.gui.preview` also exercises the real CLI and captures a synthetic title
 screen. A missing systemd user manager skips only the scoped integration test.
 
 The independent GPT-6-Astra review and its recheck are recorded in
-[ASTRA-REVIEW.md](ASTRA-REVIEW.md).
+[ASTRA-REVIEW.md](../archive/manager/ASTRA-REVIEW.md).
 
 Qt interface references:
 [QProcess](https://doc.qt.io/qtforpython-6/PySide6/QtCore/QProcess.html),

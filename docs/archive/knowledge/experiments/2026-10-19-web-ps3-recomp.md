@@ -174,6 +174,6 @@ candidate with `ppu_vm_fast.h`/`ppu_vm_page.h` and propose a single isolated
 prototype of minimizing per-access checks while preserving the current concurrency
 invariants. Measure the same `great_clock_a` scene; a synthetic ns/access figure
 alone is not enough. The SPUFP2 oracle is another direct path. **The order of the actual
-implementation is determined by the main [HANDOFF](../HANDOFF.md): first a small SPUFP2
+implementation is determined by the main [HANDOFF](../../../knowledge/HANDOFF.md): first a small SPUFP2
 candidate; PPUMEM2 separately because of its hot-tracked regression.** The research alone
 did not change the actual state of the 60 FPS goal nor did it decide on the integration of the candidates.

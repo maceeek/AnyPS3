@@ -19,7 +19,7 @@ Date: 2026-10-14, Claude Opus 5.5. The goal remains the original ACIT menu and g
 
 ## Runtime
 
-Build `local/ratchet/native-bundle-199`: trophy slot `0x20230474` → OPD `0x2013093c` (code `0x2011446c`, a dispatcher with a 12-entry jump table, all targets translated), `0x20230470` → `0x20130954` (code `0x2011439c`). For the result of the run see [CURRENT](../CURRENT.md).
+Build `local/ratchet/native-bundle-199`: trophy slot `0x20230474` → OPD `0x2013093c` (code `0x2011446c`, a dispatcher with a 12-entry jump table, all targets translated), `0x20230470` → `0x20130954` (code `0x2011439c`). For the result of the run see [CURRENT](../../../knowledge/CURRENT.md).
 
 ## Continuation 2026-10-14 (builds 199–204)
 

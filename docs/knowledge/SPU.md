@@ -25,10 +25,23 @@ The input instruction word, the decoded mnemonic/fields, the PC, the source regi
 
 Active runtime questions belong in [CURRENT.md](CURRENT.md). The creation of this overview does not change the SPU runtime or the tests.
 
+## Runtime structure (verified in the code, 2026-11-01)
+
+- **Translated code:** SPU code runs as statically translated native superblocks (integer and FP ISA from one lifter) whose
+  bytes are validated on every entry (`anyps3/spu_block.py`). Changed code, late overlays and jobs at variable LS bases run in
+  the exact interpreter from the same lifter until the next superblock leader (`anyps3/spu.py`, the dispatch loop).
+- **Threads:** with `ANYPS3_SPU_THREADS=1` SPU threads run on host pool lanes in 4096-instruction slices
+  (`anyps3/par_worker.py`); every GUI launch sets it. Unset keeps the serial cooperative reference mode.
+- **Calls and budget:** BRSL calls between native functions chain without the dispatcher (`ANYPS3_SPU_CHAIN`, default 1).
+  Since HIRES9 they share one block scope (`ANYPS3_SPU_CHAIN_SHARED`, default 1). The per-thread budget is
+  `ANYPS3_SPU_MAX_STEPS` (default 10 M instructions).
+- **Speed work** on the awaited job (HIRES7–HIRES9): [CURRENT](CURRENT.md) and the round records.
+
 ## Pool lanes: cloud optimization round (2026-10-19/20)
 
-Scope: AnyPS3 runtime and its native tests; nothing here is verified in the game. Evidence, benchmarks and limitations:
-[cloud optimization record, SPU](experiments/2026-10-19-cloud-optimization.md#spu).
+Scope: native tests only. The code has been in every game build since 2026-10-20 (706 included, default on); no per-item game
+A/B is recorded. Evidence, benchmarks and limitations:
+[cloud optimization record, SPU](../archive/knowledge/experiments/2026-10-19-cloud-optimization.md#spu).
 
 - **Reservation-lost change-counter filter (exactness derived by main-agent review, behaviour verified by
   `tests/test_spu_reservation_filter.py`):** every version bump already calls `notify()`, which now also increments a per-line-hash

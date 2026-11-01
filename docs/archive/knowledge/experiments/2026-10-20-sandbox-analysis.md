@@ -48,9 +48,9 @@ Consequently the prior statement “no host processes are running” was not ver
 ## New offline result: 603w wait attribution
 
 Evidence and repeatable reader:
-[evidence.json](../../../local/ratchet/analysis-2026-10-20-sandbox/evidence.json),
-[analysis script](../../../local/ratchet/analysis-2026-10-20-sandbox/analyze.py),
-[attribution output](../../../local/ratchet/analysis-2026-10-20-sandbox/603w-wait-attribution.txt).
+[evidence.json](../../../../local/ratchet/analysis-2026-10-20-sandbox/evidence.json),
+[analysis script](../../../../local/ratchet/analysis-2026-10-20-sandbox/analyze.py),
+[attribution output](../../../../local/ratchet/analysis-2026-10-20-sandbox/603w-wait-attribution.txt).
 
 Command, from the project root:
 
