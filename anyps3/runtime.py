@@ -1133,6 +1133,8 @@ struct GuestMemory {
             parts.push_back({byte_pointer(r.bytes,r.bytes->data()+next-r.base),n});next+=n;left-=n;}
         for(const auto& part:parts){atomic_read(part.source,buffer,part.size);buffer+=part.size;}
     }
+    inline static const bool write_tracked_only=[]{const char* v=std::getenv("ANYPS3_GUEST_WRITE_TRACKED_ONLY");
+        if(v && std::strcmp(v,"0") && std::strcmp(v,"1")){throw std::runtime_error("invalid ANYPS3_GUEST_WRITE_TRACKED_ONLY");}return !v || !std::strcmp(v,"1");}();
     void transfer(std::uint64_t address,std::uint8_t* buffer,unsigned size,bool write) {
         if(!write && concurrent() && read_page(address,buffer,size))return;   // one-page read without side effects (par_memory)
         HostByteAccess exact_bytes{host_access_observer.supports_exact_bytes.load(std::memory_order_acquire)};
@@ -1156,7 +1158,14 @@ struct GuestMemory {
             LineLocks locks(*this,parts,0);
             for(const auto& part:parts){
                 auto& versions=part.map->state->versions;const auto offset=static_cast<std::size_t>(part.pointer-part.map->region.bytes->data());
-                for(auto i=offset/128;i<=(offset+part.size-1)/128;++i){if(versions[i]==UINT32_MAX)throw std::runtime_error("guest write version overflow");++versions[i];}
+                const auto first=offset/128,last=(offset+part.size-1)/128;
+                // A part none of whose lines a reservation ever tracked skips its bumps and its notification (HIRES9; 0 = always, A/B):
+                // `tracked` is sticky and set only by track_reservation, whose every caller holds the line's stripe - which this write
+                // holds (LineLocks above), so no line changes state during the write. The versions and the touch counters are read
+                // only by reservation tokens and the reservation-lost filter / watches (observe, ReservationWatch), all sampled for a
+                // tracked line after its tracking (an untracked scalar store skips them the same way, ScalarWrite + bump_scalar).
+                if(write_tracked_only){const auto* tracked=part.map->state->tracked.get();bool any=false;for(auto i=first;i<=last && !any;++i)any=tracked[i].load(std::memory_order_acquire);if(!any)continue;}
+                for(auto i=first;i<=last;++i){if(versions[i]==UINT32_MAX)throw std::runtime_error("guest write version overflow");++versions[i];}
                 parallel->notifications->notify(part.pointer,part.size);
             }
             for(const auto& part:parts){atomic_write(byte_pointer(part.map->region.bytes,part.pointer),buffer,part.size);buffer+=part.size;publish_cpu_write(part.pointer,part.size);}

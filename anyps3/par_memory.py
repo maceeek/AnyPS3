@@ -98,7 +98,7 @@ TYPES = RESERVATION_WAIT_TYPES + r'''
     struct LocalAccess {
         unsigned leases=0,raw=0,quiet=0,slot=UINT32_MAX,observer_pauses=0,raw_yields=0;bool fault_claim=false,renderer_claim=false,is_owner=false;
         unsigned scalar_batch_depth=0;bool scalar_batch_active=false,inline_active=false;
-        const SmallList<std::uintptr_t,4>* leased_pages=nullptr;std::uintptr_t leased_scalar_page=UINTPTR_MAX;
+        const SmallList<std::uintptr_t,8>* leased_pages=nullptr;std::uintptr_t leased_scalar_page=UINTPTR_MAX;
         // RenderCursor (renderer only): this thread's page hazard is held for guest span [cursor_lo,cursor_hi) of one host page.
         bool cursor_active=false,cursor_filtered=false;std::uint64_t cursor_lo=0,cursor_hi=0;const std::uint8_t* cursor_payload=nullptr;
         const std::atomic<std::uint32_t>* cursor_state=nullptr;const std::atomic<bool>* cursor_observed=nullptr;
@@ -672,6 +672,7 @@ TYPES = RESERVATION_WAIT_TYPES + r'''
     // A plain x86 load is an acquire and a plain store a release (TSO); the volatile asm with a memory clobber keeps the compiler from
     // moving any other access across it, as the __atomic acquire loads / release stores do. Used only when the private buffer and
     // the guest bytes do not overlap (an overlapping copy keeps the one-word-at-a-time source/store interleaving below).
+    // Four 16-byte accesses per loop iteration (HIRES9): the same ascending sequence of accesses with a quarter of the loop overhead.
     [[gnu::always_inline]] static void atomic_load16(const std::uint8_t* p,std::uint8_t* out){
         __m128i v;asm volatile("vmovdqa %1,%0":"=x"(v):"m"(*reinterpret_cast<const __m128i*>(p)):"memory");_mm_storeu_si128(reinterpret_cast<__m128i*>(out),v);}
     [[gnu::always_inline]] static void atomic_store16(std::uint8_t* p,const std::uint8_t* in){
@@ -684,7 +685,8 @@ TYPES = RESERVATION_WAIT_TYPES + r'''
 #if defined(__x86_64__) && defined(__AVX__) && defined(__linux__)
         if(atomic_wide(p,out,n)){
             if(reinterpret_cast<std::uintptr_t>(p)&8){const auto word=__atomic_load_n(reinterpret_cast<const AtomicWord*>(p),__ATOMIC_ACQUIRE);std::memcpy(out,&word,8);p+=8;out+=8;n-=8;}
-            for(;n>=32;n-=32,p+=32,out+=32){atomic_load16(p,out);atomic_load16(p+16,out+16);}
+            for(;n>=64;n-=64,p+=64,out+=64){atomic_load16(p,out);atomic_load16(p+16,out+16);atomic_load16(p+32,out+32);atomic_load16(p+48,out+48);}
+            if(n>=32){atomic_load16(p,out);atomic_load16(p+16,out+16);p+=32;out+=32;n-=32;}
             if(n>=16){atomic_load16(p,out);p+=16;out+=16;n-=16;}
         }
 #endif
@@ -703,7 +705,8 @@ TYPES = RESERVATION_WAIT_TYPES + r'''
 #if defined(__x86_64__) && defined(__AVX__) && defined(__linux__)
         if(atomic_wide(p,in,n)){
             if(reinterpret_cast<std::uintptr_t>(p)&8){std::uint64_t value;std::memcpy(&value,in,8);__atomic_store_n(reinterpret_cast<AtomicWord*>(p),value,__ATOMIC_RELEASE);p+=8;in+=8;n-=8;}
-            for(;n>=32;n-=32,p+=32,in+=32){atomic_store16(p,in);atomic_store16(p+16,in+16);}
+            for(;n>=64;n-=64,p+=64,in+=64){atomic_store16(p,in);atomic_store16(p+16,in+16);atomic_store16(p+32,in+32);atomic_store16(p+48,in+48);}
+            if(n>=32){atomic_store16(p,in);atomic_store16(p+16,in+16);p+=32;in+=32;n-=32;}
             if(n>=16){atomic_store16(p,in);p+=16;in+=16;n-=16;}
         }
 #endif
@@ -967,16 +970,22 @@ TYPES = RESERVATION_WAIT_TYPES + r'''
     struct LineLocks {
         static constexpr unsigned stripes=std::tuple_size<decltype(ParallelMemory::lines)>::value;
         static_assert(stripes%64==0,"LineLocks bitmap granule");
-        ParallelMemory& parallel;std::array<std::uint64_t,stripes/64> held{};unsigned low=stripes/64,high=0;
+        // Only the words [low,high) of `held` are meaningful: each is cleared when the range first covers it (no 512-byte clear
+        // per command); the lock and unlock loops read only that range.
+        ParallelMemory& parallel;std::array<std::uint64_t,stripes/64> held;unsigned low=stripes/64,high=0;
         explicit LineLocks(GuestMemory& m,const std::vector<HostSpan>& spans):parallel(*m.parallel){take(spans);}
         template<class Spans> LineLocks(GuestMemory& m,const Spans& spans,int):parallel(*m.parallel){take(spans);}
         ~LineLocks(){for(unsigned w=low;w<high;++w)for(auto bits=held[w];bits;bits&=bits-1)parallel.lines[w*64+unsigned(__builtin_ctzll(bits))].unlock();}
         LineLocks(const LineLocks&)=delete;
         // Stripes [begin,end), end <= stripes.
         void mark(unsigned begin,unsigned end){
-            for(unsigned w=begin/64;w<(end+63)/64;++w){const unsigned lo=std::max(begin,w*64)-w*64,hi=std::min(end,w*64+64)-w*64;
+            const unsigned first=begin/64,last=(end+63)/64;
+            // w < last <= stripes/64 always; the modulo (identity) keeps GCC's -Warray-bounds from flagging the peeled clear loops.
+            auto clear=[&](unsigned from,unsigned to){for(unsigned w=from;w<to;++w)held[w%(stripes/64)]=0;};
+            if(low>=high)clear(first,last);else{clear(first,low);clear(high,last);}
+            for(unsigned w=first;w<last;++w){const unsigned lo=std::max(begin,w*64)-w*64,hi=std::min(end,w*64+64)-w*64;
                 held[w]|=(hi-lo==64?~UINT64_C(0):((UINT64_C(1)<<(hi-lo))-1)<<lo);}
-            low=std::min(low,begin/64);high=std::max(high,(end+63)/64);
+            low=std::min(low,first);high=std::max(high,last);
         }
         template<class Spans> void take(const Spans& spans){
             for(const auto& span:spans)if(span.size){const auto first=reinterpret_cast<std::uintptr_t>(span.pointer)/128,last=(reinterpret_cast<std::uintptr_t>(span.pointer)+span.size-1)/128;

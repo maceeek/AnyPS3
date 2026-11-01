@@ -6,7 +6,8 @@ still uses the uniform atomic word ABI; page ownership is a separate lifetime.
 from .par_gpu import MEMBERS as GPU_COMMIT_MEMBERS
 
 TYPES = r'''
-    using CpuPageList=SmallList<std::uintptr_t>;
+    // 8 inline entries: one MFC transfer (<= 16 KiB) spans at most 5 host pages, so no DMA command allocates its page set.
+    using CpuPageList=SmallList<std::uintptr_t,8>;
     using CpuSpanList=SmallList<HostSpan,2>;
     struct PageBroker {
         static constexpr std::uint32_t claimed=UINT32_C(0x80000000);
@@ -79,7 +80,8 @@ TYPES = r'''
             for(const auto& span:spans){const auto at=reinterpret_cast<std::uintptr_t>(span.pointer),base=reinterpret_cast<std::uintptr_t>(span.pin->data());
                 if(at<base || at-base>span.pin->size() || span.size>span.pin->size()-(at-base))throw std::runtime_error("broker span outside backing");
                 if(span.size)for(auto page=at>>12;page<=(at+span.size-1)>>12;++page)result.push_back(page);}
-            if(result.size()>1)result.unique_sort();
+            // One span yields ascending distinct pages already (the sort+unique would be the identity).
+            if(result.size()>1 && spans.size()>1)result.unique_sort();
             return result;
         }
         static std::vector<std::uintptr_t> keys(const std::vector<HostSpan>& spans){auto list=cpu_keys(spans);return {list.begin(),list.end()};}
@@ -95,7 +97,7 @@ TYPES = r'''
             if(!(old&~claimed))std::terminate();
             if(old==(claimed|1u))broker.signal_cpu();
         }
-        template<class Pages> bool try_cpu(const Pages& pages,SmallList<Cell*>& admitted){
+        template<class Pages> bool try_cpu(const Pages& pages,SmallList<Cell*,8>& admitted){
             check_fast();
             // Resolve/allocate the complete small-buffer list before admission.
             // An allocation or invalid page cannot strand an acquired prefix.
@@ -110,7 +112,7 @@ TYPES = r'''
                 check_fast();return true;
             }catch(...){for(unsigned i=0;i<acquired;++i)retire(*admitted[i],*this);admitted={};throw;}
         }
-        void release_cpu(const SmallList<Cell*>& admitted)noexcept{for(auto* entry:admitted)retire(*entry,*this);}
+        void release_cpu(const SmallList<Cell*,8>& admitted)noexcept{for(auto* entry:admitted)retire(*entry,*this);}
         void wait_change(bool owner=false){
             std::unique_lock<std::mutex> lock(mutex);check();++waiters;const auto seen=generation.load(std::memory_order_acquire);lock.unlock();
             try{if(owner && pump)pump();lock.lock();check();
@@ -150,7 +152,7 @@ TYPES = r'''
         RawPermit raw(*this);page_broker.map_owner=parallel->owner;page_broker.enabled.store(true,std::memory_order_release);
     }
     struct CpuPages {
-        PageBroker& broker;CpuPageList pages;SmallList<PageBroker::Cell*> cells;bool admitted=false;
+        PageBroker& broker;CpuPageList pages;SmallList<PageBroker::Cell*,8> cells;bool admitted=false;
         template<class Spans> CpuPages(PageBroker& b,const Spans& spans):broker(b),pages(PageBroker::cpu_keys(spans)){admitted=broker.try_cpu(pages,cells);}
         ~CpuPages(){if(admitted)broker.release_cpu(cells);}
         CpuPages(const CpuPages&)=delete;

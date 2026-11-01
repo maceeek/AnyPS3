@@ -665,6 +665,15 @@ def _rotbits(E, word, pc):
 @_reg(_range4(0xb))
 def _shufb(E, word, pc):
     f = _fields(word)
+    # Both sources held only as word- or halfword-swapped lanes (w: BE byte i is host byte i^3, h: i^1): select from them with
+    # the control's low two bits flipped instead of converting both to BE bytes.  Exact: the flip only changes the byte index
+    # inside a quadword (bits 0..3 -> (c&15)^k); the source bit 4 and the special-control bits 5..7 are untouched.
+    only = lambda reg, rep: (lambda e: e is not None and e['const'] is None and 'b' not in e['reps'] and rep in e['reps'])(E.regs.get(reg))
+    for rep, flip in (('w', 3), ('h', 1)):
+        if only(f['a'], rep) and only(f['b'], rep):
+            a = E.get(f['a'], rep); b = E.get(f['b'], rep); c = E.get(f['t'], 'b')
+            E.set(f['d'], 'b', f'spu_vshufb({a},{b},_mm_xor_si128({c},_mm_set1_epi8({flip})))')
+            return
     a = E.get(f['a'], 'b'); b = E.get(f['b'], 'b'); c = E.get(f['t'], 'b')
     E.set(f['d'], 'b', f'spu_vshufb({a},{b},{c})')
 
