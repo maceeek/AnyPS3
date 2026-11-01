@@ -200,6 +200,32 @@ class SpuBlockTests(unittest.TestCase):
         with mock.patch.dict(os.environ,{'ANYPS3_SPU_CHAIN_SHARED':'0'}):
             self.native({0x100:0x40200000},body+' assert(spu_chain_shared==0);\n')
 
+    def test_shufb_of_word_and_halfword_lanes_matches_the_isa(self):
+        # HIRES9: SHUFB whose sources are both held as word (A, XOR) or halfword (AH) lanes selects with a flipped control instead of
+        # converting the sources.  Expectation: SPU ISA v1.2 SHUFB/A/XOR/AH written out in Python; the control covers both
+        # sources, every byte index class and the 0x80/0xc0/0xe0 specials.
+        prog=[_ri10(0x34,0,3,30),_ri10(0x34,1,3,31),_rr(0x0c0,31,30,32),_rr(0x241,31,32,33),_rrr(0xb,34,32,33,40),
+              _rr(0x0c8,31,30,35),_rr(0x0c8,30,35,36),_rrr(0xb,37,36,35,40),_ri10(0x24,0,9,34),_ri10(0x24,1,9,37),_ri16(0x064,0,0)]
+        words={0x100+4*i:w for i,w in enumerate(prog)}
+        data=bytes((i*73+29)&255 for i in range(32))
+        control=bytes([0x03,0x12,0x80,0x1f,0xc0,0x05,0xe0,0x14,0x0a,0x9f,0x1b,0xdf,0x00,0x11,0xff,0x0e])
+        word=lambda b:_words(bytes(b));half=lambda b:[int.from_bytes(b[i:i+2],'big') for i in range(0,16,2)]
+        hadd=lambda x,y:b''.join(((p+q)&0xffff).to_bytes(2,'big') for p,q in zip(half(x),half(y)))
+        shufb=lambda a,b,c:bytes((0x80 if k>=0xe0 else 0xff if k>=0xc0 else 0) if k&0x80 else (a+b)[k&0x1f] for k in c)
+        r30,r31=data[:16],data[16:]
+        r32=_bytes([x+y for x,y in zip(word(r30),word(r31))]);r33=_bytes([x^y for x,y in zip(word(r32),word(r31))])
+        r34=shufb(r33,r32,control);r35=hadd(r30,r31);r36=hadd(r35,r30);r37=shufb(r35,r36,control)
+        _,functions,_=generate_parts((image(words),))
+        text=functions[0][1]
+        self.assertIn('_mm_set1_epi8(3)',text)
+        self.assertIn('_mm_set1_epi8(1)',text)
+        body=f't.gpr[3]={_cpp_reg(_bytes([0x2000,0,0,0]))};t.gpr[9]={_cpp_reg(_bytes([0x3000,0,0,0]))};t.gpr[40]={_cpp_reg(control)};'
+        body+='{const std::uint8_t d[]={'+','.join(map(str,data))+'};std::copy(d,d+sizeof(d),ls+0x2000);}'
+        body+='const std::uint8_t want[]={'+','.join(map(str,r34+r37))+'};'
+        body+=f'assert(spu_run(s,4096) && t.pc==0x128 && (t.gpr[34]=={_cpp_reg(r34)}) && (t.gpr[37]=={_cpp_reg(r37)}));'
+        body+='assert(std::equal(want,want+32,ls+0x3000));'
+        self.native(words,body)
+
     def test_self_loop_keeps_exact_state_at_every_slice_boundary(self):
         # The self-loop block continues without guard/register-file round trip only while the guard would pass; every slice end
         # (exact budgets < 64 decline the block, soft budgets end at ex>=lim inside the loop, hard step limits) must show the
