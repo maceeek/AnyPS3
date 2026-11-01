@@ -991,7 +991,7 @@ public:
     }
     // With the draw recorder a plane clear (no visual-MSAA working images: graphics_visual_msaa() off) is a Clear job: the frontend
     // begins the batch (front), pins the image before the job names it, keeps its bookkeeping (counters, visual taint) and queues the
-    // clear commands (leading barrier/group check, vkCmdClear*) in ring order with the draws, so a clear no longer waits for the
+    // clear commands (leading barrier/group check, vkCmdClearColorImage/vkCmdClearDepthStencilImage) in ring order with the draws, so a clear no longer waits for the
     // recorder to drain. The paired visual clear is the next job (lead=false), exactly as the inline order. Inline otherwise.
     void graphics_clear_image(GraphicsBatch& b,const std::shared_ptr<GraphicsImage>& image,const VkClearColorValue& color,float depth,unsigned stencil,VkImageAspectFlags aspects,bool lead=true){
         if(draw_recorder && !in_recorder_thread() && !graphics_visual_msaa() && !b.queries && !b.marks && !b.inline_draws){
