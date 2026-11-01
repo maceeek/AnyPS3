@@ -987,13 +987,24 @@ struct SpuCaptureScope {
 // limit: soft slice end (a superblock may start below it and overshoot it);
 // hard: exact distance to the step limit; fast: entries that need no exact check.
 struct SpuBlockScope {
-    NativeSpu::Thread& thread;unsigned executed=0,limit,hard,fast;std::uint64_t generation;HostAccessContext origin;
-    explicit SpuBlockScope(NativeSpu::Thread& t):thread(t),limit(static_cast<unsigned>(std::min<std::uint64_t>(t.block_budget,t.block_limit-t.steps))),
-        hard(static_cast<unsigned>(std::min<std::uint64_t>(t.block_limit-t.steps,UINT32_MAX))),fast(t.block_exact?0u:std::min(limit,hard>=64u?hard-63u:0u)),
-        generation(t.control_generation),origin(HostAccessOrigin::Engine::Spu,t.id,t.pc,&t.steps,&executed){}
-    ~SpuBlockScope(){commit();}
-    // Publish the instructions retired so far exactly as the destructor does (used before a chained call, spu_chain_call).
-    void commit(){if(thread.control_generation==generation){thread.steps+=executed;thread.published_steps.value.store(thread.steps,std::memory_order_relaxed);thread.block_budget-=std::min(executed,thread.block_budget);}executed=0;}
+    NativeSpu::Thread& thread;unsigned executed=0,limit,hard,fast;std::uint64_t generation;
+    // Shared chained call (spu_chain_call, HIRES9): `parent` is the calling function's scope.  This scope then continues the
+    // caller's count instead of starting a new one: executed/limit/hard/fast/generation/kept are the caller's (one origin =
+    // the caller's steps/budget), nothing is committed in between, and on exit (also on an exception) the whole state goes
+    // back to the caller, which commits it once.  kept = what the per-call protocol has committed so far under this scope's
+    // generation (the count at the latest shared chained call, all of it once that call returned with the generation unchanged),
+    // i.e. the only part a generation change after that point leaves in t.steps (commit).
+    SpuBlockScope* const parent;unsigned kept=0;HostAccessContext origin;
+    explicit SpuBlockScope(NativeSpu::Thread& t):thread(t),parent(static_cast<SpuBlockScope*>(t.chain_scope)),origin(HostAccessOrigin::Engine::Spu,t.id,t.pc,&t.steps,&executed){
+        if(__builtin_expect(parent!=nullptr,0)){t.chain_scope=nullptr;executed=parent->executed;limit=parent->limit;hard=parent->hard;fast=parent->fast;generation=parent->generation;kept=parent->kept;return;}
+        rearm();}
+    ~SpuBlockScope(){if(__builtin_expect(parent!=nullptr,0)){parent->executed=executed;parent->limit=limit;parent->hard=hard;parent->fast=fast;parent->generation=generation;parent->kept=kept;}
+        else commit();}
+    // Publish the instructions retired so far exactly as the destructor does (used before a per-call chained call, spu_chain_call):
+    // all of them with an unchanged generation, otherwise the prefix `kept` (0 outside shared chained calls).
+    void commit(){const bool same=thread.control_generation==generation;const unsigned done=same?executed:kept;
+        if(same || done){thread.steps+=done;thread.published_steps.value.store(thread.steps,std::memory_order_relaxed);thread.block_budget-=std::min(done,thread.block_budget);}
+        executed=0;kept=0;}
     // The budget fields a fresh scope would compute now (the caller continues after a chained call as a new entry would).
     void rearm(){limit=static_cast<unsigned>(std::min<std::uint64_t>(thread.block_budget,thread.block_limit-thread.steps));
         hard=static_cast<unsigned>(std::min<std::uint64_t>(thread.block_limit-thread.steps,UINT32_MAX));fast=thread.block_exact?0u:std::min(limit,hard>=64u?hard-63u:0u);

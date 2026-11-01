@@ -151,6 +151,55 @@ class SpuBlockTests(unittest.TestCase):
 ''')
 
 
+    def test_chained_call_scopes_commit_what_the_per_call_protocol_commits(self):
+        # HIRES9 shared chained calls (one scope origin for caller and callee) against the per-call protocol written out by hand:
+        # the caller's retired count is committed before the call, the callee's by its own scope unless the control generation
+        # changed under it, the caller then starts from zero.  Initial steps 1000, budget 100, caller retired 10 before the call,
+        # callee 7 unless stated.  Each case runs in the default (shared) form and with ANYPS3_SPU_CHAIN_SHARED=0 (per-call).
+        body=r'''
+ static unsigned run_n=0,calls=0;static int mode=0;static std::uint64_t sampled=0;
+ static SpuNativeFunction inner=[](PpuState&,NativeSpu::Thread& t,std::uint8_t*){SpuBlockScope block(t);block.executed+=4;++t.control_generation;};
+ // callee: retire run_n, then 1 = generation change, 2 = throw, 3 = both, 4 = sample the access origin, 5 = nested chained call
+ // into `inner` (retires 4, changes the generation), 6 = no progress (dynamic miss)
+ SpuNativeFunction callee=[](PpuState& s,NativeSpu::Thread& t,std::uint8_t* ls){++calls;SpuBlockScope block(t);
+  if(mode==6){t.dynamic_miss=true;return;}
+  block.executed+=run_n;
+  if(mode==4)sampled=HostAccessContext::sample().operation_id;
+  if(mode==5){assert(!spu_chain_call(s,t,ls,inner,0,block));return;}
+  if(mode&1)++t.control_generation;
+  if(mode&2)throw std::runtime_error("callee");};
+ auto start=[&](unsigned budget,int m,unsigned n=7){t.steps=1000;t.block_budget=budget;t.block_limit=UINT64_MAX;t.block_exact=false;t.block_trace=false;
+  t.block_control_exit=false;t.chain_depth=0;mode=m;run_n=n;calls=0;};
+ auto expect=[&](std::uint64_t steps,unsigned budget){assert(t.steps==steps && t.block_budget==budget && t.chain_scope==nullptr && t.chain_depth==0);};
+ // A: normal call, the caller retires 3 more: 10+7+3
+ start(100,0);{SpuBlockScope caller(t);caller.executed=10;assert(spu_chain_call(s,t,ls,callee,0,caller));caller.executed+=3;}expect(1020,80);
+ // B: generation change inside the callee: only the caller's 10
+ start(100,1);{SpuBlockScope caller(t);caller.executed=10;assert(!spu_chain_call(s,t,ls,callee,0,caller));}expect(1010,90);
+ // C: generation change in the caller after the call returned: 10+7, the caller's later 3 are dropped
+ start(100,0);{SpuBlockScope caller(t);caller.executed=10;assert(spu_chain_call(s,t,ls,callee,0,caller));caller.executed+=3;++t.control_generation;}expect(1017,83);
+ // D/E: exception in the callee, without/with a generation change
+ start(100,2);try{SpuBlockScope caller(t);caller.executed=10;spu_chain_call(s,t,ls,callee,0,caller);assert(false);}catch(const std::runtime_error&){}expect(1017,83);
+ start(100,3);try{SpuBlockScope caller(t);caller.executed=10;spu_chain_call(s,t,ls,callee,0,caller);assert(false);}catch(const std::runtime_error&){}expect(1010,90);
+ // F: the callee overshoots the slice (budget 12): the caller returns; budget 0
+ start(12,0,5);{SpuBlockScope caller(t);caller.executed=10;assert(!spu_chain_call(s,t,ls,callee,0,caller) && calls==1);}expect(1015,0);
+ // budget used up before the call: no callee
+ start(10,0);{SpuBlockScope caller(t);caller.executed=10;assert(!spu_chain_call(s,t,ls,callee,0,caller) && calls==0);}expect(1010,0);
+ // G: generation changed in the caller before the call: its 10 are dropped, the callee's fresh scope commits 7
+ start(100,0);{SpuBlockScope caller(t);caller.executed=10;++t.control_generation;assert(!spu_chain_call(s,t,ls,callee,0,caller) && calls==1);}expect(1007,93);
+ // H: nested chained call whose callee changes the generation: 10 and the middle function's 7 stay
+ start(100,5);{SpuBlockScope caller(t);caller.executed=10;assert(!spu_chain_call(s,t,ls,callee,0,caller));}expect(1017,83);
+ // I: the callee's access origin samples the retired instruction number 1000+10+7
+ start(100,4);{SpuBlockScope caller(t);caller.executed=10;assert(spu_chain_call(s,t,ls,callee,0,caller));}expect(1017,83);assert(sampled==1017);
+ // depth bound and control exit: no callee
+ start(100,0);t.chain_depth=16;{SpuBlockScope caller(t);caller.executed=10;assert(!spu_chain_call(s,t,ls,callee,0,caller) && calls==0);}assert(t.steps==1010 && t.chain_depth==16);
+ start(100,0);t.block_control_exit=true;{SpuBlockScope caller(t);caller.executed=10;assert(!spu_chain_call(s,t,ls,callee,0,caller) && calls==0);}expect(1010,90);
+ // no progress in the callee (miss): the caller returns with its 10
+ start(100,6);{SpuBlockScope caller(t);caller.executed=10;assert(!spu_chain_call(s,t,ls,callee,0,caller) && calls==1);}expect(1010,90);
+'''
+        self.native({0x100:0x40200000},body+' assert(spu_chain_shared>0);\n')
+        with mock.patch.dict(os.environ,{'ANYPS3_SPU_CHAIN_SHARED':'0'}):
+            self.native({0x100:0x40200000},body+' assert(spu_chain_shared==0);\n')
+
     def test_self_loop_keeps_exact_state_at_every_slice_boundary(self):
         # The self-loop block continues without guard/register-file round trip only while the guard would pass; every slice end
         # (exact budgets < 64 decline the block, soft budgets end at ex>=lim inside the loop, hard step limits) must show the

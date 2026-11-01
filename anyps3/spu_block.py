@@ -442,7 +442,7 @@ def emit_function(name, code_name, lo, words, lift_parts, templates=True, insns=
              # [flo, flo+flen) may wrap around the end of the 256 KB LS (code linked above the lowest loaded
              # address): every LS address derived from it is therefore masked (region compares, self-store check).
              f'const unsigned flo=(0x{lo:x}u+delta)&0x3ffffu;const bool prov=spu_provenance_on;const unsigned slim=prov?0x40000u:0x{flen + 15:x}u;(void)flo;(void)prov;(void)slim;'
-             'unsigned ex=0,lim=spu_block_lim(t,block);std::uint64_t vm=0;(void)vm;']
+             'unsigned ex=block.executed,lim=spu_block_lim(t,block);std::uint64_t vm=0;(void)vm;']
     if used_dispatch:
         lines.append('spu_dispatch_local:')
     lines.append('switch((t.pc-delta)&0x3fffc){')
@@ -539,10 +539,11 @@ def emit_function(name, code_name, lo, words, lift_parts, templates=True, insns=
             if chained(last):
                 # Chained call (spu_chain_call): the callee runs nested with this function's relocation; when it returns with
                 # budget left and no control exit, this function continues at the new t.pc as a fresh dispatch would: the
-                # local switch (continuation block or return), every region revalidated (vm=0), the budget re-derived.
+                # local switch (continuation block or return), every region revalidated (vm=0), the count taken from the
+                # scope (the callee's retired instructions in a shared call, 0 after a per-call commit), the budget re-derived.
                 lines.append(f'ex+={n};block.executed=ex;t.pc={_relocated(last.target)};'
                              f'if(!spu_chain_call(s,t,ls,{chain[last.target]},delta,block))return;'
-                             'ex=0;vm=0;lim=spu_block_lim(t,block);goto spu_dispatch_local;}')
+                             'ex=block.executed;vm=0;lim=spu_block_lim(t,block);goto spu_dispatch_local;}')
             elif last.kind == 'br':
                 lines.append(f'ex+={n};{edge(last.target)}}}')
             else:
@@ -825,11 +826,52 @@ static void spu_note_entry(NativeSpu::Thread& t,std::uint32_t pc){
 //    local switch (the continuation after the BRSL, another block of this function, or a return to the dispatcher);
 //  * exceptions (STOP, blocking channel, faults) unwind through the caller, whose scope holds nothing uncommitted;
 //  * nesting is bounded (SPU_CHAIN_DEPTH host frames, then the generic return); ANYPS3_SPU_CHAIN=0 disables it (A/B).
+// Shared form (HIRES9, default; ANYPS3_SPU_CHAIN_SHARED=0 keeps the per-call form above for A/B): the callee's scope continues the
+// caller's (t.chain_scope, SpuBlockScope) instead of a commit before the call, a second scope start in the callee and a rearm
+// after it, and the callee is called directly instead of through spu_native_call. Same entries, retired counts, budgets,
+// fallbacks and diagnostics, because every observer of the split sees the same values:
+//  * one origin: t.steps/t.block_budget stay at the caller's scope start until the outermost scope commits, executed counts from
+//    there. The commit-free conditions are the per-call ones: executed>=limit <=> (after the commit) no budget or step limit
+//    reached, as limit=min(budget,step limit-steps) at that origin; the callee's guards compare its counter ex (started at the
+//    caller's executed) against the caller's limit/hard/fast, i.e. offset by the caller's executed exactly as the callee's fresh
+//    scope would compute them (fast=min(limit,hard-63): an offset when hard is exact, and with hard clamped at UINT32_MAX -
+//    step limit far away - limit<SPU_CHAIN_SHARED_LIMIT keeps both hard tests unreachable and fast=limit); the interrupt bound
+//    room=irq_next-steps and spu_block_enter's steps+executed are the same sums; the callee's own HostAccess origin samples
+//    steps+executed = the same operation number;
+//  * a control generation changed before the call takes the per-call form (it commits nothing, as before); one changed inside
+//    the callee: the per-call form had committed the caller's prefix and dropped the rest, so the scope keeps that prefix
+//    (kept) and commit adds exactly it;
+//  * a per-call chained call further down (generation change) commits the shared count and rearms that scope; the callee hands
+//    its whole state back, so the caller continues from the new origin as after a per-call call;
+//  * exceptions: the callee's scope hands its state back while unwinding, the caller's commits it (as the two commits did).
+// Not identical (diagnostics only): published_steps (perf report) is stored once per outermost scope instead of per call.
 static constexpr unsigned SPU_CHAIN_DEPTH=16;
+static constexpr unsigned SPU_CHAIN_SHARED_LIMIT=1u<<31;
 static thread_local std::uint64_t spu_chain_returns=0;   // TEST HOOK: chained calls whose caller continued
+static thread_local std::uint64_t spu_chain_shared=0;    // TEST HOOK: chained calls entered in the shared form
 static const bool spu_chain_enabled=[]{const char* v=std::getenv("ANYPS3_SPU_CHAIN");
     if(v && std::strcmp(v,"0") && std::strcmp(v,"1")){throw std::runtime_error("invalid ANYPS3_SPU_CHAIN");}return !v || !std::strcmp(v,"1");}();
+static const bool spu_chain_shared_enabled=[]{const char* v=std::getenv("ANYPS3_SPU_CHAIN_SHARED");
+    if(v && std::strcmp(v,"0") && std::strcmp(v,"1")){throw std::runtime_error("invalid ANYPS3_SPU_CHAIN_SHARED");}return !v || !std::strcmp(v,"1");}();
 bool spu_chain_call(PpuState& s,NativeSpu::Thread& t,std::uint8_t* ls,SpuNativeFunction fn,std::uint32_t delta,SpuBlockScope& block){
+    if(__builtin_expect(spu_chain_enabled && spu_chain_shared_enabled && t.control_generation==block.generation && block.limit<SPU_CHAIN_SHARED_LIMIT,1)){
+        if(t.chain_depth>=SPU_CHAIN_DEPTH || block.executed>=block.limit || t.block_control_exit || t.block_trace)return false;
+        struct Depth {unsigned& depth;explicit Depth(unsigned& d):depth(d){++depth;}~Depth(){--depth;}} nested(t.chain_depth);
+        if(__builtin_expect(spu_stats_on,0))spu_note_entry(t,t.pc);
+        // spu_native_call's bookkeeping; progress = retired instructions (a per-call commit further down moves them to t.steps).
+        const auto steps=t.steps;const unsigned before=block.executed;block.kept=before;
+        t.reloc_delta=delta;t.dynamic_miss=false;t.block_decline=false;spu_stat(t,8);++spu_chain_shared;
+        auto count=[&]{if(delta && (!t.dynamic_miss || t.steps!=steps || block.executed!=before)){auto& c=t.relocated_entries.value;c.store(c.load(std::memory_order_relaxed)+1,std::memory_order_relaxed);}};
+        t.chain_scope=&block;
+        try{fn(s,t,ls);}catch(...){t.chain_scope=nullptr;count();throw;}
+        count();
+        if(t.steps==steps && block.executed==before){if(t.block_decline)spu_stat(t,18);else if(t.dynamic_miss)spu_stat(t,17);return false;}
+        if(block.executed>=block.limit || t.block_control_exit || t.control_generation!=block.generation)return false;
+        // The per-call form has now committed everything (the callee's scope): a later generation change drops only what follows.
+        t.reloc_delta=delta;t.dynamic_miss=false;t.block_decline=false;block.kept=block.executed;
+        if(__builtin_expect(spu_stats_on,0))spu_note_entry(t,t.pc);
+        ++spu_chain_returns;return true;
+    }
     block.commit();
     if(!spu_chain_enabled || t.chain_depth>=SPU_CHAIN_DEPTH || !t.block_budget || t.steps>=t.block_limit || t.block_control_exit || t.block_trace)return false;
     struct Depth {unsigned& depth;explicit Depth(unsigned& d):depth(d){++depth;}~Depth(){--depth;}} nested(t.chain_depth);
