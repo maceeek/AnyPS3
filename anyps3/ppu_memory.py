@@ -1,7 +1,10 @@
 """PPUFAST guest memory access helpers for translated PPU code.
 
 The inline path reads one blocker byte for the 4 KiB guest page and then
-accesses the flat guest view (GuestMemory::InlineFlat, par_memory.py). Any
+accesses the flat guest view (GuestMemory::InlineFlat, par_memory.py). Both
+come from one pointer, the view base: the blocker table sits directly below
+it, and outside a section the base is InlineFlat::blocked_base() (all pages
+blocked), so the same test sends every access to the out-of-line path. Any
 blocker, page crossing or address outside the 32-bit space calls the
 out-of-line path, which first tries the in-section medium path and otherwise
 leaves the section and performs the unchanged admitted GuestMemory operation.
@@ -26,17 +29,17 @@ template<class S> [[gnu::noinline,gnu::cold]] inline void ppu_store_slow(S& s,st
     m.inline_suspend();m.store(ea,size,value);m.inline_resume();
 }
 template<unsigned N,class S> [[gnu::always_inline]] inline std::uint64_t ppu_load(S& s,std::uint64_t ea){
-    auto& m=s.memory;
+    auto& m=s.memory;std::uint8_t* const b=m.inline_view.base;
     if(__builtin_expect(GuestMemory::inline_scalar_span<N>(ea) &&
-        !(m.inline_view.table[ea>>12].load(std::memory_order_relaxed)&GuestMemory::InlineFlat::load_block),1))
-        return GuestMemory::inline_read<N>(m.inline_view.base+ea);
+        !(GuestMemory::InlineFlat::table_of(b)[ea>>12].load(std::memory_order_relaxed)&GuestMemory::InlineFlat::load_block),1))
+        return GuestMemory::inline_read<N>(b+ea);
     return ppu_load_slow(s,ea,N);
 }
 template<unsigned N,class S> [[gnu::always_inline]] inline void ppu_store(S& s,std::uint64_t ea,std::uint64_t value){
-    auto& m=s.memory;
+    auto& m=s.memory;std::uint8_t* const b=m.inline_view.base;
     if(__builtin_expect(GuestMemory::inline_scalar_span<N>(ea) &&
-        !(m.inline_view.table[ea>>12].load(std::memory_order_relaxed)&GuestMemory::InlineFlat::store_block),1)){
-        GuestMemory::inline_write<N>(m.inline_view.base+ea,value);return;}
+        !(GuestMemory::InlineFlat::table_of(b)[ea>>12].load(std::memory_order_relaxed)&GuestMemory::InlineFlat::store_block),1)){
+        GuestMemory::inline_write<N>(b+ea,value);return;}
     ppu_store_slow(s,ea,N,value);
 }
 // Byte ranges (VMX, dcbz, string forms): same admission, payload copied with
@@ -58,50 +61,50 @@ template<class S> [[gnu::noinline,gnu::cold]] inline void ppu_write_bytes_slow(S
     m.inline_resume();
 }
 template<class S> [[gnu::always_inline]] inline void ppu_read_bytes(S& s,std::uint64_t ea,std::uint8_t* out,unsigned n){
-    auto& m=s.memory;
+    auto& m=s.memory;std::uint8_t* const b=m.inline_view.base;
     if(__builtin_expect(GuestMemory::inline_span(ea,n) &&
-        !(m.inline_view.table[ea>>12].load(std::memory_order_relaxed)&GuestMemory::InlineFlat::load_block),1)){
-        GuestMemory::atomic_read(m.inline_view.base+ea,out,n);return;}
+        !(GuestMemory::InlineFlat::table_of(b)[ea>>12].load(std::memory_order_relaxed)&GuestMemory::InlineFlat::load_block),1)){
+        GuestMemory::atomic_read(b+ea,out,n);return;}
     ppu_read_bytes_slow(s,ea,out,n);
 }
 template<class S> [[gnu::always_inline]] inline void ppu_write_bytes(S& s,std::uint64_t ea,const std::uint8_t* in,unsigned n){
-    auto& m=s.memory;
+    auto& m=s.memory;std::uint8_t* const b=m.inline_view.base;
     if(__builtin_expect(GuestMemory::inline_span(ea,n) &&
-        !(m.inline_view.table[ea>>12].load(std::memory_order_relaxed)&GuestMemory::InlineFlat::store_block),1)){
-        GuestMemory::atomic_write(m.inline_view.base+ea,in,n);return;}
+        !(GuestMemory::InlineFlat::table_of(b)[ea>>12].load(std::memory_order_relaxed)&GuestMemory::InlineFlat::store_block),1)){
+        GuestMemory::atomic_write(b+ea,in,n);return;}
     ppu_write_bytes_slow(s,ea,in,n);
 }
 // Translated pages (ppu_emit.py) test the inline path and, only when it is
 // not admitted, publish PC/steps/modified registers before the slow path.
 template<unsigned N,class S> [[gnu::always_inline]] inline bool ppu_try_load(S& s,std::uint64_t ea,std::uint64_t& value){
-    auto& m=s.memory;
+    auto& m=s.memory;std::uint8_t* const b=m.inline_view.base;
     if(__builtin_expect(GuestMemory::inline_scalar_span<N>(ea) &&
-        !(m.inline_view.table[ea>>12].load(std::memory_order_relaxed)&GuestMemory::InlineFlat::load_block),1)){
-        value=GuestMemory::inline_read<N>(m.inline_view.base+ea);return true;}
+        !(GuestMemory::InlineFlat::table_of(b)[ea>>12].load(std::memory_order_relaxed)&GuestMemory::InlineFlat::load_block),1)){
+        value=GuestMemory::inline_read<N>(b+ea);return true;}
     return false;
 }
 template<unsigned N,class S> [[gnu::always_inline]] inline bool ppu_try_store(S& s,std::uint64_t ea,std::uint64_t value){
-    auto& m=s.memory;
+    auto& m=s.memory;std::uint8_t* const b=m.inline_view.base;
     if(__builtin_expect(GuestMemory::inline_scalar_span<N>(ea) &&
-        !(m.inline_view.table[ea>>12].load(std::memory_order_relaxed)&GuestMemory::InlineFlat::store_block),1)){
-        GuestMemory::inline_write<N>(m.inline_view.base+ea,value);return true;}
+        !(GuestMemory::InlineFlat::table_of(b)[ea>>12].load(std::memory_order_relaxed)&GuestMemory::InlineFlat::store_block),1)){
+        GuestMemory::inline_write<N>(b+ea,value);return true;}
     return false;
 }
 template<class S> [[gnu::always_inline]] inline bool ppu_try_read_bytes(S& s,std::uint64_t ea,std::uint8_t* out,unsigned n){
-    auto& m=s.memory;
+    auto& m=s.memory;std::uint8_t* const b=m.inline_view.base;
     if(__builtin_expect(GuestMemory::inline_span(ea,n) &&
-        !(m.inline_view.table[ea>>12].load(std::memory_order_relaxed)&GuestMemory::InlineFlat::load_block),1)){
+        !(GuestMemory::InlineFlat::table_of(b)[ea>>12].load(std::memory_order_relaxed)&GuestMemory::InlineFlat::load_block),1)){
         // lvx: aligned quadword into a vector register (16-byte destination).
-        if(n==16 && !(ea&7))GuestMemory::atomic_read16(m.inline_view.base+ea,*reinterpret_cast<std::uint8_t(*)[16]>(out));
-        else GuestMemory::atomic_read(m.inline_view.base+ea,out,n);
+        if(n==16 && !(ea&7))GuestMemory::atomic_read16(b+ea,*reinterpret_cast<std::uint8_t(*)[16]>(out));
+        else GuestMemory::atomic_read(b+ea,out,n);
         return true;}
     return false;
 }
 template<class S> [[gnu::always_inline]] inline bool ppu_try_write_bytes(S& s,std::uint64_t ea,const std::uint8_t* in,unsigned n){
-    auto& m=s.memory;
+    auto& m=s.memory;std::uint8_t* const b=m.inline_view.base;
     if(__builtin_expect(GuestMemory::inline_span(ea,n) &&
-        !(m.inline_view.table[ea>>12].load(std::memory_order_relaxed)&GuestMemory::InlineFlat::store_block),1)){
-        GuestMemory::atomic_write(m.inline_view.base+ea,in,n);return true;}
+        !(GuestMemory::InlineFlat::table_of(b)[ea>>12].load(std::memory_order_relaxed)&GuestMemory::InlineFlat::store_block),1)){
+        GuestMemory::atomic_write(b+ea,in,n);return true;}
     return false;
 }
 // Reservations keep their admitted protocol; the section resumes afterwards.

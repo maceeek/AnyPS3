@@ -1123,14 +1123,18 @@ TYPES = RESERVATION_WAIT_TYPES + r'''
     // inline sections; a section is reader admission (exclusive raw/map
     // writers wait for it) plus an odd sequence that blocker writers wait
     // to change after publishing their bit and an asymmetric barrier.
+    // The table lives directly below the view in the same reservation
+    // (table[i] at base-pages+i), so translated code reaches both from one
+    // pointer: base[(ea>>12)-pages] is the blocker of guest page ea>>12.
     struct InlineFlat {
         static constexpr std::uint8_t no_load=1,no_store=2,claimed=4,observed=8,tracked=16,dirty=32;
         static constexpr std::uint8_t load_block=no_load|claimed|observed;
         static constexpr std::uint8_t store_block=no_store|claimed|observed|tracked|dirty;
         static constexpr std::uint64_t pages=std::uint64_t(1)<<20,reserve=(std::uint64_t(1)<<32)+0x10000;
         using Table=std::atomic<std::uint8_t>;
+        static_assert(sizeof(Table)==1 && alignof(Table)==1,"one blocker byte per guest page");
         struct Map {std::uint64_t guest,size,bytes;unsigned flags;std::uintptr_t host;std::uint64_t identity;std::shared_ptr<GuestBacking> pin;};
-        std::uint8_t* base=nullptr;std::unique_ptr<Table[]> table;std::vector<Map> maps;std::mutex mutex;
+        std::uint8_t* base=nullptr;Table* table=nullptr;std::vector<Map> maps;std::mutex mutex;
         std::uint64_t remaps=0,publications=0;
         InlineFlat()=default;
         // Address-space copies start without a view; the source keeps its own.
@@ -1139,21 +1143,25 @@ TYPES = RESERVATION_WAIT_TYPES + r'''
         ~InlineFlat(){reset();}
         void reset(){
 #if defined(__linux__)
-            if(base)munmap(base,reserve);
+            if(base)munmap(base-pages,pages+reserve);
 #endif
-            base=nullptr;table.reset();maps.clear();
+            base=nullptr;table=nullptr;maps.clear();
         }
-        static const Table* blocked(){
+        static const Table* table_of(const std::uint8_t* view){return reinterpret_cast<const Table*>(view-pages);}
+        // Inactive view: a base whose table is all blocked (every load_block and
+        // store_block bit set), so no inline access ever reaches its data part.
+        static std::uint8_t* blocked_base(){
             static const std::unique_ptr<Table[]> all=[]{std::unique_ptr<Table[]> t(new Table[pages]);
                 for(std::uint64_t i=0;i<pages;++i){t[i].store(0xff,std::memory_order_relaxed);}
                 return t;}();
-            return all.get();
+            return reinterpret_cast<std::uint8_t*>(all.get())+pages;
         }
     } inline_flat;
-    // Owner-thread view used by translated code: the live table only while
-    // its section is active, otherwise an all-blocked table.
+    // Owner-thread view used by translated code: the live flat base (and so
+    // its table) only while its section is active, otherwise blocked_base().
     struct InlineView {
-        const InlineFlat::Table* table=InlineFlat::blocked();std::uint8_t* base=nullptr;bool active=false;
+        std::uint8_t* base=InlineFlat::blocked_base();bool active=false;
+        const InlineFlat::Table* table()const{return InlineFlat::table_of(base);}
         InlineView()=default;InlineView(const InlineView&){}InlineView& operator=(const InlineView&){return *this;}
     } inline_view;
     struct InlineEnabled {
@@ -1194,9 +1202,11 @@ TYPES = RESERVATION_WAIT_TYPES + r'''
 #if defined(__linux__) && defined(__x86_64__)
         auto& f=inline_flat;std::lock_guard<std::mutex> lock(f.mutex);
         if(!f.base){
-            void* p=mmap(nullptr,InlineFlat::reserve,PROT_NONE,MAP_PRIVATE|MAP_ANONYMOUS|MAP_NORESERVE,-1,0);
+            void* p=mmap(nullptr,InlineFlat::pages+InlineFlat::reserve,PROT_NONE,MAP_PRIVATE|MAP_ANONYMOUS|MAP_NORESERVE,-1,0);
             if(p==MAP_FAILED)return; // No view: every access keeps the admitted path.
-            f.base=static_cast<std::uint8_t*>(p);f.table.reset(new InlineFlat::Table[InlineFlat::pages]);
+            if(mmap(p,InlineFlat::pages,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS|MAP_FIXED,-1,0)==MAP_FAILED){
+                munmap(p,InlineFlat::pages+InlineFlat::reserve);return;}
+            f.table=static_cast<InlineFlat::Table*>(p);f.base=static_cast<std::uint8_t*>(p)+InlineFlat::pages;
         }
         ++f.publications;
         std::vector<InlineFlat::Map> want;
@@ -1270,7 +1280,7 @@ TYPES = RESERVATION_WAIT_TYPES + r'''
         }
     }
     [[gnu::noinline]] void inline_leave(LocalAccess& local){
-        local.inline_active=false;inline_view.active=false;inline_view.table=InlineFlat::blocked();
+        local.inline_active=false;inline_view.active=false;inline_view.base=InlineFlat::blocked_base();
         auto& reader=parallel->readers[local.slot];reader.section.store(reader.section.load(std::memory_order_relaxed)+1,std::memory_order_release);
         leave_reader(local);
     }
@@ -1290,7 +1300,7 @@ TYPES = RESERVATION_WAIT_TYPES + r'''
         if(!inline_observer_compatible() || page_broker.stopped.load(std::memory_order_acquire)){leave_reader(local);++inline_counters.blocked_resumes;return;}
         auto& reader=parallel->readers[local.slot];reader.section.store(reader.section.load(std::memory_order_relaxed)+1,std::memory_order_release);
         std::atomic_signal_fence(std::memory_order_seq_cst);
-        local.inline_active=true;inline_view.base=inline_flat.base;inline_view.table=inline_flat.table.get();inline_view.active=true;
+        local.inline_active=true;inline_view.base=inline_flat.base;inline_view.active=true;
         ++inline_counters.resumes;
     }
     [[gnu::always_inline]] void inline_enter_dispatch(){if(!inline_view.active && inline_enabled.load(std::memory_order_relaxed))inline_resume();}
@@ -1298,17 +1308,17 @@ TYPES = RESERVATION_WAIT_TYPES + r'''
     // and never call observers, so blocker writers can wait for sections.
     [[gnu::noinline]] bool inline_medium_load(std::uint64_t address,unsigned size,std::uint8_t* out){
         if(!inline_view.active || !inline_span(address,size))return false;
-        auto bits=inline_view.table[address>>12].load(std::memory_order_seq_cst);
+        auto bits=inline_view.table()[address>>12].load(std::memory_order_seq_cst);
         if((bits&InlineFlat::claimed) && !(bits&(InlineFlat::load_block&~InlineFlat::claimed)) && inline_clear_claim(address))
-            bits=inline_view.table[address>>12].load(std::memory_order_seq_cst);
+            bits=inline_view.table()[address>>12].load(std::memory_order_seq_cst);
         if(bits&InlineFlat::load_block)return false;
         atomic_read(inline_view.base+address,out,size);++inline_counters.medium_loads;return true;
     }
     [[gnu::noinline]] bool inline_medium_store(std::uint64_t address,unsigned size,const std::uint8_t* in){
         if(!inline_view.active || !inline_span(address,size))return false;
-        auto bits=inline_view.table[address>>12].load(std::memory_order_seq_cst);
+        auto bits=inline_view.table()[address>>12].load(std::memory_order_seq_cst);
         if((bits&InlineFlat::claimed) && !(bits&(InlineFlat::no_store|InlineFlat::observed)) && inline_clear_claim(address))
-            bits=inline_view.table[address>>12].load(std::memory_order_seq_cst);
+            bits=inline_view.table()[address>>12].load(std::memory_order_seq_cst);
         if(bits&(InlineFlat::no_store|InlineFlat::observed|InlineFlat::claimed))return false;
         std::uint8_t* host=nullptr;
         if(bits&(InlineFlat::tracked|InlineFlat::dirty)){
@@ -1326,11 +1336,11 @@ TYPES = RESERVATION_WAIT_TYPES + r'''
     // Reusable API for other translated/HLE users of the owner thread: one
     // scalar through the flat view if the page admits it, else false.
     template<unsigned N> [[gnu::always_inline]] bool inline_try_load(std::uint64_t address,std::uint64_t& value)const{
-        if(!(inline_scalar_span<N>(address) && !(inline_view.table[address>>12].load(std::memory_order_relaxed)&InlineFlat::load_block)))return false;
+        if(!(inline_scalar_span<N>(address) && !(InlineFlat::table_of(inline_view.base)[address>>12].load(std::memory_order_relaxed)&InlineFlat::load_block)))return false;
         value=inline_read<N>(inline_view.base+address);return true;
     }
     template<unsigned N> [[gnu::always_inline]] bool inline_try_store(std::uint64_t address,std::uint64_t value){
-        if(!(inline_scalar_span<N>(address) && !(inline_view.table[address>>12].load(std::memory_order_relaxed)&InlineFlat::store_block)))return false;
+        if(!(inline_scalar_span<N>(address) && !(InlineFlat::table_of(inline_view.base)[address>>12].load(std::memory_order_relaxed)&InlineFlat::store_block)))return false;
         inline_write<N>(inline_view.base+address,value);return true;
     }
 '''

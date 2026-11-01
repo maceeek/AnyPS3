@@ -99,6 +99,8 @@ class PpuFastMemory(unittest.TestCase):
  const std::uint64_t last[9]={0,0x88,0x7788,0,0x55667788,0,0,0,UINT64_C(0x1122334455667788)};
  // Outside a section the view base is the all-blocked one: nothing is admitted.
  assert(!m.inline_view.active);
+ {GuestMemory::InlineView fresh;for(std::uint64_t p:{UINT64_C(0),UINT64_C(0x10),UINT64_C(0xfffff)})
+     assert(fresh.table()[p].load(std::memory_order_relaxed)==0xff && m.inline_view.table()[p].load(std::memory_order_relaxed)==0xff);}
  auto all=[&](std::uint64_t ea,bool expect){std::uint64_t x=0;
      assert(m.inline_try_load<1>(ea,x)==expect && m.inline_try_load<2>(ea,x)==expect && m.inline_try_load<4>(ea,x)==expect && m.inline_try_load<8>(ea,x)==expect);
      assert(ppu_try_load<1>(cpu,ea,x)==expect && ppu_try_load<2>(cpu,ea,x)==expect && ppu_try_load<4>(cpu,ea,x)==expect && ppu_try_load<8>(cpu,ea,x)==expect);};
@@ -132,7 +134,7 @@ class PpuFastMemory(unittest.TestCase):
  std::pair<std::uintptr_t,std::uint64_t> token;m.inline_suspend();assert(m.load_reserved(0x10100,4,token)==0x01020304);m.inline_resume();
  assert(m.inline_view.active && !ppu_try_store<4>(cpu,0x10100,5) && !ppu_try_store<1>(cpu,0x10f00,5) && ppu_try_load<4>(cpu,0x10100,v) && v==0x01020304);
  ppu_store<4>(cpu,0x10f00,0x0a0b0c0d);
- m.inline_suspend();
+ m.inline_suspend();all(0x10ff8,false);all(0x11000,false); // left section: blocked again
  assert(m.load(0x10ffe,4)==0xc0c1c2c3 && m.load(0x10ff8,4)==0x11223344 && m.load(0x11002,2)==0xe2e3 && m.load(0x10f00,4)==0x0a0b0c0d);
  for(unsigned i=0;i<8;++i)assert(m.load(0x50ff8+i,1)==(i<6?tail[i]:(i==6?0xc0:0xc1)));
  std::puts("span ok");
