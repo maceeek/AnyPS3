@@ -76,14 +76,26 @@ WRITE = r'''
  GuestMemory m;m.map(0x10000,4096,6,nullptr,0);m.map(0x11000,4096,6,nullptr,0);m.map(0x12000,4096,4,nullptr,0);m.map(0x14000,4096,6,nullptr,0);m.enable_concurrency();
  auto versions=[&](std::uint64_t base){for(const auto& map:m.parallel->snapshot->maps)if(map.region.base==base)return map.state->versions;assert(false);return std::vector<std::uint64_t>{};};
  std::vector<std::uint8_t> in(512);for(unsigned i=0;i<512;++i)in[i]=std::uint8_t(i*29+5);
+ // HIRES9 (ANYPS3_GUEST_WRITE_TRACKED_ONLY, default 1): a part whose lines no reservation ever tracked keeps its versions and touch
+ // counters; a part with a tracked line bumps all of its lines and touches them; 0 bumps every part (the HIRES7 expectations).
+ const bool all=std::getenv("ANYPS3_GUEST_WRITE_TRACKED_ONLY") && !std::strcmp(std::getenv("ANYPS3_GUEST_WRITE_TRACKED_ONLY"),"0");
+ auto touched=[&](std::uint64_t address){std::uintptr_t host=0;
+  for(const auto& map:m.parallel->snapshot->maps)if(address>=map.region.base && address-map.region.base<map.region.bytes->size())host=reinterpret_cast<std::uintptr_t>(map.region.bytes->data()+(address-map.region.base));
+  assert(host);return m.parallel->notifications->touched[(host/128)%4096].value.load();};
  std::pair<std::uintptr_t,std::uint64_t> token;m.load_reserved(0x11000,4,token);
- m.transfer(0x10f80,in.data(),256,true);                        // last line of mapping 1 + first line of mapping 2
+ const auto touched_a31=touched(0x10f80),touched_b0=touched(0x11000);
+ m.transfer(0x10f80,in.data(),256,true);                        // last line of mapping 1 (untracked) + first line of mapping 2 (tracked)
  for(unsigned i=0;i<256;++i){assert(m.load(0x10f80+i,1)==in[i]);}
  {const auto a=versions(0x10000),b=versions(0x11000);
-  for(unsigned i=0;i<32;++i){assert(a[i]==(i==31?1u:0u));assert(b[i]==(i==0?1u:0u));}}
+  for(unsigned i=0;i<32;++i){assert(a[i]==(all && i==31?1u:0u));assert(b[i]==(i==0?1u:0u));}}
+ assert(touched(0x10f80)==touched_a31+(all?1:0) && touched(0x11000)==touched_b0+1);
  assert(!m.store_conditional(0x11000,4,0x12345678,token));      // the PUT invalidated the reservation of that line
- m.transfer(0x10100,in.data(),300,true);                        // one mapping: bytes 0x100..0x22b = lines 2..4 of mapping 1
- {const auto a=versions(0x10000);for(unsigned i=0;i<32;++i){assert(a[i]==((i>=2 && i<=4)?1u:i==31?1u:0u));}}
+ m.transfer(0x10100,in.data(),300,true);                        // one mapping: bytes 0x100..0x22b = lines 2..4 of mapping 1, untracked
+ {const auto a=versions(0x10000);for(unsigned i=0;i<32;++i){assert(a[i]==(all && ((i>=2 && i<=4) || i==31)?1u:0u));}}
+ std::pair<std::uintptr_t,std::uint64_t> token3;m.load_reserved(0x10180,4,token3);   // tracks line 3 only
+ m.transfer(0x10100,in.data(),300,true);                        // lines 2..4 again: the part has a tracked line, all three bump
+ {const auto a=versions(0x10000);for(unsigned i=0;i<32;++i){assert(a[i]==((i>=2 && i<=4)?(all?2u:1u):all && i==31?1u:0u));}}
+ assert(!m.store_conditional(0x10180,4,0x12345678,token3));
  // A span that continues into the read-only mapping faults before any byte or version changes.
  std::vector<std::uint8_t> before(256);m.transfer(0x11f80,before.data(),128,false);
  bool hit=false;try{m.transfer(0x11f80,in.data(),256,true);}catch(const std::runtime_error& e){hit=std::string(e.what())=="guest memory permission fault";}
@@ -92,6 +104,7 @@ WRITE = r'''
   const auto b=versions(0x11000);assert(b[31]==0);}
  // A write that continues into the hole after mapping 4, and a read that continues into the hole after mapping 3, fault before any
  // change (bytes, versions, destination buffer).
+ std::pair<std::uintptr_t,std::uint64_t> token4;m.load_reserved(0x14f80,4,token4);   // track line 31 of mapping 4: its bump is visible
  m.transfer(0x14ff0,in.data(),16,true);
  hit=false;try{m.transfer(0x14ff0,in.data()+100,32,true);}catch(const std::runtime_error&){hit=true;}
  assert(hit);
@@ -116,7 +129,7 @@ FLAGS = [('-O0',), ('-O2',)] + ([('-O2', '-march=x86-64-v3')] if _avx() else [])
 
 @unittest.skipUnless(shutil.which('c++'), 'Requires native C++ compiler')
 class AtomicCopyUnrolledTests(unittest.TestCase):
-    def run_body(self, body, marker, flags=FLAGS):
+    def run_body(self, body, marker, flags=FLAGS, env=()):
         with tempfile.TemporaryDirectory() as d:
             cpp = Path(d) / 't.cpp'
             cpp.write_text(source(body).replace('#include <cassert>', '#include <cassert>\n#include <vector>\n#include <utility>\n#include <set>', 1))
@@ -125,7 +138,7 @@ class AtomicCopyUnrolledTests(unittest.TestCase):
                                    capture_output=True, text=True, timeout=600)
                 self.assertEqual(p.returncode, 0, p.stderr[-8000:])
                 p = subprocess.run([str(cpp.with_suffix(''))], capture_output=True, text=True, timeout=300,
-                                   env={**os.environ, 'SDL_AUDIODRIVER': 'dummy', 'ANYPS3_AUDIO_SINK': 'null'})
+                                   env={**os.environ, 'SDL_AUDIODRIVER': 'dummy', 'ANYPS3_AUDIO_SINK': 'null', **dict(env)})
                 self.assertEqual(p.returncode, 0, ' '.join(opt) + ': ' + p.stdout + p.stderr)
                 self.assertIn(marker, p.stdout)
 
@@ -137,6 +150,7 @@ class AtomicCopyUnrolledTests(unittest.TestCase):
 
     def test_concurrent_transfer_write_spans_versions_and_faults(self):
         self.run_body(WRITE, 'PASS transfer write', FLAGS[1:])
+        self.run_body(WRITE, 'PASS transfer write', FLAGS[2:] or FLAGS[1:], env={'ANYPS3_GUEST_WRITE_TRACKED_ONLY': '0'})
 
 
 if __name__ == '__main__':
