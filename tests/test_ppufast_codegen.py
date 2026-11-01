@@ -12,6 +12,7 @@ import unittest
 
 from anyps3.program import compile_program
 from anyps3.prx import make_image
+from tests.test_ppufast_memory import host_has_movbe
 
 BLR = 0x4E800020
 CODE = {
@@ -126,16 +127,19 @@ static void check(bool parallel){
 }
 int main(){check(false);check(true);std::puts("ok");}
 '''
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            (root / 'test.cpp').write_text(source)
-            build = subprocess.run(['c++', '-std=c++17', '-O2', '-Wall', '-Wextra', '-Werror', '-pthread', str(root / 'test.cpp'),
-                                    '-o', str(root / 'test')], capture_output=True, text=True, timeout=600)
-            self.assertEqual(build.returncode, 0, build.stderr[-8000:])
-            run = subprocess.run([str(root / 'test')], capture_output=True, text=True, timeout=60,
-                                 env={'SDL_AUDIODRIVER': 'dummy', 'ANYPS3_AUDIO_SINK': 'null', 'PATH': '/usr/bin:/bin'})
-            self.assertEqual(run.returncode, 0, run.stderr[-8000:] + run.stdout[-2000:])
-            self.assertIn('ok', run.stdout)
+        # Default ISA (volatile load/store plus byte swap) and, where the host
+        # has it, MOVBE (the -march=native / x86-64-v3 inline form).
+        for flags in ([], *([['-mmovbe']] if host_has_movbe() else [])):
+            with self.subTest(flags=flags), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                (root / 'test.cpp').write_text(source)
+                build = subprocess.run(['c++', '-std=c++17', '-O2', *flags, '-Wall', '-Wextra', '-Werror', '-pthread', str(root / 'test.cpp'),
+                                        '-o', str(root / 'test')], capture_output=True, text=True, timeout=600)
+                self.assertEqual(build.returncode, 0, build.stderr[-8000:])
+                run = subprocess.run([str(root / 'test')], capture_output=True, text=True, timeout=60,
+                                     env={'SDL_AUDIODRIVER': 'dummy', 'ANYPS3_AUDIO_SINK': 'null', 'PATH': '/usr/bin:/bin'})
+                self.assertEqual(run.returncode, 0, run.stderr[-8000:] + run.stdout[-2000:])
+                self.assertIn('ok', run.stdout)
 
 
 if __name__ == '__main__':

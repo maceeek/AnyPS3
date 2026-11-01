@@ -1170,17 +1170,33 @@ TYPES = RESERVATION_WAIT_TYPES + r'''
         bool load(std::memory_order order)const{return value.load(order);}void store(bool v,std::memory_order order){value.store(v,order);}
     } inline_enabled;
     struct InlineCounters {std::uint64_t medium_loads=0,medium_stores=0,slow_loads=0,slow_stores=0,claim_clears=0,resumes=0,blocked_resumes=0;} inline_counters;
+    // One host access of exactly N bytes, byte-reversed. With MOVBE the load or
+    // store and the swap are one instruction: asm volatile, like the volatile
+    // access, is never merged, dropped, duplicated or moved across another
+    // volatile access, and its "m" operand names exactly the N guest bytes.
     template<unsigned N> [[gnu::always_inline]] static std::uint64_t inline_read(const std::uint8_t* p){
         if constexpr(N==1)return *reinterpret_cast<const volatile std::uint8_t*>(p);
+#if defined(__MOVBE__) && defined(__x86_64__)
+        else if constexpr(N==2){typedef std::uint16_t U __attribute__((aligned(1)));std::uint16_t v;asm volatile("movbew %1,%0":"=r"(v):"m"(*reinterpret_cast<const U*>(p)));return v;}
+        else if constexpr(N==4){typedef std::uint32_t U __attribute__((aligned(1)));std::uint64_t v;asm volatile("movbel %1,%k0":"=r"(v):"m"(*reinterpret_cast<const U*>(p)));return v;}
+        else{static_assert(N==8,"inline scalar width");typedef std::uint64_t U __attribute__((aligned(1)));std::uint64_t v;asm volatile("movbeq %1,%0":"=r"(v):"m"(*reinterpret_cast<const U*>(p)));return v;}
+#else
         else if constexpr(N==2){typedef std::uint16_t U __attribute__((aligned(1)));return __builtin_bswap16(*reinterpret_cast<const volatile U*>(p));}
         else if constexpr(N==4){typedef std::uint32_t U __attribute__((aligned(1)));return __builtin_bswap32(*reinterpret_cast<const volatile U*>(p));}
         else{static_assert(N==8,"inline scalar width");typedef std::uint64_t U __attribute__((aligned(1)));return __builtin_bswap64(*reinterpret_cast<const volatile U*>(p));}
+#endif
     }
     template<unsigned N> [[gnu::always_inline]] static void inline_write(std::uint8_t* p,std::uint64_t value){
         if constexpr(N==1)*reinterpret_cast<volatile std::uint8_t*>(p)=static_cast<std::uint8_t>(value);
+#if defined(__MOVBE__) && defined(__x86_64__)
+        else if constexpr(N==2){typedef std::uint16_t U __attribute__((aligned(1)));asm volatile("movbew %w1,%0":"=m"(*reinterpret_cast<U*>(p)):"r"(value));}
+        else if constexpr(N==4){typedef std::uint32_t U __attribute__((aligned(1)));asm volatile("movbel %k1,%0":"=m"(*reinterpret_cast<U*>(p)):"r"(value));}
+        else{static_assert(N==8,"inline scalar width");typedef std::uint64_t U __attribute__((aligned(1)));asm volatile("movbeq %1,%0":"=m"(*reinterpret_cast<U*>(p)):"r"(value));}
+#else
         else if constexpr(N==2){typedef std::uint16_t U __attribute__((aligned(1)));*reinterpret_cast<volatile U*>(p)=__builtin_bswap16(static_cast<std::uint16_t>(value));}
         else if constexpr(N==4){typedef std::uint32_t U __attribute__((aligned(1)));*reinterpret_cast<volatile U*>(p)=__builtin_bswap32(static_cast<std::uint32_t>(value));}
         else{static_assert(N==8,"inline scalar width");typedef std::uint64_t U __attribute__((aligned(1)));*reinterpret_cast<volatile U*>(p)=__builtin_bswap64(value);}
+#endif
     }
     // In-page checks shared by every inline user (the caller holds a section):
     // address < 2^32 and [address,address+size) inside one 4 KiB page. Byte

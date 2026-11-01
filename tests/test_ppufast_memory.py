@@ -15,11 +15,13 @@ ARTIFACTS = Path('local/ratchet/codex/ppufast/tests')
 
 @unittest.skipUnless(shutil.which('c++'), 'Requires native C++ compiler')
 class PpuFastMemory(unittest.TestCase):
+    FLAGS = ()
+
     def native(self, name, body):
         ARTIFACTS.mkdir(parents=True, exist_ok=True)
-        cpp = ARTIFACTS / (name + '.cpp')
+        cpp = ARTIFACTS / (name + ''.join(f.replace('-m', '-') for f in self.FLAGS) + '.cpp')
         cpp.write_text(source(body).replace('#include <cassert>', '#include <cassert>\n#include <chrono>'))
-        command = ['c++', '-std=c++17', '-O2', '-Wall', '-Wextra', '-Werror',
+        command = ['c++', '-std=c++17', '-O2', *self.FLAGS, '-Wall', '-Wextra', '-Werror',
                    '-pthread', str(cpp), '-o', str(cpp.with_suffix(''))]
         p = subprocess.run(command, capture_output=True, timeout=300)
         cpp.with_suffix('.build.log').write_bytes(p.stdout + p.stderr)
@@ -231,6 +233,28 @@ class PpuFastMemory(unittest.TestCase):
  while(rounds.load()<1000)std::this_thread::yield();
  stop=true;worker.join();assert(m.load(0x10400,4)==rounds.load() && m.load(0x10800,4)==1999);
 ''')
+
+
+
+def host_has_movbe():
+    try:
+        return any(line.startswith('flags') and ' movbe' in line for line in open('/proc/cpuinfo'))
+    except OSError:
+        return False
+
+
+@unittest.skipUnless(shutil.which('c++'), 'Requires native C++ compiler')
+@unittest.skipUnless(host_has_movbe(), 'host CPU lacks MOVBE')
+class PpuFastMemoryMovbe(PpuFastMemory):
+    """The scalar layout and edge cases again with MOVBE inline reads/writes
+    (the -march=native / x86-64-v3 builds); the default build above covers the
+    volatile load/store plus byte-swap form."""
+    FLAGS = ('-mmovbe',)
+    test_reservations_leave_fast_path_and_wait_for_sections = None
+    test_claims_observers_dirty_raw_and_concurrent_admitted_users = None
+
+    def native(self, name, body):
+        return super().native(name, '#ifndef __MOVBE__\n#error MOVBE build expected\n#endif\n' + body)
 
 
 if __name__ == '__main__':
