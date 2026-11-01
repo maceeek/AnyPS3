@@ -101,11 +101,12 @@ HELPERS_CPP = r'''
 // return to the host, STOP) leaves depth above the returning frame's own
 // slot, so each frame passes it on unchanged up to anyps3_entry, which
 // restores the base before it dispatches again (exceptions unwind the frames
-// the same way). A full stack keeps the tail-call transfer.
+// the same way). A full stack keeps the tail-call transfer; the limit
+// (ANYPS3_PPU_RET_DEPTH, 0..64, anyps3_entry) never exceeds the array.
 constexpr std::uint32_t PPU_RET_FULL=UINT32_MAX;
 template<class S> [[maybe_unused,gnu::always_inline]] static inline std::uint32_t ppu_ret_push(S& state,std::uint32_t continuation){
     const std::uint32_t depth=state.ppu_ret_depth;
-    if(depth>=sizeof(state.ppu_ret_stack)/sizeof(state.ppu_ret_stack[0]))return PPU_RET_FULL;
+    if(depth>=state.ppu_ret_limit)return PPU_RET_FULL;
     state.ppu_ret_stack[depth]=continuation;state.ppu_ret_depth=depth+1;return depth;
 }
 template<class S> [[maybe_unused,gnu::always_inline]] static inline bool ppu_ret_pop(S& state,std::uint32_t pc){

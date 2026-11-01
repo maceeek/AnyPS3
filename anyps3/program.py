@@ -315,6 +315,9 @@ class Program:
                       # Host-call return frames (ppu_emit.py ppu_ret_*) never outlive one dispatch; a nested
                       # entry (module start) stacks above the caller's frames and restores their depth.
                       "    const std::uint32_t ppu_ret_base=state.ppu_ret_depth; struct PpuRetExit {PpuState& state;std::uint32_t depth;~PpuRetExit(){state.ppu_ret_depth=depth;}} ppu_ret_exit{state,ppu_ret_base};",
+                      # ANYPS3_PPU_RET_DEPTH=0..64 (default 64): host-call frames per dispatch; 0 = tail calls only (A/B).
+                      '    static const std::uint32_t ppu_ret_limit=[]{const char* v=std::getenv("ANYPS3_PPU_RET_DEPTH");if(!v)return 64u;char* end=nullptr;const auto n=std::strtoul(v,&end,10);',
+                      '        if(end==v || *end || n>64){throw std::runtime_error("invalid ANYPS3_PPU_RET_DEPTH (0..64)");}return static_cast<unsigned>(n);}(); state.ppu_ret_limit=ppu_ret_limit;',
                       "    auto& r = state.r; (void)r; for (;;) {",
                       "    state.ppu_slice_end=(state.steps/256+1)*256;" if self.process_entry else "    state.ppu_slice_end=UINT64_MAX;",
                       f'    if (state.steps >= UINT64_C({max_steps})) throw std::runtime_error("execution step limit reached");',

@@ -128,10 +128,20 @@ class PpuReturnPrediction(unittest.TestCase):
             build = subprocess.run(['c++', '-std=c++17', '-O2', '-Wall', '-Wextra', '-Werror', '-pthread',
                                     str(root/'test.cpp'), '-o', str(root/'test')], capture_output=True, text=True, timeout=900)
             self.assertEqual(build.returncode, 0, build.stderr[-6000:])
-            run = subprocess.run([str(root/'test')], capture_output=True, text=True, timeout=60,
-                                 env={**os.environ, 'ANYPS3_PERF_REPORT': '0'})
-            self.assertEqual(run.returncode, 0, run.stderr[-4000:])
-            self.assertIn('ok', run.stdout)
+            # Default depth, the tail-call-only A/B setting, and a one-entry stack
+            # (full on every nested call) give the same guest results.
+            for depth in (None, '0', '1'):
+                env = {**os.environ, 'ANYPS3_PERF_REPORT': '0'}
+                env.pop('ANYPS3_PPU_RET_DEPTH', None)
+                if depth is not None:
+                    env['ANYPS3_PPU_RET_DEPTH'] = depth
+                run = subprocess.run([str(root/'test')], capture_output=True, text=True, timeout=60, env=env)
+                self.assertEqual(run.returncode, 0, f'depth={depth} ' + run.stderr[-4000:])
+                self.assertIn('ok', run.stdout)
+            env['ANYPS3_PPU_RET_DEPTH'] = '65'
+            run = subprocess.run([str(root/'test')], capture_output=True, text=True, timeout=60, env=env)
+            self.assertNotEqual(run.returncode, 0)
+            self.assertIn('invalid ANYPS3_PPU_RET_DEPTH', run.stderr)
 
 
 if __name__ == '__main__':
