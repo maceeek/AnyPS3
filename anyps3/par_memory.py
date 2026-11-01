@@ -980,8 +980,9 @@ TYPES = RESERVATION_WAIT_TYPES + r'''
         // Stripes [begin,end), end <= stripes.
         void mark(unsigned begin,unsigned end){
             const unsigned first=begin/64,last=(end+63)/64;
-            if(low>=high){for(unsigned w=first;w<last;++w)held[w]=0;}
-            else{for(unsigned w=first;w<low;++w)held[w]=0;for(unsigned w=high;w<last;++w)held[w]=0;}
+            // w < last <= stripes/64 always; the modulo (identity) keeps GCC's -Warray-bounds from flagging the peeled clear loops.
+            auto clear=[&](unsigned from,unsigned to){for(unsigned w=from;w<to;++w)held[w%(stripes/64)]=0;};
+            if(low>=high)clear(first,last);else{clear(first,low);clear(high,last);}
             for(unsigned w=first;w<last;++w){const unsigned lo=std::max(begin,w*64)-w*64,hi=std::min(end,w*64+64)-w*64;
                 held[w]|=(hi-lo==64?~UINT64_C(0):((UINT64_C(1)<<(hi-lo))-1)<<lo);}
             low=std::min(low,first);high=std::max(high,last);
