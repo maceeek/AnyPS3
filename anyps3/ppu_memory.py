@@ -27,14 +27,14 @@ template<class S> [[gnu::noinline,gnu::cold]] inline void ppu_store_slow(S& s,st
 }
 template<unsigned N,class S> [[gnu::always_inline]] inline std::uint64_t ppu_load(S& s,std::uint64_t ea){
     auto& m=s.memory;
-    if(__builtin_expect((ea>>32)==0 && (N==1 || (ea&4095)<=4096-N) &&
+    if(__builtin_expect(GuestMemory::inline_scalar_span<N>(ea) &&
         !(m.inline_view.table[ea>>12].load(std::memory_order_relaxed)&GuestMemory::InlineFlat::load_block),1))
         return GuestMemory::inline_read<N>(m.inline_view.base+ea);
     return ppu_load_slow(s,ea,N);
 }
 template<unsigned N,class S> [[gnu::always_inline]] inline void ppu_store(S& s,std::uint64_t ea,std::uint64_t value){
     auto& m=s.memory;
-    if(__builtin_expect((ea>>32)==0 && (N==1 || (ea&4095)<=4096-N) &&
+    if(__builtin_expect(GuestMemory::inline_scalar_span<N>(ea) &&
         !(m.inline_view.table[ea>>12].load(std::memory_order_relaxed)&GuestMemory::InlineFlat::store_block),1)){
         GuestMemory::inline_write<N>(m.inline_view.base+ea,value);return;}
     ppu_store_slow(s,ea,N,value);
@@ -75,14 +75,14 @@ template<class S> [[gnu::always_inline]] inline void ppu_write_bytes(S& s,std::u
 // not admitted, publish PC/steps/modified registers before the slow path.
 template<unsigned N,class S> [[gnu::always_inline]] inline bool ppu_try_load(S& s,std::uint64_t ea,std::uint64_t& value){
     auto& m=s.memory;
-    if(__builtin_expect((ea>>32)==0 && (N==1 || (ea&4095)<=4096-N) &&
+    if(__builtin_expect(GuestMemory::inline_scalar_span<N>(ea) &&
         !(m.inline_view.table[ea>>12].load(std::memory_order_relaxed)&GuestMemory::InlineFlat::load_block),1)){
         value=GuestMemory::inline_read<N>(m.inline_view.base+ea);return true;}
     return false;
 }
 template<unsigned N,class S> [[gnu::always_inline]] inline bool ppu_try_store(S& s,std::uint64_t ea,std::uint64_t value){
     auto& m=s.memory;
-    if(__builtin_expect((ea>>32)==0 && (N==1 || (ea&4095)<=4096-N) &&
+    if(__builtin_expect(GuestMemory::inline_scalar_span<N>(ea) &&
         !(m.inline_view.table[ea>>12].load(std::memory_order_relaxed)&GuestMemory::InlineFlat::store_block),1)){
         GuestMemory::inline_write<N>(m.inline_view.base+ea,value);return true;}
     return false;

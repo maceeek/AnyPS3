@@ -1174,9 +1174,20 @@ TYPES = RESERVATION_WAIT_TYPES + r'''
         else if constexpr(N==4){typedef std::uint32_t U __attribute__((aligned(1)));*reinterpret_cast<volatile U*>(p)=__builtin_bswap32(static_cast<std::uint32_t>(value));}
         else{static_assert(N==8,"inline scalar width");typedef std::uint64_t U __attribute__((aligned(1)));*reinterpret_cast<volatile U*>(p)=__builtin_bswap64(value);}
     }
-    // In-page check shared by every inline user (the caller holds a section).
+    // In-page checks shared by every inline user (the caller holds a section):
+    // address < 2^32 and [address,address+size) inside one 4 KiB page. Byte
+    // ranges keep the split form: their addresses are mostly 16-aligned, which
+    // lets the compiler drop the page test.
     [[gnu::always_inline]] static bool inline_span(std::uint64_t address,unsigned size){
         return size && (address>>32)==0 && (address&4095)+size<=4096;
+    }
+    // Scalars in one compare. Masked m=address&0xffffffff00000fff: a set high
+    // bit makes m >= 2^32 > 4096-N; with the high half zero m is address&4095,
+    // so m<=4096-N <=> (address>>32)==0 && (address&4095)<=4096-N. One byte
+    // never crosses a page, so N==1 keeps only the high test.
+    template<unsigned N> [[gnu::always_inline]] static bool inline_scalar_span(std::uint64_t address){
+        if constexpr(N==1)return (address>>32)==0;
+        else return (address&UINT64_C(0xffffffff00000fff))<=4096-N;
     }
     // Rebuild under map publication (RawPermit: no section is active).
     void inline_publish(const std::vector<ParallelMemory::Mapping>& next){
@@ -1315,11 +1326,11 @@ TYPES = RESERVATION_WAIT_TYPES + r'''
     // Reusable API for other translated/HLE users of the owner thread: one
     // scalar through the flat view if the page admits it, else false.
     template<unsigned N> [[gnu::always_inline]] bool inline_try_load(std::uint64_t address,std::uint64_t& value)const{
-        if(!((address>>32)==0 && (N==1 || (address&4095)<=4096-N) && !(inline_view.table[address>>12].load(std::memory_order_relaxed)&InlineFlat::load_block)))return false;
+        if(!(inline_scalar_span<N>(address) && !(inline_view.table[address>>12].load(std::memory_order_relaxed)&InlineFlat::load_block)))return false;
         value=inline_read<N>(inline_view.base+address);return true;
     }
     template<unsigned N> [[gnu::always_inline]] bool inline_try_store(std::uint64_t address,std::uint64_t value){
-        if(!((address>>32)==0 && (N==1 || (address&4095)<=4096-N) && !(inline_view.table[address>>12].load(std::memory_order_relaxed)&InlineFlat::store_block)))return false;
+        if(!(inline_scalar_span<N>(address) && !(inline_view.table[address>>12].load(std::memory_order_relaxed)&InlineFlat::store_block)))return false;
         inline_write<N>(inline_view.base+address,value);return true;
     }
 '''

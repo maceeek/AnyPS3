@@ -86,6 +86,58 @@ class PpuFastMemory(unittest.TestCase):
  m.inline_suspend();assert(m.load(0x40004,4)==9 && m.inline_flat.remaps>=6);
 ''')
 
+    def test_span_edges_high_addresses_and_blocked_base(self):
+        # Both admission APIs (GuestMemory::inline_try_* and the translated-page
+        # ppu_try_* templates) at every scalar width: the last in-page offset
+        # hits, one byte further crosses into the next mapped page and misses; an
+        # address with any of the 32 high bits set misses although its low half
+        # is a mapped, admitted page. Values are literal big-endian bytes.
+        self.native('span', self.SETUP + r'''
+ struct Cpu {GuestMemory& memory;} cpu{m};
+ const std::uint8_t tail[8]={0x11,0x22,0x33,0x44,0x55,0x66,0x77,0x88};
+ for(unsigned i=0;i<8;++i){m.store(0x10ff8+i,1,tail[i]);m.store(0x11000+i,1,0xe0+i);}
+ const std::uint64_t last[9]={0,0x88,0x7788,0,0x55667788,0,0,0,UINT64_C(0x1122334455667788)};
+ // Outside a section the view base is the all-blocked one: nothing is admitted.
+ assert(!m.inline_view.active);
+ auto all=[&](std::uint64_t ea,bool expect){std::uint64_t x=0;
+     assert(m.inline_try_load<1>(ea,x)==expect && m.inline_try_load<2>(ea,x)==expect && m.inline_try_load<4>(ea,x)==expect && m.inline_try_load<8>(ea,x)==expect);
+     assert(ppu_try_load<1>(cpu,ea,x)==expect && ppu_try_load<2>(cpu,ea,x)==expect && ppu_try_load<4>(cpu,ea,x)==expect && ppu_try_load<8>(cpu,ea,x)==expect);};
+ all(0x10000,false);all(0x10ff8,false);
+ m.inline_resume();assert(m.inline_view.active);
+ all(0x10ff8,true);
+ auto edge=[&](unsigned n,auto load,auto store){std::uint64_t x=0;
+     assert(load(0x11000-n,x) && x==last[n]);
+     if(n>1){assert(!load(0x11000-n+1,x) && !store(0x11000-n+1));}
+     for(unsigned bit=32;bit<64;++bit){const auto high=std::uint64_t(1)<<bit;
+         assert(!load(high|(0x11000-n),x) && !load(high|0x10000,x) && !store(high|0x10000));}
+     assert(!load(UINT64_C(0xffffffff00010ff8),x) && !store(UINT64_C(0xffffffff00010000)));};
+ edge(1,[&](std::uint64_t a,std::uint64_t& x){return m.inline_try_load<1>(a,x);},[&](std::uint64_t a){return m.inline_try_store<1>(a,0xa5);});
+ edge(2,[&](std::uint64_t a,std::uint64_t& x){return m.inline_try_load<2>(a,x);},[&](std::uint64_t a){return m.inline_try_store<2>(a,0xa5a5);});
+ edge(4,[&](std::uint64_t a,std::uint64_t& x){return m.inline_try_load<4>(a,x);},[&](std::uint64_t a){return m.inline_try_store<4>(a,0xa5a5a5a5);});
+ edge(8,[&](std::uint64_t a,std::uint64_t& x){return m.inline_try_load<8>(a,x);},[&](std::uint64_t a){return m.inline_try_store<8>(a,UINT64_C(0xa5a5a5a5a5a5a5a5));});
+ edge(1,[&](std::uint64_t a,std::uint64_t& x){return ppu_try_load<1>(cpu,a,x);},[&](std::uint64_t a){return ppu_try_store<1>(cpu,a,0xa5);});
+ edge(2,[&](std::uint64_t a,std::uint64_t& x){return ppu_try_load<2>(cpu,a,x);},[&](std::uint64_t a){return ppu_try_store<2>(cpu,a,0xa5a5);});
+ edge(4,[&](std::uint64_t a,std::uint64_t& x){return ppu_try_load<4>(cpu,a,x);},[&](std::uint64_t a){return ppu_try_store<4>(cpu,a,0xa5a5a5a5);});
+ edge(8,[&](std::uint64_t a,std::uint64_t& x){return ppu_try_load<8>(cpu,a,x);},[&](std::uint64_t a){return ppu_try_store<8>(cpu,a,UINT64_C(0xa5a5a5a5a5a5a5a5));});
+ // Byte ranges: 16 bytes at the last quadword hit, one byte further misses.
+ std::uint8_t q[16]{};assert(ppu_try_read_bytes(cpu,0x10ff0,q,16) && q[8]==0x11 && q[15]==0x88);
+ assert(!ppu_try_read_bytes(cpu,0x10ff1,q,16) && !ppu_try_write_bytes(cpu,0x10ff1,q,16) && !ppu_try_read_bytes(cpu,UINT64_C(0x100010ff0),q,16));
+ // The full ppu_load/ppu_store forms send every miss to the admitted path.
+ assert(ppu_load<4>(cpu,0x10ffe)==0x7788e0e1 && ppu_load<8>(cpu,0x10ffc)==UINT64_C(0x55667788e0e1e2e3));
+ ppu_store<4>(cpu,0x10ffe,0xc0c1c2c3);fault([&]{ppu_load<4>(cpu,UINT64_C(0x100010000));});fault([&]{ppu_store<1>(cpu,UINT64_C(0x8000000000010000),1);});
+ m.inline_resume();
+ // A blocker published while the section is active (a reservation tracks the
+ // page) must send the next store to that page out of line at once.
+ assert(ppu_try_store<4>(cpu,0x10100,0x01020304));
+ std::pair<std::uintptr_t,std::uint64_t> token;m.inline_suspend();assert(m.load_reserved(0x10100,4,token)==0x01020304);m.inline_resume();
+ assert(m.inline_view.active && !ppu_try_store<4>(cpu,0x10100,5) && !ppu_try_store<1>(cpu,0x10f00,5) && ppu_try_load<4>(cpu,0x10100,v) && v==0x01020304);
+ ppu_store<4>(cpu,0x10f00,0x0a0b0c0d);
+ m.inline_suspend();
+ assert(m.load(0x10ffe,4)==0xc0c1c2c3 && m.load(0x10ff8,4)==0x11223344 && m.load(0x11002,2)==0xe2e3 && m.load(0x10f00,4)==0x0a0b0c0d);
+ for(unsigned i=0;i<8;++i)assert(m.load(0x50ff8+i,1)==(i<6?tail[i]:(i==6?0xc0:0xc1)));
+ std::puts("span ok");
+''')
+
     def test_reservations_leave_fast_path_and_wait_for_sections(self):
         self.native('reservation', self.SETUP + r'''
  std::pair<std::uintptr_t,std::uint64_t> token;assert(m.load_reserved(0x11000,4,token)==0);
