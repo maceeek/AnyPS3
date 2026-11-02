@@ -31,6 +31,23 @@ MEMBERS = r'''
     using RttCoverKey=std::array<std::uint64_t,7>;
     struct RttCoverHash {std::size_t operator()(const RttCoverKey& key)const{std::size_t h=0;for(auto v:key)h=(h*1099511628211ull)^v;return h;}};
     std::unordered_map<RttCoverKey,bool,RttCoverHash> rtt_cover_memo;
+    static bool rtt_literals(){static const bool on=[]{const char* v=std::getenv("ANYPS3_RSX_RTT_LITERALS");
+        if(v && std::strcmp(v,"0") && std::strcmp(v,"1")){throw std::runtime_error("invalid ANYPS3_RSX_RTT_LITERALS");}
+        return !v || !std::strcmp(v,"1");}();return on;}
+    // ANYPS3_RSX_RTT_PREFILTER (default 1): rtt_image first looks the texture's first byte up in surface_watches. That sorted,
+    // merged span list is a superset of every member surface's physical spans: refresh_surface_watches rebuilds it after each
+    // insertion into surfaces (every push_back is directly followed by it), and a removal only leaves extra spans. A byte
+    // outside it overlaps no surface, so the per-surface scan would end with no owner: the same result without the scan.
+    // 0 always scans every surface.
+    static bool rtt_prefilter(){static const bool on=[]{const char* v=std::getenv("ANYPS3_RSX_RTT_PREFILTER");
+        if(v && std::strcmp(v,"0") && std::strcmp(v,"1")){throw std::runtime_error("invalid ANYPS3_RSX_RTT_PREFILTER");}
+        return !v || !std::strcmp(v,"1");}();return on;}
+    bool surface_watched(const void* p)const{
+        const auto at=reinterpret_cast<std::uintptr_t>(p);
+        auto next=std::upper_bound(surface_watches.begin(),surface_watches.end(),at,[](std::uintptr_t a,const SurfaceWatch& w){return a<reinterpret_cast<std::uintptr_t>(w.first);});
+        if(next==surface_watches.begin())return false;
+        const auto& span=*std::prev(next);return at-reinterpret_cast<std::uintptr_t>(span.first)<span.second;
+    }
     static bool rtt_visual_fast(){static const bool on=[]{const char* v=std::getenv("ANYPS3_RENDER_SCALE_RTT_FAST");
         if(v && std::strcmp(v,"0") && std::strcmp(v,"1")){throw std::runtime_error("invalid ANYPS3_RENDER_SCALE_RTT_FAST");}
         return !v || !std::strcmp(v,"1");}();return on;}
@@ -70,6 +87,7 @@ MEMBERS = r'''
         auto reason=[&](const char* name){if(fallback_stats().enabled)++fallback_stats().paths[std::string("rtt_")+name];};
         if(!allow_resident_textures || !texture.plan || texture.levels.size()!=1 || texture.dimension!=2 || texture.cube || texture.levels[0].border){reason("unsupported_shape");return {};}
         const auto& level=texture.levels[0];bool owner_found=false;
+        if(rtt_prefilter() && !texture.plan->runs.empty() && !surface_watched(texture.plan->runs.front().data)){reason("no_owner");reason("miss");return {};}
         auto reject=[&](const char* name,const Surface& surface,std::uint64_t origin){
             reason(name);if(!fallback_stats().enabled)return;
             std::ostringstream detail;detail<<"cause="<<name<<" texture={format:"<<texture.format<<",width:"<<level.width<<",height:"<<level.height<<",pitch:"<<level.pitch<<",swizzle:"<<texture.swizzled<<",offset:"<<offset<<"} surface={format:"<<surface.format<<",width:"<<surface.width<<",height:"<<surface.height<<",samples:"<<surface.samples<<",pitch:"<<surface.target.pitch<<",tile:"<<bool(surface.target.tile)<<",swizzle:"<<surface.target.swizzle_width<<",origin:"<<origin<<"}";
@@ -229,6 +247,12 @@ MEMBERS = r'''
                 default:reason("source_format");return {};
             }
             if(!typeless_float && (surface.depth || packed || (surface.format!=11 && surface.format!=12)))fs+="return (v>>(8u*(w[2]-1u-byte_)))&255u;}\n";
+            // The view's addressing words (data[1..6] below: pitch, bpp, sample grid, swizzle extents) are fixed for the life of
+            // view.fs, so they become literals: raw_byte's per-byte div/mod by them compile to multiplies/shifts. Same values,
+            // same results. ANYPS3_RSX_RTT_LITERALS=0 keeps the buffer reads (A/B).
+            if(visual_typed)replace_all(fs,"ivec3(x/w[3],y/w[4],layer)","visual_xyl(uvec2(x,y))");   // before the literals change the pattern
+            if(rtt_literals()){const unsigned literal[]={target.pitch,target.bpp,nx,ny,texture_pot(target.swizzle_width*(target.bpp/std::min(target.bpp,4u))),texture_pot(target.swizzle_height)};
+                for(unsigned i=0;i<6;++i)replace_all(fs,"w["+std::to_string(i+1)+"]",rsxvk::u(literal[i]));}
             fs+=R"RTT(
 ''' + RAW_GLSL + r'''
 )RTT";

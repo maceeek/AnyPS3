@@ -1,5 +1,8 @@
 """Visual MSAA (ANYPS3_RENDER_SCALE_MSAA): a 2-sample visual image drawn as true 2x MSAA must give the same planes as the
-plane-by-plane path (the independent reference: separate passes with shifted geometry); native bytes stay identical."""
+plane-by-plane path (the independent reference: separate passes with shifted geometry); native bytes stay identical.
+With ANYPS3_RENDER_SCALE_MSAA_LOAD=1 a scene whose second frame is not cleared (MSAA_TEST_NOCLEAR) loads the planes into the
+working images (plane -> sample) instead of drawing plane by plane; same reference. Lavapipe has no 2x sample count: there
+both switches must fall back to the planes exactly; the 2x comparison needs NVIDIA (NVIDIA test pending for the load path)."""
 import os
 from pathlib import Path
 import subprocess
@@ -39,8 +42,9 @@ static void scene(const char* path){
  // Frame 0 marks the targets wanted (MSAA on): the next full clear creates and seeds the working images.
  clear(1,0);vk.graphics_draw(*b,s,images,depth,vs,fs,tri(0.3f,0.2f,15.6f,1.1f,2.4f,14.7f,.5f,.5f,.5f),3,positions);
  std::vector<std::uint64_t> at;
+ const bool noclear=std::getenv("MSAA_TEST_NOCLEAR")!=nullptr;   // frame 1 draws over frame 0 (load path)
  for(unsigned frame=0;frame<2;++frame){
-  clear(frame?.75f:1.f,frame?7u:3u);
+  if(!(noclear && frame))clear(frame?.75f:1.f,frame?7u:3u);
   blend(false);stencil_incr(false);
   vk.graphics_draw(*b,s,images,depth,vs,fs,tri(0.3f,0.2f,15.6f,1.1f,2.4f,14.7f,.6f,.2f,.9f),3,positions);
   stencil_incr(true);
@@ -66,11 +70,40 @@ static void scene(const char* path){
   std::fwrite(bytes+at[n++],1,visual*4,out);std::fwrite(bytes+at[n++],1,visual*4,out);std::fwrite(bytes+at[n++],1,visual,out);
   std::fwrite(bytes+at[n++],1,native*4,out);std::fwrite(bytes+at[n++],1,native*4,out);std::fwrite(bytes+at[n++],1,native,out);}
  std::fclose(out);
- std::printf("MSAA images=%llu clears=%llu draws=%llu plane_draws=%llu expands=%llu bit_expands=%llu visual_draws=%llu\n",(unsigned long long)vk.graphics_ms_images.load(),
+ std::printf("MSAA images=%llu clears=%llu draws=%llu plane_draws=%llu expands=%llu bit_expands=%llu visual_draws=%llu loads=%llu\n",(unsigned long long)vk.graphics_ms_images.load(),
   (unsigned long long)vk.graphics_ms_clears.load(),(unsigned long long)vk.graphics_ms_draws.load(),(unsigned long long)vk.graphics_ms_plane_draws.load(),
-  (unsigned long long)vk.graphics_ms_expands.load(),(unsigned long long)vk.graphics_ms_bit_expands.load(),(unsigned long long)vk.graphics_visual_draws);
+  (unsigned long long)vk.graphics_ms_expands.load(),(unsigned long long)vk.graphics_ms_bit_expands.load(),(unsigned long long)vk.graphics_visual_draws,(unsigned long long)vk.graphics_ms_loads.load());
 }
-int main(int,char** argv){try{scene(argv[1]);}catch(const std::exception& e){std::fprintf(stderr,"MSAA TEST STOP %s\n",e.what());return 1;}}
+// Load/expand round trip (ANYPS3_RENDER_SCALE_MSAA_LOAD=1 with the 4-sample TEST HOOK, runs on lavapipe): distinct plane
+// contents -> working image (graphics_ms_load) -> planes (expand on the readback). The working image is first cleared to a
+// sentinel, so planes equal to the uploaded values prove that the load wrote every sample from its own plane.
+static void roundtrip(){
+ setenv("ANYPS3_RENDER_SCALE","2",1);
+ NativeVulkan vk;auto b=vk.graphics_batch(8*1024*1024);
+ auto color=vk.graphics_image(*b,VK_FORMAT_R8G8B8A8_UNORM,8,8,4),depth=vk.graphics_image(*b,VK_FORMAT_D24_UNORM_S8_UINT,8,8,4,true);
+ auto cv=color->visual,dv=depth->visual;const unsigned n=16*16*4;
+ std::vector<std::uint32_t> c(n),d(n);std::vector<std::uint8_t> s(n);std::uint32_t r=7;
+ for(unsigned i=0;i<n;++i){r=r*1664525u+1013904223u;c[i]=r;d[i]=(r>>3)&0xffffffu;s[i]=std::uint8_t(r>>24);}
+ d[0]=0;d[1]=0xffffff;d[2]=0x800000;d[3]=0x7fffff;s[0]=0;s[1]=255;
+ vk.graphics_transfer(*b,cv,VK_IMAGE_ASPECT_COLOR_BIT,4,c.data());vk.graphics_transfer(*b,dv,VK_IMAGE_ASPECT_DEPTH_BIT,4,d.data());vk.graphics_transfer(*b,dv,VK_IMAGE_ASPECT_STENCIL_BIT,1,s.data());
+ if(!vk.graphics_ms_prepare(*b,cv) || !vk.graphics_ms_prepare(*b,dv) || !cv->ms_load || !dv->ms_load || !dv->ms_load_bits)throw std::runtime_error("no loadable working image");
+ VkClearColorValue sentinel{};sentinel.float32[0]=sentinel.float32[3]=1;
+ vk.graphics_clear_image(*b,cv,sentinel,0,0,VK_IMAGE_ASPECT_COLOR_BIT);vk.graphics_clear_image(*b,dv,sentinel,.25f,0x5a,VK_IMAGE_ASPECT_DEPTH_BIT|VK_IMAGE_ASPECT_STENCIL_BIT);
+ if(!cv->ms_current || !dv->ms_current)throw std::runtime_error("sentinel clear did not reach the working images");
+ cv->ms_current=dv->ms_current=false;   // the planes hold the content again (as after an expand)
+ b->sync();vk.graphics_ms_load(*b,*cv);vk.graphics_ms_load(*b,*dv);
+ if(!cv->ms_current || !dv->ms_current || dv->ms_stencil_known)throw std::runtime_error("load state");
+ const auto ac=vk.graphics_transfer(*b,cv,VK_IMAGE_ASPECT_COLOR_BIT,4),ad=vk.graphics_transfer(*b,dv,VK_IMAGE_ASPECT_DEPTH_BIT,4),as=vk.graphics_transfer(*b,dv,VK_IMAGE_ASPECT_STENCIL_BIT,1);
+ vk.graphics_finish(*b);const auto* bytes=static_cast<const unsigned char*>(b->map);
+ unsigned worst=0;
+ for(unsigned i=0;i<n;++i){std::uint32_t gc,gd;std::memcpy(&gc,bytes+ac+4*i,4);std::memcpy(&gd,bytes+ad+4*i,4);gd&=0xffffff;
+  if(gc!=c[i] || bytes[as+i]!=s[i]){std::fprintf(stderr,"sample %u colour %08x/%08x stencil %u/%u\n",i,gc,c[i],bytes[as+i],s[i]);throw std::runtime_error("load/expand round trip differs");}
+  worst=std::max<unsigned>(worst,gd>d[i]?gd-d[i]:d[i]-gd);}
+ if(worst>2)throw std::runtime_error("load/expand depth differs by "+std::to_string(worst));
+ std::printf("ROUNDTRIP loads=%llu expands=%llu bit_expands=%llu depth_worst=%u colour/stencil exact over %u samples\n",(unsigned long long)vk.graphics_ms_loads.load(),
+  (unsigned long long)vk.graphics_ms_expands.load(),(unsigned long long)vk.graphics_ms_bit_expands.load(),worst,n);
+}
+int main(int,char** argv){try{if(!std::strcmp(argv[1],"roundtrip"))roundtrip();else scene(argv[1]);}catch(const std::exception& e){std::fprintf(stderr,"MSAA TEST STOP %s\n",e.what());return 1;}}
 '''
 
 VISUAL, NATIVE = 32 * 32 * 2, 16 * 16 * 2
@@ -88,10 +121,10 @@ def sections():
 
 
 class VisualMsaaTests(unittest.TestCase):
-    def run_scene(self, root, env, msaa):
-        path = root / f'out-{msaa}.bin'
+    def run_scene(self, root, env, msaa, load=0):
+        path = root / f'out-{msaa}-{load}.bin'
         result = subprocess.run([str(root / 'test'), str(path)], capture_output=True, text=True,
-                                env=dict(env, ANYPS3_RENDER_SCALE_MSAA=str(msaa)), timeout=180)
+                                env=dict(env, ANYPS3_RENDER_SCALE_MSAA=str(msaa), ANYPS3_RENDER_SCALE_MSAA_LOAD=str(load)), timeout=180)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertNotIn('Validation Error', result.stdout + result.stderr)
         self.assertNotIn('Validation Warning', result.stdout + result.stderr)
@@ -115,6 +148,28 @@ class VisualMsaaTests(unittest.TestCase):
                 self.assertLessEqual(bad, size // 4 // 200, f'{device}: {name}: {bad} of {size // 4} samples differ')
         self.assertEqual(offset, len(planes))
 
+    def test_load_expand_roundtrip(self):
+        # 4-sample TEST HOOK on lavapipe (no 2x there): the load shaders, per-sample shading and the stencil bit passes run
+        # for real; on NVIDIA the same hook works too.
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / 'test.cpp').write_text(native_source().split('int main(int argc,char** argv)')[0] + MAIN)
+            build = subprocess.run(['c++', '-std=c++17', '-O1', '-Wall', '-Wextra', '-Werror', '-Wno-unused-function', '-pthread',
+                                    '-DANYPS3_VULKAN', '-DANYPS3_RSX_VK', str(root / 'test.cpp'), *LIBRARIES, '-o', str(root / 'test')],
+                                   capture_output=True, text=True, timeout=300)
+            self.assertEqual(build.returncode, 0, build.stderr)
+            env = dict(os.environ, SDL_AUDIODRIVER='dummy', ANYPS3_AUDIO_SINK='null', LP_NUM_THREADS='4', VK_INSTANCE_LAYERS='VK_LAYER_KHRONOS_validation',
+                       VK_LAYER_VALIDATE_SYNC='1', ANYPS3_RENDER_SCALE_MSAA='1', ANYPS3_RENDER_SCALE_MSAA_LOAD='1', ANYPS3_RENDER_SCALE_MSAA_TEST_SAMPLES='4')
+            env.pop('ANYPS3_AUDIO_AUDIBLE', None)
+            if not env.get('ANYPS3_REQUIRE_NVIDIA') and not env.get('VK_DRIVER_FILES') and not env.get('VK_ICD_FILENAMES'):
+                env.update(ANYPS3_VK_DEVICE='lavapipe', VK_DRIVER_FILES='/usr/share/vulkan/icd.d/lvp_icd.json')
+            result = subprocess.run([str(root / 'test'), 'roundtrip'], capture_output=True, text=True, env=env, timeout=180)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertNotIn('Validation Error', result.stdout + result.stderr)
+            self.assertNotIn('Validation Warning', result.stdout + result.stderr)
+            self.assertIn('ROUNDTRIP loads=2 ', result.stdout)
+            print(result.stdout, flush=True)
+
     def test_msaa_matches_planes(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
@@ -135,6 +190,13 @@ class VisualMsaaTests(unittest.TestCase):
             self.assertEqual(stats['images'], 0, stats)
             self.assertEqual(planes, msaa)
             print(f'PASS lavapipe fallback (no 2x): identical planes {stats}', flush=True)
+            # Load path on lavapipe: no 2x working image can exist, so no load either; the planes stay exact.
+            noclear = dict(lvp, MSAA_TEST_NOCLEAR='1')
+            planes_nc, _ = self.run_scene(root, noclear, 0)
+            loaded, stats = self.run_scene(root, noclear, 1, 1)
+            self.assertEqual((stats['images'], stats['loads'], stats['draws']), (0, 0, 0), stats)
+            self.assertEqual(planes_nc, loaded)
+            print(f'PASS lavapipe load-path fallback (no 2x): identical planes {stats}', flush=True)
             nvidia = '/usr/share/vulkan/icd.d/nvidia_icd.json'
             if not Path(nvidia).exists():
                 if os.environ.get('ANYPS3_REQUIRE_NVIDIA'):
@@ -153,6 +215,17 @@ class VisualMsaaTests(unittest.TestCase):
             self.assertGreaterEqual(stats['bit_expands'], 1, stats)
             self.compare(planes, msaa, 'NVIDIA')
             print(f'PASS NVIDIA 2x MSAA visual planes == plane-by-plane planes, native bytes identical {stats}', flush=True)
+            # Load path (NVIDIA test pending when written): frame 1 is not cleared; the first eligible draw creates the working
+            # images and loads them from the planes, the draw after the mid colour read reloads the colour.
+            nvnc = dict(nv, MSAA_TEST_NOCLEAR='1')
+            planes, plane_stats = self.run_scene(root, nvnc, 0)
+            loaded, stats = self.run_scene(root, nvnc, 1, 1)
+            self.assertEqual(plane_stats['loads'], 0, plane_stats)
+            self.assertEqual(stats['images'], 2, stats)
+            self.assertGreaterEqual(stats['loads'], 3, stats)
+            self.assertEqual(stats['plane_draws'], 0, stats)
+            self.compare(planes, loaded, 'NVIDIA load')
+            print(f'PASS NVIDIA 2x MSAA load path == plane-by-plane planes without a clear, native bytes identical {stats}', flush=True)
 
 
 if __name__ == '__main__':

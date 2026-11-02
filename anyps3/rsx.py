@@ -97,8 +97,10 @@ static std::function<void()>& rsx_owner_hook(){static thread_local std::function
     // Configure presentation policy. This does not queue, complete or display a frame.
     std::fprintf(stderr,"native GCM flip mode head=%u mode=%u\n",head,s.rsx.flip_modes[head]);
 }
-static std::uint64_t rsx_address(const NativeRsx& gpu,std::uint32_t offset){
-    if(offset>=0x10000000 || gpu.io[offset>>20]==UINT32_MAX)throw std::runtime_error("RSX reads unmapped IO offset "+std::to_string(offset));
+[[noreturn,gnu::cold,gnu::noinline]] static void rsx_address_fault(std::uint32_t offset){throw std::runtime_error("RSX reads unmapped IO offset "+std::to_string(offset));}
+// Called for every FIFO word read: the check stays inline, the throw out of line.
+[[gnu::always_inline]] static inline std::uint64_t rsx_address(const NativeRsx& gpu,std::uint32_t offset){
+    if(__builtin_expect(offset>=0x10000000 || gpu.io[offset>>20]==UINT32_MAX,0))rsx_address_fault(offset);
     return std::uint64_t(gpu.io[offset>>20])+(offset&0xfffff);
 }
 static std::uint64_t rsx_semaphore_address(const NativeRsx& gpu,std::uint32_t context,std::uint32_t offset){
@@ -560,8 +562,8 @@ static void rsx_graphics_reset_report(PpuState& s,unsigned value){
     auto* session=static_cast<rsxgraphics::Session*>(s.rsx.graphics_session?s.rsx.graphics_session:s.rsx.graphics_owner.get());
     // Pending visibility still contributes to lifetime pixel statistics, but
     // pre-reset draws must never reappear in the newly cleared report counter.
-    if(session && value==1){for(auto& p:session->pending)p.report=false;
-        for(auto& flight:session->flights)for(auto& p:flight.pending)p.report=false;}
+    if(session && value==1){session->pending_report_floor=unsigned(session->pending.size());
+        for(auto& flight:session->flights)flight.report_floor=unsigned(flight.pending.size());}
     if(rsxgraphics::fallback_stats().enabled)++rsxgraphics::fallback_stats().paths["report_reset_deferred"];
 }
 #endif
@@ -627,9 +629,12 @@ static bool rsx_method_action(std::uint32_t reg){
     case 0x1e98:case 0x17c8:case 0x2328:case 0xc40c:case 0x68:case 0x6c:case 0x1d70:case 0x1d74:case 0x50:return true;
     default:return reg>=0xa400 && reg<0xc000;}
 }
-static unsigned rsx_method_class(std::uint32_t reg){
+static const std::array<std::uint8_t,0x4000>& rsx_method_class_table(){
     static const auto table=[]{std::array<std::uint8_t,0x4000> t{};for(std::uint32_t r=0;r<0x10000;r+=4)t[r/4]=!rsx_method_supported(r)?0:rsx_method_action(r)?2:1;return t;}();
-    return reg<0x10000 && !(reg&3)?table[reg/4]:(rsx_method_supported(reg)?(rsx_method_action(reg)?2u:1u):0u);
+    return table;
+}
+static unsigned rsx_method_class(std::uint32_t reg){
+    return reg<0x10000 && !(reg&3)?rsx_method_class_table()[reg/4]:(rsx_method_supported(reg)?(rsx_method_action(reg)?2u:1u):0u);
 }
 // Registers whose method only stores its value (class 1 and none of the special cases of the execution chain in rsx_run_impl: channel/copy
 // objects, clear, zcull, vertex data and inline-array registers, begin/end/draw, program and constant uploads, flips, reports, blits,
@@ -651,18 +656,23 @@ static const std::array<std::uint8_t,0x4000>& rsx_plain_table(){
 }
 // One admitted read per 1 MiB IO page for longer packets; any failure
 // repeats the original per-word loads, which raise the original error.
-static void rsx_fifo_values(NativeRsx& gpu,GuestMemory& m,std::uint32_t at,unsigned count,std::uint32_t* out){
+// `cursor` (renderer page cursor, may be null) serves the reads it can; a declined read takes the original transfer/load.
+static void rsx_fifo_values(NativeRsx& gpu,GuestMemory& m,std::uint32_t at,unsigned count,std::uint32_t* out,GuestMemory::RenderCursor* cursor=nullptr){
     if(count>=4){
         try{std::uint8_t bytes[0x2000];unsigned done=0;
             while(done<count){
                 const unsigned n=std::min<unsigned>(count-done,(0x100000-((at+done*4)&0xfffff))/4);
-                m.transfer(rsx_address(gpu,at+done*4),bytes+done*4,n*4,false);done+=n;
+                const auto address=rsx_address(gpu,at+done*4);
+                if(!cursor || !cursor->read(address,bytes+done*4,n*4))m.transfer(address,bytes+done*4,n*4,false);
+                done+=n;
             }
             for(unsigned i=0;i<count;++i){const auto* b=bytes+4*i;out[i]=(std::uint32_t(b[0])<<24)|(std::uint32_t(b[1])<<16)|(std::uint32_t(b[2])<<8)|b[3];}
             return;
         }catch(const std::exception&){}
     }
-    for(unsigned i=0;i<count;++i)out[i]=static_cast<std::uint32_t>(m.load(rsx_address(gpu,at+i*4),4));
+    for(unsigned i=0;i<count;++i){const auto address=rsx_address(gpu,at+i*4);std::uint64_t word;
+        if(!cursor || !cursor->load(address,4,word))word=m.load(address,4);
+        out[i]=static_cast<std::uint32_t>(word);}
 }
 // FIFO window (WARMUP4): command words are read in bulk, one admitted Range read of up to 4 KiB of the published region [GET,PUT)
 // inside one 1 MiB IO page, instead of a scalar load per header plus per-word loads or a transfer per packet (~23k packets/frame in
@@ -684,6 +694,7 @@ static void rsx_fifo_values(NativeRsx& gpu,GuestMemory& m,std::uint32_t at,unsig
 // GET read after it implies), 0 of 5 without; not root-caused (WARMUP4, 2026-10-21), so the default stays the per-packet path.
 static bool rsx_fifo_window=[]{const char* v=std::getenv("ANYPS3_RSX_FIFO_WINDOW");return v && std::string(v)=="1";}();
 static std::uint64_t rsx_fifo_window_fills=0;   // test hook
+static bool rsx_fifo_pair=[]{const char* v=std::getenv("ANYPS3_RSX_FIFO_PAIR");if(v && std::strcmp(v,"0") && std::strcmp(v,"1"))throw std::runtime_error("invalid ANYPS3_RSX_FIFO_PAIR");return !v || std::strcmp(v,"0");}();
 // Whether touching host bytes [data,data+size) could have an effect besides the bytes (same conditions as rsxblit::observable).
 static bool rsx_fifo_bytes_observable(GuestMemory& m,const std::uint8_t* data,unsigned size){
     if(m.host_access_observer && (m.host_access_observer.interested(data,size) || m.raw_cpu_dirty_interested(data,size,false)))return true;
@@ -732,15 +743,32 @@ static bool rsx_run_impl(PpuState& s,unsigned budget,bool idle_poll=false){
     };
     auto in_window=[&](std::uint32_t at,std::uint64_t n){return window.valid && at>=window.base && std::uint64_t(at)+n<=window.end;};
     try{
+    // Renderer page cursor (GuestMemory::RenderCursor, ANYPS3_RSX_RENDER_BATCH): header/value reads keep one command-buffer
+    // page admitted between packets. It is revoked before the owner hook, a perf capture and every method other than a plain
+    // register store or a transform-constant upload (below), by any other GuestMemory call (GET publication, PUT loads,
+    // transfers it declines) and on leaving this scope, so nothing that can wait, block or call back runs while it is held.
+    GuestMemory::RenderCursor fifo_reads(m);
+    // The method tables are immutable after their first construction: resolve them once per run, not per packet.
+    const auto& classes=rsx_method_class_table();const auto& plain=rsx_plain_table();
     for(unsigned step=0;step<budget;++step){
         if(__builtin_expect(rsx_host_waiters.load(std::memory_order_relaxed)!=0,0)){   // = rsx_owner_poll(); the request may change memory
-            window.valid=false;auto& hook=rsx_owner_hook();if(hook)hook();}
+            window.valid=false;fifo_reads.revoke();auto& hook=rsx_owner_hook();if(hook)hook();}
         if(!cursor){window.valid=false;put=static_cast<std::uint32_t>(m.load(gpu.dma+0x40,4));get=static_cast<std::uint32_t>(m.load(gpu.dma+0x44,4));cursor=true;}
         else if(get==put){window.valid=false;put=static_cast<std::uint32_t>(m.load(gpu.dma+0x40,4));}
         if((get|put)&3)throw std::runtime_error("unaligned RSX FIFO position");
         if(get==put){publish();return progress;}
         if(!in_window(get,4))window_fill(get);
-        const auto header=in_window(get,4)?window.words[(get-window.base)/4]:static_cast<std::uint32_t>(m.load(rsx_address(gpu,get),4));
+        // Paired read: the header and the word after it are both published ([GET,PUT) holds >= 8 bytes) and on one 4 KiB guest
+        // page (one mapping, no fault the single header load would not raise): one 8-byte admission instead of two 4-byte ones.
+        // The second word is the first value of a method packet with count >= 1, which the per-word path reads next anyway before
+        // anything executes; for any other header it is a published command word read early and unused. ANYPS3_RSX_FIFO_PAIR=0
+        // (also a test hook: rsx_fifo_pair) restores separate loads.
+        std::uint32_t header,paired=0;bool have_pair=false;
+        if(in_window(get,4))header=window.words[(get-window.base)/4];
+        else{const auto address=rsx_address(gpu,get);
+            if(rsx_fifo_pair && get<put && put-get>=8 && (address&0xfff)<=0xff8){std::uint64_t both;if(!fifo_reads.load(address,8,both))both=m.load(address,8);
+                header=std::uint32_t(both>>32);paired=std::uint32_t(both);have_pair=true;}
+            else{std::uint64_t word;if(!fifo_reads.load(address,4,word))word=m.load(address,4);header=static_cast<std::uint32_t>(word);}}
         std::uint32_t next=get+4;
         if((header&0xe0000003)==0x20000000 || (header&0xe0000003)==1){
             next=header&((header&1)?0xfffffffc:0x1ffffffc);
@@ -762,9 +790,23 @@ static bool rsx_run_impl(PpuState& s,unsigned budget,bool idle_poll=false){
                     if(get<put && count*4+4>put-get){publish();return progress;}
                 }
                 std::uint32_t values[0x800];
-                for(unsigned i=0;i<count;++i){
+                // Hoisted table lookups (rsx_method_class without the per-call static guard); registers past 0xfffc take the predicate.
+                auto method_class=[&](std::uint32_t reg)->unsigned{return reg<0x10000?classes[reg>>2]:rsx_method_class(reg);};
+                // Every register of the packet supported (the common case): one pass over the table bytes, no per-word dispatch.
+                // Otherwise the per-word loop below stops (or, ANYPS3_RSX_DIAG_SKIP=1, logs) at each unsupported register as before.
+                // An all-plain packet (every register a plain store, the common state packet; plain implies class 1, so the packet
+                // is supported) stores its words in order without the per-method dispatch below: the same stores, as the dispatch's
+                // capture hook is off and a resumed packet (packet_index) is never all plain (only a semaphore wait resumes).
+                const bool in_bank=std::uint64_t(method)+std::uint64_t(count-1)*increment<0x10000;
+                bool all_plain=rsx_fifo_plain_fast && in_bank && !gpu.packet_index && !gpu.perf_capture.active;
+                if(all_plain){const auto* entry=plain.data()+(method>>2);const unsigned n=increment?count:1u;
+                    for(unsigned i=0;i<n;++i)all_plain&=entry[i]!=0;}
+                bool supported=in_bank;
+                if(supported && !all_plain){const auto* entry=classes.data()+(method>>2);const unsigned n=increment?count:1u;
+                    for(unsigned i=0;i<n;++i)if(!entry[i]){supported=false;break;}}
+                if(!supported)for(unsigned i=0;i<count;++i){
                     const auto reg=method+i*increment;
-                    if(!rsx_method_class(reg)){
+                    if(!method_class(reg)){
                         if(!rsx_diag_skip()){
                         std::fprintf(stderr,"RSX unsupported method=%04x io=%08x header=%08x count=%u value=%08" PRIx64 "\n",reg,get,header,count,m.load(rsx_address(gpu,get+4+i*4),4));
                         // Diagnostic snapshot of retained state for the next implementation step.
@@ -783,14 +825,29 @@ static bool rsx_run_impl(PpuState& s,unsigned budget,bool idle_poll=false){
                     }
                 }
                 if(in_window(get+4,std::uint64_t(count)*4))std::copy_n(window.words+(get+4-window.base)/4,count,values);
-                else{window.valid=false;rsx_fifo_values(gpu,m,get+4,count,values);}
-                const auto& plain=rsx_plain_table();
-                for(unsigned i=gpu.packet_index;i<count;++i){
+                else if(have_pair){window.valid=false;values[0]=paired;if(count>1)rsx_fifo_values(gpu,m,get+8,count-1,values+1,&fifo_reads);}
+                else{window.valid=false;rsx_fifo_values(gpu,m,get+4,count,values,&fifo_reads);}
+                if(all_plain){for(unsigned k=0;k<count;++k)gpu.registers.write(method+k*increment,values[k]);}
+                else for(unsigned i=gpu.packet_index;i<count;++i){
                     const auto reg=method+i*increment,value=values[i];
-                    if(rsx_fifo_plain_fast && reg<0x10000 && !(reg&3) && plain[reg>>2]){rsx_capture_method(s,reg,value);gpu.registers.write(reg,value);continue;}
+                    // rsx_capture_method returns at once without an active capture: test that here (no call per method).
+                    if(rsx_fifo_plain_fast && reg<0x10000 && !(reg&3) && plain[reg>>2]){if(gpu.perf_capture.active){fifo_reads.revoke();rsx_capture_method(s,reg,value);}gpu.registers.write(reg,value);continue;}
                     window.valid=false;   // not a plain store: later command words are read again
-                    if(rsx_method_class(reg)==2)publish();
-                    if(reg!=0x68)rsx_capture_method(s,reg,value);
+                    // Transform constant upload (the most frequent non-plain method): exactly the effects of the chain below for
+                    // 0x1f00..0x1f7c (class 1, no other case matches, rsx_vertex_data_register ignores it): constant + raw register.
+                    if(rsx_fifo_plain_fast && reg>=0x1f00 && reg<=0x1f7c){
+                        if(gpu.perf_capture.active){fifo_reads.revoke();rsx_capture_method(s,reg,value);}
+                        const std::uint64_t word=std::uint64_t(gpu.registers.value_or(0x1efc,0u))*4+(reg-0x1f00)/4;   // = rsx_reg, inline
+                        if(word>=gpu.transform_constants.size())throw std::runtime_error("RSX transform constant index outside bank");
+                        gpu.transform_constants.write(word,value);gpu.transform_constants_written.write(word,true);
+                        gpu.registers.write(reg,value);continue;
+                    }
+                    fifo_reads.revoke();   // every other method may wait, block, call back or access guest memory itself
+                    // BEGIN (0x1808 with a primitive) is an action only for its END twin: it edits host draw state (or stops on a
+                    // nested begin, where the catch below publishes this same GET), touches no guest memory and cannot wait, so GET
+                    // may lag behind it as behind a state method; the END that follows publishes before the draw executes.
+                    if(method_class(reg)==2 && !(reg==0x1808 && value))publish();
+                    if(reg!=0x68 && gpu.perf_capture.active)rsx_capture_method(s,reg,value);
                     if(reg==0 && value!=0x31337000)throw std::runtime_error("unsupported RSX channel object");
                     if(reg==0xe000 && value!=0xcafebabe)throw std::runtime_error("unsupported GCM driver object");
                     if((reg==0x2000 && value!=0x31337303) || (reg==0x6000 && value!=0x313371c3) ||
@@ -893,7 +950,7 @@ static bool rsx_run_impl(PpuState& s,unsigned budget,bool idle_poll=false){
                             if(!gpu.semaphore_wait)std::fprintf(stderr,"RSX semaphore wait address=%08" PRIx64 " expected=%08x actual=%08" PRIx64 "\n",address,value,m.load(address,4));
                             gpu.semaphore_wait=true;gpu.packet_index=i;publish();return progress;
                         }
-                        if(reg==0x68)rsx_capture_method(s,reg,value);
+                        if(reg==0x68 && gpu.perf_capture.active)rsx_capture_method(s,reg,value);
                         if(reg==0x6c)rsx_release_semaphore(s,address,value);
                         gpu.semaphore_wait=false;
                     }else if(reg==0x1d70 || reg==0x1d74){

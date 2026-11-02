@@ -40,7 +40,7 @@ class ProgramTests(unittest.TestCase):
         result = compile_program(im, diagnostic=True)
         self.assertEqual(len(result.operations), 1)
         self.assertEqual(list(result.traps), [0x10004])
-        self.assertNotIn('case 0x10008:', result.cpp())
+        self.assertNotIn('/* 0x10008 */', result.cpp())
 
     def test_invalid_ctr_branch_and_unknown_spr(self):
         for word in (0x4E000420, 0x7C0002A6):
@@ -102,7 +102,7 @@ class ProgramTests(unittest.TestCase):
                 status = main(['recompile-program',str(inp),'--profile',str(profile),'-o',str(out)])
             self.assertEqual(status,0)
             self.assertEqual(json.loads(stdout.getvalue())['extra_entries'],[0x10004])
-            self.assertIn('case 0x10004:',out.read_text())
+            self.assertIn('/* 0x10004 */ goto ppu_10004;',out.read_text())
 
 
 @unittest.skipUnless(shutil.which('c++'), 'Native program tests require c++.')

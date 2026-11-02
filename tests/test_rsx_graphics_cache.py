@@ -91,6 +91,34 @@ static void state_blocks_(){
  assert(shader && shader->find("state4(w[14]+2064u)")!=std::string::npos);
  std::puts("PASS immutable register/VP/FP blocks, exact bits, retained references, defaults and fence reset");
 }
+static void state_slots_(){
+ // A never-borrowed (game-shaped) bank: setup_draw's borrows hold no reference here, so the test may drop its exposure.
+ PpuState s;setup_draw(s,8,8,32,false);s.rsx.registers.exposed.fill(0);NativeVulkan vk;rsxgraphics::Session session(vk,s);
+ auto& bank=s.rsx.registers;std::vector<unsigned> data;auto fp=rsxdraw::load_fragment_program(s,rsxdraw::Reg{s.rsx});
+ auto word=[&](unsigned at){unsigned v;std::memcpy(&v,static_cast<const char*>(session.batch->map)+4*at,4);return v;};
+ // Reset values of absent registers (RPCS3 rsx_methods.cpp), every other absent register reads 0.
+ const std::map<unsigned,unsigned> reset={{0xa6c,0x207},{0x394,0},{0x398,0x3f800000},{0x368,0x1d01},{0x1834,0x901},{0x388,0x3f800000},{0x308,0x207},{0x324,0x01010101},{0x378,0x1503},{0x1d7c,0xffff0000}};
+ std::uint64_t binds=0;
+ auto bind=[&](bool direct,unsigned uploads){const auto before=session.batch->state_block_uploads,hits=session.batch->state_block_hits;
+  session.serialize_draw_registers(data,8,8);session.refresh_vertex_constants();session.refresh_fragment_constants(fp);session.bind_draw_blocks(data,direct);++binds;
+  // Exactly the expected slots re-upload; every other one of the 50 slots is a hit.
+  assert(session.batch->state_block_uploads-before==uploads && session.batch->state_block_hits-hits==50-uploads);
+  for(unsigned w=0;w<2048;++w){const unsigned r=4*w;const auto d=reset.find(r);
+   unsigned expect=bank.count(r)?std::as_const(bank).at(r):d!=reset.end()?d->second:0u;
+   if(r==0x1ff4 && direct && !bank.count(r))expect=0x3fffff;
+   assert(word(data[16+w/64]+w%64)==expect);}};
+ bind(true,50);bind(true,0);
+ bind(false,1);assert(word(data[47]+(0x1ff4/4)%64)==0);bind(false,0);   // the stored block 31 without the direct default
+ bind(true,1);assert(word(data[47]+(0x1ff4/4)%64)==0x3fffff);
+ assert(!bank.count(0x308) && bank.count(0x200));bank.write(0x308,0x201);bank.write(0x1a04,0xabcde);bind(true,2);   // blocks 3 and 26 changed
+ bank.write(0x308,0x201);bind(true,0);                                 // same value: no epoch change, nothing rebuilt
+ bank.write(0x308,0x202);bank.write(0x308,0x201);bind(true,1);         // back to the old value: one redundant upload, same words
+ bank.write(0x1ff4,5);bind(true,1);assert(word(data[47]+(0x1ff4/4)%64)==5);
+ bank.erase(0x1ff4);bind(true,1);bank.write(0x200,0x90009);bank.write(0x1ffc,0x777);bank.erase(0x308);bind(false,3);
+ vk.graphics_finish(*session.batch);vk.graphics_reset(*session.batch);bind(false,50);bind(false,0);
+ vk.graphics_finish(*session.batch);assert(binds==13);
+ std::puts("PASS state slots: only changed blocks upload, hits count the rest, direct 0x1ff4 default, tracked bank words exact");
+}
 static void queued_constants_(){
  setenv("ANYPS3_RSX_BACKEND","gpu",1);PpuState s;setup_draw(s,8,8,32,false);auto& r=s.rsx.registers;
  s.rsx.renderer=std::make_unique<NativeVulkan>();rsxgraphics::Session session(*s.rsx.renderer,s);s.rsx.graphics_session=&session;session.observe();
@@ -183,7 +211,7 @@ static void device_sequence_(){
  for(unsigned y=0;y<8;++y)for(unsigned x=0;x<8;++x)assert(near_argb(s.memory.load(0xc0100000+y*32+x*4,4),0x80ff8040));
  std::puts("PASS fixed device topology for all six array primitives, odd strips, range boundaries, exact bounds and actual draw");
 }
-int main(){try{source_working_set_();sparse_indices_();state_blocks_();queued_constants_();inverse_upload_();image_pool_();upload_bits_();device_sequence_();}catch(const std::exception& e){std::fprintf(stderr,"FAIL %s\n",e.what());return 1;}}
+int main(){try{source_working_set_();sparse_indices_();state_blocks_();state_slots_();queued_constants_();inverse_upload_();image_pool_();upload_bits_();device_sequence_();}catch(const std::exception& e){std::fprintf(stderr,"FAIL %s\n",e.what());return 1;}}
 '''
 
 def native_source():

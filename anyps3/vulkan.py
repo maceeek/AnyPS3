@@ -28,11 +28,11 @@ struct RsxPerfCounters {
     enum Id : unsigned {draws,gpu_draws,fifo_runs,packets,leave_fifo,guard_rearm,submits,submit_draw_prefix,submit_labels,submit_other,
         finish_waits,collect_waits,wait_ns,readback_flushes,readback_surfaces,host_access,label_syncs,alias_flushes,
         descriptor_allocs,descriptor_writes,pipeline_misses,framebuffer_misses,render_passes,upload_bytes,state_uploads,
-        surface_binds_new,clears,mprotect,vertex_bytes,blob_bytes,draw_layers,history_copies,pass_ends,alias_merges,fp_hits,fp_misses,timeline_polls,fence_polls,mprotect_arm,mprotect_labels,vk_memory_allocs,vk_memory_frees,vk_buffers,vk_images,vk_framebuffers,merge_rej_new,merge_rej_old,merge_rej_capacity,merge_rej_overlap,vk_memory_reuses,blit_calls,blit_pixels,blit_gpu,blit_rows,blit_batch,blit_pixel,blit_rows_ns,blit_batch_ns,blit_pixel_ns,m2mf_calls,m2mf_bytes,m2mf_ns,src_fs_hits,src_fs_misses,src_vs_hits,src_vs_misses,src_evictions,count};
+        surface_binds_new,clears,mprotect,vertex_bytes,blob_bytes,draw_layers,history_copies,pass_ends,alias_merges,fp_hits,fp_misses,timeline_polls,fence_polls,mprotect_arm,mprotect_labels,vk_memory_allocs,vk_memory_frees,vk_buffers,vk_images,vk_framebuffers,merge_rej_new,merge_rej_old,merge_rej_capacity,merge_rej_overlap,vk_memory_reuses,blit_calls,blit_pixels,blit_gpu,blit_rows,blit_batch,blit_pixel,blit_rows_ns,blit_batch_ns,blit_pixel_ns,m2mf_calls,m2mf_bytes,m2mf_ns,src_fs_hits,src_fs_misses,src_vs_hits,src_vs_misses,src_evictions,vk_pool_ranges,vk_pool_blocks,geometry_hits,geometry_misses,geometry_rereads,index_hits,index_misses,count};
     static constexpr const char* names[count]={"draws","gpu_draws","fifo_runs","packets","leave_fifo","guard_rearm","submits","submit_draw_prefix","submit_labels","submit_other",
         "finish_waits","collect_waits","wait_ns","readback_flushes","readback_surfaces","host_access","label_syncs","alias_flushes",
         "descriptor_allocs","descriptor_writes","pipeline_misses","framebuffer_misses","render_passes","upload_bytes","state_uploads",
-        "surface_binds_new","clears","mprotect","vertex_bytes","blob_bytes","draw_layers","history_copies","pass_ends","alias_merges","fp_hits","fp_misses","timeline_polls","fence_polls","mprotect_arm","mprotect_labels","vk_memory_allocs","vk_memory_frees","vk_buffers","vk_images","vk_framebuffers","merge_rej_new","merge_rej_old","merge_rej_capacity","merge_rej_overlap","vk_memory_reuses","blit_calls","blit_pixels","blit_gpu","blit_rows","blit_batch","blit_pixel","blit_rows_ns","blit_batch_ns","blit_pixel_ns","m2mf_calls","m2mf_bytes","m2mf_ns","src_fs_hits","src_fs_misses","src_vs_hits","src_vs_misses","src_evictions"};
+        "surface_binds_new","clears","mprotect","vertex_bytes","blob_bytes","draw_layers","history_copies","pass_ends","alias_merges","fp_hits","fp_misses","timeline_polls","fence_polls","mprotect_arm","mprotect_labels","vk_memory_allocs","vk_memory_frees","vk_buffers","vk_images","vk_framebuffers","merge_rej_new","merge_rej_old","merge_rej_capacity","merge_rej_overlap","vk_memory_reuses","blit_calls","blit_pixels","blit_gpu","blit_rows","blit_batch","blit_pixel","blit_rows_ns","blit_batch_ns","blit_pixel_ns","m2mf_calls","m2mf_bytes","m2mf_ns","src_fs_hits","src_fs_misses","src_vs_hits","src_vs_misses","src_evictions","vk_pool_ranges","vk_pool_blocks","geometry_hits","geometry_misses","geometry_rereads","index_hits","index_misses"};
     static inline std::array<std::atomic<std::uint64_t>,count> values{};
     static void add(Id id,std::uint64_t n=1){auto& v=values[id];v.store(v.load(std::memory_order_relaxed)+n,std::memory_order_relaxed);}
 };
@@ -259,8 +259,14 @@ public:
                 if(!v || !std::strcmp(v,"1")){
                     std::uint32_t n=0;vkGetPhysicalDeviceQueueFamilyProperties(physical,&n,nullptr);std::vector<VkQueueFamilyProperties> families(n);vkGetPhysicalDeviceQueueFamilyProperties(physical,&n,families.data());
                     for(std::uint32_t i=0;i<n;++i)if(i!=family && families[i].queueCount && (families[i].queueFlags&VK_QUEUE_TRANSFER_BIT) &&
-                        !(families[i].queueFlags&~(VK_QUEUE_TRANSFER_BIT|VK_QUEUE_SPARSE_BINDING_BIT)) && families[i].timestampValidBits){transfer_family=i;transfer_timestamp_bits=families[i].timestampValidBits;break;}}}
-            if(transfer_family!=UINT32_MAX){queue_infos[1].queueFamilyIndex=transfer_family;di.queueCreateInfoCount=2;di.pQueueCreateInfos=queue_infos;}
+                        !(families[i].queueFlags&~(VK_QUEUE_TRANSFER_BIT|VK_QUEUE_SPARSE_BINDING_BIT)) && families[i].timestampValidBits){transfer_family=i;transfer_timestamp_bits=families[i].timestampValidBits;break;}
+                    // TEST HOOK (ANYPS3_RSX_TEST_ASYNC_SAME_QUEUE=1; tests/test_rsx_async_upload.py, test_rsx_recorder.py): a device without a
+                    // transfer-only family (lavapipe) runs the async-prelude code path with the graphics queue itself as the "DMA queue": the
+                    // same submissions, upload timeline waits, per-batch transfer command buffers and timestamps, executed by one queue.
+                    const char* same=std::getenv("ANYPS3_RSX_TEST_ASYNC_SAME_QUEUE");
+                    if(same && std::strcmp(same,"0") && std::strcmp(same,"1"))throw std::runtime_error("invalid ANYPS3_RSX_TEST_ASYNC_SAME_QUEUE");
+                    if(transfer_family==UINT32_MAX && same && !std::strcmp(same,"1") && families[family].timestampValidBits){transfer_family=family;transfer_timestamp_bits=families[family].timestampValidBits;}}}
+            if(transfer_family!=UINT32_MAX && transfer_family!=family){queue_infos[1].queueFamilyIndex=transfer_family;di.queueCreateInfoCount=2;di.pQueueCreateInfos=queue_infos;}
             #endif
             #ifdef ANYPS3_RSX_VK
             VkPhysicalDeviceTimelineSemaphoreFeatures timeline{};timeline.sType=VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES;
@@ -425,6 +431,9 @@ public:
         VkFenceCreateInfo fence{};fence.sType=VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
         check(vkCreateFence(device,&fence,nullptr,&work.fence),"vkCreateFence");
         VkSubmitInfo submit{};submit.sType=VK_STRUCTURE_TYPE_SUBMIT_INFO;submit.commandBufferCount=1;submit.pCommandBuffers=&work.command;
+#ifdef ANYPS3_RSX_VK
+        recorder_queue_order();
+#endif
         check(vkQueueSubmit(queue,1,&submit,work.fence),"vkQueueSubmit");
         check(vkWaitForFences(device,1,&work.fence,VK_TRUE,UINT64_MAX),"vkWaitForFences");
         if(!coherent)check(vkInvalidateMappedMemoryRanges(device,1,&range),"vkInvalidateMappedMemoryRanges");

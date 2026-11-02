@@ -76,10 +76,12 @@ The first and only target so far is **Ratchet & Clank: A Crack in Time** (BCES00
 
 - The original game boots, plays its videos, reaches the original main menu and loads a saved game into the
   first level (`great_clock_a`). The menu and the level are rendered by the Vulkan RSX backend.
-- The menu runs at full speed. In the level the current runtime holds the 60 Hz VSYNC cap on a Ryzen 9 9900X with an
-  RTX 4070 SUPER: about **59.8–59.9 FPS mean, with 99.8–100 % of frames finishing within one vblank** in quiet
-  measurements (main thread ~11 ms and RSX worker ~12 ms of the 16.7 ms frame). The headroom is about 3–4 ms per frame;
-  an emulated 75 Hz vblank (`ANYPS3_VBLANK_HZ=75`, a measurement switch) is not held yet.
+- The menu runs at full speed. At native 1280×720, builds 703–706 (2026-10-21) held the 60 Hz VSYNC cap in the level on a
+  Ryzen 9 9900X with an RTX 4070 SUPER: **59.5–59.9 FPS mean** in quiet measurements (main thread ~11 ms and RSX worker
+  ~12 ms of the 16.7 ms frame; ~3–4 ms headroom; an emulated 75 Hz vblank is not held). Walking through heavy views at
+  720p still drops to ~44–46 FPS.
+- At 2× internal resolution (2560×1440, `ANYPS3_RENDER_SCALE=2`) build 1031 walks at **~40 FPS** (2026-10-27). A stable
+  60 FPS at 1440p is the open goal; later CPU work on the development branch is not yet measured in the game.
 - Input works through SDL game controllers, including DualSense (PS5) SIXAXIS motion, rumble and the PS button
   ([details](docs/manager/DUALSENSE.md)). Navigation with a virtual and a uinput controller is verified; a physical
   controller has not been verified yet.
@@ -91,7 +93,8 @@ Measurements, open blockers and reproduction commands are tracked in the
 
 ## Development requirements
 
-- Linux x86-64, Python 3.11+, GCC with C++17, SDL2, a Vulkan driver (a real GPU; Lavapipe for tests).
+- Linux x86-64, Python 3.11+, GCC with C++17, SDL2, Vulkan and glslang/SPIRV development libraries, a Vulkan driver (a real
+  GPU; Lavapipe for tests).
 - Optional: `cryptography` for the `unself` command (`python3 -m pip install -e .[self]`).
 - **No game data, firmware, keys or system files are included.** To run a game you need your own legally
   obtained copy of the game, the PS3 system software and the decryption parameters for your copy.

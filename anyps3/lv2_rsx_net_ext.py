@@ -1,4 +1,4 @@
-"""LV2 syscall extension group 'rsx_net' (see docs/knowledge/experiments/2026-10-15-split-units-256.md).
+"""LV2 syscall extension group 'rsx_net' (see docs/archive/knowledge/experiments/2026-10-15-split-units-256.md).
 
 syscall_rsx_net_ext() returns true only for syscalls it handled; unknown numbers fall
 through to the next group and finally to the explicit 'unimplemented LV2 syscall' stop.

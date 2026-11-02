@@ -98,7 +98,10 @@ TYPES = RESERVATION_WAIT_TYPES + r'''
     struct LocalAccess {
         unsigned leases=0,raw=0,quiet=0,slot=UINT32_MAX,observer_pauses=0,raw_yields=0;bool fault_claim=false,renderer_claim=false,is_owner=false;
         unsigned scalar_batch_depth=0;bool scalar_batch_active=false,inline_active=false;
-        const SmallList<std::uintptr_t,4>* leased_pages=nullptr;std::uintptr_t leased_scalar_page=UINTPTR_MAX;
+        const SmallList<std::uintptr_t,8>* leased_pages=nullptr;std::uintptr_t leased_scalar_page=UINTPTR_MAX;
+        // RenderCursor (renderer only): this thread's page hazard is held for guest span [cursor_lo,cursor_hi) of one host page.
+        bool cursor_active=false,cursor_filtered=false;std::uint64_t cursor_lo=0,cursor_hi=0;const std::uint8_t* cursor_payload=nullptr;
+        const std::atomic<std::uint32_t>* cursor_state=nullptr;const std::atomic<bool>* cursor_observed=nullptr;
         const ParallelMemory::Snapshot* snapshot=nullptr;
         std::array<std::pair<std::uint32_t,unsigned>,64> cache{};
         std::array<ScalarCache,64> scalar_cache{};
@@ -242,6 +245,8 @@ TYPES = RESERVATION_WAIT_TYPES + r'''
     [[gnu::always_inline]] void suspend_scalar_batch(LocalAccess& local){
         // Every admission, raw scope or blocking byte API first retires an
         // inline section; translated code then sees the blocked table.
+        // A renderer page cursor is revoked the same way (its hazard never spans another admission or a wait).
+        if(local.cursor_active)cursor_revoke(local);
         if(local.inline_active)inline_leave(local);
         if(local.scalar_batch_active && !local.leases){local.scalar_batch_active=false;leave_reader(local);}
     }
@@ -461,6 +466,21 @@ TYPES = RESERVATION_WAIT_TYPES + r'''
            !(hit.flags&(write?2:4)) || (write && (hit.flags&1)))return nullptr;
         return &hit;
     }
+    // The admitted fast paths (read_page, cursor_pin, range_admitted) refill a missing entry from the admitted snapshot instead
+    // of declining: the mapping that holds the whole span, the same one translate_parallel resolves and caches (maps never
+    // overlap). No error is raised here; a hole or a missing permission returns nullptr and the caller declines to its Lease
+    // path, which raises the original error. Two guest pages 256 KiB apart share an entry (64 entries by page number).
+    [[gnu::noinline]] const ScalarCache* refill_parallel_map(LocalAccess& local,std::uint64_t address,unsigned size,bool write){
+        if(address>UINT32_MAX || !size || size>UINT64_C(0x100000000)-address)return nullptr;
+        for(const auto& map:local.snapshot->maps){const auto& r=map.region;
+            if(address>=r.base && address-r.base<r.bytes->size() && size<=r.bytes->size()-(address-r.base)){
+                cache_scalar_mapping(local,map,address);return cached_parallel_map(local,address,size,write);}}
+        return nullptr;
+    }
+    [[gnu::always_inline]] const ScalarCache* admitted_parallel_map(LocalAccess& local,std::uint64_t address,unsigned size,bool write){
+        if(const auto* hit=cached_parallel_map(local,address,size,write))return hit;
+        return refill_parallel_map(local,address,size,write);
+    }
     void cache_scalar_mapping(LocalAccess& local,const ParallelMemory::Mapping& map,std::uint64_t address){
         const auto& r=map.region;auto& cached=local.scalar_cache[(address>>12)%local.scalar_cache.size()];
         cached={local.snapshot->epoch,r.base,r.base+r.bytes->size(),r.flags,&map,r.bytes->data(),r.bytes->coherent_data(),map.state->tracked.get()};
@@ -480,7 +500,8 @@ TYPES = RESERVATION_WAIT_TYPES + r'''
         [[gnu::always_inline]] void reject(LocalAccess& state){retire(state);memory.suspend_scalar_batch(state);}
         [[gnu::always_inline]] ScalarAccess(GuestMemory& m,std::uint64_t address,unsigned size,bool write,bool cached_only=false,bool payload_only=false):memory(m),compact(cached_only),full_lease(!payload_only){
             if(!size || size>8 || !m.parallel->asymmetric || !m.page_broker.enabled.load(std::memory_order_acquire))return;
-            auto& state=m.local_state();if(state.raw || state.leases)return;
+            auto& state=m.local_state();if(state.cursor_active)m.cursor_revoke(state);   // the hazard slot is reused below
+            if(state.raw || state.leases)return;
             if(cached_only && state.scalar_batch_depth){
                 if(state.scalar_batch_active && m.parallel->exclusive.load(std::memory_order_acquire))m.suspend_scalar_batch(state);
                 if(!state.scalar_batch_active)m.resume_scalar_batch(state);
@@ -513,6 +534,114 @@ TYPES = RESERVATION_WAIT_TYPES + r'''
         [[gnu::always_inline]] ~ScalarAccess(){if(local){if(full_lease){--local->quiet;--local->leases;}retire(*local);}}
         ScalarAccess(const ScalarAccess&)=delete;
     };
+    // One-page read (ANYPS3_GUEST_PAGE_READ, default 1; 0 keeps the Lease path for every transfer/Range read): the compact
+    // ScalarAccess admission for a read of 1..4096 bytes inside one 4 KiB guest page and one host page, without Lease, span
+    // vector, CpuPages or a second translation. It only completes reads that the Lease path completes with no side effect, and
+    // returns false (nothing read, nothing published) for everything else, which then takes the unchanged Lease path and raises
+    // its own error or runs its own observer callback / claim wait:
+    //  * admission: the pending hazard closes the raw gate exactly as a compact scalar (RawPermit/map publication wait for it;
+    //    a closed gate declines); raw scopes, nested leases and broker-less or symmetric memory decline;
+    //  * the map comes from the admitted snapshot's scalar cache (a miss declines; the Lease path refills it), with its read
+    //    permission and bounds; `epoch` (a Range's pinned map epoch, 0 = none) must equal the admitted snapshot's;
+    //  * observers: paused as for scalars, otherwise any synchronous interest in the bytes (the same byte-exact lookup the
+    //    Lease path makes under transfer's HostByteAccess) declines, so every callback still runs on the Lease path;
+    //  * claims: the page hazard is published before the claim bit is read; a claimed page declines (the Lease path waits),
+    //    an unclaimed one cannot be acquired until the hazard is retired (broker quiesce waits for it), as for scalars;
+    //  * a stopped broker declines (the Lease path rethrows the stop reason).
+    // The bytes are the same acquire loads in the same order (atomic_read) from the same view (coherent iff exact bytes).
+    inline static const bool page_read_enabled=[]{const char* v=std::getenv("ANYPS3_GUEST_PAGE_READ");
+        if(v && std::strcmp(v,"0") && std::strcmp(v,"1")){throw std::runtime_error("invalid ANYPS3_GUEST_PAGE_READ");}return !v || !std::strcmp(v,"1");}();
+    inline static thread_local std::uint64_t page_reads=0;   // TEST HOOK: one-page reads completed by this thread
+    [[gnu::noinline]] bool read_page(std::uint64_t address,std::uint8_t* out,unsigned size,std::uint64_t epoch=0){
+        if(!page_read_enabled || !size || address>UINT32_MAX || (address>>12)!=((address+size-1)>>12) || !parallel->asymmetric ||
+           !page_broker.enabled.load(std::memory_order_acquire) || page_broker.stopped.load(std::memory_order_acquire))return false;
+        auto& state=local_state();if(state.raw || state.leases)return false;
+        suspend_scalar_batch(state);   // as Lease: no owner batch or inline section spans this admission
+        if(!try_enter_scalar_reader(state))return false;
+        const auto* hit=admitted_parallel_map(state,address,size,false);
+        if(!hit || (epoch && epoch!=state.snapshot->epoch)){leave_scalar_reader(state);return false;}
+        const auto* pointer=hit->pointer+address-hit->base;const auto at=reinterpret_cast<std::uintptr_t>(pointer);
+        auto* cell=(at>>12)==((at+size-1)>>12)?page_broker.cell(at>>12):nullptr;
+        const bool exact=host_access_observer.supports_exact_bytes.load(std::memory_order_acquire);
+        if(!cell || (!(state.is_owner?in_host_access_observer:state.observer_pauses!=0) && host_access_observer &&
+           (!host_access_observer.filtered || cell->observed.load(std::memory_order_acquire)) && host_access_observer.synchronous(pointer,size,true))){
+            leave_scalar_reader(state);return false;}
+        parallel->readers[state.slot].page.store(at>>12,std::memory_order_release);
+        std::atomic_signal_fence(std::memory_order_seq_cst);
+        if((cell->state.load(std::memory_order_acquire)&PageBroker::claimed) || page_broker.stopped.load(std::memory_order_acquire)){
+            leave_scalar_reader(state);return false;}
+        atomic_read(exact?hit->coherent+address-hit->base:pointer,out,size);
+        leave_scalar_reader(state);++page_reads;return true;
+    }
+    // ---- Renderer page cursor (ANYPS3_RSX_RENDER_BATCH, default 1; 0 = every FIFO read admits on its own, as before) ----
+    // The RSX FIFO consumer (the registered renderer thread only) reads headers and packet values page after page. A cursor
+    // keeps the compact scalar admission of ONE host page published between those reads: the reader's page hazard stays
+    // on that page (it pins the map snapshot exactly like a compact scalar's hazard), and the page's map/cell resolution is
+    // reused. Every read is still a live acquire load at its original program point; only the translation is reused, and the
+    // held hazard keeps it valid (map publication needs RawPermit, whose quiet() waits for the hazard).
+    // Who can wait for the held hazard, and why it is released in bounded time without blocking the renderer:
+    //  * an exclusive raw writer or map publisher: the next cursor read sees `exclusive` and revokes;
+    //  * a GPU claim of the pinned page (broker quiesce waits for page hazards): the next read of that page sees the claim
+    //    bit and revokes; a read of another page moves the hazard off it;
+    //  * between two cursor reads the consumer executes only plain register stores and transform-constant uploads (no
+    //    guest-memory access, wait or callback). Every other method, the owner hook, a perf capture, leaving rsx_run_impl
+    //    (RAII, also on exceptions) and every GuestMemory API on this thread revoke first (suspend_scalar_batch: Lease,
+    //    read_page, RawPermit, RawYield, release_reader_slot; ScalarAccess and GpuPages explicitly), so the renderer never
+    //    blocks, waits or calls back while it holds the hazard and no other API reuses the hazard slot behind the cursor.
+    // A read the cursor cannot serve (exclusive gate, claim, observed page, cache miss, page crossing, another mapping state)
+    // revokes and returns false; the caller then takes the unchanged per-access path, which raises the original error,
+    // runs the observer callback or waits. An installed unfiltered observer, or an observed page summary, is never served;
+    // installing/replacing the observer needs RawPermit (revokes), and the per-page summary is re-read on every access.
+    inline static const bool render_batch_enabled=[]{const char* v=std::getenv("ANYPS3_RSX_RENDER_BATCH");
+        if(v && std::strcmp(v,"0") && std::strcmp(v,"1")){throw std::runtime_error("invalid ANYPS3_RSX_RENDER_BATCH");}return !v || !std::strcmp(v,"1");}();
+    inline static thread_local std::uint64_t cursor_reads=0;   // TEST HOOK: reads served by this thread's cursor
+    [[gnu::noinline]] void cursor_revoke(LocalAccess& local){local.cursor_active=false;leave_scalar_reader(local);}
+    [[gnu::noinline]] bool cursor_pin(LocalAccess& local,std::uint64_t address,unsigned size){
+        if(local.cursor_active)cursor_revoke(local);
+        if(!size || size>4096 || address>UINT32_MAX || local.raw || local.leases || local.inline_active || local.scalar_batch_active ||
+           !page_broker.enabled.load(std::memory_order_acquire) || page_broker.stopped.load(std::memory_order_acquire) ||
+           !try_enter_scalar_reader(local))return false;
+        const auto* hit=admitted_parallel_map(local,address,size,false);
+        const auto* pointer=hit?hit->pointer+address-hit->base:nullptr;const auto at=reinterpret_cast<std::uintptr_t>(pointer);
+        auto* cell=hit && (at>>12)==((at+size-1)>>12)?page_broker.cell(at>>12):nullptr;
+        const bool observer=bool(host_access_observer),filtered=observer && host_access_observer.filtered;
+        if(!cell || (observer && !filtered) || (filtered && cell->observed.load(std::memory_order_acquire))){leave_scalar_reader(local);return false;}
+        parallel->readers[local.slot].page.store(at>>12,std::memory_order_release);
+        std::atomic_signal_fence(std::memory_order_seq_cst);
+        if((cell->state.load(std::memory_order_acquire)&PageBroker::claimed) || page_broker.stopped.load(std::memory_order_acquire)){
+            leave_scalar_reader(local);return false;}
+        // Guest span of this host page inside the mapping (a mapping may start or end inside the host page).
+        const std::uint64_t offset=at&4095,first=address>=offset?address-offset:0;
+        local.cursor_lo=std::max<std::uint64_t>(first,hit->base);local.cursor_hi=std::min<std::uint64_t>(first+4096,hit->end);
+        const bool exact=host_access_observer.supports_exact_bytes.load(std::memory_order_acquire);
+        local.cursor_payload=(exact?hit->coherent:hit->pointer)+(local.cursor_lo-hit->base);
+        local.cursor_state=&cell->state;local.cursor_observed=&cell->observed;local.cursor_filtered=filtered;local.cursor_active=true;
+        return true;
+    }
+    struct RenderCursor {
+        GuestMemory& memory;LocalAccess* local=nullptr;
+        explicit RenderCursor(GuestMemory& m):memory(m){
+            if(render_batch_enabled && m.concurrent() && m.parallel->asymmetric && m.renderer_owner())local=&m.local_state();}
+        ~RenderCursor(){revoke();}
+        RenderCursor(const RenderCursor&)=delete;
+        void revoke(){if(local && local->cursor_active)memory.cursor_revoke(*local);}
+        // Served: the pinned page still holds [address,address+size), no exclusive writer or claim waits for it and its
+        // observer summary is clear. Liveness only: the held hazard already excludes both owners.
+        [[gnu::always_inline]] bool served(std::uint64_t address,unsigned size)const{
+            const auto& l=*local;
+            return l.cursor_active && address>=l.cursor_lo && address+size<=l.cursor_hi && !memory.parallel->exclusive.load(std::memory_order_acquire) &&
+                !(l.cursor_state->load(std::memory_order_acquire)&PageBroker::claimed) && !(l.cursor_filtered && l.cursor_observed->load(std::memory_order_acquire));
+        }
+        // A scalar (1/2/4/8 bytes) of [address,address+size): false = not served, nothing read.
+        [[gnu::always_inline]] bool load(std::uint64_t address,unsigned size,std::uint64_t& value){
+            if(!local || !(served(address,size) || memory.cursor_pin(*local,address,size)))return false;
+            value=atomic_scalar_read(local->cursor_payload+(address-local->cursor_lo),size);++cursor_reads;return true;
+        }
+        bool read(std::uint64_t address,std::uint8_t* out,unsigned size){
+            if(!local || !(served(address,size) || memory.cursor_pin(*local,address,size)))return false;
+            atomic_read(local->cursor_payload+(address-local->cursor_lo),out,size);++cursor_reads;return true;
+        }
+    };
     // GNU atomic byte-addressable storage. Naturally aligned scalars use their
     // actual width; bulk fringes use bytes, never read/merge/store a neighbour.
     // This is essential when two unreserved subwords share an enclosing word.
@@ -536,8 +665,31 @@ TYPES = RESERVATION_WAIT_TYPES + r'''
     // Ascending order: bytes up to the first 8-byte boundary, then aligned 8-byte words, then the tail bytes - the same
     // sequence of atomic accesses (and the same load-then-store interleaving) as one byte-or-word step per iteration. The word
     // body is unrolled by four instead of re-checking size and alignment per word (~3x faster in cache, HIRES2-W).
+#if defined(__x86_64__) && defined(__AVX__) && defined(__linux__)
+    // 16-byte body (x86 with AVX only): a naturally aligned 16-byte VMOVDQA load/store is one atomic access on every processor that
+    // enumerates AVX (Intel SDM vol. 3A 9.1.1; AMD APM vol. 2 7.3.2), so it covers its two 8-byte words in one indivisible access:
+    // every interleaving it allows is one the two 8-byte accesses allow (no byte outside [p,p+n) is touched, order stays ascending).
+    // A plain x86 load is an acquire and a plain store a release (TSO); the volatile asm with a memory clobber keeps the compiler from
+    // moving any other access across it, as the __atomic acquire loads / release stores do. Used only when the private buffer and
+    // the guest bytes do not overlap (an overlapping copy keeps the one-word-at-a-time source/store interleaving below).
+    // Four 16-byte accesses per loop iteration (HIRES9): the same ascending sequence of accesses with a quarter of the loop overhead.
+    [[gnu::always_inline]] static void atomic_load16(const std::uint8_t* p,std::uint8_t* out){
+        __m128i v;asm volatile("vmovdqa %1,%0":"=x"(v):"m"(*reinterpret_cast<const __m128i*>(p)):"memory");_mm_storeu_si128(reinterpret_cast<__m128i*>(out),v);}
+    [[gnu::always_inline]] static void atomic_store16(std::uint8_t* p,const std::uint8_t* in){
+        const __m128i v=_mm_loadu_si128(reinterpret_cast<const __m128i*>(in));asm volatile("vmovdqa %1,%0":"=m"(*reinterpret_cast<__m128i*>(p)):"x"(v):"memory");}
+    [[gnu::always_inline]] static bool atomic_wide(const std::uint8_t* p,const std::uint8_t* buffer,unsigned n){
+        const auto a=reinterpret_cast<std::uintptr_t>(p),b=reinterpret_cast<std::uintptr_t>(buffer);return n>=32 && (b+n<=a || a+n<=b);}
+#endif
     static void atomic_read(const std::uint8_t* p,std::uint8_t* out,unsigned n){
         while(n && (reinterpret_cast<std::uintptr_t>(p)&7)){*out++=__atomic_load_n(p++,__ATOMIC_ACQUIRE);--n;}
+#if defined(__x86_64__) && defined(__AVX__) && defined(__linux__)
+        if(atomic_wide(p,out,n)){
+            if(reinterpret_cast<std::uintptr_t>(p)&8){const auto word=__atomic_load_n(reinterpret_cast<const AtomicWord*>(p),__ATOMIC_ACQUIRE);std::memcpy(out,&word,8);p+=8;out+=8;n-=8;}
+            for(;n>=64;n-=64,p+=64,out+=64){atomic_load16(p,out);atomic_load16(p+16,out+16);atomic_load16(p+32,out+32);atomic_load16(p+48,out+48);}
+            if(n>=32){atomic_load16(p,out);atomic_load16(p+16,out+16);p+=32;out+=32;n-=32;}
+            if(n>=16){atomic_load16(p,out);p+=16;out+=16;n-=16;}
+        }
+#endif
         for(;n>=32;n-=32,p+=32,out+=32){
             std::uint64_t v;
             v=__atomic_load_n(reinterpret_cast<const AtomicWord*>(p),__ATOMIC_ACQUIRE);std::memcpy(out,&v,8);
@@ -550,6 +702,14 @@ TYPES = RESERVATION_WAIT_TYPES + r'''
     }
     static void atomic_write(std::uint8_t* p,const std::uint8_t* in,unsigned n){
         while(n && (reinterpret_cast<std::uintptr_t>(p)&7)){__atomic_store_n(p++,*in++,__ATOMIC_RELEASE);--n;}
+#if defined(__x86_64__) && defined(__AVX__) && defined(__linux__)
+        if(atomic_wide(p,in,n)){
+            if(reinterpret_cast<std::uintptr_t>(p)&8){std::uint64_t value;std::memcpy(&value,in,8);__atomic_store_n(reinterpret_cast<AtomicWord*>(p),value,__ATOMIC_RELEASE);p+=8;in+=8;n-=8;}
+            for(;n>=64;n-=64,p+=64,in+=64){atomic_store16(p,in);atomic_store16(p+16,in+16);atomic_store16(p+32,in+32);atomic_store16(p+48,in+48);}
+            if(n>=32){atomic_store16(p,in);atomic_store16(p+16,in+16);p+=32;in+=32;n-=32;}
+            if(n>=16){atomic_store16(p,in);p+=16;in+=16;n-=16;}
+        }
+#endif
         for(;n>=32;n-=32,p+=32,in+=32){
             // Each source word is read just before its store (as in the one-word loop), so an overlapping source keeps its result.
             std::uint64_t v;
@@ -569,6 +729,13 @@ TYPES = RESERVATION_WAIT_TYPES + r'''
             case 4:return from_be(__atomic_load_n(reinterpret_cast<const AtomicInt*>(pointer),__ATOMIC_ACQUIRE));
             case 8:return from_be(__atomic_load_n(reinterpret_cast<const AtomicWord*>(pointer),__ATOMIC_ACQUIRE));
             }
+        }
+        // A word-aligned doubleword (the RSX FIFO header+value pair, a PPU ld at a 4-byte boundary): its two aligned words in
+        // ascending order, one acquire load each. Every value this returns is one the bytewise sequence below can return (each
+        // word's four ascending byte loads at one instant); no byte outside [pointer,pointer+8) is touched.
+        if(size==8 && !(reinterpret_cast<std::uintptr_t>(pointer)&3)){
+            const std::uint64_t high=from_be(__atomic_load_n(reinterpret_cast<const AtomicInt*>(pointer),__ATOMIC_ACQUIRE));
+            return (high<<32)|from_be(__atomic_load_n(reinterpret_cast<const AtomicInt*>(pointer+4),__ATOMIC_ACQUIRE));
         }
         std::uint8_t bytes[8]{};atomic_read(pointer,bytes,size);std::uint64_t value=0;
         for(unsigned i=0;i<size;++i)value=(value<<8)|bytes[i];
@@ -796,14 +963,36 @@ TYPES = RESERVATION_WAIT_TYPES + r'''
         for(auto i=first;size && i<=last;++i){auto& v=map.state->versions[i];if(v==UINT32_MAX)throw std::runtime_error("guest write version overflow");++v;}
         parallel->notifications->notify(map.region.bytes->data()+address-map.region.base,size);
     }
+    // The stripe locks of every 128-byte host line the spans touch (stripe = line % 4096), each taken once, in ascending stripe
+    // order (the global order of every multi-stripe holder: ScalarLock/ScalarWrite take a<b) and released on destruction. The set
+    // is collected in a 4096-bit map: the same set and order as sorting and uniquing every line's stripe index, without the two
+    // heap vectors (SPU DMA PUTs take this per command). A span of >= 4096 lines covers every stripe.
     struct LineLocks {
-        GuestMemory& memory;std::vector<std::unique_lock<ParallelMemory::LineMutex>> locks;
-        explicit LineLocks(GuestMemory& m,const std::vector<HostSpan>& spans):memory(m){
-            std::vector<unsigned> indices;
+        static constexpr unsigned stripes=std::tuple_size<decltype(ParallelMemory::lines)>::value;
+        static_assert(stripes%64==0,"LineLocks bitmap granule");
+        // Only the words [low,high) of `held` are meaningful: each is cleared when the range first covers it (no 512-byte clear
+        // per command); the lock and unlock loops read only that range.
+        ParallelMemory& parallel;std::array<std::uint64_t,stripes/64> held;unsigned low=stripes/64,high=0;
+        explicit LineLocks(GuestMemory& m,const std::vector<HostSpan>& spans):parallel(*m.parallel){take(spans);}
+        template<class Spans> LineLocks(GuestMemory& m,const Spans& spans,int):parallel(*m.parallel){take(spans);}
+        ~LineLocks(){for(unsigned w=low;w<high;++w)for(auto bits=held[w];bits;bits&=bits-1)parallel.lines[w*64+unsigned(__builtin_ctzll(bits))].unlock();}
+        LineLocks(const LineLocks&)=delete;
+        // Stripes [begin,end), end <= stripes.
+        void mark(unsigned begin,unsigned end){
+            const unsigned first=begin/64,last=(end+63)/64;
+            // w < last <= stripes/64 always; the modulo (identity) keeps GCC's -Warray-bounds from flagging the peeled clear loops.
+            auto clear=[&](unsigned from,unsigned to){for(unsigned w=from;w<to;++w)held[w%(stripes/64)]=0;};
+            if(low>=high)clear(first,last);else{clear(first,low);clear(high,last);}
+            for(unsigned w=first;w<last;++w){const unsigned lo=std::max(begin,w*64)-w*64,hi=std::min(end,w*64+64)-w*64;
+                held[w]|=(hi-lo==64?~UINT64_C(0):((UINT64_C(1)<<(hi-lo))-1)<<lo);}
+            low=std::min(low,first);high=std::max(high,last);
+        }
+        template<class Spans> void take(const Spans& spans){
             for(const auto& span:spans)if(span.size){const auto first=reinterpret_cast<std::uintptr_t>(span.pointer)/128,last=(reinterpret_cast<std::uintptr_t>(span.pointer)+span.size-1)/128;
-                for(auto line=first;line<=last;++line)indices.push_back(line%m.parallel->lines.size());}
-            std::sort(indices.begin(),indices.end());indices.erase(std::unique(indices.begin(),indices.end()),indices.end());
-            for(auto i:indices)locks.emplace_back(m.parallel->lines[i]);
+                if(last-first>=stripes-1){mark(0,stripes);continue;}
+                const unsigned start=static_cast<unsigned>(first%stripes),count=static_cast<unsigned>(last-first+1);
+                if(start+count<=stripes)mark(start,start+count);else{mark(start,stripes);mark(0,start+count-stripes);}}
+            for(unsigned w=low;w<high;++w)for(auto bits=held[w];bits;bits&=bits-1)parallel.lines[w*64+unsigned(__builtin_ctzll(bits))].lock();
         }
     };
     HostSpan reservation_span(std::uint64_t address,unsigned size){
@@ -943,14 +1132,18 @@ TYPES = RESERVATION_WAIT_TYPES + r'''
     // inline sections; a section is reader admission (exclusive raw/map
     // writers wait for it) plus an odd sequence that blocker writers wait
     // to change after publishing their bit and an asymmetric barrier.
+    // The table lives directly below the view in the same reservation
+    // (table[i] at base-pages+i), so translated code reaches both from one
+    // pointer: base[(ea>>12)-pages] is the blocker of guest page ea>>12.
     struct InlineFlat {
         static constexpr std::uint8_t no_load=1,no_store=2,claimed=4,observed=8,tracked=16,dirty=32;
         static constexpr std::uint8_t load_block=no_load|claimed|observed;
         static constexpr std::uint8_t store_block=no_store|claimed|observed|tracked|dirty;
         static constexpr std::uint64_t pages=std::uint64_t(1)<<20,reserve=(std::uint64_t(1)<<32)+0x10000;
         using Table=std::atomic<std::uint8_t>;
+        static_assert(sizeof(Table)==1 && alignof(Table)==1,"one blocker byte per guest page");
         struct Map {std::uint64_t guest,size,bytes;unsigned flags;std::uintptr_t host;std::uint64_t identity;std::shared_ptr<GuestBacking> pin;};
-        std::uint8_t* base=nullptr;std::unique_ptr<Table[]> table;std::vector<Map> maps;std::mutex mutex;
+        std::uint8_t* base=nullptr;Table* table=nullptr;std::vector<Map> maps;std::mutex mutex;
         std::uint64_t remaps=0,publications=0;
         InlineFlat()=default;
         // Address-space copies start without a view; the source keeps its own.
@@ -959,21 +1152,25 @@ TYPES = RESERVATION_WAIT_TYPES + r'''
         ~InlineFlat(){reset();}
         void reset(){
 #if defined(__linux__)
-            if(base)munmap(base,reserve);
+            if(base)munmap(base-pages,pages+reserve);
 #endif
-            base=nullptr;table.reset();maps.clear();
+            base=nullptr;table=nullptr;maps.clear();
         }
-        static const Table* blocked(){
+        static const Table* table_of(const std::uint8_t* view){return reinterpret_cast<const Table*>(view-pages);}
+        // Inactive view: a base whose table is all blocked (every load_block and
+        // store_block bit set), so no inline access ever reaches its data part.
+        static std::uint8_t* blocked_base(){
             static const std::unique_ptr<Table[]> all=[]{std::unique_ptr<Table[]> t(new Table[pages]);
                 for(std::uint64_t i=0;i<pages;++i){t[i].store(0xff,std::memory_order_relaxed);}
                 return t;}();
-            return all.get();
+            return reinterpret_cast<std::uint8_t*>(all.get())+pages;
         }
     } inline_flat;
-    // Owner-thread view used by translated code: the live table only while
-    // its section is active, otherwise an all-blocked table.
+    // Owner-thread view used by translated code: the live flat base (and so
+    // its table) only while its section is active, otherwise blocked_base().
     struct InlineView {
-        const InlineFlat::Table* table=InlineFlat::blocked();std::uint8_t* base=nullptr;bool active=false;
+        std::uint8_t* base=InlineFlat::blocked_base();bool active=false;
+        const InlineFlat::Table* table()const{return InlineFlat::table_of(base);}
         InlineView()=default;InlineView(const InlineView&){}InlineView& operator=(const InlineView&){return *this;}
     } inline_view;
     struct InlineEnabled {
@@ -982,30 +1179,70 @@ TYPES = RESERVATION_WAIT_TYPES + r'''
         bool load(std::memory_order order)const{return value.load(order);}void store(bool v,std::memory_order order){value.store(v,order);}
     } inline_enabled;
     struct InlineCounters {std::uint64_t medium_loads=0,medium_stores=0,slow_loads=0,slow_stores=0,claim_clears=0,resumes=0,blocked_resumes=0;} inline_counters;
+    // One host access of exactly N bytes, byte-reversed. With MOVBE the load or
+    // store and the swap are one instruction: asm volatile, like the volatile
+    // access, is never merged, dropped, duplicated or moved across another
+    // volatile access, and its "m" operand names exactly the N guest bytes.
     template<unsigned N> [[gnu::always_inline]] static std::uint64_t inline_read(const std::uint8_t* p){
+#if defined(__x86_64__)
+        // One byte: the same single access, with base+index addressing. movzbl
+        // and the 32-bit movbe zero-extend; the stated range keeps the compiler
+        // from extending the value again.
+        if constexpr(N==1){std::uint64_t v;asm volatile("movzbl %1,%k0":"=r"(v):"m"(*p));if(v>0xff)__builtin_unreachable();return v;}
+#else
         if constexpr(N==1)return *reinterpret_cast<const volatile std::uint8_t*>(p);
+#endif
+#if defined(__MOVBE__) && defined(__x86_64__)
+        else if constexpr(N==2){typedef std::uint16_t U __attribute__((aligned(1)));std::uint16_t v;asm volatile("movbew %1,%0":"=r"(v):"m"(*reinterpret_cast<const U*>(p)));return v;}
+        else if constexpr(N==4){typedef std::uint32_t U __attribute__((aligned(1)));std::uint64_t v;asm volatile("movbel %1,%k0":"=r"(v):"m"(*reinterpret_cast<const U*>(p)));if(v>0xffffffff)__builtin_unreachable();return v;}
+        else{static_assert(N==8,"inline scalar width");typedef std::uint64_t U __attribute__((aligned(1)));std::uint64_t v;asm volatile("movbeq %1,%0":"=r"(v):"m"(*reinterpret_cast<const U*>(p)));return v;}
+#else
         else if constexpr(N==2){typedef std::uint16_t U __attribute__((aligned(1)));return __builtin_bswap16(*reinterpret_cast<const volatile U*>(p));}
         else if constexpr(N==4){typedef std::uint32_t U __attribute__((aligned(1)));return __builtin_bswap32(*reinterpret_cast<const volatile U*>(p));}
         else{static_assert(N==8,"inline scalar width");typedef std::uint64_t U __attribute__((aligned(1)));return __builtin_bswap64(*reinterpret_cast<const volatile U*>(p));}
+#endif
     }
     template<unsigned N> [[gnu::always_inline]] static void inline_write(std::uint8_t* p,std::uint64_t value){
+#if defined(__x86_64__)
+        if constexpr(N==1)asm volatile("movb %b1,%0":"=m"(*p):"r"(value));
+#else
         if constexpr(N==1)*reinterpret_cast<volatile std::uint8_t*>(p)=static_cast<std::uint8_t>(value);
+#endif
+#if defined(__MOVBE__) && defined(__x86_64__)
+        else if constexpr(N==2){typedef std::uint16_t U __attribute__((aligned(1)));asm volatile("movbew %w1,%0":"=m"(*reinterpret_cast<U*>(p)):"r"(value));}
+        else if constexpr(N==4){typedef std::uint32_t U __attribute__((aligned(1)));asm volatile("movbel %k1,%0":"=m"(*reinterpret_cast<U*>(p)):"r"(value));}
+        else{static_assert(N==8,"inline scalar width");typedef std::uint64_t U __attribute__((aligned(1)));asm volatile("movbeq %1,%0":"=m"(*reinterpret_cast<U*>(p)):"r"(value));}
+#else
         else if constexpr(N==2){typedef std::uint16_t U __attribute__((aligned(1)));*reinterpret_cast<volatile U*>(p)=__builtin_bswap16(static_cast<std::uint16_t>(value));}
         else if constexpr(N==4){typedef std::uint32_t U __attribute__((aligned(1)));*reinterpret_cast<volatile U*>(p)=__builtin_bswap32(static_cast<std::uint32_t>(value));}
         else{static_assert(N==8,"inline scalar width");typedef std::uint64_t U __attribute__((aligned(1)));*reinterpret_cast<volatile U*>(p)=__builtin_bswap64(value);}
+#endif
     }
-    // In-page check shared by every inline user (the caller holds a section).
+    // In-page checks shared by every inline user (the caller holds a section):
+    // address < 2^32 and [address,address+size) inside one 4 KiB page. Byte
+    // ranges keep the split form: their addresses are mostly 16-aligned, which
+    // lets the compiler drop the page test.
     [[gnu::always_inline]] static bool inline_span(std::uint64_t address,unsigned size){
         return size && (address>>32)==0 && (address&4095)+size<=4096;
+    }
+    // Scalars in one compare. Masked m=address&0xffffffff00000fff: a set high
+    // bit makes m >= 2^32 > 4096-N; with the high half zero m is address&4095,
+    // so m<=4096-N <=> (address>>32)==0 && (address&4095)<=4096-N. One byte
+    // never crosses a page, so N==1 keeps only the high test.
+    template<unsigned N> [[gnu::always_inline]] static bool inline_scalar_span(std::uint64_t address){
+        if constexpr(N==1)return (address>>32)==0;
+        else return (address&UINT64_C(0xffffffff00000fff))<=4096-N;
     }
     // Rebuild under map publication (RawPermit: no section is active).
     void inline_publish(const std::vector<ParallelMemory::Mapping>& next){
 #if defined(__linux__) && defined(__x86_64__)
         auto& f=inline_flat;std::lock_guard<std::mutex> lock(f.mutex);
         if(!f.base){
-            void* p=mmap(nullptr,InlineFlat::reserve,PROT_NONE,MAP_PRIVATE|MAP_ANONYMOUS|MAP_NORESERVE,-1,0);
+            void* p=mmap(nullptr,InlineFlat::pages+InlineFlat::reserve,PROT_NONE,MAP_PRIVATE|MAP_ANONYMOUS|MAP_NORESERVE,-1,0);
             if(p==MAP_FAILED)return; // No view: every access keeps the admitted path.
-            f.base=static_cast<std::uint8_t*>(p);f.table.reset(new InlineFlat::Table[InlineFlat::pages]);
+            if(mmap(p,InlineFlat::pages,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS|MAP_FIXED,-1,0)==MAP_FAILED){
+                munmap(p,InlineFlat::pages+InlineFlat::reserve);return;}
+            f.table=static_cast<InlineFlat::Table*>(p);f.base=static_cast<std::uint8_t*>(p)+InlineFlat::pages;
         }
         ++f.publications;
         std::vector<InlineFlat::Map> want;
@@ -1079,7 +1316,7 @@ TYPES = RESERVATION_WAIT_TYPES + r'''
         }
     }
     [[gnu::noinline]] void inline_leave(LocalAccess& local){
-        local.inline_active=false;inline_view.active=false;inline_view.table=InlineFlat::blocked();
+        local.inline_active=false;inline_view.active=false;inline_view.base=InlineFlat::blocked_base();
         auto& reader=parallel->readers[local.slot];reader.section.store(reader.section.load(std::memory_order_relaxed)+1,std::memory_order_release);
         leave_reader(local);
     }
@@ -1099,7 +1336,7 @@ TYPES = RESERVATION_WAIT_TYPES + r'''
         if(!inline_observer_compatible() || page_broker.stopped.load(std::memory_order_acquire)){leave_reader(local);++inline_counters.blocked_resumes;return;}
         auto& reader=parallel->readers[local.slot];reader.section.store(reader.section.load(std::memory_order_relaxed)+1,std::memory_order_release);
         std::atomic_signal_fence(std::memory_order_seq_cst);
-        local.inline_active=true;inline_view.base=inline_flat.base;inline_view.table=inline_flat.table.get();inline_view.active=true;
+        local.inline_active=true;inline_view.base=inline_flat.base;inline_view.active=true;
         ++inline_counters.resumes;
     }
     [[gnu::always_inline]] void inline_enter_dispatch(){if(!inline_view.active && inline_enabled.load(std::memory_order_relaxed))inline_resume();}
@@ -1107,17 +1344,17 @@ TYPES = RESERVATION_WAIT_TYPES + r'''
     // and never call observers, so blocker writers can wait for sections.
     [[gnu::noinline]] bool inline_medium_load(std::uint64_t address,unsigned size,std::uint8_t* out){
         if(!inline_view.active || !inline_span(address,size))return false;
-        auto bits=inline_view.table[address>>12].load(std::memory_order_seq_cst);
+        auto bits=inline_view.table()[address>>12].load(std::memory_order_seq_cst);
         if((bits&InlineFlat::claimed) && !(bits&(InlineFlat::load_block&~InlineFlat::claimed)) && inline_clear_claim(address))
-            bits=inline_view.table[address>>12].load(std::memory_order_seq_cst);
+            bits=inline_view.table()[address>>12].load(std::memory_order_seq_cst);
         if(bits&InlineFlat::load_block)return false;
         atomic_read(inline_view.base+address,out,size);++inline_counters.medium_loads;return true;
     }
     [[gnu::noinline]] bool inline_medium_store(std::uint64_t address,unsigned size,const std::uint8_t* in){
         if(!inline_view.active || !inline_span(address,size))return false;
-        auto bits=inline_view.table[address>>12].load(std::memory_order_seq_cst);
+        auto bits=inline_view.table()[address>>12].load(std::memory_order_seq_cst);
         if((bits&InlineFlat::claimed) && !(bits&(InlineFlat::no_store|InlineFlat::observed)) && inline_clear_claim(address))
-            bits=inline_view.table[address>>12].load(std::memory_order_seq_cst);
+            bits=inline_view.table()[address>>12].load(std::memory_order_seq_cst);
         if(bits&(InlineFlat::no_store|InlineFlat::observed|InlineFlat::claimed))return false;
         std::uint8_t* host=nullptr;
         if(bits&(InlineFlat::tracked|InlineFlat::dirty)){
@@ -1135,11 +1372,11 @@ TYPES = RESERVATION_WAIT_TYPES + r'''
     // Reusable API for other translated/HLE users of the owner thread: one
     // scalar through the flat view if the page admits it, else false.
     template<unsigned N> [[gnu::always_inline]] bool inline_try_load(std::uint64_t address,std::uint64_t& value)const{
-        if(!((address>>32)==0 && (N==1 || (address&4095)<=4096-N) && !(inline_view.table[address>>12].load(std::memory_order_relaxed)&InlineFlat::load_block)))return false;
+        if(!(inline_scalar_span<N>(address) && !(InlineFlat::table_of(inline_view.base)[address>>12].load(std::memory_order_relaxed)&InlineFlat::load_block)))return false;
         value=inline_read<N>(inline_view.base+address);return true;
     }
     template<unsigned N> [[gnu::always_inline]] bool inline_try_store(std::uint64_t address,std::uint64_t value){
-        if(!((address>>32)==0 && (N==1 || (address&4095)<=4096-N) && !(inline_view.table[address>>12].load(std::memory_order_relaxed)&InlineFlat::store_block)))return false;
+        if(!(inline_scalar_span<N>(address) && !(InlineFlat::table_of(inline_view.base)[address>>12].load(std::memory_order_relaxed)&InlineFlat::store_block)))return false;
         inline_write<N>(inline_view.base+address,value);return true;
     }
 '''

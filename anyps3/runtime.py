@@ -598,9 +598,27 @@ struct GuestMemory {
             operator std::uint64_t()const{return value.load(std::memory_order_acquire);}
         };
         struct Part { unsigned offset,size; std::uint8_t* data; std::shared_ptr<GuestBacking> owner;std::uint64_t mapping_id=0; };
+        // The parts in address order, contiguous (pointer iteration) like the std::vector they replace. Almost every Range
+        // lies in one mapping: that part is stored inline (no heap block per creation); a second part moves all into `many`.
+        struct Parts {
+            Part one{};std::vector<Part> many;unsigned n=0;   // n<=1: `one` holds the part; n>1: `many` holds all n parts
+            Part* data(){return n>1?many.data():&one;}const Part* data()const{return n>1?many.data():&one;}
+            std::size_t size()const{return n;}bool empty()const{return !n;}
+            Part* begin(){return data();}Part* end(){return data()+n;}const Part* begin()const{return data();}const Part* end()const{return data()+n;}
+            Part& operator[](std::size_t i){return data()[i];}const Part& operator[](std::size_t i)const{return data()[i];}
+            Part& at(std::size_t i){if(i>=n)throw std::out_of_range("guest range part");return data()[i];}
+            const Part& at(std::size_t i)const{if(i>=n)throw std::out_of_range("guest range part");return data()[i];}
+            Part& front(){return data()[0];}const Part& front()const{return data()[0];}
+            Part& back(){return data()[n-1];}const Part& back()const{return data()[n-1];}
+            void push_back(Part part){
+                if(!n){one=std::move(part);n=1;return;}
+                if(n==1){many.reserve(4);many.push_back(std::move(one));one=Part{};}
+                many.push_back(std::move(part));++n;
+            }
+        };
         GuestMemory* memory=nullptr;
         unsigned size=0;bool writable=false;std::uint64_t address=0;mutable Epoch epoch;
-        std::vector<Part> parts;
+        Parts parts;
         std::uint8_t* pointer(unsigned offset,unsigned count)const{
             memory->require_raw();check_epoch();
             if(offset>size || count>size-offset)throw std::runtime_error("guest range bounds fault");
@@ -628,6 +646,9 @@ struct GuestMemory {
             epoch=memory->parallel->epoch;
         }
         void read(unsigned offset,std::uint8_t* out,unsigned count)const{
+            // Concurrent reads go by address through the admitted snapshot (read_admitted below); a one-page read whose map
+            // epoch still equals this Range's needs no check_epoch revalidation and completes without side effects (par_memory).
+            if(memory->concurrent() && offset<=size && count<=size-offset && memory->read_page(address+offset,out,count,epoch))return;
         HostByteAccess exact_bytes{memory->host_access_observer.supports_exact_bytes.load(std::memory_order_acquire)};
             Lease lease(*memory,address+offset,count,false,true);check_epoch();
             if(memory->concurrent()){
@@ -700,8 +721,28 @@ struct GuestMemory {
         bool consume(){return dirty.exchange(false,std::memory_order_acq_rel);}
     };
     HostObserver cpu_dirty_filter=[] {HostObserver filter;filter.filtered=true;filter.supports_exact_bytes=true;return filter;}();
-    using CpuDirtyList=std::vector<std::shared_ptr<CpuDirtyWatch>>;
-    CpuDirtyList cpu_dirty_watches;
+    using CpuDirtyWatches=std::vector<std::shared_ptr<CpuDirtyWatch>>;
+    // One immutable published registry: the watches plus every watched span sorted by start, each with the running maximum
+    // of the span ends up to it, so a writer marks the watches overlapping its bytes in O(log n + overlapping spans)
+    // instead of testing every watch (raw texture inputs and geometry entries: up to ~1000 watches). The marked set is
+    // exactly that of CpuDirtyWatch::overlaps over all watches.
+    struct CpuDirtyList : CpuDirtyWatches {
+        struct Span {std::uintptr_t first,last,reach;CpuDirtyWatch* watch;};
+        std::vector<Span> index;
+        CpuDirtyList()=default;
+        explicit CpuDirtyList(const CpuDirtyWatches& watches):CpuDirtyWatches(watches){
+            for(const auto& watch:*this)for(const auto& span:watch->spans)index.push_back({span.first,span.second,0,watch.get()});
+            std::sort(index.begin(),index.end(),[](const Span& a,const Span& b){return a.first<b.first;});
+            std::uintptr_t reach=0;for(auto& span:index){reach=std::max(reach,span.last);span.reach=reach;}
+        }
+        void mark(const void* pointer,unsigned size)const{
+            if(!size)return;
+            const auto p=reinterpret_cast<std::uintptr_t>(pointer),end=p+size;
+            auto it=std::lower_bound(index.begin(),index.end(),end,[](const Span& span,std::uintptr_t e){return span.first<e;});
+            while(it!=index.begin()){--it;if(it->reach<=p)break;if(it->last>p)it->watch->dirty.store(true,std::memory_order_release);}
+        }
+    };
+    CpuDirtyWatches cpu_dirty_watches;
     std::shared_ptr<const CpuDirtyList> gpu_dirty_watches=std::make_shared<const CpuDirtyList>();
     struct CpuDirtyRegistry {
         std::shared_ptr<const CpuDirtyList> current;
@@ -771,14 +812,12 @@ struct GuestMemory {
         publish_cpu_write_watched(pointer,size);
     }
     [[gnu::noinline]] void publish_cpu_write_watched(const void* pointer,unsigned size){
-        CpuDirtyPin pin(*this);
-        for(const auto& watch:*pin.snapshot)if(watch->overlaps(pointer,size))watch->dirty.store(true,std::memory_order_release);
+        CpuDirtyPin pin(*this);pin.snapshot->mark(pointer,size);
     }
     void publish_gpu_write(const void* pointer,unsigned size){
         // GPU claims exclude bytes, not observer metadata permits. A cold
         // immutable registry snapshot keeps concurrent watch removal safe.
-        const auto watches=std::atomic_load_explicit(&gpu_dirty_watches,std::memory_order_acquire);
-        for(const auto& watch:*watches)if(watch->overlaps(pointer,size))watch->dirty.store(true,std::memory_order_release);
+        const auto watches=std::atomic_load_explicit(&gpu_dirty_watches,std::memory_order_acquire);watches->mark(pointer,size);
     }
     // One admitted, permission/map-checked read of the complete upload range.
     // This is an immutable byte snapshot, not a promise of atomic multiword
@@ -801,7 +840,43 @@ struct GuestMemory {
     // coherence point as range(address,size,false) -- creation retires GPU-authoritative bytes at this safe point, which the
     // draw relies on before it reserves staging space -- but without page-broker cell admission: nothing is read here.
     Range range_translated(std::uint64_t address,unsigned size){return range(address,size,false,false);}
+    // One-mapping Range creation (ANYPS3_GUEST_RANGE_ADMISSION, default 1; 0 = the Lease for every creation): a span inside
+    // one mapping of the admitted snapshot (scalar map cache hit, permission checked) whose bytes no synchronous observer is
+    // interested in (the Lease path's own lookup, same HostByteAccess context) is created under the compact pending hazard
+    // instead of Lease + CpuPages + a per-mapping walk. Creation reads no payload byte; its only effects besides the Range are
+    // the observer coherence point (any interest declines) and, when brokered, not completing while a claim is in progress on
+    // one of its pages (the Lease path then asks page_broker.coherence and waits). So brokered creation (up to 64 host pages)
+    // declines when any page's claim bit is set; a claim whose bit appears after that check began after this creation, which
+    // the Lease path would only have made wait for the creation: no guest byte, label or callback differs. Translation-only
+    // creation (brokered=false) takes no broker interest at all, as on the Lease path. A declined creation (nothing published)
+    // takes the unchanged Lease path: errors, callbacks, coherence requests, claim waits, spans over several mappings. The Range
+    // pins the backing (shared_ptr copied under admission) and records the admitted snapshot's epoch (= parallel->epoch).
+    inline static const bool range_admission_enabled=[]{const char* v=std::getenv("ANYPS3_GUEST_RANGE_ADMISSION");
+        if(v && std::strcmp(v,"0") && std::strcmp(v,"1")){throw std::runtime_error("invalid ANYPS3_GUEST_RANGE_ADMISSION");}return !v || !std::strcmp(v,"1");}();
+    inline static thread_local std::uint64_t admitted_ranges=0;   // TEST HOOK: creations completed by this thread without a Lease
+    [[gnu::noinline]] bool range_admitted(std::uint64_t address,unsigned size,bool write,bool brokered,Range& result){
+        if(!range_admission_enabled || !size || address>UINT32_MAX || size>UINT64_C(0x100000000)-address || !parallel->asymmetric ||
+           !page_broker.enabled.load(std::memory_order_acquire) || page_broker.stopped.load(std::memory_order_acquire))return false;
+        auto& state=local_state();if(state.raw || state.leases)return false;
+        suspend_scalar_batch(state);   // as Lease: no batch, inline section or renderer cursor spans this admission
+        if(!try_enter_scalar_reader(state))return false;
+        const auto* hit=admitted_parallel_map(state,address,size,write);
+        auto* pointer=hit?hit->pointer+address-hit->base:nullptr;const auto at=reinterpret_cast<std::uintptr_t>(pointer);
+        if(!hit || (!(state.is_owner?in_host_access_observer:state.observer_pauses!=0) && host_access_observer && host_access_observer.synchronous(pointer,size))){
+            leave_scalar_reader(state);return false;}
+        if(brokered){
+            const auto first=at>>12,last=(at+size-1)>>12;bool clear=last-first<64;
+            for(auto page=first;clear && page<=last;++page){const auto* cell=page_broker.cell(page);
+                clear=cell && !(cell->state.load(std::memory_order_acquire)&PageBroker::claimed);}
+            if(!clear || page_broker.stopped.load(std::memory_order_acquire)){leave_scalar_reader(state);return false;}
+        }
+        auto pin=hit->map->region.bytes;const auto identity=hit->map->region.identity;const auto epoch=state.snapshot->epoch;
+        leave_scalar_reader(state);
+        result.memory=this;result.size=size;result.writable=write;result.address=address;result.epoch=epoch;
+        result.parts.push_back({0,size,pointer,std::move(pin),identity});++admitted_ranges;return true;
+    }
     Range range(std::uint64_t address,unsigned size,bool write,bool brokered=true){
+        if(concurrent()){Range admitted;if(range_admitted(address,size,write,brokered,admitted))return admitted;}
         Lease lease(*this,address,size,write,true,brokered);
         if(address>UINT32_MAX || size>UINT64_C(0x100000000)-address)
             throw std::runtime_error("guest address outside 32-bit space");
@@ -1058,16 +1133,42 @@ struct GuestMemory {
             parts.push_back({byte_pointer(r.bytes,r.bytes->data()+next-r.base),n});next+=n;left-=n;}
         for(const auto& part:parts){atomic_read(part.source,buffer,part.size);buffer+=part.size;}
     }
+    inline static const bool write_tracked_only=[]{const char* v=std::getenv("ANYPS3_GUEST_WRITE_TRACKED_ONLY");
+        if(v && std::strcmp(v,"0") && std::strcmp(v,"1")){throw std::runtime_error("invalid ANYPS3_GUEST_WRITE_TRACKED_ONLY");}return !v || !std::strcmp(v,"1");}();
     void transfer(std::uint64_t address,std::uint8_t* buffer,unsigned size,bool write) {
+        if(!write && concurrent() && read_page(address,buffer,size))return;   // one-page read without side effects (par_memory)
         HostByteAccess exact_bytes{host_access_observer.supports_exact_bytes.load(std::memory_order_acquire)};
         // A transfer inside one guest page is one span: admit it like a scalar access and skip the per-page broker set.
         const bool one_page=size && address<=UINT32_MAX && (address>>12)==((address+size-1)>>12);
         Lease lease(*this,address,size,write,true,true,one_page);
         if(concurrent()){
-            if(one_page && !write){read_admitted(address,buffer,size);return;}
-            const auto spans=parallel_spans(address,size,write,true);
-            if(write){LineLocks locks(*this,spans);bump_parallel(spans);for(const auto& part:spans){atomic_write(byte_pointer(part.pin,part.pointer),buffer,part.size);buffer+=part.size;publish_cpu_write(part.pointer,part.size);}}
-            else for(const auto& part:spans){atomic_read(byte_pointer(part.pin,part.pointer),buffer,part.size);buffer+=part.size;}
+            // Reads: read_admitted resolves every mapping (read permission) before the first destination byte, as parallel_spans did.
+            if(!write){read_admitted(address,buffer,size);return;}
+            // Writes: the spans of parallel_spans (same translations, permission/self-modifying-code checks and errors, all before
+            // any stripe, version or byte changes), but held without the span vector and its shared_ptr copies: the Lease pins the
+            // admitted map snapshot, whose Mapping owns the backing and is the BackingState parallel->backings names (publish_maps;
+            // entries are never replaced while a snapshot holds them), so versions are bumped through it without the hash lookup.
+            // Then, as before: all stripes, all version bumps (+ notifications), then the bytes span by span.
+            if(address>UINT32_MAX || size>UINT64_C(0x100000000)-address)throw std::runtime_error("guest transfer outside 32-bit space");
+            struct Part {std::uint8_t* pointer=nullptr;unsigned size=0;const ParallelMemory::Mapping* map=nullptr;};
+            SmallList<Part,4> parts;auto next=address;unsigned left=size;
+            while(left){const auto& map=translate_parallel(next,1,true);const auto& r=map.region;
+                const unsigned n=std::min<std::uint64_t>(left,r.bytes->size()-(next-r.base));
+                parts.push_back({r.bytes->data()+next-r.base,n,&map});next+=n;left-=n;}
+            LineLocks locks(*this,parts,0);
+            for(const auto& part:parts){
+                auto& versions=part.map->state->versions;const auto offset=static_cast<std::size_t>(part.pointer-part.map->region.bytes->data());
+                const auto first=offset/128,last=(offset+part.size-1)/128;
+                // A part none of whose lines a reservation ever tracked skips its bumps and its notification (HIRES9; 0 = always, A/B):
+                // `tracked` is sticky and set only by track_reservation, whose every caller holds the line's stripe - which this write
+                // holds (LineLocks above), so no line changes state during the write. The versions and the touch counters are read
+                // only by reservation tokens and the reservation-lost filter / watches (observe, ReservationWatch), all sampled for a
+                // tracked line after its tracking (an untracked scalar store skips them the same way, ScalarWrite + bump_scalar).
+                if(write_tracked_only){const auto* tracked=part.map->state->tracked.get();bool any=false;for(auto i=first;i<=last && !any;++i)any=tracked[i].load(std::memory_order_acquire);if(!any)continue;}
+                for(auto i=first;i<=last;++i){if(versions[i]==UINT32_MAX)throw std::runtime_error("guest write version overflow");++versions[i];}
+                parallel->notifications->notify(part.pointer,part.size);
+            }
+            for(const auto& part:parts){atomic_write(byte_pointer(part.map->region.bytes,part.pointer),buffer,part.size);buffer+=part.size;publish_cpu_write(part.pointer,part.size);}
             return;
         }
         if(address>UINT32_MAX || size>UINT64_C(0x100000000)-address)

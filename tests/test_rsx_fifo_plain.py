@@ -44,6 +44,10 @@ static Stream build(){
  // incrementing / non-incrementing multi-method packets across plain and special registers
  st.method(0x1efc,{3});st.method(0x1f00,{0x3f800000,0x40000000,0x40400000,0x40800000});
  st.method(0x1ef8,{0});st.method(0xb80,{0x11111111,0x22222222,0x33333333,0x44444444,0x55555555});   // program upload through the load position
+ // constant uploads as the game sends them (load position + one 4x4 matrix), non-incrementing, and at the last bank slot
+ st.method(0x1efc,{40});{std::vector<std::uint32_t> v;for(unsigned i=0;i<16;++i)v.push_back(0x3f000000u+i*0x1111u);
+  st.words.push_back((16u<<18)|0x1f00);for(auto x:v)st.words.push_back(x);}
+ st.method(0x1f40,{0xa1,0xa2,0xa3},false);st.method(0x1efc,{511});st.method(0x1f00,{0xb1,0xb2,0xb3,0xb4});
  st.method(0x300,{1,2,3,4,5,6,7,8},true);st.method(0x300,{9,10,11},false);st.method(0x400,{0xaaaa,0xbbbb,0xcccc},true);
  return st;
 }
@@ -73,6 +77,12 @@ static void equal_paths(){
  if(fast.program!=slow.program || fast.constants!=slow.constants)throw std::runtime_error("transform program/constants differ");
  if(fast.commands!=slow.commands || fast.zcull!=slow.zcull || fast.vertex_cache!=slow.vertex_cache)throw std::runtime_error("counters differ");
  if(fast.registers.size()<400)throw std::runtime_error("test stream wrote too few registers: "+std::to_string(fast.registers.size()));
+ // Independent expectation for the game-shaped constant uploads (load position * 4 + method slot; non-incrementing: last word wins).
+ for(unsigned i=0;i<16;++i)if(fast.constants[160+i]!=0x3f000000u+i*0x1111u)throw std::runtime_error("matrix constant "+std::to_string(i)+" wrong");
+ if(fast.constants[176]!=0xa3 || fast.constants[177]!=0)throw std::runtime_error("non-incrementing constant upload wrong");
+ for(unsigned i=0;i<4;++i)if(fast.constants[2044+i]!=0xb1+i)throw std::runtime_error("last-slot constant upload wrong");
+ {auto reg=[&](std::uint32_t r){for(const auto& [k,v]:fast.registers)if(k==r)return v;return 0u;};
+  if(reg(0x1f00)!=0xb1 || reg(0x1f3c)!=0x3f000000u+15*0x1111u || reg(0x1f40)!=0xa3)throw std::runtime_error("constant registers not stored in the bank");}
  std::printf("PASS fast path equals the chain: %zu registers, %llu packets, %u plain registers\n",fast.registers.size(),(unsigned long long)fast.commands,fast.plain);
 }
 static void plain_set(){
@@ -187,7 +197,100 @@ static void window_claimed_page(){
  if(services[0]!=1 || regs[0][3]!=0x13 || regs[0][4]==0x14)throw std::runtime_error("claimed page: the failure did not stop at the first packet on the claimed page");
  std::puts("PASS a claimed page inside the window range is serviced only by the per-word path (first coherence failure propagates)");
 }
-int main(){try{extracted_are_special();plain_set();equal_paths();window_release_into_fifo();window_callbacks();window_claimed_page();}catch(const std::exception& e){std::fprintf(stderr,"FAIL %s\n",e.what());return 1;}}
+// Paired header/value reads (rsx_fifo_pair): ~3000 plain packets of 1..9 words (incrementing and not) from an offset just below a
+// 4 KiB page end, consumed in PUT kicks at random word positions (often inside a packet). Independent expectation: every register
+// holds the last value the stream assigns it, GET stops at a packet boundary <= PUT, and (serial memory, filtered observer on the
+// word at PUT) the consumer never reads at or beyond PUT. Runs with pairing on and off, serial and as a renderer thread on
+// concurrent memory with the page broker (the game's configuration).
+static void paired_reads(){
+ std::vector<std::uint32_t> plain;for(std::uint32_t reg=0x200;reg<0x2000;reg+=4)if(rsx_plain_table()[reg>>2] && rsx_method_class(reg)==1)plain.push_back(reg);
+ auto all_plain=[&](std::uint32_t reg,unsigned n){for(unsigned i=0;i<n;++i)if(!rsx_plain_table()[(reg+4*i)>>2])return false;return true;};
+ for(int concurrent=0;concurrent<2;++concurrent)for(bool pair:{true,false}){
+  rsx_fifo_pair=pair;rsx_fifo_window=false;
+  PpuState s;setup_fifo(s);auto& gpu=s.rsx;auto& m=s.memory;gpu.device=0x70000000;
+  std::uint32_t r=4321;std::vector<std::uint32_t> words,starts;std::map<std::uint32_t,std::uint32_t> expect;
+  for(unsigned k=0;k<3000;++k){
+   const unsigned n=1+lcg(r)%9;const bool increment=n==1 || lcg(r)%4;std::uint32_t reg;
+   do{reg=plain[lcg(r)%plain.size()];}while(increment && !all_plain(reg,n));
+   starts.push_back(unsigned(words.size()));words.push_back((n<<18)|(increment?0u:0x40000000u)|reg);
+   for(unsigned i=0;i<n;++i){const auto v=lcg(r)|1u;words.push_back(v);expect[increment?reg+4*i:reg]=v;}
+  }
+  starts.push_back(unsigned(words.size()));words.push_back(0);   // a count-0 header ends the stream: its successor lies at PUT
+  const std::uint32_t base=0x20ff4;std::uint32_t at=base;for(auto w:words){put(s,at,w);at+=4;}
+  const std::uint32_t end=at;put(s,end,0xffffffffu);   // never a valid header: must not be consumed
+  std::vector<std::uint32_t> kicks;for(std::uint32_t p=base;p<end;){p+=4*(1+lcg(r)%23);kicks.push_back(std::min(p,end));}
+  m.store(gpu.dma+0x44,4,base);m.store(gpu.dma+0x40,4,base);
+  bool beyond=false;std::uint32_t watched=0;
+  auto host=[&](std::uint32_t offset){return host_byte(s,0x70000000+offset);};
+  auto consume=[&]{
+   for(const auto p:kicks){
+    if(!concurrent){watched=p;m.host_access_observer=[&](const void* q,std::uint64_t n,bool){const auto* w=host(watched);if(static_cast<const std::uint8_t*>(q)<w+4 && w<static_cast<const std::uint8_t*>(q)+n)beyond=true;};
+     m.host_access_observer.filtered=true;m.host_access_observer.watch(host(p),4);}
+    m.store(gpu.dma+0x40,4,p);(void)rsx_run_impl(s,1000000);
+    if(!concurrent)m.host_access_observer={};
+    const auto get=std::uint32_t(m.load(gpu.dma+0x44,4));
+    if(get>p || (get!=end && !std::binary_search(starts.begin(),starts.end(),(get-base)/4)) || p-get>=4*10)throw std::runtime_error("GET "+std::to_string(get)+" is not the last packet boundary before PUT "+std::to_string(p));
+   }};
+  if(!concurrent)consume();
+  else{m.enable_concurrency();m.enable_page_broker();std::exception_ptr error;
+   std::thread worker([&]{try{m.renderer_thread=std::this_thread::get_id();m.renderer_enabled=true;consume();}catch(...){error=std::current_exception();}});
+   worker.join();m.renderer_enabled=false;if(error)std::rethrow_exception(error);}
+  if(beyond)throw std::runtime_error(std::string("pair=")+(pair?"1":"0")+": the consumer read the word at PUT");
+  if(m.load(gpu.dma+0x44,4)!=end)throw std::runtime_error("consumer did not reach the end");
+  for(const auto& [reg,v]:expect)if(rsx_reg(gpu,reg)!=v)throw std::runtime_error(std::string("pair=")+(pair?"1":"0")+" concurrent="+std::to_string(concurrent)+": register "+std::to_string(reg)+" = "+std::to_string(rsx_reg(gpu,reg))+" expected "+std::to_string(v));
+ }
+ rsx_fifo_pair=true;rsx_fifo_window=true;
+ std::puts("PASS paired header/value reads: 3000 packets across page ends and mid-packet PUT kicks, serial and renderer thread, never past PUT");
+}
+// Packet validation: a packet whose words name an unsupported register stops before ANY of its words executes, with the
+// original message naming the first unsupported register; the packet before it executed, the one after it did not, GET stays
+// at the stopping packet. Cases: incrementing packet (unsupported third word), non-incrementing packet of an unsupported
+// register, incrementing packet running past 0xfffc. Independent expectation from rsx_method_class, not from the table scan.
+static void unsupported_in_packet(){
+ std::uint32_t reg=0;for(std::uint32_t r=0x200;r+8<0x10000;r+=4)if(rsx_method_class(r)==1 && rsx_method_class(r+4)==1 && !rsx_method_class(r+8) && rsx_plain_table()[r>>2] && rsx_plain_table()[(r+4)>>2]){reg=r;break;}
+ if(!reg)throw std::runtime_error("test: no plain pair followed by an unsupported register");
+ std::uint32_t lone=0;for(std::uint32_t r=0x200;r<0x10000;r+=4)if(!rsx_method_class(r)){lone=r;break;}
+ const std::uint32_t top=0xfff0;   // five words 0xfff0..0x10000: the packet runs past the last 16-bit method
+ struct Case {std::uint32_t method;unsigned count;bool increment;} cases[]={{reg,3,true},{lone,2,false},{top,5,true}};
+ for(const auto& c:cases){
+  std::uint32_t stop=UINT32_MAX;for(unsigned i=0;i<c.count && stop==UINT32_MAX;++i){const auto r=c.method+(c.increment?4*i:0);if(!rsx_method_class(r))stop=r;}
+  if(stop==UINT32_MAX)throw std::runtime_error("test: case without an unsupported register");
+  PpuState s;setup_fifo(s);auto& gpu=s.rsx;gpu.device=0x70000000;
+  std::vector<std::uint32_t> w{(1u<<18)|0x300,0x1111,(c.count<<18)|(c.increment?0u:0x40000000u)|c.method};for(unsigned i=0;i<c.count;++i)w.push_back(0xabc0+i);w.push_back((1u<<18)|0x304);w.push_back(0x2222);
+  std::uint32_t at=BASE;for(auto x:w){put(s,at,x);at+=4;}
+  s.memory.store(gpu.dma+0x44,4,BASE);s.memory.store(gpu.dma+0x40,4,at);
+  std::string error;try{(void)rsx_run_impl(s,1000000);}catch(const std::runtime_error& e){error=e.what();}
+  const auto expected="unimplemented native RSX method "+std::to_string(stop)+" ";
+  if(error.rfind(expected,0)!=0)throw std::runtime_error("unsupported packet: error '"+error+"', expected '"+expected+"...'");
+  if(rsx_reg(gpu,0x300)!=0x1111 || rsx_reg(gpu,0x304)==0x2222)throw std::runtime_error("unsupported packet: neighbours executed wrongly");
+  for(unsigned i=0;i<c.count;++i){const auto r=c.method+(c.increment?4*i:0);if(r<0x10000 && rsx_method_class(r) && rsx_reg(gpu,r)==0xabc0+i)throw std::runtime_error("unsupported packet: a word of the stopping packet executed");}
+  if(s.memory.load(gpu.dma+0x44,4)!=BASE+8)throw std::runtime_error("unsupported packet: GET is not at the stopping packet");
+ }
+ std::puts("PASS a packet naming an unsupported register stops before any of its words executes (incrementing, non-incrementing, past 0xfffc)");
+}
+// GET publication points: GET is stored before every action method except BEGIN with a primitive (0x1808 != 0) and on return.
+// A filtered observer on the GET word records, at each GET store, which of the plain registers 0x300..0x30c the consumer has
+// executed. Independent expectation from the stream order: before INVALIDATE_L2 {0x300,0x304}, before END {.., 0x308}, at return
+// all four (no store before BEGIN). Serial memory, window on and off.
+static void get_publication(){
+ for(bool windowed:{false,true}){
+  rsx_fifo_window=windowed;
+  PpuState s;setup_fifo(s);auto& gpu=s.rsx;gpu.device=0x70000000;gpu.draw.primitive=0;gpu.draw.ranges.clear();   // END without ranges: no draw
+  Stream st;st.method(0x300,{1});st.method(0x1808,{5});st.method(0x304,{2});st.method(0x1fd8,{0});st.method(0x308,{3});st.method(0x1808,{0});st.method(0x30c,{4});
+  std::uint32_t at=BASE;for(auto w:st.words){put(s,at,w);at+=4;}
+  s.memory.store(gpu.dma+0x44,4,BASE);s.memory.store(gpu.dma+0x40,4,at);
+  std::vector<unsigned> seen;
+  s.memory.host_access_observer=[&](const void*,std::uint64_t,bool write){if(!write)return;unsigned mask=0;
+   for(unsigned i=0;i<4;++i){mask|=unsigned(std::as_const(gpu).registers.count(0x300+4*i))<<i;}seen.push_back(mask);};
+  s.memory.host_access_observer.filtered=true;s.memory.host_access_observer.watch(host_byte(s,gpu.dma+0x44),4);
+  (void)rsx_run_impl(s,1000000);s.memory.host_access_observer={};
+  if(s.memory.load(gpu.dma+0x44,4)!=at)throw std::runtime_error("GET publication: consumer did not reach PUT");
+  if(seen!=std::vector<unsigned>{3,7,15}){std::string got;for(auto v:seen)got+=std::to_string(v)+" ";throw std::runtime_error("GET publication masks "+got+"(expected 3 7 15)");}
+ }
+ rsx_fifo_window=true;
+ std::puts("PASS GET is published before every action except BEGIN, and on return");
+}
+int main(){try{unsupported_in_packet();extracted_are_special();plain_set();equal_paths();window_release_into_fifo();window_callbacks();window_claimed_page();paired_reads();get_publication();}catch(const std::exception& e){std::fprintf(stderr,"FAIL %s\n",e.what());return 1;}}
 '''
 
 
@@ -233,7 +336,7 @@ class RsxFifoPlainTests(unittest.TestCase):
             env = dict(os.environ, ANYPS3_VK_DEVICE='lavapipe', VK_DRIVER_FILES='/usr/share/vulkan/icd.d/lvp_icd.json')
             result = subprocess.run([str(root / 'test')], env=env, capture_output=True, text=True, timeout=300)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            self.assertEqual(result.stdout.count('PASS '), 6, result.stdout)
+            self.assertEqual(result.stdout.count('PASS '), 9, result.stdout)
 
 
 if __name__ == '__main__':

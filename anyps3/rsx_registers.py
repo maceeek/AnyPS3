@@ -10,9 +10,18 @@ template<class T,std::size_t N> class RsxShaderArray {
     mutable std::uint64_t generation=1;
     bool exposed=false;
 public:
+    // Explicit writes also bump the version of their 128-element chunk, so a consumer can skip comparing unchanged
+    // chunks. Valid only while the array was never mutably borrowed (exposed()) and for the same identity (a copy or
+    // assignment gets a new one).
+    static constexpr std::size_t chunk=128,chunk_count=(N+chunk-1)/chunk;
+private:
+    std::array<std::uint64_t,chunk_count> chunk_versions{};
+    static std::uint64_t next_identity(){static std::atomic<std::uint64_t> next{1};return next.fetch_add(1,std::memory_order_relaxed);}
+public:
+    std::uint64_t identity=next_identity();
     RsxShaderArray()=default;
     RsxShaderArray(const RsxShaderArray& other):values(other.values){}
-    RsxShaderArray& operator=(const RsxShaderArray& other){if(this!=&other){values=other.values;++generation;}return *this;}
+    RsxShaderArray& operator=(const RsxShaderArray& other){if(this!=&other){values=other.values;++generation;identity=next_identity();}return *this;}
     constexpr std::size_t size()const{return N;}
     const T* data()const{return values.data();}
     T* data(){exposed=true;return values.data();}
@@ -20,11 +29,13 @@ public:
     T& operator[](std::size_t i){exposed=true;return values[i];}
     auto begin()const{return values.begin();}auto end()const{return values.end();}
     auto begin(){exposed=true;return values.begin();}auto end(){exposed=true;return values.end();}
-    void write(std::size_t i,T value){if(values.at(i)!=value){values[i]=value;++generation;}}
+    void write(std::size_t i,T value){if(values.at(i)!=value){values[i]=value;++generation;++chunk_versions[i/chunk];}}
     std::uint64_t version()const{
         if(exposed && std::memcmp(observed.data(),values.data(),sizeof(values))){observed=values;++generation;}
         return generation;
     }
+    bool borrowed()const{return exposed;}
+    std::uint64_t chunk_version(std::size_t c)const{return chunk_versions[c];}
 };
 
 struct RsxRegisters {
@@ -51,13 +62,17 @@ struct RsxRegisters {
         if(this!=&other){values=other.values;written=other.written;count_=other.count_;epochs=other.epochs;exposed=other.exposed;identity=next_identity();}
         return *this;
     }
+    // The transform-constant window (0x1efc load position, 0x1f00..0x1f7c constant data words) is in no derived register
+    // block: rsxgraphics::Session::refresh_registers stores 0 for these words (no shader reads them), so its stores keep the
+    // block epoch. Every other consumer reads the bank's values directly.
+    static constexpr bool epoch_tracked(unsigned slot){return slot<0x1efc/4 || slot>0x1f7c/4;}
     // Tracked write (the FIFO path): no borrow escapes, the block epoch changes
-    // exactly when presence or value changes.
-    void write(std::uint32_t r,std::uint32_t value){
+    // exactly when presence or value of a register outside the constant window changes.
+    [[gnu::always_inline]] void write(std::uint32_t r,std::uint32_t value){   // inline at the FIFO store sites (hot)
         if(r>=0x10000 || (r&3))throw std::runtime_error("invalid RSX register bank address");
         const unsigned slot=r/4;auto& mask=written[slot/64];const auto bit=UINT64_C(1)<<(slot%64);
-        if(!(mask&bit)){mask|=bit;values[slot]={r,value};++count_;++epochs[slot/64];}
-        else if(values[slot].second!=value){values[slot].second=value;++epochs[slot/64];}
+        if(!(mask&bit)){mask|=bit;values[slot]={r,value};++count_;if(epoch_tracked(slot))++epochs[slot/64];}
+        else if(values[slot].second!=value){values[slot].second=value;if(epoch_tracked(slot))++epochs[slot/64];}
     }
     unsigned next(unsigned i)const{
         if(i>=slots)return slots;
@@ -79,6 +94,8 @@ struct RsxRegisters {
     RsxRegisters& operator=(std::initializer_list<value_type> init){clear();for(const auto& p:init)(*this)[p.first]=p.second;return *this;}
     std::size_t size()const{return count_;}bool empty()const{return !count_;}
     bool count(std::uint32_t r)const{return r<0x10000 && !(r&3) && (written[r/256]&(UINT64_C(1)<<((r/4)%64)));}
+    // The value of a present register, else fallback: exactly find(r)==end()?fallback:find(r)->second (const, no borrow).
+    [[gnu::always_inline]] std::uint32_t value_or(std::uint32_t r,std::uint32_t fallback)const{return count(r)?values[r/4].second:fallback;}
     // Mutable iteration can reach every slot.
     iterator begin(){expose_all();return {this,next(0)};}iterator end(){return {this,slots};}
     const_iterator begin()const{return {this,next(0)};}const_iterator end()const{return {this,slots};}

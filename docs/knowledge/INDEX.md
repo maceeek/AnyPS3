@@ -1,56 +1,66 @@
 # AnyPS3 project knowledge base
 
-This is the version-controlled entry point for the next model, a new run and a human. Read the goal state and runtime evidence in [CURRENT.md](CURRENT.md), the writing rules in [WORKFLOW.md](WORKFLOW.md), the handoff in [HANDOFF.md](HANDOFF.md). A record in the documentation does not, by itself, verify the emulator's function.
+Entry point for the next model, a new run or a human. A record here does not, by itself, verify the emulator's function.
 
-Latest state and handoff: the top sections of [CURRENT.md](CURRENT.md) and [HANDOFF.md](HANDOFF.md). Sections older than
-2026-10-21 moved to [history/](history/) on 2026-10-25.
+## Reading order
 
-## Records, newest first
+1. The root `AGENTS.md` (rules, acceptance, audio rule).
+2. [CURRENT.md](CURRENT.md): the goal, the last PC measurement, the cloud changes since, the A/B switches, **the PC
+   measurement plan**, refuted levers and standing decisions. It is the whole current state.
+3. [HANDOFF.md](HANDOFF.md): branches, live processes, how a cloud round works and what the container cannot test.
+4. A record below only when working on its area.
 
-Each record describes its own snapshot, not the current runtime.
+## Records (newest first; each describes its own snapshot)
 
-- 2026-10-25 [higher-resolution performance milestone](experiments/2026-10-25-scale2-walking.md): GPU depth copies,
-  bounded history/source caches and sampler shader reuse; original 1440p walking evidence, partial-suite closeout and
-  remaining 60-FPS/zero-stutter acceptance limits.
-- 2026-10-23 [FIX7 user-reported problems](experiments/2026-10-23-fix7.md): START crash, GUI settings, skip intro,
-  save-menu audio, two windows, stutter, RPCS3 patches (not adopted).
-- 2026-10-23 [cloud follow-up](experiments/2026-10-23-cloud-render-scale.md): visual history through alias merge/rebind and
-  typeless depth, counter fix; lavapipe unit tests only, no game run.
-- 2026-10-23 [resolution scaling milestone](experiments/2026-10-23-render-scale.md): 1440p 45.52 FPS, GUI resolution
-  selection, batched visual draws, matched native/scaled captures; quality-loss paths and stable 60 FPS open.
-- 2026-10-21 wave 6: build 706 holds the 60 Hz cap at ~59.7 FPS with ~3–4 ms headroom
-  ([FAST2 record, wave 6](experiments/2026-10-20-fast2-wave.md#wave-6-results-2026-10-21));
-  [GUI-first quickstart and desktop installer](experiments/2026-10-21-gui-installer.md).
-- 2026-10-20 [manager and Qt wrapper](experiments/2026-10-20-manager-gui.md) and [usage](../manager/README.md);
-  [sandbox analysis and offline wait attribution](experiments/2026-10-20-sandbox-analysis.md) (603a 54.045 FPS);
-  [FAST2 wave](experiments/2026-10-20-fast2-wave.md) (472: 46.68 FPS).
-- 2026-10-19 [FAST wave](experiments/2026-10-19-fast-wave.md) (default 14.25 FPS),
-  [cloud optimization round](experiments/2026-10-19-cloud-optimization.md) (460: 22.59 FPS),
-  [results 379–380](experiments/2026-10-19-performance-379.md),
-  [web research of real PS3 recomp projects](experiments/2026-10-19-web-ps3-recomp.md).
-- Older: [../menu-progress.md](../menu-progress.md) and the `experiments/` directory.
+- 2026-11-01 [cloud HIRES9](experiments/2026-11-01-cloud-hires9.md): PPU inline guest accesses through one pointer, MOVBE,
+  budget-free block heads (memory kernels −14..−17 % Ir); SPU job remainder: shared chained-call scope, DMA copy, untracked DMA
+  writes, SHUFB lanes (−9.8 % native); full suite.
+- 2026-11-01 [cloud HIRES8](experiments/2026-11-01-cloud-hires8.md): generated SPU code without stack homes, self loops in host
+  locals (job −39 % native); PPU page jump tables, host-call return prediction.
+- 2026-11-01 [cloud HIRES7](experiments/2026-11-01-cloud-hires7.md): SPU job DMA path, FP underflow lanes, BRSL chaining;
+  RSX worker work moved onto the draw recorder; the prepare-stage design; full suite.
+- 2026-10-31 [cloud HIRES6](experiments/2026-10-31-cloud-hires6.md): worker draw unit −9.9 % (game-shaped bench mode), GPU
+  barrier cuts 17 → 10, GPU mark attribution, visual 2× MSAA load path.
+- 2026-10-31 [cloud HIRES5](experiments/2026-10-31-cloud-hires5.md): geometry reuse under CPU-dirty watches, state path
+  (−24 % worker Ir per indexed draw).
+- 2026-10-30 [cloud HIRES4](experiments/2026-10-30-cloud-hires4.md): FIFO decode, renderer-thread guest-memory admission
+  (−37 % worker Ir per frame).
+- 2026-10-28 [cloud HIRES3](experiments/2026-10-28-cloud-hires3.md): device-memory pool, DrawJob pointers, report floors,
+  typed-RTT literals, the FIFO bench.
+- 2026-10-25/27 [HIRES and HIRES2 waves](experiments/2026-10-25-hires-wave.md): **the last game measurement on the PC**
+  (1440p walking 1031: 39.91 / 40.58 FPS), GPU split, stutter classes, blockers.
 
-## Orientation
+## Topic pages (stable knowledge)
 
-| Area | Overview | What to look for |
+| Area | Page | What to look for |
 | --- | --- | --- |
 | CELL and MFC | [CELL.md](CELL.md) | local vs main memory, DMA, synchronization, public manuals |
 | SPU | [SPU.md](SPU.md) | ISA, channels, mailbox, tag completion, instruction reference |
 | PPU | [PPU.md](PPU.md) | registers, ABI/OPD, PowerPC reference, HLE boundaries |
 | RSX | [RSX.md](RSX.md) | FIFO, methods, draw, shaders, surface/flip, NV40/RSX differences |
 | Source provenance | [SOURCES.md](SOURCES.md) | actual paths, revisions, manual manifest, limitations |
+| Writing rules | [WORKFLOW.md](WORKFLOW.md) | status labels, evidence, durable handoff |
 
-## Quick start for the next run
+Code-level overview: [../architecture.md](../architecture.md) (RSX/Vulkan structure in [RSX.md](RSX.md));
+GUI/manager: [../manager/README.md](../manager/README.md), [../manager/DUALSENSE.md](../manager/DUALSENSE.md); brief history:
+[../menu-progress.md](../menu-progress.md).
 
-1. Read the root `AGENTS.md`, this page and CURRENT. Respect the user's latest instructions and the actual state of the working tree.
-2. Open [../menu-progress.md](../menu-progress.md) for the current ACIT overview and the referenced logs. Verify aging information in the last real run; do not treat a run number from another model as automatically current.
-3. Pick one specific open question. Before making a change, write down the hypothesis and the evidence that will confirm or refute it.
-4. After verification, update CURRENT and the relevant topic page or a separate record. Write down the command, source state, profile and artifact paths.
+## Archive
+
+[../archive/](../archive/README.md) holds everything superseded on 2026-11-01:
+- the full progress log;
+- the CURRENT/HANDOFF history;
+- the records of 2026-10-14 … 2026-10-25 (bring-up, menu, level, FAST/FAST2 waves, 60 FPS at native resolution, resolution
+  scaling, the 2026-10-25 walking work);
+- the old milestone pages;
+- the manager's verification evidence.
+
+Read it only for provenance of a specific older fact.
 
 ## Searching
 
-From the project root: `rg -n 'tag|mailbox|DMA' docs/knowledge local/reference/cell-docs/md`.
-For an exact instruction use `rg -n 'Shuffle Bytes|Read Channel' local/reference/cell-docs/md`.
-The manuals' MD has a `PDF page N` heading for each physical page; verify graphical tables and bit diagrams in the PDF.
-
-PDFs and derived MD belong in the local library `local/reference/cell-docs/`; their existence and version are confirmed by the manifest and a check of the cover page. Local reference clones are not automatically part of the version-controlled knowledge base.
+From the project root: `rg -n 'tag|mailbox|DMA' docs/knowledge local/reference/cell-docs/md` (the archive is outside
+`docs/knowledge`, so it is not searched by default). For an exact instruction: `rg -n 'Shuffle Bytes|Read Channel'
+local/reference/cell-docs/md`. The manuals' MD has a `PDF page N` heading for each physical page; verify graphical tables and
+bit diagrams in the PDF. PDFs and derived MD live in the PC's local library `local/reference/cell-docs/` (manifest with
+SHA-256); local reference clones are not part of the version-controlled knowledge base.

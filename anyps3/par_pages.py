@@ -6,7 +6,8 @@ still uses the uniform atomic word ABI; page ownership is a separate lifetime.
 from .par_gpu import MEMBERS as GPU_COMMIT_MEMBERS
 
 TYPES = r'''
-    using CpuPageList=SmallList<std::uintptr_t>;
+    // 8 inline entries: one MFC transfer (<= 16 KiB) spans at most 5 host pages, so no DMA command allocates its page set.
+    using CpuPageList=SmallList<std::uintptr_t,8>;
     using CpuSpanList=SmallList<HostSpan,2>;
     struct PageBroker {
         static constexpr std::uint32_t claimed=UINT32_C(0x80000000);
@@ -54,12 +55,19 @@ TYPES = r'''
         [[gnu::always_inline]] Cell* cell(std::uintptr_t page)const{
             // Cache only positive leaves, so publication never leaves a stale
             // negative hint. Identity prevents reuse after broker destruction.
-            struct Cache {std::uint64_t identity=0;std::uintptr_t block=0;Node* leaf=nullptr;};thread_local Cache cache;
-            if(cache.identity!=identity || cache.block!=page>>9){auto* node=root.get();
-                for(int shift=45;node && shift>=9;shift-=9)node=node->children[(page>>shift)&511].load(std::memory_order_acquire);
-                if(!node)return nullptr;
-                cache={identity,page>>9,node};}
-            return &cache.leaf->cells[page&511];
+            // Four fully associative entries (2 MiB host blocks, round-robin refill): alternating pages of different backings
+            // (the RSX FIFO page and its GET/control page, a draw's buffers) no longer evict each other on every access (one
+            // entry walked 5 levels per GET store). A leaf, once linked, stays linked to the same block for the broker's lifetime.
+            // Identity 0 is never a broker's, so an empty entry never matches.
+            struct Cache {std::uint64_t identity=0;std::uintptr_t block=0;Node* leaf=nullptr;};
+            struct Caches {std::array<Cache,4> entry{};unsigned next=0;};thread_local Caches caches;
+            const auto block=page>>9;
+            for(const auto& cache:caches.entry)if(cache.identity==identity && cache.block==block)return &cache.leaf->cells[page&511];
+            auto* node=root.get();
+            for(int shift=45;node && shift>=9;shift-=9)node=node->children[(page>>shift)&511].load(std::memory_order_acquire);
+            if(!node)return nullptr;
+            caches.entry[caches.next++&3]={identity,block,node};
+            return &node->cells[page&511];
         }
         bool owner_unclaimed(const void* pointer,unsigned size){
             if(stopped.load(std::memory_order_acquire))return false;
@@ -72,7 +80,8 @@ TYPES = r'''
             for(const auto& span:spans){const auto at=reinterpret_cast<std::uintptr_t>(span.pointer),base=reinterpret_cast<std::uintptr_t>(span.pin->data());
                 if(at<base || at-base>span.pin->size() || span.size>span.pin->size()-(at-base))throw std::runtime_error("broker span outside backing");
                 if(span.size)for(auto page=at>>12;page<=(at+span.size-1)>>12;++page)result.push_back(page);}
-            if(result.size()>1)result.unique_sort();
+            // One span yields ascending distinct pages already (the sort+unique would be the identity).
+            if(result.size()>1 && spans.size()>1)result.unique_sort();
             return result;
         }
         static std::vector<std::uintptr_t> keys(const std::vector<HostSpan>& spans){auto list=cpu_keys(spans);return {list.begin(),list.end()};}
@@ -88,7 +97,7 @@ TYPES = r'''
             if(!(old&~claimed))std::terminate();
             if(old==(claimed|1u))broker.signal_cpu();
         }
-        template<class Pages> bool try_cpu(const Pages& pages,SmallList<Cell*>& admitted){
+        template<class Pages> bool try_cpu(const Pages& pages,SmallList<Cell*,8>& admitted){
             check_fast();
             // Resolve/allocate the complete small-buffer list before admission.
             // An allocation or invalid page cannot strand an acquired prefix.
@@ -103,7 +112,7 @@ TYPES = r'''
                 check_fast();return true;
             }catch(...){for(unsigned i=0;i<acquired;++i)retire(*admitted[i],*this);admitted={};throw;}
         }
-        void release_cpu(const SmallList<Cell*>& admitted)noexcept{for(auto* entry:admitted)retire(*entry,*this);}
+        void release_cpu(const SmallList<Cell*,8>& admitted)noexcept{for(auto* entry:admitted)retire(*entry,*this);}
         void wait_change(bool owner=false){
             std::unique_lock<std::mutex> lock(mutex);check();++waiters;const auto seen=generation.load(std::memory_order_acquire);lock.unlock();
             try{if(owner && pump)pump();lock.lock();check();
@@ -143,7 +152,7 @@ TYPES = r'''
         RawPermit raw(*this);page_broker.map_owner=parallel->owner;page_broker.enabled.store(true,std::memory_order_release);
     }
     struct CpuPages {
-        PageBroker& broker;CpuPageList pages;SmallList<PageBroker::Cell*> cells;bool admitted=false;
+        PageBroker& broker;CpuPageList pages;SmallList<PageBroker::Cell*,8> cells;bool admitted=false;
         template<class Spans> CpuPages(PageBroker& b,const Spans& spans):broker(b),pages(PageBroker::cpu_keys(spans)){admitted=broker.try_cpu(pages,cells);}
         ~CpuPages(){if(admitted)broker.release_cpu(cells);}
         CpuPages(const CpuPages&)=delete;
@@ -156,7 +165,8 @@ TYPES = r'''
         GpuPages()=default;
         GpuPages(GuestMemory& m,std::vector<HostSpan> requested):spans(std::move(requested)){
             if(!m.page_broker.enabled.load())throw std::runtime_error("enable page broker before ownership acquisition");
-            auto& local=m.local_state();if(local.leases || local.raw)throw std::runtime_error("page ownership inside CPU/raw admission");
+            // A renderer page cursor never spans a claim (broker quiesce would wait for its own hazard).
+            auto& local=m.local_state();if(local.cursor_active)m.cursor_revoke(local);if(local.leases || local.raw)throw std::runtime_error("page ownership inside CPU/raw admission");
             // Only map owner may translate and pin new claims in this phase.
             if(!m.memory_owner() && !(m.renderer_owner() && (local.fault_claim || local.renderer_claim)))throw std::runtime_error("foreign page ownership requires map owner pin transaction");
             memory=&m;broker=&m.page_broker;GuestMemory::stat_gpu_claims.fetch_add(1,std::memory_order_relaxed);pages=PageBroker::keys(spans);token=broker->acquire(pages,m.renderer_owner() && (local.fault_claim || local.renderer_claim),&m.metadata_mutex.value);

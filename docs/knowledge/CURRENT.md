@@ -1,227 +1,286 @@
-# Current state and goal
+# Current state — 2026-11-01
 
-## HIRES2 wave — 2026-10-27 evening (goal NOT reached; branch `claude/hires2-wave`)
+This page is the whole current state. It keeps the last game measurement on the PC (HIRES2, 2026-10-27) and the cloud
+rounds since (HIRES3–HIRES9, source changes measured only synthetically). Everything older is in [../archive/](../archive/README.md)
+and is not needed for orientation.
 
-1440p walking: build 1031 holds **39.91 / 40.58 FPS** vs 960 (= main f92681c) 37.27 / 35.89 (QUIET, alternating), GPU
-15.4 vs 19.0 ms/frame. Scale 1 walks at ~44 FPS; standing still is 60 at scale 1. **Remaining blockers (verified):**
-(1) CPU critical path in heavy views (~2000 draws): RSX worker ~20–22 ms (≈2.9 ms + 9.1 µs/draw, flat profile) and
-the main guest thread ~14.8 ms, of which ~3.9 ms is spin-waiting for SPU jobs; (2) GPU at scale 2 ~15.4 ms (visual
-draws 7.3, second sample plane 2.3, native pass begins 1.0, copies 2.3). Merged but unmeasured in the game: fast RGBA8
-visual RTT + barriers without HOST bits (1034: about level with 1031 in one pair), native-switch replay change, visual 2×
-MSAA (default off; build 1035 compiled, not measured), unrolled atomic copy (1002: one disturbed-looking slower run —
-re-measure before merging to main).
-Record, tables and next actions: [HIRES2 wave](experiments/2026-10-25-hires-wave.md#hires2-wave-result-2026-10-27-evening-coordinator-claude-opus-55-agents-opus-55-high-goal-not-reached).
+## Goal and acceptance
 
-## HIRES wave: true 1440p at a stable 60 FPS — 2026-10-25 evening (goal NOT reached)
+- **Goal (user, since 2026-10-25):** the original ACIT level at true 1440p (`ANYPS3_RENDER_SCALE=2`) at a stable 60 FPS, without
+  stutter, playable with a physical gamepad.
+- **Acceptance (root `AGENTS.md`):** two alternating QUIET runs of the same build, each mean >= 59.7 FPS, >= 99 % of flips
+  within one vblank, main thread and RSX worker each <= ~13 ms per frame, correct level image, no STOP.
+- **Not verified:** stable 60 FPS at 1440p; physical gamepad acceptance (virtual and uinput pads are verified).
 
-Baseline 882 walking (QUIET): 1440p 33.15 FPS / rsx_worker 16.1 ms; 720p 44.68 FPS / 10.6 ms — the RSX worker's
-per-draw CPU cost (~11.5 µs) is the critical path, and the 1440p image was derived from native pixels (MSAA sample-grid
-layout bug → zig-zag comb). Fixes from three agents (visual MSAA layout, per-draw CPU caches, Vulkan pair/shader/
-framebuffer costs) are merged and tested on branch `hires/integ`; **no game measurement of them yet**. Integration build
-960 + run 960q1 were queued detached at session end. Record and next actions:
-[HIRES wave](experiments/2026-10-25-hires-wave.md).
+## Where the game is (verified on the PC)
 
-## Performance milestone closed — 2026-10-25
+Boot, videos (START skips), `front_end` loading, title screen, the **original main menu** (~40 s with the fast menu), LOAD
+with the virtual pad and the first level `great_clock_a`, all through static PPU/SPU translation and the own Vulkan RSX
+(PC: Ryzen 9 9900X, RTX 4070 SUPER, Linux).
+- **720p (scale 1):** standing still holds the 60 Hz cap. Build 706 (2026-10-21) did 59.71 / 59.69 FPS, ~99.8 % one-vblank, main ~11 ms
+  and worker ~12 ms. Walking in heavy views misses (HIRES2: ~44–46 FPS).
+- **1440p (scale 2) walking:** build 1031 did **39.91 / 40.58 FPS** (HIRES2, below). The image is the game's 960×704 scene rendered at
+  1920×1408 and resampled 4:3 horizontally, with no comb and no block replication (verified over whole frames). Full 2560-column
+  detail would need a horizontal scale of 8/3, which is **a user decision, open**.
 
-The user cleared the goal and requested closing the milestones and committing. Root matches tested snapshot 882 (348 Python files; `local/ratchet/integration-manifest-882.json`). This is an implementation/evidence checkpoint: **higher-resolution 60 FPS and zero movement shader stutter are not achieved**.
+## Last PC measurement — HIRES2, 2026-10-27 (verified; main 95756e2 = PR #14)
 
-Implemented: exact SPIR-V 1.0/1.3 cache validation; bounded blit/history/source reuse; coherent GPU depth-byte copies; reuse of shaders across implicit filter/mip changes and resident wrap/coordinate changes. Native pixel/coherence and actual Vulkan tests pass; shader identity reuse is also visible in the original game. 880's warmed CPU-blit/readback cost drops to 0.689 s / 84 surfaces versus 13.872 s / 1890 in the earlier diagnostic, without a controlled FPS claim.
+Decision-grade, QUIET, alternating, scale-2 timed virtual-pad walk, no STOP, original PT_LOAD exact:
 
-Latest real run `882residentdiag1`: original level at 2560x1440, 31.154 FPS over the whole walk, 32.957% one-vblank, worst 1149.310 ms; exact PT_LOAD/no STOP. Warmed window has zero GLSL compiles, but whole movement contains five first-use compiles and expensive pipeline creation. Image artifacts and physical-gamepad acceptance remain open. Dynamic sampler GPU cost needs quiet same-binary comparison.
-
-Full integrated-881 suite was stopped on closeout: 82/210 modules, 603/1071 tests completed, four skips, no failures in completed modules, no source drift. This is **not a full suite pass** and does not cover the added 882 change; its focused/broader Vulkan tests are recorded separately. Build 883 is a verified, unintegrated metadata-only texture-eviction diagnostic, with no game run.
-
-All builds, game runs and the test scope started for this work are finished or stopped; no assigned subagents remain. If resumed: complete final-source regression validation, repeat quiet 882 static/dynamic comparisons, then test the texture-eviction hypothesis with 883. [Full evidence, commands and limitations](experiments/2026-10-25-scale2-walking.md).
-
-## FIX7: user-reported playability problems — 2026-10-23 (branch `claude/fix7`)
-
-The user played through the GUI (release of 2026-10-21) and reported nine problems. Record:
-[FIX7](experiments/2026-10-23-fix7.md).
-
-- **START in game:** timed `sys_semaphore_wait` + saturating LV2 deadlines (4d8b6a9). Build 810: the semaphore STOP is
-  gone; the pause menu's blur draws then stop on `sequential_color_texture_feedback`. With the diagnostic CPU fallback
-  (810b) the original pause menu renders and unpauses. GPU snapshot fix on `fast2/fix7-pause` 0f7addf — **unbuilt**.
-- **GUI:** worker toggles removed (always on); `host_drain`/`flip_early` toggles removed (the GUI had been disabling
-  both); unimplemented settings hidden; clear key-download result; **Skip intro** (`ANYPS3_PAD_INJECT`, default off,
-  no game run yet).
-- **Two windows / save-menu audio:** fixed and merged (d6647f6); run 820a verified one Vulkan window, menu ~60 FPS and
-  no silent audio periods with the savedata dialogs open.
-- **Stutter:** CPU scaled blits dominate; `fast2/fix7-stutter` (blit planner + shader cache cap) — **unbuilt**.
-- **RPCS3 patches:** only "Unlock FPS" exists for 01.00; user decided to keep the no-patch rule.
-
-**First next action:** build `fast2/fix7-pause` (+ `fast2/fix7-stutter`) on top of `claude/fix7`, run the pause probe
-(`local/ratchet/work/fix7-pause/pause_probe.sh`) and a walking run (`local/ratchet/work/fix7-stutter/tools/walk.sh`).
-
-## Cloud follow-up (no game, no GPU) — 2026-10-23
-
-Branch `claude/jolly-pasteur-z3etd7` (base `8c66615`), source-level only, verified with
-native Vulkan unit tests on lavapipe + validation; **no game build, run or FPS figure**:
-
-- Alias merge / equal-footprint rebind now copy whole-texel subpixel blocks from the old
-  visual companion instead of nearest-upscaling native pixels (native path untouched;
-  unmapped texels keep native reconstruction; fully mapped transitions skip the sync;
-  `ANYPS3_RENDER_SCALE_HISTORY=0` disables it for A/B; ~1 ms host cost per plan-cache miss).
-- Typeless D24S8-as-ARGB8 RTT keeps visual depth/stencil subpixels (one-word aspects).
-- `PERF RENDER_SCALE` queue/drain counters are run totals (were printed as 0); new
-  `history_copies`/`history_texels`.
-- A visual draw reuses its native draw's pipeline (one lookup per pair; saving unmeasured).
-
-First next action on the real PC: new build from this branch, quiet scale-2 run (compare
-803: 45.52 FPS), same-flip native/visual capture. Stable 60 FPS at scale 2 and the
-final-image dependency chain remain unverified.
-[Record](experiments/2026-10-23-cloud-render-scale.md).
-
-## Resolution-scaling milestone — 2026-10-23
-
-Implemented on `feat/render-scale`, based on current `origin/main`:
-
-- Native guest rendering plus visual companions at integer scales 1–4; typed
-  render-to-texture sampling, capture and presentation use the scaled images.
-- Visual draw batching reduces render-pass switching. Quiet original Great Clock
-  run803 at2560×1440 averaged **45.52FPS**, with recorder enabled. Stable60FPS
-  and full-scene high-resolution detail remain unverified.
-- GUI **Video → Internal rendering resolution** persists global/title overrides
-  and passes the typed value to supported builds. Installed release unchanged.
-- `scripts/ratchet_fast_menu.py` automates START through the original input path.
-  This accelerates boot navigation; a complete intro bypass is not implemented.
-- Same-flip native/visual captures confirm a modest visual improvement. Known
-  merge/rebind and unsupported RTT paths still reconstruct native detail. Their
-  exact contribution to the final world image remains untraced.
-
-Validation: complete802 runtime suite reconciled to925 passes+7 skips after one
-unchanged concurrency fixture passed its uncontended rerun; the original failed
-report is retained. Later changes have focused tests. After rebasing, all GUI and
-manager tests passed (146 passes,4 skips). Final review has no remaining confirmed
-blocker. Original game bytes are unchanged; physical gamepad was not tested.
-
-Final build805 reached the original Great Clock with matching native/scaled
-captures, exact original PT_LOAD bytes and no guest STOP. No runtime jobs remain
-active. User requested completion and branch publication of these milestones. Next
-rendering investigation: trace the final scene's image dependencies and preserve
-visual history through the implicated alias/conversion; then measure quiet FPS.
-[Evidence and exact scope](experiments/2026-10-23-render-scale.md).
-
-
-## Wave 6 result — 2026-10-21 ~17:10 (Opus 5.5 coordinator; Opus 5.5 medium agents; gpt-6.1-sol / gpt-6-astra)
-
-**State: the original level holds the 60 Hz VSYNC cap with ~3–4 ms headroom per frame; the strict acceptance is met on the
-per-frame criteria, not on the two-second minimum.** Branch `claude/wave6-60fps` = `main` + integration `fast2/integ473` 5c266e2
-+ GUI branch `feat/gui-pad` (audio toggle, SIXAXIS/rumble/PS button). Its exact runtime is **build 706** (snapshot verified equal to
-the branch's `anyps3/` and profile).
-
-| runs (QUIET, original level great_clock_a) | FPS mean | worst 2 s | flips in one vblank | main_ppu / rsx_worker ms/frame |
+| build | content | runs | FPS | GPU busy ms/frame |
 | --- | --- | --- | --- | --- |
-| 706a / 706b (branch build) | 59.71 / 59.69 | 57.43 / 55.42 | — | 11.0 / 12.2 |
-| 706c / 706d (branch build, ring) | 59.51 / 56.79 | 55.49 / 32.95 | 99.5 / 95.7 % | 11.0–11.9 / 12.4–13.1 |
-| 705a–d (integration 5c266e2 = 706 without the GUI/pad branch) | 59.77 / 58.39 / 59.91 / 59.89 | 58.4 / 42.0 / 59.0 / 58.0 | 99.8 / 98.6 / 99.9 / 99.9 % | 10.6–11.1 / 11.8–12.5 |
-| 703c / 703d (reference) | — / 59.94 | — / 59.49 | 99.6 / 100.0 % | 11.1 / 12.2 |
-| 472a (main before this branch) | 46.68 | 32.0 | — | 14.0 / 13.4 |
+| 960 | main f92681c | 960sa1 / 960sa2 | 37.27 / 35.89 | 18.64 / 19.29 |
+| 1031 | 960 + visual typeless aspect by a draw (9912280) + static fragment discards | 1031a1 / 1031a2 | 39.91 / 40.58 | 15.52 / 15.32 |
+| 1034 | 1031 + fast RGBA8 visual typed-RTT half, barriers without HOST bits (single pair, not a decision) | 1034a1 / 1034a2 | 38.19 / 40.43 | 14.50 / 13.94 |
 
-706d: the first 16 s of its window were RSX-worker-bound bursts (worker busy 20–38 ms/frame, misses.py `work/integ473/i6/miss-706d.txt`),
-then a steady 60; 705b had a similar burst at the end of its window → occasional worker bursts in some runs, not specific to the GUI/pad
-branch; cause open (next step: ring + RSX stage profile of such a burst). Work span p50 12.6–12.9 ms, p99 15.6–16.5 ms (706c/d).
-Acceptance (AGENTS.md): mean >= 59.7, >= 99 % one-vblank flips, main thread and RSX worker <= ~13 ms — met in most runs; the worst
-two-second interval (>= 59.5) is not met consistently (single dips, partly from desktop use during the runs). **Headroom measured with
-`ANYPS3_VBLANK_HZ` (671b/c): 75 Hz is not held (55.9 % one-vblank), 90 Hz runs at half rate** — frame cost ~12.3–13.5 ms.
-Pipeline-cache persistence: run-wide pipeline creation 184–241 ms vs ~800 ms before.
+**Blockers (verified):**
+1. **RSX worker CPU:** heavy views have ~1800–2400 draws. The worker is busy ~20–22 ms there (≈ 2.9 ms + 9.1 µs per draw, flat
+   profile, no item > 7 %).
+2. **Main guest thread:** ~14.8 ms in the same work span. ~26 % of it is spin-waiting for SPU jobs (delay 0x666068 17.5 %, job flag
+   0x5564d4 5.6 %, engine counter 0x696c10 3.0 %), ≈ 3.9 ms per heavy frame. 57 % is translated page code and ~6.5 % the
+   dispatcher; there are no observer faults. The guest never runs ahead past the flip.
+3. **GPU at scale 2:** 15.65 ms (1031sm1). Visual draws take 7.26 ms (1692 per frame), native draws 2.80, native render-pass begins 1.02
+   (12.6 µs each vs 1.55 µs visual, unexplained), copies ~2.3 and ~250 barriers ~0.6. The second visual sample plane costs 2.3 ms.
+4. **Stutter:** hitches repeat with the walker loop at both scales; pipeline creation is ruled out.
+   - **Class A (RSX worker, 80–160 ms frames with ~360 draws):** at scale 2, ~55 ms is device-memory alloc/free. The other
+     60–100 ms is unattributed time in the `fifo` stage.
+   - **Class B (GPU, texture-streaming frames, 130–160 ms):** every GPU operation is ~10× slower, coinciding with ~240 new
+     allocations per frame. The cause is unknown (first touch? clock drop?).
+   - **Class C (main thread, ~140 ms frames, 4–5 per 80 s):** the main thread runs with no block event and no GPU output.
 
-**Tests:** full suite on 5c266e2: 185 modules, 877 tests, 0 failures, 0 skips (the 25 `tests/manager` tests are not part of the
-partitioned run: 38 run separately on the branch, OK, 4 opt-in installer skips); native pad tests 8/8 OK on the branch.
-**Reviews:** gpt-6-astra reviews spuput-1, rsxhead-1, fpspu-2, rsxw4-1, warmup-blit-4 — every finding fixed with a test and a
-mutation check (`local/ratchet/work/_reviews/`). Open, documented: FIFO window ships OFF (`ANYPS3_RSX_FIFO_WINDOW=1`; a drain-bound test
-failed 4/6 with it, cause unknown); the FP fast path 559472e has no demonstrated gain (kept: exact per review, 703/705 measured best with it).
-**Not verified:** physical gamepad (DualSense) and GUI build/play with the real game — the user tests next; audible audio (never on this PC
-by agents). **Hardware:** RAM bit flips on this PC (verified, see the wave record).
+**Still open from HIRES2:**
+- 1035 (visual 2× MSAA on/off) was compiled but never measured.
+- 1002 (unrolled atomic copy cf7a6ef, since merged to main) looked slower in one disturbed run. Its copy body was rewritten in
+  HIRES7 and HIRES9, so measuring the branch tip at scale 1 against 960 answers the question.
 
-**Local data cleanup (2026-10-21, user-approved):** ~323 GB of `local/ratchet` deleted (452 → 127 GB): all per-run game cache
-scratch dirs `cache/anyps3-*` (`cache/vk` kept), all `native-bundle-*` except 706, binaries/generated C++/objects and all but the last two
-frame dumps of every `native-virtual-*` except builds 380, 386, 460, 472, 478, 603, 660, 703, 705, 706 (run summaries, logs, evidence
-images kept), object-cache entries older than 24 h, frametime rings except 703c/d, 705a–d, 706c/d, all but the 6 newest
-`sample-profile-*`, agents' `work/*/prof` dumps, all agent git worktrees and `work/*/base` copies (branches and STATUS/RESULT notes kept;
-MAINSLACK2's untracked scripts in `work/spuput/untracked/`). Manifest: `local/ratchet/cleanup-2026-10-21-plan.tsv`; tool
-`local/ratchet/tools/cleanup_2026_10_21.py`. Game inputs, source snapshots, `codex/` captures, suites and docs untouched. Older run/build
-numbers cited in records may therefore lack their binaries; rebuild from `source-snapshot-N` if needed.
+Record: [HIRES/HIRES2](experiments/2026-10-25-hires-wave.md). PC-only evidence:
+`local/ratchet/work/hires2{w,s}/RESULT.md`.
 
-**GUI follow-up (branch `claude/gui-keys-fix`, 2026-10-21):** key setup explained in the wizard and CLI errors (JSON format, purpose,
-sources), private hex entry, validation against the selected PUP/EBOOT, opt-in "Download from RPCS3" (pinned commit ffba2bf, SHA-256
-verified, confirmation dialog; no keys in the repository); recovery from failed imports (Resume/Remove unfinished titles, adoption may
-replace an unfinished title without userdata/builds), job removal/clear, explanations for disabled actions (Build before Play), ISO-step
-layout and many state-refresh fixes. Tests: 132 manager + 11 GUI pass (4 opt-in installer skips). Real-game acceptance in a temporary
-library: adopt-ratchet OK, all 193 native units built in 22 min, run rendered the original intro (897 flips, 15 captures, audio off).
-Reviews: gpt-6-astra on GUIFIX (findings fixed by the agent) and on the keys commit (review-guikeys-1: 2 Medium + 1 Low, fixed with
-mutation-checked tests). Not verified: live HTTPS download, the exact compositor paint artifact the user saw (not reproduced offscreen),
-physical controller. Evidence: `docs/manager/evidence/guifix/`, `docs/manager/evidence/guikeys.md`.
+## Cloud rounds HIRES3–HIRES9 — 2026-10-28 … 11-01 (branch `ccr-b1a3987e-aypb5o`; nothing measured in the game)
 
-Open GUI item (user test 2026-10-21, addressed by the follow-up above): ISO import stops at "missing-key: Set the user-supplied pup key file first" without saying what the
-file is; on this PC use **Adopt Ratchet** (reuses `local/ratchet/firmware-keys.json`, `app-key.json` and the decrypted
-`firmware-verified/`) or set the PUP key to `local/ratchet/firmware-keys.json`. The message/wizard should explain the PUP key file.
+The cloud container has no game data, no `local/` tree and no NVIDIA GPU. Every change is exact or gated, has a native
+regression test with an independent oracle and mutation checks, and was measured only with callgrind or thread-CPU time on
+synthetic benches (instructions are not time). The branch is main 95756e2 plus these rounds (111 commits) and the documentation cleanup.
 
-Next candidates (unverified ideas): chain SPU native functions without the dispatcher, SPU FP slow path, 16-byte `atomic_read`, the FIFO
-window bracket failure, then render resolution scaling (`local/ratchet/work/_tasks/RESSCALE.md`). Record:
-[FAST2 record, wave 6](experiments/2026-10-20-fast2-wave.md#wave-6-results-2026-10-21).
+| PC blocker | cloud changes (round) | synthetic result (verified, cloud) |
+| --- | --- | --- |
+| RSX worker CPU | DrawJob borrowed pointers, report floors, vertex-constant chunks (H3); FIFO decode/actions, renderer-thread guest-memory admission, paired FIFO loads (H4); geometry reuse under CPU-dirty watches, O(log n) watch registry, index/state path (H5); single-part inline `Range`, shared cached triangles, constant-window registers, no GET publication before BEGIN (H6); batch reset/begin, submit and plane clears as draw-recorder jobs (H7, recorder on only) | per indexed draw 69.1 k → 53.6 k Ir (H4), 53.5 k → 40.5 k (H5, −24 %); game-shaped draw unit 41.7 k → 37.6 k (H6, −9.9 %), 37.4 k → 33.2 k (H7, −11.3 %); worker frame with no draws −51 % (H4) |
+| GPU at scale 2 | typed-RTT decoder addressing as literals (H3); full barriers 17 → 10 per frame, GPU marks for clears/copies, `PERF RENDER_SCALE_WORK`, visual 2× MSAA plane→sample load path (H6, default off) | pixel-exact on lavapipe with sync validation silent; GPU time is not measurable here |
+| Stutter class A | device-memory pool: 256 MiB blocks, best fit, coalescing (H3) | lavapipe: 64 ranges from 7 driver allocations vs 68 |
+| Main thread: SPU-job wait | DMA path without heap spans, 16-byte atomic body, FP underflow lanes, BRSL chaining (H7); generated SPU code without stack homes, self loops in host locals (H8); shared chained-call scope, 64-byte DMA copy loop, untracked DMA writes without bumps/notify, SHUFB lanes (H9) | synthetic job non-FP Ir 136.5 k → 113.9 k (H7) → 75.4 k (H8) → **68.6 k** (H9): −50 %. Native AVX-512 15.8 k → 9.6 k (H8) → **8.7 k ns/iteration** (H9): −45 % since H7's tip (H7 itself ~−12 %, noisy). Output digest identical. |
+| Main thread: page code | one jump table per page, host-call return prediction (H8); one-compare inline range test, one pointer per access (blocker table below the flat view), MOVBE, one-byte `movzbl`/`movb`, budget-free block heads (H9) | call kernels −7..−14 % Ir (H8); memory kernels −14..−17 %, call kernels −11..−18 %, page text −11 % (H9); an inline access is 11 host instructions (was 18–19) |
 
-## Local data cleanup — 2026-10-25 (user request)
+**Derived, unverified:**
+- **Worker:** heavy-frame worker ≈ 11.6 ms at 2000 draws and ≈ 13.3 ms at 2400. This holds with the recorder on, if Ir scale to
+  time and the game's geometry is as static as the bench's.
+- **Main thread:** ≈ 12–13 ms. Assumptions: the awaited SPU job shrinks like the synthetic one (the 3.9 ms wait falls by ~1.7–2 ms),
+  and page code (57 %) gains the −7..−14 % measured natively on the kernels.
+- **GPU:** ≈ 14–14.5 ms at scale 2 (1034 plus barrier cuts). That fits the 16.7 ms frame with little headroom.
+- **Stutter:** classes B and C are not addressed.
 
-**Verified:** `local/ratchet` 169 → 81 GB (`df /home` 604 → 521 GB used). Tool `local/ratchet/tools/cleanup_2026_10_25.py`,
-manifest `local/ratchet/cleanup-2026-10-25-plan.tsv`, log `cleanup-2026-10-25-apply.log` (freed 67.4 GB).
-- Deleted (reproducible or duplicates): binaries/C++/objects of every build except **472, 706, 805, 820, 860, 870**; every
-  `native-bundle-*` except 860/870; byte-identical binary copies in run dirs (checked against build N); `cache/anyps3-*`
-  (`cache/vk` kept); nested `local/ratchet` copies inside `codex/*` workspaces (no code/test references them); `__pycache__`;
-  `work/suite*/tree`; `sample-profile-*` except the 2 newest; `waketrace-*`.
-- Compressed losslessly with zstd (read with `zstdcat`): run/build `stderr.log`/`stdout.log`/`to-menu.log` > 1 MiB, `ft-*.bin`
-  rings, run `frametime.bin`, `sdl-disk.raw`. Older records citing these paths mean the `.zst` file.
-- Source snapshots: git history starts at the build-460 state (`ca7604a`), so snapshots 256–459 are **not** in git. All
-  snapshots except 472, 706, 805, 820, 860, 870 are in `local/ratchet/archive/source-snapshots-until-2026-10-25.tar.zst`
-  (5.4 MB, sha256 in `.sha256`, directory list in `.list`; verified by extraction + `diff -r`, 365/365 identical). Restore:
-  `zstd -dc --long=27 archive/source-snapshots-until-2026-10-25.tar.zst | tar -xf - source-snapshot-N`.
-- Git: worktrees of merged, clean branches removed (branches kept); `work/render-scale/gui-tree` kept (uncommitted edits
-  that differ from main).
-- Not touched: game inputs, firmware, hdd0, frames/evidence images, codex captures/tests, notes, build 870 (compiling) and
-  its snapshot/bundle. Object cache pruned after 870 linked: 22 → 5.4 GB, entries before 2026-10-23 deleted (4932, 16.6 GB);
-  870 had 0 cache hits (full recompile) and its 193 fresh objects are kept.
-- **Round b (evening, after Codex's 871–883 work ended; `ANYPS3_CLEANUP_ROUND=b`, plan `cleanup-2026-10-25b-plan.tsv`):**
-  freed 30.0 GB (binaries of 860 and 871–881, bundles except 882/883, run-dir binary copies, `cache/anyps3-*`) plus 4.7 GB
-  object-cache entries older than 2026-10-25. Builds with binaries now: **472, 706, 805, 820, 870, 882 (= commit 31d50d8,
-  snapshot verified file-identical), 883** (882 + texture-cache counters). Snapshots 860 and 871–881 are in
-  `archive/source-snapshots-860-881.tar.zst` (verified by extraction + `diff -r`). Result: `local/ratchet` 88 GB,
-  `df /home` 526 GB used. Evidence logs, frames, rings and JSON of every run are kept.
+Records (detail on demand, one per round): [H3](experiments/2026-10-28-cloud-hires3.md),
+[H4](experiments/2026-10-30-cloud-hires4.md), [H5](experiments/2026-10-31-cloud-hires5.md),
+[H6](experiments/2026-10-31-cloud-hires6.md), [H7](experiments/2026-11-01-cloud-hires7.md),
+[H8](experiments/2026-11-01-cloud-hires8.md), [H9](experiments/2026-11-01-cloud-hires9.md).
 
-## Older state records
+## A/B switches on the branch (defaults verified in the code, 2026-11-01)
 
-FAST2 wave 4, the 2026-10-20 sandbox assessment, installer/manager notes, the historical notes, the
-history of real stops 256–339 and the old "first next actions" (2026-10-14 to 2026-10-21) are in
-[history/CURRENT-2026-10-14-to-10-21.md](history/CURRENT-2026-10-14-to-10-21.md).
+Each switch is read once per process; any value other than `0`/`1` stops the run. The table lists those meant for the PC's A/B runs.
 
-## Where the game is
+| switch | default | 0 / 1 means | round |
+| --- | --- | --- | --- |
+| `ANYPS3_RSX_MEMORY_POOL` | 1 | 0 = driver allocation per resource (old) | H3 |
+| `ANYPS3_RSX_RTT_LITERALS` | 1 | 0 = typed-RTT addressing through constants | H3 |
+| `ANYPS3_GUEST_PAGE_READ`, `ANYPS3_RSX_RENDER_BATCH`, `ANYPS3_GUEST_RANGE_ADMISSION` | 1 | 0 = old renderer-thread guest-memory admission | H4 |
+| `ANYPS3_RSX_FIFO_PAIR` | 1 | 0 = no paired FIFO loads | H4 |
+| `ANYPS3_RSX_GEOMETRY_REUSE` | 1 | 0 = copy vertex inputs/index spans every draw | H5 |
+| `ANYPS3_RSX_RTT_PREFILTER`, `ANYPS3_RSX_TEXTURE_IMAGE_MEMO` | 1 | 0 = old texture/RTT lookup | H5 |
+| `ANYPS3_RSX_BARRIER_DEDUPE`, `ANYPS3_RSX_PAIR_BARRIERS`, `ANYPS3_RSX_PASS_BARRIER` | 1 | 0 = old barriers | H6 |
+| `ANYPS3_RENDER_SCALE_MSAA` / `ANYPS3_RENDER_SCALE_MSAA_LOAD` | 0 / 0 | 1 = visual 2× MSAA working images / their plane→sample load path (NVIDIA test pending) | HIRES2 / H6 |
+| `ANYPS3_RSX_RECORDER` | 0 (GUI too) | 1 = asynchronous draw recorder (the walking wrapper sets 1; 624b teal-frame question open) | older |
+| `ANYPS3_RSX_RECORDER_SUBMIT` | 1 | 0 = inline submit (only matters with the recorder on) | H7 |
+| `ANYPS3_SPU_CHAIN` / `ANYPS3_SPU_CHAIN_SHARED` | 1 / 1 | 0 = BRSL through the dispatcher / per-call scope | H7 / H9 |
+| `ANYPS3_GUEST_WRITE_TRACKED_ONLY` | 1 | 0 = DMA writes bump/notify every line | H9 |
+| `ANYPS3_PPU_RET_DEPTH` | 64 | 0 = old tail calls out of a page | H8 |
+| `ANYPS3_GEN_SPU_SELF_LOOP` (generation time) | 1 | 0 = old self-loop form (needs its own build) | H8 |
 
-The original game passes through boot, videos (skippable with START), the `front_end` loading, the title screen and reaches the
-**original main menu** (NEW GAME / LOAD / COMMUNITY / OPTIONS / DELETE) ~2 min after start; the menu responds to the
-virtual pad (down arrow → LOAD). Rendering: custom Vulkan RSX (NVIDIA RTX 4070 SUPER), PPU/SPU statically translated.
-The historical performance of the menu in build 339 was a median 59.94 FPS; this figure is not the performance of the level in build 380, which has 15.02 FPS.
+The HIRES9 PPU memory and block-head cuts and the HIRES8 jump tables have no switch. For them the A/B is two builds.
 
-## Split compilation (since 256)
+## First next actions on the PC (one plan; replaces the per-round lists)
 
-`build_game` writes `units.json` + `anyps3.hpp`, `program.cpp` (runtime, main),
-96 `ppu-*.cpp` and 96 `spu-*.cpp`; `virtual_pad.py build -j 24` compiles in parallel in **~4 min**
-(previously a single 458 MB TU, LTO 7–15+ min). See [record 256](experiments/2026-10-15-split-units-256.md).
+1. **Targeted NVIDIA tests on the branch tip:** `test_rsx_visual_msaa`, `test_rsx_async_upload`, `test_rsx_recorder`,
+   `test_rsx_gpu_work`. Then the full suite (the cloud container cannot build some modules; see [HANDOFF](HANDOFF.md)).
+2. **One integration build N of the tip** (new number, source snapshot). Record compile wall time and the `.text` of the
+   ppu-*/spu-* units against 1034.
+3. **QUIET alternating 1440p walks, N vs 1034 (or 1031), two each**, with the walking wrapper's `ANYPS3_RSX_RECORDER=1`. Record:
+   FPS and one-vblank %; `main_ppu`, `rsx_worker`, rsx-record and GPU busy ms/frame; µs/draw in heavy frames; the SPU-wait shares
+   (0x666068, 0x5564d4, 0x696c10) and the awaited ig lane's time (sampler); the worst frames. Check the image for the recorder's teal frames. Also run a scale-1 pair
+   against 960, which settles the 1002 question.
+4. **If not at the target, one switch at a time, alternating, with the same binary** (switches in the table above):
+   - worker: `ANYPS3_RSX_GEOMETRY_REUSE=0`, `ANYPS3_RSX_RECORDER_SUBMIT=0`, the three H4 memory switches together;
+   - main thread: `ANYPS3_SPU_CHAIN=0`, `ANYPS3_SPU_CHAIN_SHARED=0`, `ANYPS3_GUEST_WRITE_TRACKED_ONLY=0`, `ANYPS3_PPU_RET_DEPTH=0`;
+   - GPU: one `ANYPS3_RSX_VK_MARKS=1` walk (does the 12.6 µs native pass begin move to clears/copies in `PERF GPU_MARKS`?),
+     then `ANYPS3_RSX_BARRIER_DEDUPE=0`, then MSAA on with load 1 vs 0 vs MSAA off.
+5. **Stutter:** full frame ring with `hitch_marks.py`, `ANYPS3_RSX_MEMORY_POOL=1` vs 0. Class A should vanish with the pool; if
+   class B persists, the first-touch hypothesis is refuted.
+6. **Exactness spot checks:**
+   - animated/skinned geometry with geometry reuse on (visual);
+   - a run that hits `--max-steps` stops with the same message, PC and steps as before;
+   - `ANYPS3_SPU_DYNAMIC_LOG` rows match the base build.
+7. **If the recorder shows no teal frames on the tip,** make it the default in the runtime and the GUI
+   (`anyps3_manager/settings.py` `experimental.recorder`).
 
-## Commands
+## Next levers once measured (derived from the cloud analysis)
+
+- **Worker:** a prepare-stage split of the RSX worker (designed in [H7](experiments/2026-11-01-cloud-hires7.md), −22 % estimated,
+  not implemented); a two-thread worker (front: FIFO decode and state; back: prepare and record).
+- **Main thread:** register allocation across PPU blocks or a cheaper CR-field representation. Each `cmpwi` costs ~10 host
+  instructions, and GCC reloads registers at every block head ([H9](experiments/2026-11-01-cloud-hires9.md)). For the SPU job:
+  a one-page DMA write fast path (~1–1.5 k Ir per iteration) and the FP slow path's stack homes.
+- **GPU:** the native pass-begin cost; the second visual sample plane (MSAA load path); horizontal scale 8/3 only on the user's
+  decision.
+
+## Refuted — do not repeat (with the round that showed it)
+
+- **Measurement methodology:**
+  - HOST_PROFILE distortion is only ~3 %; SMT/CPU placement and recorder spin are not levers (HIRES2).
+  - `ANYPS3_SPU_PROFILE` distorts the SPU and the clocks; use only `ANYPS3_PERF_REPORT=1` (older).
+  - valgrind rejects the flat view's `mremap` duplication. PPU callgrind figures before H8 measured the slow memory path, so
+    `bench/ppu_bench.py` shims it (`-DBENCH_MREMAP_SHIM`) (H8).
+- **GPU:**
+  - Pipeline compiles do not cause the 140–180 ms walking hitches (46 ms of creation in all of 1031a2) (HIRES2).
+  - Multiview or layered visual planes do not help: 960sx1/sx2 GPU 20.8 / 19.4 ms (HIRES2).
+  - Static discards blocking early-Z are not a big lever (HIRES2).
+  - Locking GPU clocks is not a fix: the low P-state follows intermittent feeding (FAST, 10-19). PRESENT_EARLY was reverted;
+    never merge `fast2/frametime-early-present` (FAST2, 10-21).
+  - A boot-time pipeline prebuild saves only the warm cost (771 pipelines ≈ 42 ms) and cannot help unseen shaders; the
+    real defect was the disk-cache cap (FIX7, 10-23).
+  - Compiles are not the bulk of the post-load slow phase; it was CPU NV3089 scaled blits, since moved to the GPU (FAST2).
+  - Hazard tracking would not help the native→visual→native pass case (H3).
+  - No scale-2 copy is removable (H6).
+- **RSX worker:**
+  - Incremental HostObserver bitmaps (1001) are neutral at both scales (HIRES2).
+  - At scale 1, barrier de-duplication and occlusion-query elision gave nothing (FAST2). The HIRES6 barrier cuts target
+    scale 2 and are unmeasured.
+  - The FIFO prefetch window is slower: `ANYPS3_RSX_FIFO_WINDOW=1` 66.1 vs 27.3 M Ir/frame (H3, H4).
+  - Reading several pages one at a time under a moving hazard is not equivalent (H4).
+  - The FIFO bench's setup borrows the register bank and constants (~6.9 k Ir/draw the game does not pay); use mode `tracked=1` (H5).
+- **SPU and the main thread's SPU wait:**
+  - The wait is an ig lane *running* the awaited job: 94 % lane compute; parked ~1 %, wake-to-run 1.8–4.6 µs. Parking and
+    wake latency are not the lever (FAST2 wake trace).
+  - Lane 0x100 (CellSpursKernel0, ~70 % of SPU instructions) is not critical: halving its rate changed neither FPS nor
+    main_idle (FAST2).
+  - SPU register residency across blocks/functions gave no gain; cross-function calls became 2.5× slower (FAST2). HIRES8's
+    self-loop locals are a different scope.
+  - A guest timer slack of 1 ns adds +1.3 ms main busy, so it stays opt-in (FAST2).
+  - `[[gnu::cold]]` does not stop GCC homing live vectors around a call that returns into hot generated code (H8).
+  - A 64-byte aligned SPU register file has no effect; it was reverted (H9).
+- **PPU:**
+  - A block-local copy of the inline view: −1 % Ir for +1.4 % text (H8).
+  - Register locals across a self loop's back edge: text +5.7 % (H9).
+  - Deferring register write-back to block end: GCC reloads at every head anyway (H9).
+  - The one-compare range test for byte ranges: k_vmx +2.5 % (H9).
+
+## Standing decisions
+
+- **No patches to game bytes (user, 10-23), not even opt-in.** The only RPCS3 patch for 01.00 is "Unlock FPS" (frame-time
+  constants at 0xca2500/0xca4170/0xc9438c); it and recomp-port hooks/limiters are excluded. Evidence:
+  [FIX7 record](../archive/knowledge/experiments/2026-10-23-fix7.md#rpcs3-game-patches-for-acit--researched-not-adopted-user-decision).
+- **No substitutes:** no substitute menu, no pre-unpacked assets, no other emulator.
+- **Explicit stops:** unknown behaviour stops the run explicitly.
+- **Recorder off by default:** in the runtime and the GUI, until the 624b teal frames are checked; walks measure with it on.
+- **Visual 2× MSAA off by default** until the NVIDIA test and an A/B.
+- **GUI launches:**
+  - always set `ANYPS3_RSX_WORKER=1 ANYPS3_SPU_THREADS=1`; the game is unplayable without them (`anyps3_manager/settings.py`);
+  - skip intro (`input.skip_intro`, through `ANYPS3_PAD_INJECT`) is off by default;
+  - the fast menu (early START on the title) is the default.
+- **Exactness:** the GPU path need not be bit-exact with the CPU reference rasterizer (tests use documented tolerances). At
+  render scale, native images stay authoritative beside the visual companions.
+- **Shared guest memory:** no plain (non-atomic) AVX accesses without an exclusion protocol, since that is a C++ data race
+  (sandbox analysis, 10-20).
+- **Presentation:** guest VSYNC presents through MAILBOX with >= 3 images (FIFO plus the compositor gave 20 FPS).
+- **Caches:** the shader disk cache is capped at 32768 files / 4096 MiB, the source cache at 1024 entries / 64 MiB (measured
+  working sets).
+- **Silence:** every agent-started process forces `SDL_AUDIODRIVER=dummy ANYPS3_AUDIO_SINK=null` (root `AGENTS.md`).
+
+## Game runtime facts for performance work (verified on the PC, archived records 10-16 … 10-21)
+
+- **Frame structure:**
+  - The level runs in VSYNC mode with no interval (≤ 59.94 FPS; G=*(0xca3f84), mode word G+84 = 0, 2 while loading).
+  - Flips are vblank-quantised, so every frame must stay under 16.7 ms.
+  - At native 60 FPS the main thread is 8.9 ms of work + 3.4 ms SPU wait + 3.5 ms limiter slack. The pacing sleep is a
+    usleep(50) loop at 0x5c56d4; the limiter 0x5c5228 binds at the vblank period.
+- **Native headroom (706, `ANYPS3_VBLANK_HZ`):** 75 Hz gives 55.9 % one-vblank and 90 Hz half rate, i.e. a frame cost of
+  ~12.3–13.5 ms.
+- **Wait loops of the main thread:**
+  - the job flag at 0x5564d4 spins until `(int16)*(r3+0x18) < 0` on `or r31,r31,r31` hints;
+  - 0x666068 is the 16-hint delay block;
+  - 0x696c10 spins ~1 ms, then calls `sys_timer_usleep(30)`.
+- **SPU lanes:**
+  - The critical lanes are the igCellSpursKernelGroup lanes 0x2000200/0x3000200/0x4000200.
+  - They advance the completion frontiers 0xfc7d00/0xfc7e00 by MFC PUTLLUC (SPU pc 0x3f9e8). The awaited job seen was the
+    FP-heavy microprogram 0x27.
+  - Jobs load at variable LS bases, so interpreted SPU entries exist (SPUDYN).
+- **Pad:** thread 1 reads `cellPadGetData` once per frame (0x65d92c). An edge lasts one frame, so a tap shorter than a frame
+  hitch is lost; auto-repeat starts after > 30 held frames.
+- **GPU clocks:** the RTX 4070 SUPER stays at P8/P5 when fed in bursts (one replay frame 103 ms at P8 vs 10.5 ms at P0).
+  This confounds stutter class B.
+- **Original behaviour, not bugs:** `lwmutex unlock by non-owner … lr=0x0099e23c`; a second START during title→menu selects
+  NEW GAME.
+
+## Known open problems (last known status)
+
+- **Pause blur:** the GPU feedback snapshot is merged (main 124b7d4) but no in-game pause test is recorded. Depth feedback is
+  still an explicit stop.
+- **Savedata:** CIRCLE in the savedata LOAD list gives "Savedata error 0x8002b403 (callback 1)"; the cancel reply is suspect
+  (FIX7).
+- **Visual history:** CPU/SPU writes discard visual history, and clean-owner merges and unsupported RTT conversions rebuild
+  from native pixels. The effect on the final image is not traced.
+- **Worker bursts:** occasional RSX-worker bursts at native resolution (20–38 ms/frame for ~16 s, 706d/705b), cause unknown.
+- **Never run:** the 883 texture-eviction diagnostic and a quiet `ANYPS3_RSX_RESIDENT_SAMPLER_DYNAMIC=0/1` A/B.
+- **Estimate instructions:** PPU fres/frsqrte/vrefp/vrsqrtefp are exactly rounded, not the Cell estimate table; SPU
+  frest/frsqest use RPCS3's table (derived). ZPASS/report semantics with statistics disabled copy an RPCS3 approximation
+  (hypothesis).
+- **Physical gamepad:** never verified in game. uinput → SDL → cellPad is verified; SDL needs window focus or
+  `SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS=1`.
+- **Wake trace:** `ANYPS3_WAKETRACE` is not in this branch (only the PC branch `fast2/spuwake`); use the sampler or merge
+  that branch.
+
+## Commands (PC)
 
 ```bash
-# Source snapshot + build (always a new N), translation with the host ISA:
-# From a snapshot: PYTHONPATH=local/ratchet/source-snapshot-N python -P … (without -P `python -m` picks up the live tree from cwd!)
+# Source snapshot + build (always a new N). From a snapshot use PYTHONPATH=local/ratchet/source-snapshot-N python -P …
 python -P -m anyps3.build_game local/ratchet/EBOOT.analysis.elf --firmware local/ratchet/firmware-verified/dev_flash/sys/external \
   --key-file local/ratchet/app-key.json --profile profiles/ratchet-acit.json --max-steps 1000000000000 -o local/ratchet/native-bundle-N
 ANYPS3_EXTRA_CXXFLAGS='-march=native -ffp-contract=off' ANYPS3_RSX_VK_BUILD=1 PYTHONPATH=. \
   python local/ratchet/tools/virtual_pad.py build -j 16 local/ratchet/native-bundle-N local/ratchet/native-virtual-N
-# Run to the menu + measurement + DOWN + SIGKILL (writes verification.json); the same binary in a copy of the directory for other modes:
+# 1440p walk (QUIET, pattern of the HIRES2 walk scripts) and its report (writes local/ratchet/walking-RUN.json):
+QUIET=1 bash local/ratchet/work/hires2s/measure-walk-1034.sh RUN        # copy and adapt for build N
+python local/ratchet/report-walking.py RUN
+# Stutter / marks analysis: local/ratchet/work/hires2s/tools/{hitch_marks.py,marks_worst.py}; SPU-wait split:
+# local/ratchet/work/hires2w/tools/wallsplit.py; call stacks: local/ratchet/tools/sample_callers.py
+# Other PC tools: report-walk-hitches.py; tools/level_warmup.py RUN_DIR (level-summary.json skips the 40 s post-load
+# phase); tools/nav_check.sh, tools/uinput_pad.py (PAD=uinput), tools/play_physical.sh N for pads;
+# ANYPS3_CAPTURE_NATIVE_PAIR=1 + ANYPS3_FRAME_TRIGGER for same-flip native/visual captures (diagnostic, blocks on readback)
+# Menu run + measurement (verification.json):
 bash local/ratchet/tools/measure_menu.sh N 0-5,12-17 ANYPS3_RSX_WORKER=1 ANYPS3_SPU_THREADS=1
-python local/ratchet/tools/menu_stats.py N 10
-# Full suite (4 processes, real Vulkan):
-LP_NUM_THREADS=4 python local/ratchet/codex/rsxvk/rsxvk12/run_suite.py local/ratchet/suite-N
 ```
 
-Measurement rules: only `ANYPS3_PERF_REPORT=1` (`ANYPS3_SPU_PROFILE` distorts the SPU and also the clocks); game on CPUs 0–5,12–17,
-agents/suite on 6–11,18–23 (second CCD). Terminate the program with `kill -KILL` (SDL catches SIGINT/TERM). Every run
-under `systemd-run --user --scope -p MemoryMax=24G`. Agents: `codex exec … -m gpt-6.1-sol` in a scope with `MemoryMax`.
-`pgrep/pkill -f` with a pattern from your own command also hits your own shell — kill by PID with a cmdline check.
+**Measurement rules:**
+- Measure with `ANYPS3_PERF_REPORT=1` only.
+- Run the game on CPUs 0–5,12–17 and agents/suite on 6–11,18–23 (second CCD), every run under
+  `systemd-run --user --scope -p MemoryMax=24G`.
+- End a run with `kill -KILL` (SDL catches SIGINT/TERM), and kill by PID after a cmdline check (`pkill -f` also hits your own
+  shell).
+- Keep throughput and diagnostic runs apart: the wake trace costs 2–4 FPS and the sampler shifts FPS. Exclude the first run
+  after a shader-identity change (it compiles cold).
+- Walks use `measure-walk-N.sh`: QUIET, WARM20/WIN90, `walk-timed.py`, recorder=1. Each run gets a private CoW HDD from
+  `walk-hdd-template-20261025/` (`ANYPS3_HDD_ROOT`); concurrent runs must never share an HDD.
+- The PC agent shell is zsh, so an unquoted `$FILES` stays one word; use bash arrays.
+- Builds cited as baselines: 706, 960, 1031, 1034 (1035 for MSAA). They must survive any `local/ratchet` cleanup.
+- Logs over 1 MiB are `.zst`. Old source snapshots are in `local/ratchet/archive/source-snapshots-*.tar.zst`, restored with
+  `zstd -dc --long=27 … | tar -xf - source-snapshot-N` (cleanup of 2026-10-25:
+  [archived note](../archive/knowledge/history/CURRENT-2026-10-21-to-10-25.md#local-data-cleanup--2026-10-25-user-request)).
+
+Split compilation: `build_game` writes `units.json`, `anyps3.hpp`, `program.cpp` (runtime, main) and ~96 `ppu-*.cpp` +
+~96 `spu-*.cpp`, compiled in parallel in ~4 min.

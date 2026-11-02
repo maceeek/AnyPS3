@@ -25,14 +25,22 @@ or limit check.  Correctness arguments (see docs in RESULT.md):
   computed jumps into a block) use the exact interpreter until the next leader.
 """
 import json
+import os
 import re
 
 from .errors import AnyPS3Error
 from .spu_interp import Expr
 from . import spu_simd
 
+# Self-loop blocks keep their registers in host locals across iterations (self_loop).  Generation-time switch for A/B:
+# ANYPS3_GEN_SPU_SELF_LOOP=0 when the bundle is generated emits the previous per-iteration register file round trip.
+SPU_SELF_LOOP = {None: True, '1': True, '0': False}.get(os.environ.get('ANYPS3_GEN_SPU_SELF_LOOP'), None)
+if SPU_SELF_LOOP is None:
+    raise AnyPS3Error('invalid ANYPS3_GEN_SPU_SELF_LOOP (expected 0 or 1)')
+
 MAX_BLOCK = 64
 MAX_FUNCTION = 1024
+SPU_CHAIN = True  # emit chained BRSL calls (spu_chain_call); ANYPS3_SPU_CHAIN=0 disables them at run time
 REGION = 64  # validation granule (bytes) of the per-call validated-region bitmap
 _EFFECT_TOKENS = ('spu_stop(', 'channel', 'throw', 'spu_dynamic_fault', 'spu_external_event', 'spu_interrupt_return')
 _INDIRECT = (0x1a8, 0x1a9, 0x128, 0x129, 0x12a, 0x12b, 0x1ab, 0x1aa)
@@ -89,6 +97,9 @@ class Values:
 
     def __init__(self, lines):
         self.lines, self.regs, self.count = lines, {}, 0
+        # Self-loop analysis (emit_function): registers set in this block, registers read before being set (live-in),
+        # and the set registers at every early exit (pending_stores).
+        self.written, self.livein, self.exits = set(), set(), []
 
     def emit(self, text):
         self.lines.append(text)
@@ -115,6 +126,8 @@ class Values:
     def _entry(self, reg):
         entry = self.regs.get(reg)
         if entry is None:
+            if reg not in self.written:
+                self.livein.add(reg)
             name = self.fresh()
             self.emit(f'[[maybe_unused]] const SpuV {name}=spu_vld(g[{reg}]);')
             entry = self.regs[reg] = dict(reps={'b': name}, const=None, dirty=False)
@@ -151,10 +164,12 @@ class Values:
         name = self.fresh()
         self.emit(f'[[maybe_unused]] const SpuV {name}={expr};')
         self.regs[reg] = dict(reps={rep: name}, const=None, dirty=True)
+        self.written.add(reg)
         return name
 
     def set_const(self, reg, words):
         self.regs[reg] = dict(reps={}, const=tuple(w & 0xffffffff for w in words), dirty=True)
+        self.written.add(reg)
 
     def choose(self, regs):
         score = {'w': 0, 'b': 0, 'h': 0}
@@ -215,6 +230,7 @@ class Values:
                 entry['dirty'] = False
 
     def pending_stores(self):
+        self.exits.append(frozenset(self.written))
         return ''.join(f'spu_vst(g[{reg}],{self.materialize_b(reg)});'
                        for reg, entry in sorted(self.regs.items()) if entry['dirty'])
 
@@ -229,6 +245,7 @@ class BlockValues(Values):
     def __init__(self, lines, block_end, insn_index, flen):
         super().__init__(lines)
         self.block_end, self.insn_index, self.current, self.flen = block_end, insn_index, None, flen
+        self.slim = 'slim'  # name of the store-check bound (self_loop: a loop-local copy)
 
     def self_store_exit(self, address, pc, provenance=False):
         """A store overlapping this function's own (relocated) code range ends the call after the storing instruction:
@@ -239,7 +256,11 @@ class BlockValues(Values):
         hit = f'((({address}+15u-flo)&0x3ffffu)<0x{self.flen + 15:x}u)'
         leave = f'{self.pending_stores()}block.executed=ex+{self.insn_index(pc) + 1};t.pc={nxt};return;'
         if provenance:
-            return (f'if(__builtin_expect(prov|({hit}),0)){{if(prov)spu_ls_forget(t,{address},16);if({hit}){{{leave}}}}}')
+            # One unlikely compare for both rare conditions: slim (function prologue) is the hit bound, or 0x40000 with provenance
+            # logging on (the masked offset is always below it).  The forget is deferred without a call (spu_ls_forget_quad):
+            # no call returns into the block.
+            any_ = f'((({address}+15u-flo)&0x3ffffu)<{self.slim})'
+            return (f'if(__builtin_expect({any_},0)){{if(prov)spu_ls_forget_quad(t,{address});if({hit}){{{leave}}}}}')
         return f'if(__builtin_expect({hit},0)){{{leave}}}'
 
     def interrupt_boundary(self, pc):
@@ -270,8 +291,78 @@ class BlockValues(Values):
         name = self.fresh()
         pc = self.current
         self.emit(f'const unsigned a{name}={address};spu_vstp(ls+a{name},{value});')
-        # One unlikely branch for both rare conditions: provenance logging (diagnostic) and a store into the function's own range.
         self.emit(self.self_store_exit(f'a{name}', pc, provenance=True))
+
+
+def self_loop(block_values, emit_body, last, n, mask, exit_edge):
+    """C++ for a block whose conditional branch targets its own start (a loop body without inner control flow).
+
+    Iterations after the first run without the block-entry guard and without the register file round trip: registers
+    the body reads before setting them (live-in) stay in host locals (`c<reg><rep>`, the representations the previous
+    iteration ended with), and registers set before every exit point of the body are not stored at the back edge at
+    all (the next iteration sets them again before anything can observe them).  Exactness:
+    * the back edge continues only when the guard of the next entry would take its fast path without effect,
+      ex<lim && (vm&mask)==mask (vm cannot change inside the block: every exit that could change LS code returns);
+      otherwise the registers are flushed and the block is entered through its label, exactly as before;
+    * every point inside the body that can observe the register file (self-store exit, interrupt sampling boundary,
+      a lifted body without template, the final flush) sees the architectural value of every register: carried locals
+      are marked dirty when the body sets them, so pending_stores/flush write them; a register not carried is set
+      before each of those points in every iteration (checked on the first pass, asserted on the second);
+    * the first iteration loads the carried registers from g[] (also those only needed by an early exit), so its
+      early exits store unchanged values where nothing was set yet."""
+    probe = block_values([])
+    emit_body(probe)
+    cond = last.word & 127
+    probe.word0(cond)
+    carried = {}
+    for reg, entry in sorted(probe.regs.items()):
+        if reg in probe.livein or any(reg not in seen for seen in probe.exits):
+            reps = ('b',) if entry['const'] is not None else tuple(sorted(entry['reps']))
+            carried[reg] = (reps, entry['dirty'])
+    dead = {reg for reg, entry in probe.regs.items() if entry['dirty'] and reg not in carried}
+    out = []
+    values = block_values(out)
+    load = {'b': 'spu_vld(g[{r}])', 'w': 'spu_vswap32(spu_vld(g[{r}]))', 'h': 'spu_vswap16(spu_vld(g[{r}]))'}
+    init = [f'c{reg}{rep}={load[rep].format(r=reg)}' for reg, (reps, _) in carried.items() for rep in reps]
+    for reg, (reps, dirty) in carried.items():
+        values.regs[reg] = dict(reps={rep: f'c{reg}{rep}' for rep in reps}, const=None, dirty=dirty)
+    # lim and vm are invariant inside the body (only block ends and calls re-derive them; every body exit returns): the back-edge
+    # test ex<lim && (vm&mask)==mask is one compare against a bound fixed before the loop.  The store checks of the body compare
+    # against lslim, a copy of slim behind an empty asm: a value of its own, live only in the loop, that GCC keeps in a register
+    # where the loop has no call (slim itself is live across every call of the function and stays in its stack home).
+    out.append(('[[maybe_unused]] SpuV ' + ','.join(init) + ';' if init else '')
+               + f'const unsigned llim=(vm&0x{mask:x}ull)==0x{mask:x}ull?lim:0u;')
+    head = len(out) - 1
+    values.slim = 'lslim'
+    emit_body(values)
+    if any(re.search(r'(?<![\w.])(lim|vm)\s*[|&]?=(?!=)', line) for line in out[head + 1:]):
+        raise AssertionError('SPU self loop: the body changes lim or vm')
+    if any('<lslim)' in line for line in out[head + 1:]):
+        out[head] += 'unsigned lslim=slim;__asm__("":"+r"(lslim));'
+    out[head] += 'for(;;){'
+    values.current = last.pc
+    kind = last.op >> 2
+    value = values.word0(cond)
+    if kind in (0x44, 0x46):
+        value = f'({value}&0xffffu)'
+    relation = '==' if kind in (0x40, 0x44) else '!='
+    back = []
+    for reg, (reps, _) in carried.items():
+        for rep in reps:
+            var, expr = f'c{reg}{rep}', values.get(reg, rep)
+            if expr != var:
+                if expr.startswith('c'):
+                    raise AssertionError('SPU self loop: carried value aliases another local')
+                back.append(f'{var}={expr};')
+    for reg, entry in values.regs.items():
+        if entry['dirty'] and (carried[reg][1] is False if reg in carried else reg not in dead):
+            raise AssertionError(f'SPU self loop: register {reg} dirty at the back edge but not carried')
+    if any(dead - seen for seen in values.exits):
+        raise AssertionError('SPU self loop: an early exit precedes the setting of an uncarried register')
+    out.append(f'ex+={n};if(({value}{relation}0u)&&ex<llim){{{"".join(back)}continue;}}')
+    values.flush()
+    out.append(f'if({value}{relation}0u)goto spu_b_{last.target:x};else {exit_edge}}}}}')
+    return out
 
 
 def _relocated(target):
@@ -309,10 +400,12 @@ def address_taken(insns):
     return {v for v in ((x.word >> 7) & 0x3ffff for x in insns if x.word >> 25 == 0x21) if not v & 3}
 
 
-def emit_function(name, code_name, lo, words, lift_parts, templates=True, insns=None, extra_leaders=()):
+def emit_function(name, code_name, lo, words, lift_parts, templates=True, insns=None, extra_leaders=(), chain=None):
     """One native function for source bytes [lo, lo+4*len(words)) at original address lo.
 
-    extra_leaders: direct branch targets and source leaders known from all sources."""
+    extra_leaders: direct branch targets and source leaders known from all sources.
+    chain: {target: native function} for BRSL targets outside this function that one native function of the same source
+    serves (generate_blocks); such a call runs that function nested (spu_chain_call) instead of returning to the dispatcher."""
     hi = lo + 4 * len(words)
     if insns is None:
         insns = [decode(lo + 4 * i, w, lift_parts) for i, w in enumerate(words)]
@@ -329,7 +422,10 @@ def emit_function(name, code_name, lo, words, lift_parts, templates=True, insns=
     if current:
         blocks.append(current)
     starts = {b[0].pc for b in blocks}
-    used_dispatch = any(b[-1].kind == 'ind' for b in blocks)
+    chain = chain or {}
+    chained = lambda x: x.kind == 'br' and x.op >> 2 == 0x66 and x.target not in starts and x.target in chain
+    callees = sorted({chain[b[-1].target] for b in blocks if chained(b[-1])})
+    used_dispatch = any(b[-1].kind == 'ind' for b in blocks) or bool(callees)
     flen = 4 * len(words)
     if flen > 64 * REGION:
         raise AnyPS3Error('SPU native function exceeds the validation bitmap')
@@ -338,14 +434,15 @@ def emit_function(name, code_name, lo, words, lift_parts, templates=True, insns=
     # regions of this function whose LS bytes were proven equal to the translated bytes since the last event that
     # can change LS (a store of this function into its own range, a channel/effect instruction).  Both live in
     # registers; block.executed is only synchronised where the scope or a callee can observe it.
-    lines = [f'void {name}(PpuState& s,NativeSpu::Thread& t,std::uint8_t* ls) {{',
+    lines = [f'void {callee}(PpuState&,NativeSpu::Thread&,std::uint8_t*);' for callee in callees]
+    lines += [f'void {name}(PpuState& s,NativeSpu::Thread& t,std::uint8_t* ls) {{',
              'auto& g=t.gpr;(void)g;(void)s;SpuBlockScope block(t);const std::uint32_t delta=t.reloc_delta;'
              f'const std::uint8_t* const code={code_name};',
              # flo = LS address of the function start in this call.  With a relocation the function's window
              # [flo, flo+flen) may wrap around the end of the 256 KB LS (code linked above the lowest loaded
              # address): every LS address derived from it is therefore masked (region compares, self-store check).
-             f'const unsigned flo=(0x{lo:x}u+delta)&0x3ffffu;const bool prov=spu_provenance_on;(void)flo;(void)prov;'
-             'unsigned ex=0,lim=spu_block_lim(t,block);std::uint64_t vm=0;(void)vm;']
+             f'const unsigned flo=(0x{lo:x}u+delta)&0x3ffffu;const bool prov=spu_provenance_on;const unsigned slim=prov?0x40000u:0x{flen + 15:x}u;(void)flo;(void)prov;(void)slim;'
+             'unsigned ex=block.executed,lim=spu_block_lim(t,block);std::uint64_t vm=0;(void)vm;']
     if used_dispatch:
         lines.append('spu_dispatch_local:')
     lines.append('switch((t.pc-delta)&0x3fffc){')
@@ -380,8 +477,6 @@ def emit_function(name, code_name, lo, words, lift_parts, templates=True, insns=
         else:
             lines.append(f'if(__builtin_expect((ex>=lim)|((vm&0x{mask:x}ull)!=0x{mask:x}ull),0)){{{slow_call}}}')
         index = {x.pc: i for i, x in enumerate(block)}
-        values = BlockValues(lines, end, lambda pc: index[pc], flen)
-        values.block_start = start
         last = block[-1]
         here = lambda pc: f'(a+0x{pc - start:x}u)'
         if last.kind == 'effect':
@@ -391,30 +486,46 @@ def emit_function(name, code_name, lo, words, lift_parts, templates=True, insns=
             lines.append(edge((last.pc + 4) & 0x3fffc) + '}')
             continue
         body_insns = block if last.kind in ('plain', 'store') else block[:-1]
-        for x in body_insns:
-            values.current = x.pc
-            fn = spu_simd.template(x.word) if templates else None
-            emitted = False
-            if fn is not None:
-                mark = len(lines)
-                saved = {r: dict(e, reps=dict(e['reps'])) for r, e in values.regs.items()}
-                saved_count = values.count
-                try:
-                    fn(values, x.word, f'(0x{x.pc:x}u+delta)')
-                    emitted = True
-                except spu_simd.Unsupported:
-                    del lines[mark:]
-                    values.regs, values.count = saved, saved_count
-            if not emitted:
-                used = {int(r) for r in re.findall(r'g\[(\d+)\]', x.body)}
-                values.flush(used)
-                if x.kind == 'store':
-                    lines.append(f'{{[[maybe_unused]] SpuRegister out{{}};{x.body}{values.self_store_exit("address", x.pc)}}}')
-                else:
-                    lines.append(f'{{[[maybe_unused]] SpuRegister out{{}};{x.body}}}')
-                values.drop(used)
-            if is_mfc_parameter_wrch(x.word):
-                lines.append(values.interrupt_boundary(x.pc))
+
+        def emit_body(values):
+            out = values.lines
+            for x in body_insns:
+                values.current = x.pc
+                fn = spu_simd.template(x.word) if templates else None
+                emitted = False
+                if fn is not None:
+                    mark = len(out)
+                    saved = {r: dict(e, reps=dict(e['reps'])) for r, e in values.regs.items()}
+                    saved_state = values.count, set(values.written), set(values.livein), list(values.exits)
+                    try:
+                        fn(values, x.word, f'(0x{x.pc:x}u+delta)')
+                        emitted = True
+                    except spu_simd.Unsupported:
+                        del out[mark:]
+                        values.regs = saved
+                        values.count, values.written, values.livein, values.exits = saved_state
+                if not emitted:
+                    used = {int(r) for r in re.findall(r'g\[(\d+)\]', x.body)}
+                    values.livein |= used - values.written  # the lifted body reads g[] directly
+                    values.flush(used)
+                    if x.kind == 'store':
+                        out.append(f'{{[[maybe_unused]] SpuRegister out{{}};{x.body}{values.self_store_exit("address", x.pc)}}}')
+                    else:
+                        out.append(f'{{[[maybe_unused]] SpuRegister out{{}};{x.body}}}')
+                    values.drop(used)
+                if is_mfc_parameter_wrch(x.word):
+                    out.append(values.interrupt_boundary(x.pc))
+
+        def block_values(out):
+            values = BlockValues(out, end, lambda pc: index[pc], flen)
+            values.block_start = start
+            return values
+
+        if SPU_SELF_LOOP and last.kind == 'brc' and last.target == start:
+            lines.extend(self_loop(block_values, emit_body, last, len(block), mask, edge((last.pc + 4) & 0x3fffc)))
+            continue
+        values = block_values(lines)
+        emit_body(values)
         n = len(block)
         if last.kind in ('plain', 'store'):
             values.flush()
@@ -425,7 +536,15 @@ def emit_function(name, code_name, lo, words, lift_parts, templates=True, insns=
             if last.op >> 2 in (0x62, 0x66):  # BRASL/BRSL link: word 0 = next actual address
                 values.set(last.word & 127, 'b', f'spu_vlink({here(last.pc + 4)}&0x3fffc)')
             values.flush()
-            if last.kind == 'br':
+            if chained(last):
+                # Chained call (spu_chain_call): the callee runs nested with this function's relocation; when it returns with
+                # budget left and no control exit, this function continues at the new t.pc as a fresh dispatch would: the
+                # local switch (continuation block or return), every region revalidated (vm=0), the count taken from the
+                # scope (the callee's retired instructions in a shared call, 0 after a per-call commit), the budget re-derived.
+                lines.append(f'ex+={n};block.executed=ex;t.pc={_relocated(last.target)};'
+                             f'if(!spu_chain_call(s,t,ls,{chain[last.target]},delta,block))return;'
+                             'ex=block.executed;vm=0;lim=spu_block_lim(t,block);goto spu_dispatch_local;}')
+            elif last.kind == 'br':
                 lines.append(f'ex+={n};{edge(last.target)}}}')
             else:
                 lines.append(f'block.executed=ex+{n};t.pc=0x{last.target:x}u;return;}}')
@@ -475,6 +594,7 @@ def generate_blocks(images, overlays, lift_parts):
     functions = []
     ranges = []
     chunks = {}
+    chunk_sources = {}
     decoded = {}
     sources = []
     own_targets = []
@@ -508,6 +628,28 @@ def generate_blocks(images, overlays, lift_parts):
                 chunks[key][1].update(leaders)
             else:
                 chunks[key] = (insns[at // 4:at // 4 + MAX_FUNCTION], set(leaders))
+            chunk_sources.setdefault(key, []).append((base, payload))
+    # Chained calls: a BRSL whose target lies outside its own chunk but inside its source, where every source this chunk was
+    # translated from has the same chunk at the target (deduplicated chunks may come from several sources). The target is a
+    # leader of that chunk (a direct target of the source). Only a speed hint: the callee validates its bytes on entry and a
+    # mismatch falls back to the generic dispatcher (spu_chain_call).
+    names = {key: f'spu_fn_{number}' for number, key in enumerate(chunks)}
+    def chain_map(key, insns):
+        lo, data = key
+        result = {}
+        for x in insns:
+            if x.kind != 'br' or x.op >> 2 != 0x66 or lo <= x.target < lo + len(data):
+                continue
+            homes = set()
+            for base, payload in chunk_sources[key]:
+                if not base <= x.target < base + len(payload):
+                    homes = None
+                    break
+                at = (x.target - base) // (4 * MAX_FUNCTION) * (4 * MAX_FUNCTION)
+                homes.add((base + at, payload[at:at + 4 * MAX_FUNCTION]))
+            if homes is not None and len(homes) == 1:
+                result[x.target] = names[homes.pop()]
+        return result
     for number, ((lo, data), (insns, leaders)) in enumerate(chunks.items()):
         code = f'spu_code_{number}'
         name = f'spu_fn_{number}'
@@ -515,7 +657,8 @@ def generate_blocks(images, overlays, lift_parts):
         literal = '\n'.join('"' + ''.join(f'\\x{b:02x}' for b in data[i:i + 64]) + '"'
                             for i in range(0, len(data), 64))
         text = (f'extern const std::uint8_t {code}[];\nconst std::uint8_t {code}[]=\n{literal};\n'
-                + emit_function(name, code, lo, words, lift_parts, insns=insns, extra_leaders=leaders))
+                + emit_function(name, code, lo, words, lift_parts, insns=insns, extra_leaders=leaders,
+                                chain=chain_map((lo, data), insns) if SPU_CHAIN else None))
         starts = emit_function.last_starts
         bits = bytearray((len(words) + 7) // 8)
         for pc in starts:
@@ -565,6 +708,8 @@ struct SpuSlow {std::uint64_t vm;std::uint32_t lim,ok;};
 // Slow tier of the per-block guard (see spu_block.py): block.executed is already synchronised by the caller.
 SpuSlow spu_block_slow(PpuState&,NativeSpu::Thread&,SpuBlockScope&,const std::uint8_t* ls,unsigned flo,const std::uint8_t* code,unsigned flen,
                        unsigned a,unsigned offset,unsigned length,unsigned count,unsigned lim,std::uint64_t vm,std::uint64_t mask);
+// Chained BRSL into another native function (spu_block.py chain_map); true: the caller continues at t.pc (see DISPATCH_CPP).
+bool spu_chain_call(PpuState&,NativeSpu::Thread&,std::uint8_t*,SpuNativeFunction,std::uint32_t,SpuBlockScope&);
 // Number of instructions a call may retire before the exact block-entry guard must run again: the soft/hard
 // budget (scope.fast) and, with interrupts enabled, the distance to the next interrupt sampling point.  Equivalent
 // to the conditions `executed<fast && (!interrupts_enabled || steps+executed<irq_next)` the guard used per block.
@@ -666,6 +811,78 @@ static void spu_note_entry(NativeSpu::Thread& t,std::uint32_t pc){
         const auto v=table[h].load(std::memory_order_relaxed);
         if(!v || (v>>32)==pc+1){table[h].store((std::uint64_t(pc+1)<<32)|((v&0xffffffffu)+1),std::memory_order_relaxed);break;}
     }
+}
+// SPU function chaining (HIRES7): a BRSL into another native function of the same source runs that function nested instead of
+// returning to spu_step and re-entering through spu_native_enter. Step by step the same as the generic path:
+//  * the caller's retired instructions are published first (SpuBlockScope::commit = what its return does), and the callee is
+//    entered only when spu_step would enter anything: budget left, below the step limit, no control exit; otherwise the caller
+//    returns as before;
+//  * the callee is entered through spu_native_call with the caller's relocation (t.pc = target already set), so it validates its
+//    own bytes; which matching native function serves a PC is a hint in both paths (each validates exactly the bytes it executes);
+//  * callee without progress (miss, decline, interrupt redirect): the caller returns and the generic dispatcher handles t.pc;
+//  * callee with progress: the caller continues only under spu_step's conditions for its next entry and an unchanged control
+//    generation, with its scope re-derived as a fresh entry would (rearm), the caller's relocation restored and miss/decline
+//    cleared; the generated code drops every validated region (the callee may have written LS) and dispatches t.pc through its
+//    local switch (the continuation after the BRSL, another block of this function, or a return to the dispatcher);
+//  * exceptions (STOP, blocking channel, faults) unwind through the caller, whose scope holds nothing uncommitted;
+//  * nesting is bounded (SPU_CHAIN_DEPTH host frames, then the generic return); ANYPS3_SPU_CHAIN=0 disables it (A/B).
+// Shared form (HIRES9, default; ANYPS3_SPU_CHAIN_SHARED=0 keeps the per-call form above for A/B): the callee's scope continues the
+// caller's (t.chain_scope, SpuBlockScope) instead of a commit before the call, a second scope start in the callee and a rearm
+// after it, and the callee is called directly instead of through spu_native_call. Same entries, retired counts, budgets,
+// fallbacks and diagnostics, because every observer of the split sees the same values:
+//  * one origin: t.steps/t.block_budget stay at the caller's scope start until the outermost scope commits, executed counts from
+//    there. The commit-free conditions are the per-call ones: executed>=limit <=> (after the commit) no budget or step limit
+//    reached, as limit=min(budget,step limit-steps) at that origin; the callee's guards compare its counter ex (started at the
+//    caller's executed) against the caller's limit/hard/fast, i.e. offset by the caller's executed exactly as the callee's fresh
+//    scope would compute them (fast=min(limit,hard-63): an offset when hard is exact, and with hard clamped at UINT32_MAX -
+//    step limit far away - limit<SPU_CHAIN_SHARED_LIMIT keeps both hard tests unreachable and fast=limit); the interrupt bound
+//    room=irq_next-steps and spu_block_enter's steps+executed are the same sums; the callee's own HostAccess origin samples
+//    steps+executed = the same operation number;
+//  * a control generation changed before the call takes the per-call form (it commits nothing, as before); one changed inside
+//    the callee: the per-call form had committed the caller's prefix and dropped the rest, so the scope keeps that prefix
+//    (kept) and commit adds exactly it;
+//  * a per-call chained call further down (generation change) commits the shared count and rearms that scope; the callee hands
+//    its whole state back, so the caller continues from the new origin as after a per-call call;
+//  * exceptions: the callee's scope hands its state back while unwinding, the caller's commits it (as the two commits did).
+// Not identical (diagnostics only): published_steps (perf report) is stored once per outermost scope instead of per call.
+static constexpr unsigned SPU_CHAIN_DEPTH=16;
+static constexpr unsigned SPU_CHAIN_SHARED_LIMIT=1u<<31;
+static thread_local std::uint64_t spu_chain_returns=0;   // TEST HOOK: chained calls whose caller continued
+static thread_local std::uint64_t spu_chain_shared=0;    // TEST HOOK: chained calls entered in the shared form
+static const bool spu_chain_enabled=[]{const char* v=std::getenv("ANYPS3_SPU_CHAIN");
+    if(v && std::strcmp(v,"0") && std::strcmp(v,"1")){throw std::runtime_error("invalid ANYPS3_SPU_CHAIN");}return !v || !std::strcmp(v,"1");}();
+static const bool spu_chain_shared_enabled=[]{const char* v=std::getenv("ANYPS3_SPU_CHAIN_SHARED");
+    if(v && std::strcmp(v,"0") && std::strcmp(v,"1")){throw std::runtime_error("invalid ANYPS3_SPU_CHAIN_SHARED");}return !v || !std::strcmp(v,"1");}();
+bool spu_chain_call(PpuState& s,NativeSpu::Thread& t,std::uint8_t* ls,SpuNativeFunction fn,std::uint32_t delta,SpuBlockScope& block){
+    if(__builtin_expect(spu_chain_enabled && spu_chain_shared_enabled && t.control_generation==block.generation && block.limit<SPU_CHAIN_SHARED_LIMIT,1)){
+        if(t.chain_depth>=SPU_CHAIN_DEPTH || block.executed>=block.limit || t.block_control_exit || t.block_trace)return false;
+        struct Depth {unsigned& depth;explicit Depth(unsigned& d):depth(d){++depth;}~Depth(){--depth;}} nested(t.chain_depth);
+        if(__builtin_expect(spu_stats_on,0))spu_note_entry(t,t.pc);
+        // spu_native_call's bookkeeping; progress = retired instructions (a per-call commit further down moves them to t.steps).
+        const auto steps=t.steps;const unsigned before=block.executed;block.kept=before;
+        t.reloc_delta=delta;t.dynamic_miss=false;t.block_decline=false;spu_stat(t,8);++spu_chain_shared;
+        auto count=[&]{if(delta && (!t.dynamic_miss || t.steps!=steps || block.executed!=before)){auto& c=t.relocated_entries.value;c.store(c.load(std::memory_order_relaxed)+1,std::memory_order_relaxed);}};
+        t.chain_scope=&block;
+        try{fn(s,t,ls);}catch(...){t.chain_scope=nullptr;count();throw;}
+        count();
+        if(t.steps==steps && block.executed==before){if(t.block_decline)spu_stat(t,18);else if(t.dynamic_miss)spu_stat(t,17);return false;}
+        if(block.executed>=block.limit || t.block_control_exit || t.control_generation!=block.generation)return false;
+        // The per-call form has now committed everything (the callee's scope): a later generation change drops only what follows.
+        t.reloc_delta=delta;t.dynamic_miss=false;t.block_decline=false;block.kept=block.executed;
+        if(__builtin_expect(spu_stats_on,0))spu_note_entry(t,t.pc);
+        ++spu_chain_returns;return true;
+    }
+    block.commit();
+    if(!spu_chain_enabled || t.chain_depth>=SPU_CHAIN_DEPTH || !t.block_budget || t.steps>=t.block_limit || t.block_control_exit || t.block_trace)return false;
+    struct Depth {unsigned& depth;explicit Depth(unsigned& d):depth(d){++depth;}~Depth(){--depth;}} nested(t.chain_depth);
+    t.block_decline=false;
+    if(__builtin_expect(spu_stats_on,0))spu_note_entry(t,t.pc);
+    const auto before=t.steps;
+    spu_native_call(s,t,ls,fn,delta);
+    if(t.steps==before || !t.block_budget || t.steps>=t.block_limit || t.block_control_exit || t.control_generation!=block.generation)return false;
+    t.reloc_delta=delta;t.dynamic_miss=false;t.block_decline=false;block.rearm();
+    if(__builtin_expect(spu_stats_on,0))spu_note_entry(t,t.pc);
+    ++spu_chain_returns;return true;
 }
 // True when native code made progress or changed state; false: interpret.
 static bool spu_native_enter(PpuState& s,NativeSpu::Thread& t,std::uint8_t* ls){

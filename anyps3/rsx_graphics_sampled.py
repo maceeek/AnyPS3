@@ -1,5 +1,16 @@
 """Cache-native texture upload, with all guest codecs resolved at upload time."""
 MEMBERS = r'''
+    // ANYPS3_RSX_TEXTURE_IMAGE_MEMO (default 1): the lookup below remembers, per identity slot, the inputs of a hit on a trusted
+    // entry whose every candidate was trusted (no snapshot read), with raw_revision at that time. raw_revision moves at every
+    // change of the raw cache that the lookup reads: insertion (index_raw), erase (erase_raw: also the only sampled_entries and
+    // raw_positions changes, and every move of an entry inside raw_textures), replacement (store_raw) and invalidation
+    // (dirty_raw); RawTexture fields are otherwise only written on entries not yet stored. With the same inputs and revision the
+    // scan selects the same entry with the same trusted candidates, so only its CPU-dirty check (raw_dirty) runs again. 0 always scans.
+    static bool texture_image_memo(){static const bool on=[]{const char* v=std::getenv("ANYPS3_RSX_TEXTURE_IMAGE_MEMO");
+        if(v && std::strcmp(v,"0") && std::strcmp(v,"1")){throw std::runtime_error("invalid ANYPS3_RSX_TEXTURE_IMAGE_MEMO");}
+        return !v || !std::strcmp(v,"1");}();return on;}
+    struct ImageMemo {std::vector<unsigned> key;const void* identity=nullptr;bool planned=false;std::uint64_t origin_size=0,size=0,revision=0,id=0;std::size_t position=0;};
+    std::array<ImageMemo,8> image_memo{};
     std::shared_ptr<NativeVulkan::GraphicsImage> texture_image(const Texture& supplied){
         HostPhase phase(HostStage::texture_upload);
         const auto* source=supplied.levels[0].data;const auto size=supplied.plan?supplied.plan->bytes:supplied.untiled?supplied.untiled->size():supplied.storage_size;
@@ -12,7 +23,14 @@ MEMBERS = r'''
         // Synchronization can erase/move cache entries. Do it before taking
         // an entry reference, including for physically disjoint bytes that
         // share a protected host page with a resident surface.
-        const auto signature=sampled_key(key,t.plan?static_cast<const void*>(t.plan.get()):t.untiled?t.storage:source,size,t.storage_size);
+        const void* identity=t.plan?static_cast<const void*>(t.plan.get()):t.untiled?t.storage:source;
+        auto& memo=image_memo[(reinterpret_cast<std::uintptr_t>(identity)>>4)%image_memo.size()];
+        if(texture_image_memo() && memo.revision==raw_revision && memo.identity==identity && memo.planned==bool(t.plan) && memo.origin_size==t.storage_size && memo.size==size && memo.key==key){
+            if(memo.position>=raw_textures.size() || raw_textures[memo.position].id!=memo.id)throw std::runtime_error("RSX texture image memo outlived its raw entry");
+            auto& entry=raw_textures[memo.position];
+            if(!raw_dirty(entry) && entry.trusted){if(fallback_stats().enabled)++fallback_stats().paths["texture_hit"];++raw_hits;entry.last_use=++resource_clock;return entry.image;}
+        }
+        const auto signature=sampled_key(key,identity,size,t.storage_size);
         auto matches=[&](const RawTexture& e){return e.image && e.key==key && (t.plan?e.plan==t.plan:e.origin==(t.untiled?t.storage:source)) && e.origin_size==t.storage_size && e.size==size;};
         bool snapshot_read=false;RawTexture* first_match=nullptr;
         {const auto range=sampled_entries.equal_range(signature);
@@ -34,7 +52,10 @@ MEMBERS = r'''
             else if(!same && !invalid){std::vector<std::uint8_t> bytes;const auto* current=source;
                 if(state.memory.concurrent() && !t.untiled){bytes.resize(size);pinned_host_read(state.memory,source,bytes.data(),size);current=bytes.data();}
                 same=std::memcmp(entry.snapshot.data(),current,size)==0;}
-            if(same){if(fallback_stats().enabled)++fallback_stats().paths["texture_hit"];++raw_hits;entry.last_use=++resource_clock;return entry.image;}
+            if(same){if(fallback_stats().enabled)++fallback_stats().paths["texture_hit"];++raw_hits;entry.last_use=++resource_clock;
+                if(!snapshot_read && entry.trusted){memo.key=key;memo.identity=identity;memo.planned=bool(t.plan);memo.origin_size=t.storage_size;memo.size=size;
+                    memo.revision=raw_revision;memo.id=entry.id;memo.position=std::size_t(&entry-raw_textures.data());}
+                return entry.image;}
             if(entry.dirty_inputs){reuse=entry.id;dirty=entry.dirty_inputs;reusable_image=entry.image;}
             else erase_raw(&entry-raw_textures.data(),"snapshot_mismatch");
             }

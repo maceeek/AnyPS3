@@ -137,8 +137,27 @@ static void selective_unprotectable(){
  const auto* raw=s.memory.regions[1].bytes->data()+0x100000;assert(raw[0]>=127 && raw[0]<=128 && raw[1]==255);
  session.guard.disarm();session.flush();std::puts("PASS allocator-edge flush only downloads the affected surface, retained read stays coherent");
 }
+static void owner_lookup_order(){
+ // rtt_image's surface lookup (ANYPS3_RSX_RTT_PREFILTER) across surface creation and removal at the texture's bytes.
+ PpuState s;setup_draw(s,8,8,256,false);auto& r=s.rsx.registers;r[0x20c]=r[0x22c]=256;
+ s.rsx.renderer=std::make_unique<NativeVulkan>();rsxgraphics::Session session(*s.rsx.renderer,s);s.rsx.graphics_session=&session;session.observe();setenv("ANYPS3_RSX_BACKEND","gpu",1);
+ auto& paths=rsxgraphics::fallback_stats().paths;
+ auto sample=[&](unsigned address){r[0x1a00]=address;r[0x1a04]=(0x0001a529u&~0xff00u)|((0x85u|0x20u)<<8);r[0x1a08]=0x00030303;r[0x1a0c]=0x80000000;r[0x1a10]=0xaae4;r[0x1a14]=0x01010000;
+  r[0x1a18]=(8u<<16)|8;r[0x1840]=256;const auto before=paths["rtt_no_owner"];auto t=session.texture_metadata(0);return std::make_pair(t.resident_image,paths["rtt_no_owner"]-before);};
+ const unsigned color=r[0x210],away=0x300000;
+ auto first=sample(color);assert(!first.first && first.second==1);           // no surface owns the color bytes yet
+ rsx_execute_draw(s);                                                           // creates the color surface over them
+ auto owned=sample(color);assert(owned.first && owned.second==0);
+ auto far=sample(away);assert(!far.first && far.second==1);                    // bytes no surface covers
+ session.clear_surfaces();
+ auto gone=sample(color);assert(!gone.first && gone.second==1);                // the owner was removed
+ const auto data=s.rsx.renderer->graphics_transfer(*session.batch,owned.first,VK_IMAGE_ASPECT_COLOR_BIT,rsxgraphics::image_bpp(owned.first->format));s.rsx.renderer->graphics_finish(*session.batch);
+ const auto* p=static_cast<const std::uint8_t*>(session.batch->map)+data;assert(p[0]==255 && near_byte(p[1],128) && near_byte(p[2],64) && near_byte(p[3],128));
+ session.flush(false);s.rsx.graphics_session=nullptr;
+ std::puts("PASS RTT owner lookup follows surface creation and removal at the sampled bytes");
+}
 int main(){try{setenv("ANYPS3_RSX_HOST_PROFILE","1",1);setenv("ANYPS3_RSX_FALLBACK_STATS","1",1);
- rtt_case(0,true,false,false,8,0x85);rtt_case(3,false,false,false,8,0x85);rtt_case(4,true,false,false,8,0x85);rtt_case(5,false,false,false,11,0x9a);rtt_case(0,false,true,false,8,0x85);rtt_case(0,false,false,true,8,0x85);rtt_case(0,false,false,false,11,0x85);rtt_case(0,false,false,false,8,0x85,true);rtt_case(0,false,false,false,8,0x85,false,true);rtt_case(0,false,false,false,11,0x85,false,true);rtt_case(0,true,false,false,8,0x85,false,false,true);expanded_sample_masks();depth_view();tiled_feedback_snapshot();depth_typeless_bits();float_typeless_bits();selective_unprotectable();
+ rtt_case(0,true,false,false,8,0x85);rtt_case(3,false,false,false,8,0x85);rtt_case(4,true,false,false,8,0x85);rtt_case(5,false,false,false,11,0x9a);rtt_case(0,false,true,false,8,0x85);rtt_case(0,false,false,true,8,0x85);rtt_case(0,false,false,false,11,0x85);rtt_case(0,false,false,false,8,0x85,true);rtt_case(0,false,false,false,8,0x85,false,true);rtt_case(0,false,false,false,11,0x85,false,true);rtt_case(0,true,false,false,8,0x85,false,false,true);expanded_sample_masks();depth_view();tiled_feedback_snapshot();depth_typeless_bits();float_typeless_bits();selective_unprotectable();owner_lookup_order();
 }catch(const std::exception& e){std::fprintf(stderr,"FAIL %s\n",e.what());return 1;}}
 '''
 def native_source():
@@ -154,4 +173,4 @@ class RenderTargetTextureTests(unittest.TestCase):
             run=subprocess.run([str(root/'test')],capture_output=True,text=True,env=env,timeout=90)
             self.assertEqual(run.returncode,0,run.stdout+run.stderr)
             self.assertNotIn('Validation Error',run.stdout+run.stderr);self.assertNotIn('Validation Warning',run.stdout+run.stderr)
-            self.assertEqual(run.stdout.count('PASS '),17)
+            self.assertEqual(run.stdout.count("PASS "),18)

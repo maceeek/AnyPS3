@@ -94,6 +94,8 @@ struct NativeSpu {
         // Internal AOT dispatch context; each spu_step defaults to one instruction.
         unsigned block_budget=1;std::uint64_t block_limit=UINT64_MAX;bool block_trace=false,block_control_exit=false;
         bool dynamic_miss=false;
+        unsigned chain_depth=0;   // nesting of chained native calls (spu_chain_call), bounded by SPU_CHAIN_DEPTH
+        void* chain_scope=nullptr; // SpuBlockScope* of a shared chained call, taken by the callee's scope constructor (spu_chain_call)
         // Relocation is a hint only: generated word/run guards revalidate LS.
         std::uint32_t reloc_delta=0;
         // Translation identity is independent of the thread's boot image.
@@ -147,6 +149,8 @@ struct NativeSpu {
         std::array<std::uint32_t,2> signals{};std::array<bool,2> signal_ready{};
         SpuPublished<unsigned> signal_config{0};unsigned waiting_signal=0;
         std::vector<Segment> segments;
+        // Provenance forgets of quadword stores not yet applied to dma_writes (spu_ls_forget_quad): one bit per 16-byte LS line.
+        std::array<std::uint64_t,256> ls_forget{};bool ls_forget_pending=false;
     };
     struct Group {
         std::uint32_t id=0,count=0,priority=0;SpuPublished<std::uint32_t> state{0};
@@ -384,7 +388,7 @@ static std::uint32_t spu_syscall(PpuState& s) {
             }
             spu_prepare(s,thread,ls);
             thread.stopped=false;thread.exit_status_ready=false;thread.waiting_receive=false;
-            thread.dma_writes.clear();thread.dynamic_blocks.clear();thread.dynamic_seen.clear();thread.dynamic_miss=false;thread.reloc_delta=0;
+            thread.dma_writes.clear();thread.ls_forget={};thread.ls_forget_pending=false;thread.dynamic_blocks.clear();thread.dynamic_seen.clear();thread.dynamic_miss=false;thread.reloc_delta=0;
             thread.steps=0;thread.published_steps.value.store(0,std::memory_order_relaxed);thread.dma={};thread.tag_mask=0;thread.tag_status=0;thread.tag_status_ready=false;thread.stalled_lists={};thread.stall_mask=0;thread.stall_stat=0;thread.stall_stat_ready=false;thread.tag_update_pending=0;
             thread.out_mailbox_full=false;thread.in_mailbox.clear();thread.reservation_address=UINT64_MAX;
             thread.reservation_observed_valid=false;thread.idle_poll=NativeSpu::Thread::PollState{};

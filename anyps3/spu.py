@@ -162,7 +162,7 @@ def lift_parts(pc, word, *, runtime=False):
         relative=op>>2 in (0x47,0x67)
         address=f'({w(a,0)}+{uint32((i10*16)&0xffffffff)})&0x3fff0' if op>>3 in (0x24,0x34) else f'{hex_value(((pc if relative else 0)+si16*4)&0x3fff0)}'
         if op in (0x144,0x1c4):address=f'({w(a,0)}+{w(b,0)})&0x3fff0'
-        if op>>2 in (0x41,0x47) or op>>3==0x24 or op==0x144:body=f'const unsigned address={address};std::copy(g[{t}].begin(),g[{t}].end(),ls+address);spu_ls_forget(t,address,16);'
+        if op>>2 in (0x41,0x47) or op>>3==0x24 or op==0x144:body=f'const unsigned address={address};std::copy(g[{t}].begin(),g[{t}].end(),ls+address);spu_ls_forget_quad(t,address);'
         else:body=f'const unsigned address={address};std::copy_n(ls+address,16,g[{t}].begin());'
     elif op>>2 in (0x40,0x42,0x44,0x46,0x60,0x62,0x64,0x66):
         kind=op>>2;target=((0 if kind in (0x60,0x62) else pc)+si16*4)&0x3fffc
@@ -630,11 +630,13 @@ __attribute__((noinline)) static __m128 spu_single_sse(__m128 a,__m128 b,unsigne
             const auto x=spu_word(a,i),y=spu_word(b,i),z=spu_word(c,i),r=result[i],m=r&0x7fffffffu;
             // Denormal/extended inputs need DIFF. IEEE RZ overflow can also
             // produce 0x7f7fffff, so include that boundary in the slow path.
-            bool safe=!spu_single_diff(x) && !spu_single_diff(y) && (kind<3 || !spu_single_diff(z));
+            const bool ordinary=!spu_single_diff(x) && !spu_single_diff(y) && (kind<3 || !spu_single_diff(z));
             const bool exact_zero=kind<2?((x&0x7fffffff)==(y&0x7fffffff)):
                 ((!(x&0x7fffffff) || !(y&0x7fffffff)) && (kind==2 || !(z&0x7fffffff)));
-            safe=safe && ((m>=0x00800000u && m<0x7f7fffffu) || (!m && exact_zero));
-            if(safe){spu_word(out,i,m?r:0);if(spu_profile_on)++spu_profile.fp_fast_lanes;}
+            if(ordinary && ((m>=0x00800000u && m<0x7f7fffffu) || (!m && exact_zero))){spu_word(out,i,m?r:0);if(spu_profile_on)++spu_profile.fp_fast_lanes;}
+            // Proven underflow (as spu_vfp): ordinary inputs and a nonzero RZ result below 2^-126, or a zero FM product of
+            // nonzero inputs, is +0 with flags 3 in spu_single_round (exponent < -126).
+            else if(ordinary && ((m && m<0x00800000u) || (kind==2 && !m && !exact_zero))){spu_word(out,i,0);spu_fp_flag(fpscr,i,3);if(spu_profile_on)++spu_profile.fp_fast_lanes;}
             else slow|=1u<<i;
         }
         }
@@ -908,6 +910,15 @@ void spu_ls_write(NativeSpu::Thread&,unsigned,unsigned,std::uint64_t);
 static inline void spu_ls_forget(NativeSpu::Thread& t,unsigned base,unsigned size){
     if(!t.dma_writes.empty())spu_ls_write(t,base,size,UINT64_MAX);
 }
+// The forget of a quadword store (16-byte aligned `base`), deferred without a call: generated code must not call out of its
+// hot path (a call that returns clobbers every vector register, so GCC homes all live SPU values on the stack).  The line is
+// marked under the same condition as spu_ls_forget (a map that is empty before draining stays empty after it).  Exact for
+// every reader: forgets only remove bytes and commute with each other (the remainder of each span does not depend on their
+// order or grouping), and spu_ls_drain applies the pending lines before every insert or other forget (spu_ls_write) and
+// before every reader (spu_dynamic_record, spu_dynamic_fault), so each sees the map of eager forgets.
+[[gnu::always_inline]] static inline void spu_ls_forget_quad(NativeSpu::Thread& t,unsigned base){
+    if(!t.dma_writes.empty()){t.ls_forget[base>>10]|=std::uint64_t(1)<<((base>>4)&63);t.ls_forget_pending=true;}
+}
 // Diagnostic capture is TLS and disabled by default. It observes one scheduler
 // slice, including attempted blocking instructions and the actual DMA payloads.
 // Unsupported external stimuli are recorded as such, never fabricated for replay.
@@ -976,11 +987,28 @@ struct SpuCaptureScope {
 // limit: soft slice end (a superblock may start below it and overshoot it);
 // hard: exact distance to the step limit; fast: entries that need no exact check.
 struct SpuBlockScope {
-    NativeSpu::Thread& thread;unsigned executed=0,limit,hard,fast;std::uint64_t generation;HostAccessContext origin;
-    explicit SpuBlockScope(NativeSpu::Thread& t):thread(t),limit(static_cast<unsigned>(std::min<std::uint64_t>(t.block_budget,t.block_limit-t.steps))),
-        hard(static_cast<unsigned>(std::min<std::uint64_t>(t.block_limit-t.steps,UINT32_MAX))),fast(t.block_exact?0u:std::min(limit,hard>=64u?hard-63u:0u)),
-        generation(t.control_generation),origin(HostAccessOrigin::Engine::Spu,t.id,t.pc,&t.steps,&executed){}
-    ~SpuBlockScope(){if(thread.control_generation==generation){thread.steps+=executed;thread.published_steps.value.store(thread.steps,std::memory_order_relaxed);thread.block_budget-=std::min(executed,thread.block_budget);}}
+    NativeSpu::Thread& thread;unsigned executed=0,limit,hard,fast;std::uint64_t generation;
+    // Shared chained call (spu_chain_call, HIRES9): `parent` is the calling function's scope.  This scope then continues the
+    // caller's count instead of starting a new one: executed/limit/hard/fast/generation/kept are the caller's (one origin =
+    // the caller's steps/budget), nothing is committed in between, and on exit (also on an exception) the whole state goes
+    // back to the caller, which commits it once.  kept = what the per-call protocol has committed so far under this scope's
+    // generation (the count at the latest shared chained call, all of it once that call returned with the generation unchanged),
+    // i.e. the only part a generation change after that point leaves in t.steps (commit).
+    SpuBlockScope* const parent;unsigned kept=0;HostAccessContext origin;
+    explicit SpuBlockScope(NativeSpu::Thread& t):thread(t),parent(static_cast<SpuBlockScope*>(t.chain_scope)),origin(HostAccessOrigin::Engine::Spu,t.id,t.pc,&t.steps,&executed){
+        if(__builtin_expect(parent!=nullptr,0)){t.chain_scope=nullptr;executed=parent->executed;limit=parent->limit;hard=parent->hard;fast=parent->fast;generation=parent->generation;kept=parent->kept;return;}
+        rearm();}
+    ~SpuBlockScope(){if(__builtin_expect(parent!=nullptr,0)){parent->executed=executed;parent->limit=limit;parent->hard=hard;parent->fast=fast;parent->generation=generation;parent->kept=kept;}
+        else commit();}
+    // Publish the instructions retired so far exactly as the destructor does (used before a per-call chained call, spu_chain_call):
+    // all of them with an unchanged generation, otherwise the prefix `kept` (0 outside shared chained calls).
+    void commit(){const bool same=thread.control_generation==generation;const unsigned done=same?executed:kept;
+        if(same || done){thread.steps+=done;thread.published_steps.value.store(thread.steps,std::memory_order_relaxed);thread.block_budget-=std::min(done,thread.block_budget);}
+        executed=0;kept=0;}
+    // The budget fields a fresh scope would compute now (the caller continues after a chained call as a new entry would).
+    void rearm(){limit=static_cast<unsigned>(std::min<std::uint64_t>(thread.block_budget,thread.block_limit-thread.steps));
+        hard=static_cast<unsigned>(std::min<std::uint64_t>(thread.block_limit-thread.steps,UINT32_MAX));fast=thread.block_exact?0u:std::min(limit,hard>=64u?hard-63u:0u);
+        generation=thread.control_generation;}
 };
 
 // SPU ISA v1.2 PDF pp.178-181,251-252; Cell BE Handbook v1.1 pp.470-471.

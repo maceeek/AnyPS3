@@ -159,7 +159,7 @@ remapping and dead zones unavailable; default SDL mapping remains active.
 Existing compiled game artifacts do not gain runtime functionality until their owner rebuilds them.
 
 Reproducible scoped commands, logs, test-source hashes and mutation results are
-in [evidence/padmotion/README.md](evidence/padmotion/README.md). Tests use an
+in [the PADMOTION evidence](../archive/manager/evidence/padmotion/README.md). Tests use an
 isolated fake SDL shared library or SDL virtual devices, never a physical rumble
 probe. All processes force dummy/null audio; the Qt checks run offscreen.
 Physical USB/Bluetooth behavior, calibration quality, actual game motion/rumble

@@ -34,6 +34,18 @@ struct RsxDrawState {
     std::vector<std::uint32_t> scratch_indices;
     std::vector<std::uint8_t> scratch_index_bytes;
     std::vector<std::array<std::uint32_t,3>> scratch_triangles;
+    // Minimum/maximum (+ base) of the decoded unrestarted indices of the current draw (extent_known), recorded for
+    // scratch_triangles at its built size (extent_of/extent_size) only when every decoded index is in a triangle.
+    // Reset at every index build; triangle_extent() hands it to IndexBounds instead of a second scan.
+    bool extent_known=false;std::uint32_t extent_lo=0,extent_hi=0;const void* extent_of=nullptr;std::size_t extent_size=0;
+    // A triangle-list draw without restart served by the session's index reuse (Session::index_read) takes the entry's immutable
+    // triangles instead of building scratch_indices/scratch_triangles: the draw's triangle list is triangle_list(). Pinned until
+    // the next draw starts (or copied into the scratch lists before a CPU fallback); never guest state.
+    std::shared_ptr<const std::vector<std::array<std::uint32_t,3>>> shared_triangles;
+    const std::vector<std::array<std::uint32_t,3>>& triangle_list()const{return shared_triangles?*shared_triangles:scratch_triangles;}
+    const std::pair<unsigned,unsigned>* triangle_extent(const std::vector<std::array<std::uint32_t,3>>& t,std::pair<unsigned,unsigned>& out)const{
+        if(!extent_known || extent_of!=static_cast<const void*>(&t) || extent_size!=t.size() || t.empty())return nullptr;
+        out={extent_lo,extent_hi};return &out;}
 };
 '''
 
@@ -58,22 +70,56 @@ CPP = r'''
 #if defined(__SSSE3__) && defined(__SSE4_1__)
 #include <immintrin.h>
 #endif
+#if defined(__SSE2__)
+#include <emmintrin.h>
+#endif
 namespace rsxdraw {
 using Vec4=std::array<float,4>;
+// Zero n words with 16-byte stores: the bytes of memset(p,0,4n). Kept a loop (no memset pattern): a memset of >= 2 KiB is
+// `rep stosb`, which valgrind counts per byte, and the per-draw blob is ~2.2 KiB.
+[[maybe_unused,gnu::optimize("no-tree-loop-distribute-patterns")]] static void zero_words(unsigned* p,std::size_t n){
+    std::size_t i=0;
+#if defined(__SSE2__)
+    for(;i+4<=n;i+=4)_mm_storeu_si128(reinterpret_cast<__m128i*>(p+i),_mm_setzero_si128());
+#endif
+    for(;i<n;++i)p[i]=0;
+}
 // Big-endian index decode: out[i]=raw+base, or UINT32_MAX for the restart value
-// when restart is enabled. largest/any cover the unrestarted raw values only,
-// for the caller's overflow check. Width is 2 or 4 bytes.
+// when restart is enabled. largest/smallest/any cover the unrestarted raw values only,
+// for the caller's overflow check and its index extent (smallest/largest are only
+// meaningful when any). Width is 2 or 4 bytes.
 [[maybe_unused]] static void decode_indices(const std::uint8_t* in,std::uint32_t* out,unsigned count,unsigned width,bool restart,
-        std::uint32_t restart_index,std::uint32_t base,std::uint32_t& largest,bool& any){
+        std::uint32_t restart_index,std::uint32_t base,std::uint32_t& largest,std::uint32_t& smallest,bool& any){
     unsigned i=0;
 #if defined(__SSSE3__) && defined(__SSE4_1__)
-    __m128i maxv=_mm_setzero_si128(),seen=_mm_setzero_si128();
+    // Restart lanes are or-ed to all ones before the minimum and cleared before the maximum, so they count for neither.
+#if defined(__AVX2__)
+    if(width==2 && count>=16){
+        __m256i maxv=_mm256_setzero_si256(),minv=_mm256_set1_epi32(-1),seen=_mm256_setzero_si256();
+        const __m256i basev=_mm256_set1_epi32(int(base)),restartv=_mm256_set1_epi32(int(restart_index)),ones=_mm256_set1_epi32(-1);
+        const __m128i swap16=_mm_setr_epi8(1,0,3,2,5,4,7,6,9,8,11,10,13,12,15,14);
+        auto widen=[&](unsigned at){return _mm256_cvtepu16_epi32(_mm_shuffle_epi8(_mm_loadu_si128(reinterpret_cast<const __m128i*>(in+2*at)),swap16));};
+        if(!restart){seen=ones;   // count >= 16: some value is unrestarted
+            for(;i+16<=count;i+=16){const __m256i x=widen(i),y=widen(i+8);
+                _mm256_storeu_si256(reinterpret_cast<__m256i*>(out+i),_mm256_add_epi32(x,basev));_mm256_storeu_si256(reinterpret_cast<__m256i*>(out+i+8),_mm256_add_epi32(y,basev));
+                maxv=_mm256_max_epu32(maxv,_mm256_max_epu32(x,y));minv=_mm256_min_epu32(minv,_mm256_min_epu32(x,y));}
+            for(;i+8<=count;i+=8){const __m256i x=widen(i);_mm256_storeu_si256(reinterpret_cast<__m256i*>(out+i),_mm256_add_epi32(x,basev));maxv=_mm256_max_epu32(maxv,x);minv=_mm256_min_epu32(minv,x);}
+        }else for(;i+8<=count;i+=8){const __m256i x=widen(i),hit=_mm256_cmpeq_epi32(x,restartv);
+            _mm256_storeu_si256(reinterpret_cast<__m256i*>(out+i),_mm256_or_si256(_mm256_add_epi32(x,basev),hit));
+            maxv=_mm256_max_epu32(maxv,_mm256_andnot_si256(hit,x));minv=_mm256_min_epu32(minv,_mm256_or_si256(hit,x));seen=_mm256_or_si256(seen,_mm256_andnot_si256(hit,ones));}
+        alignas(32) std::uint32_t m[8],l[8];_mm256_store_si256(reinterpret_cast<__m256i*>(m),maxv);_mm256_store_si256(reinterpret_cast<__m256i*>(l),minv);
+        largest=0;smallest=UINT32_MAX;for(unsigned k=0;k<8;++k){largest=std::max(largest,m[k]);smallest=std::min(smallest,l[k]);}
+        any=!_mm256_testz_si256(seen,seen);
+    }else
+#endif
+    {
+    __m128i maxv=_mm_setzero_si128(),minv=_mm_set1_epi32(-1),seen=_mm_setzero_si128();
     const __m128i basev=_mm_set1_epi32(int(base)),restartv=_mm_set1_epi32(int(restart_index)),ones=_mm_set1_epi32(-1);
     auto lanes=[&](__m128i x,std::uint32_t* to){
         if(restart){const __m128i hit=_mm_cmpeq_epi32(x,restartv);
             _mm_storeu_si128(reinterpret_cast<__m128i*>(to),_mm_or_si128(_mm_add_epi32(x,basev),hit));
-            maxv=_mm_max_epu32(maxv,_mm_andnot_si128(hit,x));seen=_mm_or_si128(seen,_mm_andnot_si128(hit,ones));}
-        else{_mm_storeu_si128(reinterpret_cast<__m128i*>(to),_mm_add_epi32(x,basev));maxv=_mm_max_epu32(maxv,x);seen=ones;}
+            maxv=_mm_max_epu32(maxv,_mm_andnot_si128(hit,x));minv=_mm_min_epu32(minv,_mm_or_si128(hit,x));seen=_mm_or_si128(seen,_mm_andnot_si128(hit,ones));}
+        else{_mm_storeu_si128(reinterpret_cast<__m128i*>(to),_mm_add_epi32(x,basev));maxv=_mm_max_epu32(maxv,x);minv=_mm_min_epu32(minv,x);seen=ones;}
     };
     if(width==2){
         const __m128i low=_mm_setr_epi8(1,0,-1,-1,3,2,-1,-1,5,4,-1,-1,7,6,-1,-1),high=_mm_setr_epi8(9,8,-1,-1,11,10,-1,-1,13,12,-1,-1,15,14,-1,-1);
@@ -83,16 +129,21 @@ using Vec4=std::array<float,4>;
         const __m128i swap=_mm_setr_epi8(3,2,1,0,7,6,5,4,11,10,9,8,15,14,13,12);
         for(;i+4<=count;i+=4)lanes(_mm_shuffle_epi8(_mm_loadu_si128(reinterpret_cast<const __m128i*>(in+4*i)),swap),out+i);
     }
-    alignas(16) std::uint32_t m[4];_mm_store_si128(reinterpret_cast<__m128i*>(m),maxv);
-    largest=std::max(std::max(m[0],m[1]),std::max(m[2],m[3]));any=!_mm_testz_si128(seen,seen);
+    alignas(16) std::uint32_t m[4],l[4];_mm_store_si128(reinterpret_cast<__m128i*>(m),maxv);_mm_store_si128(reinterpret_cast<__m128i*>(l),minv);
+    largest=std::max(std::max(m[0],m[1]),std::max(m[2],m[3]));smallest=std::min(std::min(l[0],l[1]),std::min(l[2],l[3]));any=!_mm_testz_si128(seen,seen);
+    }
 #else
-    largest=0;any=false;
+    largest=0;smallest=UINT32_MAX;any=false;
 #endif
     for(;i<count;++i){
         const std::uint32_t raw=width==2?(std::uint32_t(in[2*i])<<8|in[2*i+1]):(std::uint32_t(in[4*i])<<24|std::uint32_t(in[4*i+1])<<16|std::uint32_t(in[4*i+2])<<8|in[4*i+3]);
         if(restart && raw==restart_index){out[i]=UINT32_MAX;continue;}
-        largest=std::max(largest,raw);any=true;out[i]=raw+base;
+        largest=std::max(largest,raw);smallest=std::min(smallest,raw);any=true;out[i]=raw+base;
     }
+}
+[[maybe_unused]] static void decode_indices(const std::uint8_t* in,std::uint32_t* out,unsigned count,unsigned width,bool restart,
+        std::uint32_t restart_index,std::uint32_t base,std::uint32_t& largest,bool& any){
+    std::uint32_t smallest;decode_indices(in,out,count,width,restart,restart_index,base,largest,smallest,any);
 }
 // Minimum and maximum over every index of n triangles (n may be zero).
 [[maybe_unused]] static void index_extent(const std::array<std::uint32_t,3>* t,std::size_t n,unsigned& lo,unsigned& hi){
@@ -225,11 +276,10 @@ static unsigned logic_op(unsigned op,unsigned src,unsigned dst);
 ''' + GAPS_CPP + SWZ_CPP + r'''
 struct Reg { // gpu.registers access; unwritten registers hold reset value 0 (RPCS3 rsx_methods.cpp:137).
     const NativeRsx& gpu;
-    std::uint32_t operator()(std::uint32_t r)const{
-        auto it=gpu.registers.find(r);
-        return it==gpu.registers.end()?0u:it->second;
-    }
-    std::uint32_t get(std::uint32_t r,std::uint32_t fallback)const{auto it=gpu.registers.find(r);return it==gpu.registers.end()?fallback:it->second;}
+    // Inline presence test + slot load (RsxRegisters::value_or, the const find() result): a draw reads ~150 registers, almost
+    // all with constant addresses, so the bounds/alignment checks fold away instead of an out-of-line find per read.
+    [[gnu::always_inline]] std::uint32_t operator()(std::uint32_t r)const{return gpu.registers.value_or(r,0u);}
+    [[gnu::always_inline]] std::uint32_t get(std::uint32_t r,std::uint32_t fallback)const{return gpu.registers.value_or(r,fallback);}
 };
 
 static const std::vector<GuestMemory::Region>& rsx_maps(const PpuState& s){return s.memory.regions;}
@@ -288,7 +338,7 @@ struct DrawReadBatch {
         if(count==inputs.size())throw std::runtime_error("RSX draw input capacity");
         inputs[count++]={&range,destination};
     }
-    void read(std::uint8_t* output){
+    void read(std::uint8_t* output)const{
         if(!count)return;
         const auto& first=*inputs[0].range;
         if(!first.memory->concurrent()){
@@ -1319,6 +1369,21 @@ static bool rsx_vertex_data_register(NativeRsx& gpu,std::uint32_t reg,std::uint3
     }
     return true;
 }
+namespace rsxdraw {
+// The 16 fragment texture units of one draw. Constructing and destroying 16 Textures per draw cost ~1k instructions; the
+// outermost draw of a thread reuses one array instead. Invariant: outside a draw every unit of that array is
+// default-constructed. The guard resets exactly the units the draw assigned (touched: every assignment site marks its unit
+// before assigning, the CPU path marks all 16) when the draw's scope ends, also by an exception, at the point where the
+// former local array was destroyed. A nested draw on the same thread gets its own array.
+struct DrawTextureUnits {
+    static std::array<Texture,16>& scratch(){static thread_local std::array<Texture,16> units;return units;}
+    static bool& busy(){static thread_local bool flag=false;return flag;}
+    std::unique_ptr<std::array<Texture,16>> nested;std::array<Texture,16>& units;unsigned touched=0;const bool outer;
+    DrawTextureUnits():nested(busy()?std::make_unique<std::array<Texture,16>>():nullptr),units(nested?*nested:scratch()),outer(!nested){if(outer)busy()=true;}
+    ~DrawTextureUnits(){if(!outer)return;for(unsigned u=0;u<16;++u)if(touched&(1u<<u)){units[u].~Texture();new(&units[u]) Texture();}busy()=false;}
+    DrawTextureUnits(const DrawTextureUnits&)=delete;DrawTextureUnits& operator=(const DrawTextureUnits&)=delete;
+};
+}
 static void rsx_execute_draw(PpuState& s){
     using namespace rsxdraw;
     GuestMemory::SplitReadScope split_reads(s.memory);
@@ -1346,13 +1411,17 @@ static void rsx_execute_draw(PpuState& s){
     PerfDraw perf;if(host_stats().enabled)++host_stats().draws;::RsxPerfCounters::add(::RsxPerfCounters::draws);
     HostPhase host_phase(HostStage::indices);
     // ---- indices
-    auto& indices=draw.scratch_indices;indices.clear();
+    auto& indices=draw.scratch_indices;indices.clear();draw.shared_triangles.reset();
     bool lazy_geometry=false;
+    // Only the eager index build of a triangle list may take the reuse entry's triangles (the device-geometry materializer
+    // fills the scratch lists that prepared() already holds).
+    [[maybe_unused]] bool share_triangles=graphics_backend && draw.indexed && draw.primitive==5;std::size_t shared_count=0;
 #ifdef ANYPS3_RSX_VK
     std::optional<rsxgraphics::DeviceGeometry> device_geometry;
     if(graphics_backend){device_geometry.emplace(draw);lazy_geometry=device_geometry->valid;}
 #endif
     auto build_indices=[&]{
+    draw.extent_known=false;draw.extent_of=nullptr;draw.shared_triangles.reset();
     const auto base_index=reg.get(0x173c,0);
     if(!draw.elements.empty()){
         const bool restart=reg.get(0x1dac,0)&1;
@@ -1367,7 +1436,54 @@ static void rsx_execute_draw(PpuState& s){
         if(!width || (dma&15)>1)throw std::runtime_error("unsupported RSX index array format/location");
         const bool restart=reg.get(0x1dac,0)&1;
         const unsigned restart_index=reg.get(0x1db0,0xffffffff)&(width==2?0xffff:0xffffffff);
-        for(const auto& [first,count]:draw.ranges){
+        // Adjacent ranges (each starting where the previous one ended: one index list split into <=256-index
+        // DRAW_INDEX_ARRAY words) are read with ONE transfer of their union -- the same bytes in the same order, one
+        // admissible schedule of the per-range reads -- and decoded in one pass. Any exception re-runs the per-range loop
+        // below from the start, so the first failing range raises its original error at its original point (the union
+        // read and decode have no guest-visible effect). Without restart the unrestarted extent is kept for IndexBounds.
+        // With geometry reuse the session serves an unchanged span's decoded list (Session::index_read) or keeps this
+        // decode (index_prepare before the transfer, index_store after it); its errors still come from the per-range loop.
+        bool merged=false;
+#ifdef ANYPS3_RSX_VK
+        auto* reuse=graphics_backend?static_cast<rsxgraphics::Session*>(gpu.graphics_session):nullptr;
+#endif
+        if(!draw.ranges.empty()){
+            try{
+                std::uint64_t total=0,first_address=0;bool adjacent=true;
+                for(std::size_t k=0;k<draw.ranges.size() && adjacent;++k){const auto [first,count]=draw.ranges[k];
+                    const auto begin=std::uint64_t(offset)+std::uint64_t(first)*width;
+                    if(!count || begin>UINT32_MAX || std::uint64_t(count)*width>UINT32_MAX || (k && std::uint64_t(first)!=std::uint64_t(draw.ranges[k-1].first)+draw.ranges[k-1].second)){adjacent=false;break;}
+                    const auto address=location_address(gpu,dma&15,begin,count*width);
+                    if(k && address!=first_address+total*width){adjacent=false;break;}
+                    if(!k)first_address=address;
+                    total+=count;
+                }
+                if(adjacent && total*width<=0x1000000){
+                    std::uint32_t largest=0,smallest=UINT32_MAX;bool any=false;bool served=false;
+#ifdef ANYPS3_RSX_VK
+                    std::optional<rsxgraphics::Session::IndexToken> token;
+                    if(reuse){served=reuse->index_read(first_address,unsigned(total*width),width,restart,restart_index,base_index,indices,largest,smallest,any,
+                            share_triangles && !restart?&draw.shared_triangles:nullptr);
+                        if(draw.shared_triangles)shared_count=std::size_t(total);
+                        if(!served)token=reuse->index_prepare(first_address,unsigned(total*width));}
+#endif
+                    auto& bytes=draw.scratch_index_bytes;
+                    if(!served){bytes.resize(total*width);m.transfer(first_address,bytes.data(),unsigned(total*width),false);}
+                    // Grown in steps of <= 256 indices: the same <= 1 KiB value-initialising resizes as the per-range loop (one
+                    // resize of several KiB is a `rep stosb`, which callgrind counts per byte).
+                    if(!served)for(unsigned at=0;at<total;at+=256){const unsigned n=std::min<std::uint64_t>(256,total-at);indices.resize(at+n);
+                        std::uint32_t high=0,low=UINT32_MAX;bool seen=false;
+                        decode_indices(bytes.data()+std::size_t(at)*width,indices.data()+at,n,width,restart,restart_index,base_index,high,low,seen);
+                        if(seen){largest=any?std::max(largest,high):high;smallest=any?std::min(smallest,low):low;any=true;}}
+                    if(any && std::uint64_t(largest)+base_index>=UINT32_MAX)throw std::runtime_error("RSX vertex index overflow");
+                    merged=true;if(!restart && any){draw.extent_lo=smallest+base_index;draw.extent_hi=largest+base_index;draw.extent_known=true;}
+#ifdef ANYPS3_RSX_VK
+                    if(token)reuse->index_store(std::move(*token),width,restart,restart_index,base_index,indices,largest,smallest,any);
+#endif
+                }
+            }catch(...){indices.clear();draw.extent_known=false;draw.shared_triangles.reset();}
+        }
+        if(!merged)for(const auto& [first,count]:draw.ranges){
             const auto begin=std::uint64_t(offset)+std::uint64_t(first)*width;
             if(begin>UINT32_MAX || std::uint64_t(count)*width>UINT32_MAX)throw std::runtime_error("RSX index array address overflow");
             const auto address=location_address(gpu,dma&15,begin,count*width);
@@ -1377,9 +1493,11 @@ static void rsx_execute_draw(PpuState& s){
             // Same values/errors as the per-element loop: decode into place,
             // checking overflow on the unrestarted maximum only.
             const auto at=indices.size();indices.resize(at+count);
-            std::uint32_t largest=0;bool any=false;
-            decode_indices(bytes.data(),indices.data()+at,count,width,restart,restart_index,base_index,largest,any);
+            std::uint32_t largest=0,smallest=UINT32_MAX;bool any=false;
+            decode_indices(bytes.data(),indices.data()+at,count,width,restart,restart_index,base_index,largest,smallest,any);
             if(any && std::uint64_t(largest)+base_index>=UINT32_MAX)throw std::runtime_error("RSX vertex index overflow");
+            if(!restart && any){draw.extent_lo=draw.extent_known?std::min(draw.extent_lo,smallest+base_index):smallest+base_index;
+                draw.extent_hi=draw.extent_known?std::max(draw.extent_hi,largest+base_index):largest+base_index;draw.extent_known=true;}
         }
     }else if(!draw.immediate_vertices.empty()){
         for(std::uint32_t i=0;i<draw.immediate_vertices.size();++i)indices.push_back(i);
@@ -1412,7 +1530,7 @@ static void rsx_execute_draw(PpuState& s){
         if(draw.primitive==3 && n>1)lines.push_back({indices.back(),indices.front()});
         break;
     case 1:break; // expanded into squares after viewport/program state is known
-    case 5:{const auto at=triangles.size();triangles.resize(at+n/3);if(n/3)std::memcpy(triangles.data()+at,indices.data(),n/3*3*sizeof(std::uint32_t));}break;
+    case 5:{const auto* first=reinterpret_cast<const std::array<std::uint32_t,3>*>(indices.data());triangles.insert(triangles.end(),first,first+n/3);}break; // no zero-fill before the copy
     case 6:for(std::size_t i=0;i+2<n;++i)triangles.push_back(i&1?std::array<std::uint32_t,3>{indices[i+1],indices[i],indices[i+2]}:std::array<std::uint32_t,3>{indices[i],indices[i+1],indices[i+2]});break;
     case 7:case 10:for(std::size_t i=1;i+1<n;++i)triangles.push_back({indices[0],indices[i],indices[i+1]});break;
     case 8:for(std::size_t i=0;i+3<n;i+=4){triangles.push_back({indices[i],indices[i+1],indices[i+2]});triangles.push_back({indices[i],indices[i+2],indices[i+3]});}break;
@@ -1421,12 +1539,19 @@ static void rsx_execute_draw(PpuState& s){
     }
     };
     auto build_triangles=[&]{
+    // Served triangles (no restart): exactly assemble(indices) of the shared_count served indices.
+    if(draw.shared_triangles){if(draw.extent_known && shared_count%3==0){draw.extent_of=draw.shared_triangles.get();draw.extent_size=draw.shared_triangles->size();}
+        else{draw.extent_known=false;}return;}
     if(draw.indexed && (reg.get(0x1dac,0)&1)){
         std::vector<std::uint32_t> strip;
         for(const auto index:indices){if(index==UINT32_MAX){assemble(strip);strip.clear();}else strip.push_back(index);}
         assemble(strip);
         indices.erase(std::remove(indices.begin(),indices.end(),UINT32_MAX),indices.end());
     }else assemble(indices);
+    // A triangle list without restart holds every decoded index iff the count is a multiple of 3 (else the tail is dropped).
+    if(draw.extent_known && draw.primitive==5 && !(reg.get(0x1dac,0)&1) && indices.size()%3==0 && triangles.size()*3==indices.size()){
+        draw.extent_of=&triangles;draw.extent_size=triangles.size();}
+    else draw.extent_known=false;
     };
     if(!lazy_geometry)build_triangles();
     host_phase.next(HostStage::state);
@@ -1529,7 +1654,7 @@ static void rsx_execute_draw(PpuState& s){
     std::shared_ptr<const std::vector<FpInst>> fp_owner;if(color_target || alpha_test || depth_export)fp_owner=load_fragment_program_shared(s,reg);
     static const std::vector<FpInst> no_fragment_program;const auto& fp=fp_owner?*fp_owner:no_fragment_program;
     host_phase.next(HostStage::texture_metadata);
-    std::array<Texture,16> textures{};
+    DrawTextureUnits texture_units;auto& textures=texture_units.units;
     unsigned used_inputs=0;
 #ifdef ANYPS3_RSX_VK
     bool texture_context_validated=false;
@@ -1540,6 +1665,7 @@ static void rsx_execute_draw(PpuState& s){
         if((inst.s0&3)==1 || (inst.s1&3)==1 || (inst.s2&3)==1)used_inputs|=1u<<((inst.d>>13)&15);
         const unsigned opcode=((inst.d>>24)&63)|((inst.s1>>31)<<6);
         if(opcode==23 || opcode==24 || opcode==25 || opcode==47 || opcode==49){const unsigned unit=(inst.d>>17)&15;
+            texture_units.touched|=1u<<unit;
             if(!(reg.get(0x1a00+unit*32+0xc,0)>>31)){textures[unit].null_texture=true;continue;}
             if(!textures[unit].valid){
 #ifdef ANYPS3_RSX_VK
@@ -1785,11 +1911,15 @@ static void rsx_execute_draw(PpuState& s){
         if(!session){owned=std::make_unique<rsxgraphics::Session>(*gpu.renderer,s);session=owned.get();}
         // Materialize in the same attempt when a supported VP/alias path
         // needs CPU geometry. A rejected draw is never prepared a second time.
-        auto materialize=[&]{if(lazy_geometry){build_indices();build_triangles();lazy_geometry=false;}};
+        auto materialize=[&]{if(lazy_geometry){share_triangles=false;build_indices();build_triangles();lazy_geometry=false;}};
         using Materializer=decltype(materialize);
         const rsxgraphics::GeometryFallback fallback{&materialize,[](void* p){(*static_cast<Materializer*>(p))();}};
-        const bool done=rsxgraphics::prepared(*session,triangles,vertex,fp,textures,colors,depth,width,height,x0,y0,x1,y1,point_draw,line_draw?&line_geometry:nullptr,lazy_geometry?&*device_geometry:nullptr,fallback);
+        const bool done=rsxgraphics::prepared(*session,draw.triangle_list(),vertex,fp,textures,colors,depth,width,height,x0,y0,x1,y1,point_draw,line_draw?&line_geometry:nullptr,lazy_geometry?&*device_geometry:nullptr,fallback);
         if(!done)materialize();
+        if(!done && draw.shared_triangles){   // the CPU renderer below reads the scratch lists
+            triangles.assign(draw.shared_triangles->begin(),draw.shared_triangles->end());
+            const auto* flat=reinterpret_cast<const std::uint32_t*>(triangles.data());indices.assign(flat,flat+triangles.size()*3);
+            draw.shared_triangles.reset();draw.extent_known=false;}
         if(done){
             if(owned)session->flush(true,nullptr,0,"standalone_draw");
             ++draw.draws;draw.ranges.clear();draw.immediate_vertices.clear();draw.elements.clear();return;
@@ -1806,6 +1936,7 @@ static void rsx_execute_draw(PpuState& s){
     }
     PerfTimer fallback_timer(fallback_time);
 #endif
+    texture_units.touched=0xffff;   // the CPU renderer below may edit any unit
     for(const auto& t:textures)if(t.null_texture)throw std::runtime_error("RSX FP samples a disabled texture unit on the CPU renderer");
     // Only the Vulkan graphics fragment path models 0x1d7c (sample mask, alpha-to-coverage/one).
     if(reg.get(0x1d7c,0xffff0000)!=0xffff0000)throw std::runtime_error("unsupported RSX multisample coverage/alpha control on the CPU renderer");

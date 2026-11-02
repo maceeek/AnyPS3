@@ -55,7 +55,7 @@ public:
         return {{int(x),int(y)},{right-x,bottom-y}};
     }
     struct GraphicsPipeline;
-    struct GraphicsImage {
+    struct GraphicsImage : std::enable_shared_from_this<GraphicsImage> {
         NativeVulkan* owner;
         VkSampler sampler=VK_NULL_HANDLE;
         VkImage image=VK_NULL_HANDLE;VkDeviceMemory memory=VK_NULL_HANDLE;
@@ -74,10 +74,12 @@ public:
         // back into the planes (sample n -> plane n). ms_current/ms_stencil_* are recording-order state (recorder thread, or
         // the frontend after GraphicsBatch::sync); ms_wanted (an eligible draw targeted this image) is frontend state.
         std::shared_ptr<GraphicsImage> ms;bool ms_current=false,ms_wanted=false,ms_stencil_known=false;unsigned ms_stencil=0;
-        std::shared_ptr<GraphicsPipeline> ms_expand,ms_expand_bits;std::array<VkFramebuffer,2> ms_expand_fb{};
+        std::shared_ptr<GraphicsPipeline> ms_expand,ms_expand_bits;std::array<VkFramebuffer,4> ms_expand_fb{};
+        std::shared_ptr<GraphicsPipeline> ms_load,ms_load_bits;VkFramebuffer ms_load_fb=VK_NULL_HANDLE;   // planes -> working image (graphics_ms_load)
         GraphicsImage(NativeVulkan* o,VkFormat f,unsigned w,unsigned h,unsigned l,bool d):owner(o),format(f),width(w),height(h),layers(l),depth(d){}
         ~GraphicsImage(){if(sampler)vkDestroySampler(owner->device,sampler,nullptr);
             for(auto f:ms_expand_fb)if(f)vkDestroyFramebuffer(owner->device,f,nullptr);
+            if(ms_load_fb)vkDestroyFramebuffer(owner->device,ms_load_fb,nullptr);
             for(auto v:views)vkDestroyImageView(owner->device,v,nullptr);
             if(array_view && !borrowed)vkDestroyImageView(owner->device,array_view,nullptr);
             if(stencil_array_view)vkDestroyImageView(owner->device,stencil_array_view,nullptr);
@@ -124,22 +126,33 @@ public:
     struct GraphicsPush{float width,height,x,y;unsigned plane,layers;float shifts[8];float raster_scale[2];};
     static_assert(offsetof(GraphicsPush,raster_scale)==56 && sizeof(GraphicsPush)==64);
     struct GraphicsBatch;
+    // Images and buffers are borrowed: graphics_draw pins every one of them in the batch (GraphicsBatch::pins/buffer_pins)
+    // before the job is published, and the pins are released only by graphics_reset/~GraphicsBatch after b.sync(), i.e.
+    // after the recorder has recorded the job (also for visual jobs queued in the batch). Owning copies here cost two
+    // atomic reference-count operations per non-null slot and draw half, on two threads.
     struct DrawJob {
         GraphicsBatch* batch=nullptr;std::shared_ptr<GraphicsPipeline> pipeline;GraphicsState s;
-        std::array<std::shared_ptr<GraphicsImage>,4> colors;std::shared_ptr<GraphicsImage> depth;
-        std::array<std::shared_ptr<GraphicsImage>,20> textures;std::array<std::shared_ptr<GraphicsBuffer>,16> raw_textures;
+        std::array<GraphicsImage*,4> colors{};GraphicsImage* depth=nullptr;
+        std::array<GraphicsImage*,20> textures{};std::array<GraphicsBuffer*,16> raw_textures{};
         std::array<std::array<float,2>,4> positions{};
         float bias_constant=0,bias_slope=0,min_bounds=0,max_bounds=1;
         unsigned vertices=0,first_vertex=0,query=0,passes=1;bool indexed=false,layered=false,multiview=false,defer_planes=false;
         std::uint64_t at=0,range=0,index_offset=0;
         std::shared_ptr<GraphicsPipeline> ms_pipeline;   // set: this visual half may draw into its attachments' MSAA working images
-        void reset(){batch=nullptr;pipeline.reset();ms_pipeline.reset();depth.reset();for(auto& x:colors)x.reset();for(auto& x:textures)x.reset();for(auto& x:raw_textures)x.reset();}
+        // Batch lifecycle jobs share the ring (FIFO with the draws): Reset = the recorder-owned half of graphics_reset
+        // (graphics_reset_commands), Begin = the command-buffer half of a front-half graphics_begin (graphics_begin_commands).
+        // Submit = graphics_submit_commands for the timeline value in `at` (graphics_submit booked it on the frontend).
+        // Clear = the commands of a plane clear (graphics_clear_commands): image `depth`, the clear_* values.
+        enum Kind:unsigned char{Draw,Reset,Begin,Submit,Clear};Kind kind=Draw;
+        VkClearColorValue clear_color{};float clear_depth=0;unsigned clear_stencil=0;VkImageAspectFlags clear_aspects=0;bool clear_lead=true;
+        void reset(){batch=nullptr;pipeline.reset();ms_pipeline.reset();depth=nullptr;colors={};textures={};raw_textures={};kind=Draw;}
     };
     struct GraphicsBatch {
         NativeVulkan* owner;
         VkBuffer buffer=VK_NULL_HANDLE,data_buffer=VK_NULL_HANDLE;VkDeviceMemory memory=VK_NULL_HANDLE,data_memory=VK_NULL_HANDLE;void* map=nullptr;
         VkCommandBuffer command=VK_NULL_HANDLE,upload_command=VK_NULL_HANDLE,transfer_command=VK_NULL_HANDLE;VkFence fence=VK_NULL_HANDLE;
         VkCommandPool command_pool=VK_NULL_HANDLE;   // owns `command`: the draw recorder records it while the frontend resets/frees other batches' buffers
+        VkCommandPool transfer_command_pool=VK_NULL_HANDLE;   // owns `transfer_command` (DMA-queue family), same reason
         // Async prelude (NativeVulkan::transfer_queue): staging->device copies on the DMA queue, timestamps in their own 2-slot pool.
         VkQueryPool transfer_queries=VK_NULL_HANDLE;bool transfer_pending=false;std::uint64_t upload_wait=0;VkDescriptorPool descriptors=VK_NULL_HANDLE;
         // Further pools chained when one batch records more sets than `descriptors` holds.
@@ -162,6 +175,7 @@ public:
         // kind of the later mark (GraphicsMark). Serializes the pipeline at every mark: attribution, not a performance mode.
         VkQueryPool marks=VK_NULL_HANDLE;unsigned mark_count=0;std::vector<unsigned> mark_kinds;
         bool coherent=false,recording=false,submitted=false,failed=false;
+        bool submit_failed=false;   // recorder-written: a queued Submit job threw before vkQueueSubmit (the fence was never submitted)
         std::uint64_t capacity=0,used=0;
         // Shader failures are consumed only after batch completion. Keep the
         // device words live until then instead of a graphics->transfer turn
@@ -172,6 +186,10 @@ public:
         // readbacks are deliberately absent: they retain their command order.
         std::vector<VkBufferCopy> uploads;
         VkFramebuffer active_framebuffer=VK_NULL_HANDLE;
+        std::uint64_t barrier_serial=0;   // graphics_command_serial right after this recording's last full barrier (0: none yet)
+        // graphics_pass_ended: serial after the last full barrier or the pass end that continued a passes-only chain from it
+        // (0: none), the serial right after the open pass's begin, and whether that begin directly followed pass_chain.
+        std::uint64_t pass_chain=0,pass_begin=0;bool pass_clean=false;
         std::uint64_t render_passes=0,render_pass_reuses=0,upload_commands=0;
         // MSAA plane runs: while consecutive draws keep plane 0's pass on one
         // attachment set, their planes >=1 are recorded later, one pass per
@@ -184,7 +202,7 @@ public:
             unsigned vertices,instances,first_vertex,query;bool indexed;VkDeviceSize index_offset;VkQueryControlFlags query_flags;
         };
         std::vector<PlaneDraw> plane_draws;std::array<VkFramebuffer,4> plane_framebuffers{};
-        VkRenderPass plane_pass=VK_NULL_HANDLE;VkExtent2D plane_extent{};unsigned plane_count=0;
+        VkRenderPass plane_pass=VK_NULL_HANDLE;VkExtent2D plane_extent{};unsigned plane_count=0,plane_attachments=0;bool plane_visual=false;
         std::uint64_t plane_deferred=0;
         // Recorder-owned snapshots survive ring-slot reuse. Semantic command
         // boundaries drain them; generic recorder synchronization does not.
@@ -219,11 +237,16 @@ public:
         bool inline_draws=false;   // ConditionalScope: draws are recorded inline while a conditional-rendering scope is open
         // Waits until the draw recorder has recorded every queued draw (see DrawJob). Required before any use of recorder-owned state.
         std::atomic<unsigned> pending_jobs{0};   // queued, not yet recorded draws of this batch
-        void sync(){if(pending_jobs.load(std::memory_order_acquire) || owner->recorder_failed())owner->recorder_drain();}
+        // sync() waits for EVERY queued job (as before the lifecycle jobs, when only the recording batch had queued jobs): an entry
+        // point that records on the frontend may touch device-wide recorder state (framebuffer cache, visual/plane replays at a pass
+        // end) that a queued Submit job of another batch also touches. settle() waits only while this batch has queued jobs: the
+        // non-recording frontend uses of an in-flight batch (graphics_collect, graphics_reset, graphics_move_stats).
+        void sync(){owner->recorder_drain();}
+        void settle(){if(pending_jobs.load(std::memory_order_acquire) || owner->recorder_failed())owner->recorder_drain();}
         explicit GraphicsBatch(NativeVulkan* o):owner(o){}
         ~GraphicsBatch(){
             if(pending_jobs.load(std::memory_order_acquire))owner->recorder_quiesce();
-            if(submitted)vkWaitForFences(owner->device,1,&fence,VK_TRUE,UINT64_MAX);
+            if(submitted && !submit_failed)vkWaitForFences(owner->device,1,&fence,VK_TRUE,UINT64_MAX);
             // A prelude submitted on the DMA queue before a failing graphics submit (or before an abandoned batch) still reads our staging
             // buffer and writes our device buffer: wait for its upload timeline value before anything is freed. upload_wait is set by
             // the submission itself, independently of profiling, and cleared by graphics_reset after retirement.
@@ -237,8 +260,9 @@ public:
             if(descriptors)vkDestroyDescriptorPool(owner->device,descriptors,nullptr);
             for(auto pool:overflow_descriptors)vkDestroyDescriptorPool(owner->device,pool,nullptr);
             if(fence)vkDestroyFence(owner->device,fence,nullptr);
-            if(upload_command)vkFreeCommandBuffers(owner->device,owner->pool,1,&upload_command);
-            if(transfer_command)vkFreeCommandBuffers(owner->device,owner->transfer_pool,1,&transfer_command);
+            if(upload_command)vkFreeCommandBuffers(owner->device,command_pool,1,&upload_command);
+            if(transfer_command)vkFreeCommandBuffers(owner->device,transfer_command_pool,1,&transfer_command);
+            if(transfer_command_pool)vkDestroyCommandPool(owner->device,transfer_command_pool,nullptr);
             if(transfer_queries)vkDestroyQueryPool(owner->device,transfer_queries,nullptr);
             if(command)vkFreeCommandBuffers(owner->device,command_pool,1,&command);
             if(command_pool)vkDestroyCommandPool(owner->device,command_pool,nullptr);
@@ -273,6 +297,11 @@ private:
     std::map<std::string,std::shared_ptr<GraphicsPipeline>> graphics_pipelines;
     std::weak_ptr<GraphicsPipeline> last_pipeline_diagnostic;
     std::unordered_map<std::array<std::uint64_t,34>,std::weak_ptr<GraphicsPipeline>,GraphicsKeyHash<34>> graphics_pipeline_fast;
+    // The previous graphics_pipeline_fast lookup (key, element or nullptr = absent). Every insertion, assignment or erase of the
+    // map bumps graphics_pipeline_fast_version; an unchanged map gives an equal key the same find() result, and element
+    // pointers of an unordered_map stay valid until that element is erased (which bumps the version).
+    std::array<std::uint64_t,34> graphics_pipeline_last_key{};const std::weak_ptr<GraphicsPipeline>* graphics_pipeline_last_entry=nullptr;
+    std::uint64_t graphics_pipeline_fast_version=1,graphics_pipeline_last_version=0;
     // Device-wide framebuffer cache (recording thread only: the draw recorder, or the owner after GraphicsBatch::sync).
     std::unordered_map<std::array<std::uint64_t,10>,std::shared_ptr<typename GraphicsBatch::Framebuffer>,typename GraphicsBatch::FramebufferHash> graphics_framebuffers;
 public:
@@ -320,13 +349,47 @@ private:
     struct GraphicsSite{unsigned previous;explicit GraphicsSite(unsigned s):previous(graphics_site_ref()){graphics_site_ref()=s;}~GraphicsSite(){graphics_site_ref()=previous;}};
     static void graphics_mark(GraphicsBatch& b,unsigned kind){
         if(!b.marks || b.mark_count>=4096)return;
-        vkCmdWriteTimestamp(b.command,VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,b.marks,b.mark_count++);b.mark_kinds.push_back((b.replaying_visual?unsigned(SiteVisual):graphics_site_ref())*16+kind);  // visual replays (incl. their planes) are one site
+        // A tagged command recorded since the previous mark (a copy, clear, blit or barrier without its own mark, e.g. the
+        // visual half of a clear or a texture upload just before a pass begin) gets its own mark first: its time is not
+        // attributed to the next mark's kind.
+        const unsigned pending=graphics_last_kind();graphics_last_kind()=MarkOther;
+        const unsigned site=(b.replaying_visual?unsigned(SiteVisual):graphics_site_ref())*16;   // visual replays (incl. their planes) are one site
+        if(pending!=MarkOther && pending!=kind && b.mark_count<4095){vkCmdWriteTimestamp(b.command,VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,b.marks,b.mark_count++);b.mark_kinds.push_back(site+pending);}
+        vkCmdWriteTimestamp(b.command,VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,b.marks,b.mark_count++);b.mark_kinds.push_back(site+kind);
     }
+public:
+    // ---- GPU work accounting (always on; plain relaxed load+store like RsxPerfCounters: one recording thread at a time per batch) ----
+    // Per command kind as recorded (rsx_vk_resources.py wrappers and the pass-begin sites): counts, bytes (buffer copies) and
+    // texels (image copies/blits/clears: extent x layers). PERF RENDER_SCALE_WORK prints the totals; tests read the deltas.
+    enum GraphicsWorkId:unsigned {WorkBarriers,WorkBarriersElided,WorkPipelineBarriers,WorkPassNative,WorkPassVisual,WorkPassAttachments,
+        WorkCopyBuffer,WorkCopyBufferBytes,WorkCopyImage,WorkCopyImageTexels,WorkBufferImage,WorkBufferImageTexels,WorkBlits,WorkBlitTexels,
+        WorkClears,WorkClearTexels,WorkDispatches,WorkCount};
+    static constexpr const char* graphics_work_names[WorkCount]={"barriers","barriers_elided","pipeline_barriers","pass_native","pass_visual","pass_attachments",
+        "copy_buffer","copy_buffer_bytes","copy_image","copy_image_texels","buffer_image","buffer_image_texels","blits","blit_texels",
+        "clears","clear_texels","dispatches"};
+    static std::array<std::atomic<std::uint64_t>,WorkCount>& graphics_work(){static std::array<std::atomic<std::uint64_t>,WorkCount> values{};return values;}
+    static void graphics_work_add(unsigned id,std::uint64_t n=1){auto& v=graphics_work()[id];v.store(v.load(std::memory_order_relaxed)+n,std::memory_order_relaxed);}
+    static std::uint64_t graphics_work_value(unsigned id){return graphics_work()[id].load(std::memory_order_relaxed);}
+    // Image copy/blit/buffer-image commands and texels per call site (GraphicsSite): [2*site] commands, [2*site+1] texels.
+    static std::array<std::atomic<std::uint64_t>,32>& graphics_site_work(){static std::array<std::atomic<std::uint64_t>,32> values{};return values;}
+    static void graphics_site_copy(std::uint64_t texels){const unsigned site=std::min<unsigned>(graphics_site_ref(),15);auto& s=graphics_site_work();
+        s[2*site].store(s[2*site].load(std::memory_order_relaxed)+1,std::memory_order_relaxed);s[2*site+1].store(s[2*site+1].load(std::memory_order_relaxed)+texels,std::memory_order_relaxed);}
+    // Bumped by every action command recorded outside a render pass and by every pass begin/end, on every thread and into every
+    // command buffer (rsx_vk_resources.py wrappers; draws and queries only occur inside a pass whose begin is counted). A value
+    // unchanged since a batch's last full barrier proves that nothing was recorded into that batch since (graphics_barrier).
+    // A locked increment: a lost update must never bring the value back to an older snapshot.
+    static std::atomic<std::uint64_t>& graphics_command_serial(){static std::atomic<std::uint64_t> serial{1};return serial;}
+    static void graphics_command_recorded(){graphics_command_serial().fetch_add(1,std::memory_order_acq_rel);}
+    // Right after every vkCmdBeginRenderPass: counts, and whether this pass extends a clean chain (graphics_pass_ended).
+    static void graphics_pass_begun(GraphicsBatch& b,bool visual,unsigned attachments){graphics_work_add(visual?WorkPassVisual:WorkPassNative);graphics_work_add(WorkPassAttachments,attachments);
+        const auto now=graphics_command_serial().load(std::memory_order_acquire);b.pass_clean=b.pass_chain && now==b.pass_chain+1;b.pass_begin=now;}
+private:
     static void graphics_replay_planes(GraphicsBatch& b){
         for(unsigned plane=1;plane<b.plane_count;++plane){
             VkRenderPassBeginInfo pass{};pass.sType=VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;pass.renderPass=b.plane_pass;
             pass.framebuffer=b.plane_framebuffers[plane];pass.renderArea={{0,0},b.plane_extent};
             vkCmdBeginRenderPass(b.command,&pass,VK_SUBPASS_CONTENTS_INLINE);graphics_mark(b,MarkPassBegin);++b.render_passes;::RsxPerfCounters::add(::RsxPerfCounters::render_passes);
+            graphics_pass_begun(b,b.plane_visual,b.plane_attachments);
             const std::array<unsigned,22>* previous=b.dynamic_valid?&b.dynamic_state:nullptr;
             for(const auto& d:b.plane_draws){
                 if(d.query!=UINT_MAX)vkCmdBeginQuery(b.command,b.occlusion,d.query+plane,d.query_flags);
@@ -340,12 +403,12 @@ private:
                 graphics_mark(b,MarkDraw);
             }
             b.dynamic_state=b.plane_draws.back().dynamic;b.dynamic_valid=true;
-            vkCmdEndRenderPass(b.command);graphics_mark(b,MarkPassEnd);::RsxPerfCounters::add(::RsxPerfCounters::pass_ends);
+            vkCmdEndRenderPass(b.command);graphics_pass_ended(b);graphics_mark(b,MarkPassEnd);::RsxPerfCounters::add(::RsxPerfCounters::pass_ends);
         }
         b.plane_draws.clear();b.plane_count=0;
     }
     static void graphics_close_pass_only(GraphicsBatch& b){
-        if(b.active_framebuffer){vkCmdEndRenderPass(b.command);graphics_mark(b,MarkPassEnd);b.active_framebuffer=VK_NULL_HANDLE;::RsxPerfCounters::add(::RsxPerfCounters::pass_ends);}
+        if(b.active_framebuffer){vkCmdEndRenderPass(b.command);graphics_pass_ended(b);graphics_mark(b,MarkPassEnd);b.active_framebuffer=VK_NULL_HANDLE;::RsxPerfCounters::add(::RsxPerfCounters::pass_ends);}
         if(!b.plane_draws.empty())graphics_replay_planes(b);
     }
     static void graphics_end_pass(GraphicsBatch& b){
@@ -365,22 +428,62 @@ private:
     static bool graphics_barrier_host(){static const bool host=[]{const char* v=std::getenv("ANYPS3_RSX_BARRIER_HOST");
         if(v && std::strcmp(v,"0") && std::strcmp(v,"1")){throw std::runtime_error("invalid ANYPS3_RSX_BARRIER_HOST");}
         return v && !std::strcmp(v,"1");}();return host;}
+    // ANYPS3_RSX_BARRIER_DEDUPE=0 records every full barrier (former behaviour, A/B). Default 1: a full barrier directly after this
+    // batch's previous full barrier, with no command recorded between them (graphics_command_serial unchanged), is not recorded.
+    // Exact: the second barrier's first synchronization scope (ALL_COMMANDS) already holds every command before the first one and
+    // its access scope every earlier write; the first adds no dependency the second does not have. Timestamps (marks, stamps)
+    // and state binds are not counted: they access no memory a later command reads.
+    static bool graphics_barrier_dedupe(){static const bool value=[]{const char* v=std::getenv("ANYPS3_RSX_BARRIER_DEDUPE");
+        if(v && std::strcmp(v,"0") && std::strcmp(v,"1")){throw std::runtime_error("invalid ANYPS3_RSX_BARRIER_DEDUPE");}
+        return !v || !std::strcmp(v,"1");}();return value;}
+    // ANYPS3_RSX_PASS_BARRIER=0: a full barrier right after a render pass end is still recorded (A/B). Default 1: the end of
+    // a pass counts as this batch's last full barrier when everything recorded since the previous full barrier is render
+    // passes (each begun directly after the previous end: b.pass_chain/pass_clean, checked with graphics_command_serial).
+    // Exact: the accesses since that barrier are attachment reads/writes and shader reads/stores of those passes; the end
+    // dependency (0->EXTERNAL, src ALL_GRAPHICS + attachment writes, dst ALL_COMMANDS + MEMORY_READ|WRITE) orders them and
+    // makes the attachment writes visible to every later access (shader stores are only the status words, read after their
+    // own barrier at submit); every older access is ordered by the previous full barrier. A copy/clear/upload in the chain
+    // (its writes are not in an end dependency's access scope) keeps the next barrier. Not with ANYPS3_RSX_BARRIER_HOST=1.
+    static bool graphics_pass_barrier(){static const bool value=[]{const char* v=std::getenv("ANYPS3_RSX_PASS_BARRIER");
+        if(v && std::strcmp(v,"0") && std::strcmp(v,"1")){throw std::runtime_error("invalid ANYPS3_RSX_PASS_BARRIER");}
+        return !v || !std::strcmp(v,"1");}();return value;}
+    static void graphics_pass_ended(GraphicsBatch& b){const auto now=graphics_command_serial().load(std::memory_order_acquire);
+        if(b.pass_clean && now==b.pass_begin+1 && graphics_pass_barrier() && !graphics_barrier_host())b.barrier_serial=b.pass_chain=now;
+        b.pass_clean=false;}
     static void graphics_barrier(GraphicsBatch& b){
-        graphics_end_pass(b);graphics_mark(b,graphics_last_kind());graphics_last_kind()=MarkOther;
+        graphics_end_pass(b);
+        if(b.barrier_serial && b.barrier_serial==graphics_command_serial().load(std::memory_order_acquire) && graphics_barrier_dedupe()){graphics_work_add(WorkBarriersElided);return;}
+        graphics_mark(b,graphics_last_kind());graphics_last_kind()=MarkOther;
         const bool host=graphics_barrier_host();
         VkMemoryBarrier m{};m.sType=VK_STRUCTURE_TYPE_MEMORY_BARRIER;
         m.srcAccessMask=VK_ACCESS_MEMORY_WRITE_BIT|VK_ACCESS_MEMORY_READ_BIT|(host?VK_ACCESS_HOST_WRITE_BIT:0);
         m.dstAccessMask=VK_ACCESS_MEMORY_READ_BIT|VK_ACCESS_MEMORY_WRITE_BIT;
         vkCmdPipelineBarrier(b.command,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT|(host?VK_PIPELINE_STAGE_HOST_BIT:0),
             VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,0,1,&m,0,nullptr,0,nullptr);graphics_mark(b,MarkBarrier);
+        b.barrier_serial=b.pass_chain=graphics_command_serial().load(std::memory_order_acquire);graphics_work_add(WorkBarriers);
     }
-    void graphics_begin(GraphicsBatch& b){
+    // front: the caller is a frontend-only entry point (graphics_draw's front half, graphics_upload/reserve_upload from the
+    // draw path, graphics_state_blocks) that records no command itself. With the draw recorder such a begin only marks the
+    // batch recording and queues the command-buffer half (graphics_begin_commands) as a Begin job: every later command of
+    // this batch is either a queued job (FIFO) or recorded after b.sync(). Every other caller records commands itself right
+    // after graphics_begin, so it first drains this batch's queued jobs (a Reset from graphics_reset) and begins inline.
+    void graphics_begin(GraphicsBatch& b,bool front=false){
         if(b.owner!=this || b.failed)throw std::runtime_error("RSX graphics batch owner/failure");
         if(b.recording)return;
         if(b.submitted || b.completion)throw std::runtime_error("RSX graphics begin before retirement/reset");
+        const bool deferred=front && draw_recorder && !in_recorder_thread() && !b.inline_draws && !b.queries && !b.marks;
+        if(!deferred)b.sync();
+        // plane_draws is recorder-written only while draws of this batch are queued; none are (it is not recording).
         if(!b.plane_draws.empty())throw std::runtime_error("RSX graphics deferred MSAA planes outlived their batch");
+        if(deferred){auto& job=recorder_slot();job.batch=&b;job.kind=DrawJob::Begin;b.recording=true;++graphics_recordings;
+            b.pending_jobs.fetch_add(1,std::memory_order_relaxed);recorder_publish();return;}
+        graphics_begin_commands(b);b.recording=true;++graphics_recordings;
+    }
+    // Command-buffer half of graphics_begin (inline, or the Begin job on the draw recorder thread).
+    void graphics_begin_commands(GraphicsBatch& b){
         VkCommandBufferBeginInfo i{};i.sType=VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;i.flags=graphics_gpu_loop()?VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT:VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-        check(vkBeginCommandBuffer(b.command,&i),"graphics begin");b.recording=true;++graphics_recordings;
+        if(in_recorder_thread())graphics_recorder_begins.fetch_add(1,std::memory_order_relaxed);
+        check(vkBeginCommandBuffer(b.command,&i),"graphics begin");b.barrier_serial=b.pass_chain=0;
         if(b.queries)vkCmdResetQueryPool(b.command,b.queries,0,4096);
         vkCmdResetQueryPool(b.command,b.occlusion,0,1024);
         if(transfer_queue && b.busy_queries){vkCmdResetQueryPool(b.command,b.busy_queries,0,3);vkCmdWriteTimestamp(b.command,VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,b.busy_queries,0);}
@@ -406,18 +509,26 @@ private:
         // Pointer equality with the canonical text owner proves equal bytes (shader_identity compared them once).
         const auto same_vs=[&](const GraphicsPipeline& p){return p.vs_source.get()==&vs || p.vs_source.get()==vs_canonical || (++shader_text_compares,*p.vs_source==vs);};
         const auto same_fs=[&](const GraphicsPipeline& p){return p.fs_source.get()==&fs || p.fs_source.get()==fs_canonical || (++shader_text_compares,*p.fs_source==fs);};
-        std::array<std::uint64_t,34> fast_key{};fast_key[0]=a;fast_key[1]=b;unsigned field=0;
-        auto field_=[&](unsigned v){const auto word=2+field/2;fast_key[word]|=std::uint64_t(v)<<(32*(field%2));++field;};
+        std::array<std::uint64_t,34> fast_key{};fast_key[0]=a;fast_key[1]=b;
+        // 32-bit fields in order: field n is the low (even n) or high (odd n) half of key word 2+n/2 -- on a little-endian host
+        // exactly the consecutive uint32 array copied over words 2..33 (at most 3+8*4+5+8+7=55 of 64 fields).
+        static_assert(__BYTE_ORDER__==__ORDER_LITTLE_ENDIAN__ && sizeof(fast_key)-16==64*sizeof(std::uint32_t),"pipeline key field packing");
+        std::array<std::uint32_t,64> fields{};unsigned field=0;
+        auto field_=[&](unsigned v){fields[field++]=v;};
         field_(s.colors);field_(s.color);field_(s.depth);
         for(unsigned i=0;i<s.colors;++i){const auto& v=s.blend[i];field_(v.blendEnable);field_(v.srcColorBlendFactor);field_(v.dstColorBlendFactor);field_(v.colorBlendOp);field_(v.srcAlphaBlendFactor);field_(v.dstAlphaBlendFactor);field_(v.alphaBlendOp);field_(v.colorWriteMask);}
         field_(s.z.depthTestEnable);field_(s.z.depthWriteEnable);field_(s.z.depthCompareOp);field_(s.z.stencilTestEnable);field_(s.z.depthBoundsTestEnable);
         for(const auto* v:{&s.z.front,&s.z.back}){field_(v->failOp);field_(v->passOp);field_(v->depthFailOp);field_(v->compareOp);}
         field_(s.raster.frontFace);field_(s.raster.cullMode);field_(s.raster.depthBiasEnable);field_(s.logic_enable);field_(s.logic);field_(multiview?s.samples:0);field_(s.raster_samples);
-        auto cached=graphics_pipeline_fast.find(fast_key);
-        if(cached!=graphics_pipeline_fast.end())if(auto hit=cached->second.lock()){
+        std::memcpy(fast_key.data()+2,fields.data(),sizeof(fields));
+        if(graphics_pipeline_last_version!=graphics_pipeline_fast_version || graphics_pipeline_last_key!=fast_key){
+            const auto found=graphics_pipeline_fast.find(fast_key);
+            graphics_pipeline_last_entry=found==graphics_pipeline_fast.end()?nullptr:&found->second;
+            graphics_pipeline_last_key=fast_key;graphics_pipeline_last_version=graphics_pipeline_fast_version;}
+        if(graphics_pipeline_last_entry)if(auto hit=graphics_pipeline_last_entry->lock()){
             if(same_vs(*hit) && same_fs(*hit)){
                 hit->last_use=++cache_clock;++compile_stats.graphics_hits;last_pipeline_diagnostic=hit;compile_stats_print();return hit;}}
-        if(graphics_pipeline_fast.size()>=graphics_pipeline_limit)graphics_pipeline_fast.erase(graphics_pipeline_fast.begin());
+        if(graphics_pipeline_fast.size()>=graphics_pipeline_limit){graphics_pipeline_fast.erase(graphics_pipeline_fast.begin());++graphics_pipeline_fast_version;}
         // Cold diagnostics retain the serialized field decomposition.
         std::string key;
         key.append(reinterpret_cast<const char*>(&a),sizeof(a));key.append(reinterpret_cast<const char*>(&b),sizeof(b));
@@ -436,7 +547,7 @@ private:
         // Hashes accelerate lookup; exact bytes remain authoritative even on a collision.
         if(it!=graphics_pipelines.end() && (!same_vs(*it->second) || !same_fs(*it->second))){
             key+='\0'+vs+'\0'+fs;it=graphics_pipelines.find(key);}
-        if(it!=graphics_pipelines.end()){it->second->last_use=++cache_clock;++compile_stats.graphics_hits;last_pipeline_parts=parts;last_pipeline_identity=std::string(reinterpret_cast<const char*>(&a),sizeof(a))+std::string(reinterpret_cast<const char*>(&b),sizeof(b));compile_stats_print();graphics_pipeline_fast[fast_key]=it->second;last_pipeline_diagnostic=it->second;return it->second;}
+        if(it!=graphics_pipelines.end()){it->second->last_use=++cache_clock;++compile_stats.graphics_hits;last_pipeline_parts=parts;last_pipeline_identity=std::string(reinterpret_cast<const char*>(&a),sizeof(a))+std::string(reinterpret_cast<const char*>(&b),sizeof(b));compile_stats_print();graphics_pipeline_fast[fast_key]=it->second;++graphics_pipeline_fast_version;last_pipeline_diagnostic=it->second;return it->second;}
         ++compile_stats.graphics_misses;::RsxPerfCounters::add(::RsxPerfCounters::pipeline_misses);
         const auto identity=key.substr(0,key.size()-state_key.size());
         if(auto last=last_pipeline_diagnostic.lock()){last_pipeline_parts=last->diagnostic_parts;last_pipeline_identity=last->diagnostic_identity;}
@@ -503,7 +614,7 @@ private:
         VkPipelineViewportStateCreateInfo viewport{};viewport.sType=VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;viewport.viewportCount=viewport.scissorCount=1;
         auto raster=s.raster;raster.sType=VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;raster.polygonMode=VK_POLYGON_MODE_FILL;raster.lineWidth=1;
         VkPipelineMultisampleStateCreateInfo ms{};ms.sType=VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;ms.rasterizationSamples=VkSampleCountFlagBits(s.raster_samples);
-        if(s.raster_samples!=1 && (s.raster_samples!=2 || multiview))throw std::runtime_error("RSX graphics pipeline raster samples");
+        if(s.raster_samples!=1 && ((s.raster_samples!=2 && s.raster_samples!=graphics_ms_samples()) || multiview))throw std::runtime_error("RSX graphics pipeline raster samples");
         auto z=s.z;z.sType=VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
         VkPipelineColorBlendStateCreateInfo cb{};cb.sType=VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;cb.attachmentCount=s.colors;cb.pAttachments=s.blend.data();
         cb.logicOpEnable=s.logic_enable;cb.logicOp=s.logic;
@@ -519,7 +630,7 @@ private:
             std::fprintf(stderr,"RSX FS PIPELINE glsl_bytes=%zu pipeline_ms=%.3f rss_bytes=%llu\n",fs.size(),pipeline_ns*1.e-6,(unsigned long long)(resident_pages*std::uint64_t(sysconf(_SC_PAGESIZE))));}
         ++compile_stats.graphics_pipelines;compile_stats.pipeline_ns+=pipeline_ns;pipeline_cache_created();
         save_pipeline_cache();compile_stats_print();
-        graphics_pipeline_fast[fast_key]=p;return graphics_pipelines.emplace(std::move(key),std::move(p)).first->second;
+        graphics_pipeline_fast[fast_key]=p;++graphics_pipeline_fast_version;return graphics_pipelines.emplace(std::move(key),std::move(p)).first->second;
     }
 public:
     // True when batch preludes run on the dedicated DMA queue (graphics_upload_submissions counts those submissions).
@@ -582,7 +693,7 @@ public:
         VkBufferCreateInfo bi{};bi.sType=VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;bi.size=bytes;bi.usage=VK_BUFFER_USAGE_STORAGE_BUFFER_BIT|VK_BUFFER_USAGE_INDEX_BUFFER_BIT|VK_BUFFER_USAGE_TRANSFER_SRC_BIT|VK_BUFFER_USAGE_TRANSFER_DST_BIT;
         // Both queue families touch these two buffers (prelude on the DMA queue, batch on the graphics queue); no ownership transfer needed.
         const std::uint32_t sharing_families[2]={family,transfer_family};
-        if(transfer_queue){bi.sharingMode=VK_SHARING_MODE_CONCURRENT;bi.queueFamilyIndexCount=2;bi.pQueueFamilyIndices=sharing_families;}
+        if(transfer_queue && transfer_family!=family){bi.sharingMode=VK_SHARING_MODE_CONCURRENT;bi.queueFamilyIndexCount=2;bi.pQueueFamilyIndices=sharing_families;}
         check(vkCreateBuffer(device,&bi,nullptr,&b->buffer),"graphics staging buffer");
         VkMemoryRequirements r{};vkGetBufferMemoryRequirements(device,b->buffer,&r);
         VkMemoryAllocateInfo ai{};ai.sType=VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;ai.allocationSize=r.size;ai.memoryTypeIndex=host_read_memory_type(r.memoryTypeBits);
@@ -595,9 +706,15 @@ public:
         VkCommandBufferAllocateInfo ci{};ci.sType=VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;ci.commandPool=pool;ci.level=VK_COMMAND_BUFFER_LEVEL_PRIMARY;ci.commandBufferCount=1;
         {VkCommandPoolCreateInfo pi{};pi.sType=VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;pi.queueFamilyIndex=family;pi.flags=VK_COMMAND_POOL_CREATE_TRANSIENT_BIT|VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
             check(vkCreateCommandPool(device,&pi,nullptr,&b->command_pool),"graphics batch command pool");}
-        ci.commandPool=b->command_pool;check(vkAllocateCommandBuffers(device,&ci,&b->command),"graphics command buffer");ci.commandPool=pool;
-        check(vkAllocateCommandBuffers(device,&ci,&b->upload_command),"graphics upload command buffer");
-        if(transfer_queue){ci.commandPool=transfer_pool;check(vkAllocateCommandBuffers(device,&ci,&b->transfer_command),"graphics transfer command buffer");ci.commandPool=pool;}
+        // `upload_command` shares the batch's own pool with `command`: the draw recorder records/resets both (Submit/Reset jobs) while the
+        // frontend records other command buffers from the shared pools.
+        ci.commandPool=b->command_pool;check(vkAllocateCommandBuffers(device,&ci,&b->command),"graphics command buffer");
+        check(vkAllocateCommandBuffers(device,&ci,&b->upload_command),"graphics upload command buffer");ci.commandPool=pool;
+        // The DMA-queue prelude buffer lives in its own per-batch pool (like `command`/`upload_command`): the draw recorder records, submits
+        // and resets it in Submit/Reset jobs while the frontend creates and frees other batches.
+        if(transfer_queue){VkCommandPoolCreateInfo pi{};pi.sType=VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;pi.queueFamilyIndex=transfer_family;pi.flags=VK_COMMAND_POOL_CREATE_TRANSIENT_BIT|VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+            check(vkCreateCommandPool(device,&pi,nullptr,&b->transfer_command_pool),"graphics batch transfer pool");
+            ci.commandPool=b->transfer_command_pool;check(vkAllocateCommandBuffers(device,&ci,&b->transfer_command),"graphics transfer command buffer");ci.commandPool=pool;}
         VkFenceCreateInfo fi{};fi.sType=VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;check(vkCreateFence(device,&fi,nullptr,&b->fence),"graphics fence");
         b->descriptors=graphics_descriptor_pool();
         VkQueryPoolCreateInfo oi{};oi.sType=VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;oi.queryType=VK_QUERY_TYPE_OCCLUSION;oi.queryCount=1024;
@@ -721,14 +838,21 @@ public:
         GraphicsSite site(SiteDeviceCopies);
         graphics_begin(b);graphics_barrier(b);vkCmdCopyBuffer(b.command,b.data_buffer,b.data_buffer,unsigned(regions.size()),regions.data());graphics_barrier(b);
     }
+    // An upload slice that starts exactly where the batch's last copy region ends (in staging and in the device buffer: staging
+    // offsets equal device offsets) extends that region: the prelude copies the same bytes with one region less. Slices are
+    // disjoint and allocated in increasing order (graphics_space), so a merged region never overlaps another one.
+    void graphics_upload_region(GraphicsBatch& b,std::uint64_t at,std::uint64_t bytes){
+        if(!b.uploads.empty()){auto& last=b.uploads.back();if(last.srcOffset==last.dstOffset && last.srcOffset+last.size==at){last.size+=bytes;return;}}
+        b.uploads.push_back({at,at,bytes});
+    }
     // Immutable slice filled in place by the caller (staging map + offset);
     // the batch prelude copies it to the device buffer before any consumer.
     std::uint64_t graphics_reserve_upload(GraphicsBatch& b,std::uint64_t bytes){
-        graphics_begin(b);const auto at=graphics_space(b,bytes);b.uploads.push_back({at,at,bytes});b.upload_bytes+=bytes;
+        graphics_begin(b,true);const auto at=graphics_space(b,bytes);graphics_upload_region(b,at,bytes);b.upload_bytes+=bytes;
         ::RsxPerfCounters::add(::RsxPerfCounters::upload_bytes,bytes);return at;
     }
-    std::uint64_t graphics_upload(GraphicsBatch& b,const void* data,std::uint64_t bytes){
-        graphics_begin(b);const auto at=graphics_space(b,bytes);std::memcpy(static_cast<char*>(b.map)+at,data,bytes);b.upload_bytes+=bytes;::RsxPerfCounters::add(::RsxPerfCounters::upload_bytes,bytes);return at;
+    std::uint64_t graphics_upload(GraphicsBatch& b,const void* data,std::uint64_t bytes,bool front=false){
+        graphics_begin(b,front);const auto at=graphics_space(b,bytes);std::memcpy(static_cast<char*>(b.map)+at,data,bytes);b.upload_bytes+=bytes;::RsxPerfCounters::add(::RsxPerfCounters::upload_bytes,bytes);return at;
     }
     struct GraphicsStateBlock {std::uint64_t version;const unsigned* data;unsigned words;};
     template<std::size_t N> void graphics_state_blocks(GraphicsBatch& b,const std::array<GraphicsStateBlock,N>& blocks,unsigned first=0){
@@ -737,9 +861,9 @@ public:
         for(unsigned index=0;index<blocks.size();++index){const auto& block=blocks[index];const unsigned slot=first+index;
             if(!block.version || !block.words)throw std::runtime_error("RSX invalid immutable state block");
             if(b.state_versions[slot]==block.version){++b.state_block_hits;continue;}
-            const auto size=std::uint64_t(block.words)*4,at=graphics_upload(b,block.data,size);
+            const auto size=std::uint64_t(block.words)*4,at=graphics_upload(b,block.data,size,true);
             b.state_versions[slot]=block.version;b.state_offsets[slot]=at/4;++b.state_block_uploads;::RsxPerfCounters::add(::RsxPerfCounters::state_uploads);
-            b.uploads.push_back({at,at,size});
+            graphics_upload_region(b,at,size);
         }
     }
     std::shared_ptr<GraphicsBuffer> graphics_buffer(GraphicsBatch& b,const void* data,std::uint64_t size){b.sync();
@@ -856,29 +980,65 @@ public:
         b.buffer_pins.push_back(transfer);b.pins.push_back(source);b.pins.push_back(result);if(!visual)graphics_visual_sync(b,result,"aspect");return result;
     }
     std::uint64_t graphics_full_clears=0;
-    void graphics_clear_image(GraphicsBatch& b,const std::shared_ptr<GraphicsImage>& image,const VkClearColorValue& color,float depth,unsigned stencil,VkImageAspectFlags aspects){b.sync();
+    // lead=false: the caller has just recorded the leading full barrier of this group and since then only clears/copies of
+    // other images (a native image before its visual companion, colour targets before the depth target of one guest clear).
+    // Exact without a barrier of its own: the group's barrier orders every earlier access of this image (pending visual draws
+    // were replayed before it), the group's other commands touch distinct images, and every later reader of this image starts
+    // with its own full dependency (a graphics_barrier or a pass begin), as after any clear.
+    static void graphics_group_lead(GraphicsBatch& b,bool lead){
+        if(lead){graphics_barrier(b);return;}
+        if(b.active_framebuffer || !b.visual_jobs.empty() || !b.plane_draws.empty())throw std::runtime_error("RSX grouped clear/copy without its leading barrier");
+    }
+    // With the draw recorder a plane clear (no visual-MSAA working images: graphics_visual_msaa() off) is a Clear job: the frontend
+    // begins the batch (front), pins the image before the job names it, keeps its bookkeeping (counters, visual taint) and queues the
+    // clear commands (leading barrier/group check, vkCmdClearColorImage/vkCmdClearDepthStencilImage) in ring order with the draws, so a clear no longer waits for the
+    // recorder to drain. The paired visual clear is the next job (lead=false), exactly as the inline order. Inline otherwise.
+    void graphics_clear_image(GraphicsBatch& b,const std::shared_ptr<GraphicsImage>& image,const VkClearColorValue& color,float depth,unsigned stencil,VkImageAspectFlags aspects,bool lead=true){
+        if(draw_recorder && !in_recorder_thread() && !graphics_visual_msaa() && !b.queries && !b.marks && !b.inline_draws){
+            graphics_begin(b,true);graphics_work_add(WorkClearTexels,std::uint64_t(image->width)*image->height*image->layers);b.pins.push_back(image);
+            auto& job=recorder_slot();job.batch=&b;job.kind=DrawJob::Clear;job.depth=image.get();job.clear_color=color;job.clear_depth=depth;job.clear_stencil=stencil;
+            job.clear_aspects=aspects;job.clear_lead=lead;b.pending_jobs.fetch_add(1,std::memory_order_relaxed);recorder_publish();
+            ++graphics_full_clears;graphics_visual_taint(*image,0,true);
+            if(image->visual)graphics_clear_image(b,image->visual,color,depth,stencil,aspects,false);
+            return;
+        }
+        b.sync();
         GraphicsSite site(SiteClear);
-        graphics_begin(b);graphics_barrier(b);
+        graphics_begin(b);graphics_group_lead(b,lead||!graphics_pair_barriers());
         // Visual MSAA: a clear of every aspect makes the working image current (its planes are then stale); a partial clear
         // of a current working image stays in it. Anything else clears the planes (a current working image is then absent).
         if(graphics_visual_msaa() && image->ms_wanted && !image->ms)graphics_ms_prepare(b,image);
         if(image->ms){
             const VkImageAspectFlags all=image->depth?VK_IMAGE_ASPECT_DEPTH_BIT|(image->format==VK_FORMAT_D24_UNORM_S8_UINT?VK_IMAGE_ASPECT_STENCIL_BIT:0):VK_IMAGE_ASPECT_COLOR_BIT;
             if(image->ms_current || (aspects&all)==all){
-                const VkImageSubresourceRange whole{aspects,0,1,0,1};
+                const VkImageSubresourceRange whole{aspects,0,1,0,1};graphics_work_add(WorkClearTexels,std::uint64_t(image->width)*image->height*2);
                 if(image->depth){const VkClearDepthStencilValue value{depth,stencil};vkCmdClearDepthStencilImage(b.command,image->ms->image,VK_IMAGE_LAYOUT_GENERAL,&value,1,&whole);}
                 else vkCmdClearColorImage(b.command,image->ms->image,VK_IMAGE_LAYOUT_GENERAL,&color,1,&whole);
                 if(aspects&VK_IMAGE_ASPECT_STENCIL_BIT){image->ms_stencil_known=true;image->ms_stencil=stencil&255;}
                 image->ms_current=true;b.pins.push_back(image);++graphics_ms_clears;graphics_visual_taint(*image,0,true);return;
             }
         }
-        const VkImageSubresourceRange range{aspects,0,1,0,image->layers};
+        const VkImageSubresourceRange range{aspects,0,1,0,image->layers};graphics_work_add(WorkClearTexels,std::uint64_t(image->width)*image->height*image->layers);
         if(image->depth){const VkClearDepthStencilValue value{depth,stencil};vkCmdClearDepthStencilImage(b.command,image->image,VK_IMAGE_LAYOUT_GENERAL,&value,1,&range);}
         else vkCmdClearColorImage(b.command,image->image,VK_IMAGE_LAYOUT_GENERAL,&color,1,&range);
         b.pins.push_back(image);++graphics_full_clears;graphics_visual_taint(*image,0,true);
-        if(image->visual)graphics_clear_image(b,image->visual,color,depth,stencil,aspects);
+        if(image->visual)graphics_clear_image(b,image->visual,color,depth,stencil,aspects,false);
     }
-    void graphics_copy(GraphicsBatch& b,const std::shared_ptr<GraphicsImage>& from,const std::shared_ptr<GraphicsImage>& to){b.sync();
+    // Recorder half of a queued plane clear (graphics_clear_image): the same commands as its inline path.
+    void graphics_clear_commands(DrawJob& j){
+        GraphicsSite site(SiteClear);auto& b=*j.batch;const auto& image=*j.depth;graphics_recorder_clears.fetch_add(1,std::memory_order_relaxed);
+        graphics_group_lead(b,j.clear_lead||!graphics_pair_barriers());
+        const VkImageSubresourceRange range{j.clear_aspects,0,1,0,image.layers};
+        if(image.depth){const VkClearDepthStencilValue value{j.clear_depth,j.clear_stencil};vkCmdClearDepthStencilImage(b.command,image.image,VK_IMAGE_LAYOUT_GENERAL,&value,1,&range);}
+        else vkCmdClearColorImage(b.command,image.image,VK_IMAGE_LAYOUT_GENERAL,&j.clear_color,1,&range);
+    }
+    // ANYPS3_RSX_PAIR_BARRIERS=0: the visual half of a clear/copy and later clears of one guest clear record their own leading
+    // barrier again (former behaviour, A/B). Default 1 (graphics_group_lead).
+    static bool graphics_pair_barriers(){static const bool value=[]{const char* v=std::getenv("ANYPS3_RSX_PAIR_BARRIERS");
+            if(v && std::strcmp(v,"0") && std::strcmp(v,"1")){throw std::runtime_error("invalid ANYPS3_RSX_PAIR_BARRIERS");}
+            return !v || !std::strcmp(v,"1");}();
+        return value;}
+    void graphics_copy(GraphicsBatch& b,const std::shared_ptr<GraphicsImage>& from,const std::shared_ptr<GraphicsImage>& to,bool lead=true){b.sync();
         if(from==to)return;
         graphics_ms_planes(b,from.get());graphics_ms_planes(b,to.get());
         GraphicsSite site(SiteSurfaceCopy);
@@ -886,7 +1046,7 @@ public:
             (to->format==VK_FORMAT_R8G8B8A8_SRGB && from->format==VK_FORMAT_R8G8B8A8_UNORM);
         if((from->format!=to->format && !rgba_compatible) || from->width!=to->width || from->height!=to->height || from->layers!=to->layers || from->depth!=to->depth)
             throw std::runtime_error("RSX graphics copy shape mismatch");
-        graphics_begin(b);graphics_barrier(b);
+        graphics_begin(b);graphics_group_lead(b,lead||!graphics_pair_barriers());
         for(const VkImageAspectFlags aspect:from->depth?std::vector<VkImageAspectFlags>{VK_IMAGE_ASPECT_DEPTH_BIT}:std::vector<VkImageAspectFlags>{VK_IMAGE_ASPECT_COLOR_BIT}){
             VkImageCopy c{};c.srcSubresource={aspect,0,0,from->layers};c.dstSubresource={aspect,0,0,to->layers};c.extent={from->width,from->height,1};
             vkCmdCopyImage(b.command,from->image,VK_IMAGE_LAYOUT_GENERAL,to->image,VK_IMAGE_LAYOUT_GENERAL,1,&c);}
@@ -894,7 +1054,7 @@ public:
             vkCmdCopyImage(b.command,from->image,VK_IMAGE_LAYOUT_GENERAL,to->image,VK_IMAGE_LAYOUT_GENERAL,1,&c);}
         b.pins.push_back(from);b.pins.push_back(to);
         graphics_visual_taint(*to,from->visual_taint,true);
-        if(to->visual){if(from->visual)graphics_copy(b,from->visual,to->visual);else graphics_visual_sync(b,to,"copy_unpaired");}
+        if(to->visual){if(from->visual)graphics_copy(b,from->visual,to->visual,graphics_ms_any);else graphics_visual_sync(b,to,"copy_unpaired");}
     }
     // Visual history through a native byte permutation (alias merge, equal
     // footprint rebind): regions are in visual units, the visual blocks of whole
@@ -947,7 +1107,21 @@ public:
             if(v && std::strcmp(v,"0") && std::strcmp(v,"1")){throw std::runtime_error("invalid ANYPS3_RENDER_SCALE_MSAA");}
             return v && !std::strcmp(v,"1");}();
         return value;}
-    std::atomic<std::uint64_t> graphics_ms_draws{0},graphics_ms_plane_draws{0},graphics_ms_expands{0},graphics_ms_bit_expands{0},graphics_ms_clears{0},graphics_ms_images{0};
+    std::atomic<std::uint64_t> graphics_ms_draws{0},graphics_ms_plane_draws{0},graphics_ms_expands{0},graphics_ms_bit_expands{0},graphics_ms_clears{0},graphics_ms_images{0},graphics_ms_loads{0};
+    // ANYPS3_RENDER_SCALE_MSAA_LOAD=1 (with ANYPS3_RENDER_SCALE_MSAA=1; default 0, NVIDIA test pending): the plane->sample load.
+    // An eligible draw creates its targets' working images itself (not only a full clear), and a target whose planes hold the
+    // content is loaded into its working image first (graphics_ms_load: one 2-sample pass, sample n <- plane n by per-sample
+    // shading; depth by gl_FragDepth, stencil by 8 bit-plane REPLACE draws with per-sample discard). Needs sampleRateShading.
+    // TEST HOOK ANYPS3_RENDER_SCALE_MSAA_TEST_SAMPLES=4: working images of 4-plane visual images, for devices without 2x
+    // (lavapipe). Draw eligibility stays 2-sample, so only clears, loads and expands use them (load/expand round trip test).
+    static unsigned graphics_ms_samples(){static const unsigned value=[]{const char* v=std::getenv("ANYPS3_RENDER_SCALE_MSAA_TEST_SAMPLES");
+            if(v && std::strcmp(v,"2") && std::strcmp(v,"4")){throw std::runtime_error("invalid ANYPS3_RENDER_SCALE_MSAA_TEST_SAMPLES");}
+            return v?unsigned(v[0]-'0'):2u;}();
+        return value;}
+    bool graphics_ms_load_on()const{static const bool value=[]{const char* v=std::getenv("ANYPS3_RENDER_SCALE_MSAA_LOAD");
+            if(v && std::strcmp(v,"0") && std::strcmp(v,"1")){throw std::runtime_error("invalid ANYPS3_RENDER_SCALE_MSAA_LOAD");}
+            return v && !std::strcmp(v,"1");}();
+        return value && graphics_visual_msaa() && graphics_features.sampleRateShading;}
     bool graphics_ms_any=false;   // set once any working image exists (frontend, published to the recorder through the job queue)
     // Formats whose 2-sample working image round-trips exactly through a sampled texelFetch and an attachment write.
     std::array<signed char,256> graphics_ms_format_known{};   // 0 unknown, 1 yes, -1 no (formats < 256)
@@ -959,19 +1133,20 @@ public:
         const auto& l=graphics_properties.limits;if(!l.standardSampleLocations)return false;
         const bool color=f==VK_FORMAT_R8G8B8A8_UNORM || f==VK_FORMAT_R5G6B5_UNORM_PACK16 || f==VK_FORMAT_R16G16B16A16_SFLOAT || f==VK_FORMAT_R32G32B32A32_SFLOAT || f==VK_FORMAT_R32_SFLOAT;
         if(depth?(f!=VK_FORMAT_D24_UNORM_S8_UINT && f!=VK_FORMAT_D16_UNORM):!color)return false;
-        if(depth?!(l.framebufferDepthSampleCounts&l.sampledImageDepthSampleCounts&VK_SAMPLE_COUNT_2_BIT) || (f==VK_FORMAT_D24_UNORM_S8_UINT && !(l.framebufferStencilSampleCounts&l.sampledImageStencilSampleCounts&VK_SAMPLE_COUNT_2_BIT))
-                :!(l.framebufferColorSampleCounts&l.sampledImageColorSampleCounts&VK_SAMPLE_COUNT_2_BIT))return false;
+        const auto count=VkSampleCountFlagBits(graphics_ms_samples());
+        if(depth?!(l.framebufferDepthSampleCounts&l.sampledImageDepthSampleCounts&count) || (f==VK_FORMAT_D24_UNORM_S8_UINT && !(l.framebufferStencilSampleCounts&l.sampledImageStencilSampleCounts&count))
+                :!(l.framebufferColorSampleCounts&l.sampledImageColorSampleCounts&count))return false;
         VkImageFormatProperties p{};
         const VkImageUsageFlags usage=VK_IMAGE_USAGE_TRANSFER_DST_BIT|VK_IMAGE_USAGE_SAMPLED_BIT|(depth?VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT:VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT);
-        return vkGetPhysicalDeviceImageFormatProperties(physical,f,VK_IMAGE_TYPE_2D,VK_IMAGE_TILING_OPTIMAL,usage,0,&p)==VK_SUCCESS && (p.sampleCounts&VK_SAMPLE_COUNT_2_BIT);
+        return vkGetPhysicalDeviceImageFormatProperties(physical,f,VK_IMAGE_TYPE_2D,VK_IMAGE_TILING_OPTIMAL,usage,0,&p)==VK_SUCCESS && (p.sampleCounts&count);
     }
     // Frontend: creates the working image of visual image v, its expand pipelines and per-plane framebuffers. Outside a pass.
     bool graphics_ms_prepare(GraphicsBatch& b,const std::shared_ptr<GraphicsImage>& v){
         if(v->ms)return true;
-        if(v->layers!=2 || v->visual || v->borrowed || !graphics_ms_format(v->format,v->depth)){v->ms_wanted=false;return false;}
+        if(v->layers!=graphics_ms_samples() || v->visual || v->borrowed || !graphics_ms_format(v->format,v->depth)){v->ms_wanted=false;return false;}
         auto m=std::make_shared<GraphicsImage>(this,v->format,v->width,v->height,1,v->depth);
         VkImageCreateInfo ii{};ii.sType=VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;ii.imageType=VK_IMAGE_TYPE_2D;ii.format=v->format;ii.extent={v->width,v->height,1};ii.mipLevels=1;ii.arrayLayers=1;
-        ii.samples=VK_SAMPLE_COUNT_2_BIT;ii.tiling=VK_IMAGE_TILING_OPTIMAL;ii.usage=VK_IMAGE_USAGE_TRANSFER_DST_BIT|VK_IMAGE_USAGE_SAMPLED_BIT|(v->depth?VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT:VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT);
+        ii.samples=VkSampleCountFlagBits(v->layers);ii.tiling=VK_IMAGE_TILING_OPTIMAL;ii.usage=VK_IMAGE_USAGE_TRANSFER_DST_BIT|VK_IMAGE_USAGE_SAMPLED_BIT|(v->depth?VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT:VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT);
         check(vkCreateImage(device,&ii,nullptr,&m->image),"visual msaa image");
         VkMemoryRequirements r{};vkGetImageMemoryRequirements(device,m->image,&r);VkMemoryAllocateInfo ai{};ai.sType=VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;ai.allocationSize=r.size;ai.memoryTypeIndex=memory_type(r.memoryTypeBits,VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
         m->memory_bytes=r.size;check(vkAllocateMemory(device,&ai,nullptr,&m->memory),"visual msaa memory");check(vkBindImageMemory(device,m->image,m->memory,0),"visual msaa bind");
@@ -999,8 +1174,24 @@ public:
             v->ms_expand=graphics_pipeline(e,*vs,*fs_depth,vs,fs_depth);
             if(stencil){e.z.depthTestEnable=e.z.depthWriteEnable=false;v->ms_expand_bits=graphics_pipeline(e,*vs,*fs_bits,vs,fs_bits);}}
         else{e.colors=1;e.color=v->format;e.blend[0].colorWriteMask=15;v->ms_expand=graphics_pipeline(e,*vs,*fs_color,vs,fs_color);}
-        for(unsigned layer=0;layer<2;++layer){VkFramebufferCreateInfo fi{};fi.sType=VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;fi.renderPass=v->ms_expand->pass;fi.attachmentCount=1;fi.pAttachments=&v->views[layer];
+        for(unsigned layer=0;layer<v->layers;++layer){VkFramebufferCreateInfo fi{};fi.sType=VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;fi.renderPass=v->ms_expand->pass;fi.attachmentCount=1;fi.pAttachments=&v->views[layer];
             fi.width=v->width;fi.height=v->height;fi.layers=1;check(vkCreateFramebuffer(device,&fi,nullptr,&v->ms_expand_fb[layer]),"visual msaa expand framebuffer");}
+        if(graphics_ms_load_on()){
+            // Load (planes -> samples): gl_SampleID selects the plane, so every sample is shaded on its own.
+            static const auto ld_color=std::make_shared<const std::string>(head+"layout(binding=17) uniform sampler2DArray src_;layout(location=0) out vec4 o;\n"
+                "void main(){o=texelFetch(src_,ivec3(ivec2(gl_FragCoord.xy),gl_SampleID),0);}\n");
+            static const auto ld_depth=std::make_shared<const std::string>(head+"layout(binding=17) uniform sampler2DArray src_;\n"
+                "void main(){gl_FragDepth=texelFetch(src_,ivec3(ivec2(gl_FragCoord.xy),gl_SampleID),0).r;}\n");
+            static const auto ld_bits=std::make_shared<const std::string>(head+"layout(binding=18) uniform usampler2DArray stencil_;\n"
+                "void main(){if(((texelFetch(stencil_,ivec3(ivec2(gl_FragCoord.xy),gl_SampleID),0).r>>bit_)&1u)==0u)discard;}\n");
+            GraphicsState l=e;l.raster_samples=v->layers;
+            if(v->depth){l.z.depthTestEnable=l.z.depthWriteEnable=true;l.z.depthCompareOp=VK_COMPARE_OP_ALWAYS;v->ms_load=graphics_pipeline(l,*vs,*ld_depth,vs,ld_depth);   // also writes stencil 0 (REPLACE, reference 0)
+                if(stencil){if(!v->stencil_array_view){VkImageViewCreateInfo vi{};vi.sType=VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;vi.image=v->image;vi.viewType=VK_IMAGE_VIEW_TYPE_2D_ARRAY;vi.format=v->format;
+                        vi.subresourceRange={VK_IMAGE_ASPECT_STENCIL_BIT,0,1,0,v->layers};check(vkCreateImageView(device,&vi,nullptr,&v->stencil_array_view),"visual msaa plane stencil view");}
+                    l.z.depthTestEnable=l.z.depthWriteEnable=false;v->ms_load_bits=graphics_pipeline(l,*vs,*ld_bits,vs,ld_bits);}}
+            else v->ms_load=graphics_pipeline(l,*vs,*ld_color,vs,ld_color);
+            VkFramebufferCreateInfo fi{};fi.sType=VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;fi.renderPass=v->ms_load->pass;fi.attachmentCount=1;fi.pAttachments=&m->views[0];
+            fi.width=v->width;fi.height=v->height;fi.layers=1;check(vkCreateFramebuffer(device,&fi,nullptr,&v->ms_load_fb),"visual msaa load framebuffer");}
         b.pins.push_back(v);v->ms=std::move(m);v->ms_current=false;graphics_ms_any=true;++graphics_ms_images;return true;
     }
     // Recording side (draw recorder, or the frontend after b.sync()): working image -> planes. Ends any open pass first.
@@ -1023,9 +1214,10 @@ public:
         for(unsigned face=0;face<2;++face){d[6+face*3]=255;d[7+face*3]=255;d[8+face*3]=v.ms_stencil_known?v.ms_stencil&255:0;}
         const float one=1;std::memcpy(&d[19],&one,4);
         const std::uint32_t offset=0;
-        for(unsigned layer=0;layer<2;++layer){
+        for(unsigned layer=0;layer<v.layers;++layer){
             VkRenderPassBeginInfo pass{};pass.sType=VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;pass.renderPass=p.pass;pass.framebuffer=v.ms_expand_fb[layer];pass.renderArea={{0,0},{v.width,v.height}};
             vkCmdBeginRenderPass(b.command,&pass,VK_SUBPASS_CONTENTS_INLINE);graphics_mark(b,MarkPassBegin);++b.render_passes;::RsxPerfCounters::add(::RsxPerfCounters::render_passes);
+            graphics_pass_begun(b,true,1);
             vkCmdBindPipeline(b.command,VK_PIPELINE_BIND_POINT_GRAPHICS,p.pipeline);
             vkCmdBindDescriptorSets(b.command,VK_PIPELINE_BIND_POINT_GRAPHICS,p.layout,0,1,&set,1,&offset);
             graphics_emit_dynamic(b.command,d,nullptr);
@@ -1037,10 +1229,48 @@ public:
                 for(unsigned bit=0;bit<8;++bit){push.layers=bit;vkCmdSetStencilWriteMask(b.command,VK_STENCIL_FACE_FRONT_AND_BACK,1u<<bit);
                     vkCmdPushConstants(b.command,p.layout,VK_SHADER_STAGE_VERTEX_BIT|VK_SHADER_STAGE_FRAGMENT_BIT,0,sizeof(GraphicsPush),&push);
                     vkCmdDraw(b.command,3,1,0,0);graphics_mark(b,MarkDraw);}}
-            vkCmdEndRenderPass(b.command);graphics_mark(b,MarkPassEnd);::RsxPerfCounters::add(::RsxPerfCounters::pass_ends);
+            vkCmdEndRenderPass(b.command);graphics_pass_ended(b);graphics_mark(b,MarkPassEnd);::RsxPerfCounters::add(::RsxPerfCounters::pass_ends);
         }
         b.bound_graphics_pipeline=bits?v.ms_expand_bits->pipeline:p.pipeline;b.dynamic_valid=false;
         v.ms_current=false;++graphics_ms_expands;if(bits)++graphics_ms_bit_expands;
+    }
+    // Recording side: planes -> working image (graphics_ms_load_on). Ends any open pass first; the working image is current after.
+    void graphics_ms_load(GraphicsBatch& b,GraphicsImage& v){
+        graphics_close_pass_only(b);
+        const auto& p=*v.ms_load;const bool bits=bool(v.ms_load_bits);
+        if(!graphics_sampler){VkSamplerCreateInfo sampler{};sampler.sType=VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+            sampler.magFilter=sampler.minFilter=VK_FILTER_NEAREST;sampler.mipmapMode=VK_SAMPLER_MIPMAP_MODE_NEAREST;
+            sampler.addressModeU=sampler.addressModeV=sampler.addressModeW=VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+            check(vkCreateSampler(device,&sampler,nullptr,&graphics_sampler),"graphics sampler");}
+        const auto set=graphics_descriptor_set(b,p.descriptors,"visual msaa load descriptor");
+        std::array<VkWriteDescriptorSet,3> writes{};const VkDescriptorBufferInfo data{b.data_buffer,0,16};
+        const VkDescriptorImageInfo images[2]{{graphics_sampler,v.array_view,VK_IMAGE_LAYOUT_GENERAL},{graphics_sampler,v.stencil_array_view,VK_IMAGE_LAYOUT_GENERAL}};
+        for(auto& w:writes){w.sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;w.dstSet=set;w.descriptorCount=1;}
+        writes[0].dstBinding=0;writes[0].descriptorType=VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC;writes[0].pBufferInfo=&data;
+        writes[1].dstBinding=17;writes[1].descriptorType=VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;writes[1].pImageInfo=&images[0];
+        writes[2].dstBinding=18;writes[2].descriptorType=VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;writes[2].pImageInfo=&images[1];
+        vkUpdateDescriptorSets(device,bits?3:2,writes.data(),0,nullptr);
+        std::array<unsigned,22> d{};d[0]=d[4]=v.width;d[1]=d[5]=v.height;
+        for(unsigned face=0;face<2;++face){d[6+face*3]=255;d[7+face*3]=255;d[8+face*3]=0;}   // depth pass: stencil REPLACE with 0
+        const float one=1;std::memcpy(&d[19],&one,4);
+        const std::uint32_t offset=0;
+        VkRenderPassBeginInfo pass{};pass.sType=VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;pass.renderPass=p.pass;pass.framebuffer=v.ms_load_fb;pass.renderArea={{0,0},{v.width,v.height}};
+        vkCmdBeginRenderPass(b.command,&pass,VK_SUBPASS_CONTENTS_INLINE);graphics_mark(b,MarkPassBegin);++b.render_passes;::RsxPerfCounters::add(::RsxPerfCounters::render_passes);
+        graphics_pass_begun(b,true,1);
+        vkCmdBindPipeline(b.command,VK_PIPELINE_BIND_POINT_GRAPHICS,p.pipeline);
+        vkCmdBindDescriptorSets(b.command,VK_PIPELINE_BIND_POINT_GRAPHICS,p.layout,0,1,&set,1,&offset);
+        graphics_emit_dynamic(b.command,d,nullptr);
+        GraphicsPush push{float(v.width),float(v.height),0,0,0,0,{},{1,1}};
+        vkCmdPushConstants(b.command,p.layout,VK_SHADER_STAGE_VERTEX_BIT|VK_SHADER_STAGE_FRAGMENT_BIT,0,sizeof(GraphicsPush),&push);
+        vkCmdDraw(b.command,3,1,0,0);graphics_mark(b,MarkDraw);
+        if(bits){vkCmdBindPipeline(b.command,VK_PIPELINE_BIND_POINT_GRAPHICS,v.ms_load_bits->pipeline);
+            vkCmdSetStencilReference(b.command,VK_STENCIL_FACE_FRONT_AND_BACK,255);
+            for(unsigned bit=0;bit<8;++bit){push.layers=bit;vkCmdSetStencilWriteMask(b.command,VK_STENCIL_FACE_FRONT_AND_BACK,1u<<bit);
+                vkCmdPushConstants(b.command,p.layout,VK_SHADER_STAGE_VERTEX_BIT|VK_SHADER_STAGE_FRAGMENT_BIT,0,sizeof(GraphicsPush),&push);
+                vkCmdDraw(b.command,3,1,0,0);graphics_mark(b,MarkDraw);}}
+        vkCmdEndRenderPass(b.command);graphics_pass_ended(b);graphics_mark(b,MarkPassEnd);::RsxPerfCounters::add(::RsxPerfCounters::pass_ends);
+        b.bound_graphics_pipeline=bits?v.ms_load_bits->pipeline:p.pipeline;b.dynamic_valid=false;
+        v.ms_current=true;v.ms_stencil_known=false;++graphics_ms_loads;
     }
     // Frontend hook before any non-draw access to `image` (a native image with a visual companion, a visual image, or an
     // input alias of one): its pending visual draws are recorded, then a current working image is expanded.
@@ -1060,7 +1290,10 @@ public:
     // visibility_count/draws and the staging bytes; the recorder owns the command buffer, descriptor cache and pools, framebuffers,
     // framebuffer_pins, active_framebuffer, bound pipeline, dynamic state, plane runs, timestamps and marks. Every other entry point that
     // receives a GraphicsBatch calls b.sync() first, which waits until all queued draws are recorded (and rethrows a recorder failure);
-    // the frontend-only entry points (graphics_begin of a fresh batch, graphics_space/upload/reserve_upload/state_blocks) do not.
+    // the frontend-only entry points (graphics_begin(b,true) of a fresh batch, graphics_space/upload/reserve_upload/state_blocks) do not.
+    // Batch lifecycle: graphics_reset queues the recorder-owned reset (Reset job) and a front-half begin queues the command-buffer
+    // begin (Begin job), both counted in pending_jobs like draws, so the recorder owns the batch's command buffer from its reset
+    // through its last queued draw; graphics_submit/collect sync first as before.
     // Each batch records into its own command pool, so resetting/freeing another batch never races with the recorder.
     static bool& in_recorder_thread(){static thread_local bool recorder=false;return recorder;}
     static void recorder_relax(){
@@ -1072,6 +1305,10 @@ public:
     }
     // TEST HOOK (tests/test_rsx_recorder.py): the Nth recorded draw (0 = off) throws on the recorder thread.
     std::atomic<unsigned> graphics_test_recorder_fault{0};
+    std::atomic<bool> graphics_test_recorder_reset_fault{false};   // TEST HOOK: the next Reset job throws on the recorder thread
+    std::atomic<std::uint64_t> graphics_recorder_resets{0},graphics_recorder_begins{0},graphics_recorder_submits{0},graphics_recorder_clears{0};   // lifecycle jobs run on the recorder thread
+    std::atomic<unsigned> graphics_test_recorder_submit_delay_ms{0};   // TEST HOOK: the recorder sleeps before every Submit job (ordering tests)
+    bool graphics_recorder_submit=true;   // ANYPS3_RSX_RECORDER_SUBMIT (default 1): graphics_submit queues a Submit job (see graphics_submit)
     std::uint64_t recorder_clock=0;   // LRU stamps of the batch-local caches, recorder-thread only
     struct DrawRecorder {
         static constexpr std::size_t slots=256;
@@ -1096,9 +1333,17 @@ public:
                     auto& job=ring[c%slots];
                     if(!failed.load(std::memory_order_acquire)){
                         try{
-                            const auto fault=owner->graphics_test_recorder_fault.load(std::memory_order_relaxed);
-                            if(fault && ++recorded==fault)throw std::runtime_error("RSX draw recorder test fault");
-                            owner->graphics_record_draw(job);
+                            if(job.kind==DrawJob::Reset){
+                                if(owner->graphics_test_recorder_reset_fault.exchange(false,std::memory_order_relaxed))throw std::runtime_error("RSX draw recorder reset test fault");
+                                owner->graphics_reset_commands(*job.batch);}
+                            else if(job.kind==DrawJob::Begin)owner->graphics_begin_commands(*job.batch);
+                            else if(job.kind==DrawJob::Clear)owner->graphics_clear_commands(job);
+                            else if(job.kind==DrawJob::Submit){
+                                if(const auto ms=owner->graphics_test_recorder_submit_delay_ms.load(std::memory_order_relaxed))std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+                                owner->graphics_submit_commands(*job.batch,job.at);}
+                            else{const auto fault=owner->graphics_test_recorder_fault.load(std::memory_order_relaxed);
+                                if(fault && ++recorded==fault)throw std::runtime_error("RSX draw recorder test fault");
+                                owner->graphics_record_draw(job);}
                         }catch(...){{std::lock_guard<std::mutex> lock(mutex);error=std::current_exception();}failed.store(true,std::memory_order_release);}
                     }
                     auto* batch=job.batch;job.reset();
@@ -1125,7 +1370,13 @@ public:
         const char* v=std::getenv("ANYPS3_RSX_RECORDER");
         if(v && std::strcmp(v,"0") && std::strcmp(v,"1"))throw std::runtime_error("invalid ANYPS3_RSX_RECORDER");
         if(v && !std::strcmp(v,"1") && !graphics_gpu_loop())draw_recorder=std::make_unique<DrawRecorder>(this);
+        const char* s=std::getenv("ANYPS3_RSX_RECORDER_SUBMIT");
+        if(s && std::strcmp(s,"0") && std::strcmp(s,"1"))throw std::runtime_error("invalid ANYPS3_RSX_RECORDER_SUBMIT");
+        graphics_recorder_submit=!s || !std::strcmp(s,"1");
     }
+    // Queue order with deferred submissions: every other submission to, wait on or presentation through the graphics queue (and every
+    // device-wide idle wait) first lets the recorder submit what the frontend already queued, so the queue sees the program order.
+    void recorder_queue_order(){if(draw_recorder && !in_recorder_thread())recorder_drain();}
     // Waits until every queued draw is recorded. No-op on the recorder thread and without a recorder.
     void recorder_drain(){
         if(!draw_recorder || in_recorder_thread())return;
@@ -1229,6 +1480,10 @@ public:
         if(graphics_ms_any){
             for(const auto& t:textures)if(t){if(t->ms && t->ms_current)graphics_ms_expand(b,*t);if(t->borrowed && t->borrowed->ms && t->borrowed->ms_current)graphics_ms_expand(b,*t->borrowed);}
             ms_mode=bool(j.ms_pipeline);
+            // Load path: every attachment has a working image with a load pipeline; the ones whose planes hold the content
+            // are loaded first, so the draw goes into the working images (ms_load exists only with graphics_ms_load_on).
+            if(ms_mode){bool loadable=true;for(unsigned i=0;i<s.colors;++i)loadable=loadable && colors[i]->ms && colors[i]->ms_load;if(depth)loadable=loadable && depth->ms && depth->ms_load;
+                if(loadable){for(unsigned i=0;i<s.colors;++i)if(!colors[i]->ms_current)graphics_ms_load(b,*colors[i]);if(depth && !depth->ms_current)graphics_ms_load(b,*depth);}}
             for(unsigned i=0;i<s.colors && ms_mode;++i)ms_mode=colors[i]->ms && colors[i]->ms_current;
             if(ms_mode && depth)ms_mode=depth->ms && depth->ms_current;
             if(!ms_mode){for(unsigned i=0;i<s.colors;++i)if(colors[i] && colors[i]->ms && colors[i]->ms_current)graphics_ms_expand(b,*colors[i]);
@@ -1288,8 +1543,8 @@ public:
             if(found!=graphics_framebuffers.end() && !found->second->live()){graphics_framebuffers.erase(found);found=graphics_framebuffers.end();}
             if(found!=graphics_framebuffers.end()){framebuffer=found->second->handle;found->second->last_use=++recorder_clock;b.framebuffer_pins.push_back(found->second);++b.framebuffer_hits;}
             else{check(vkCreateFramebuffer(device,&fi,nullptr,&framebuffer),"graphics framebuffer");auto entry=std::make_shared<typename GraphicsBatch::Framebuffer>();entry->owner=this;entry->handle=framebuffer;entry->last_use=++recorder_clock;entry->pipeline=ms_mode?j.ms_pipeline:j.pipeline;
-                for(unsigned i=0;i<s.colors;++i)entry->images.push_back(ms_mode?colors[i]->ms:colors[i]);
-                if(depth)entry->images.push_back(ms_mode?depth->ms:depth);
+                for(unsigned i=0;i<s.colors;++i)entry->images.push_back(ms_mode?std::weak_ptr<GraphicsImage>(colors[i]->ms):colors[i]->weak_from_this());
+                if(depth)entry->images.push_back(ms_mode?std::weak_ptr<GraphicsImage>(depth->ms):depth->weak_from_this());
                 if(graphics_framebuffers.size()>=framebuffer_limit){
                     for(auto it=graphics_framebuffers.begin();it!=graphics_framebuffers.end();){if(!it->second->live())it=graphics_framebuffers.erase(it);else ++it;}
                     if(graphics_framebuffers.size()>=framebuffer_limit)graphics_framebuffers.erase(lru_entry(graphics_framebuffers));}
@@ -1311,7 +1566,7 @@ public:
                 // only visual images, immutable slices and buffers that only frontend commands rewrite, and every frontend
                 // command still replays them first (graphics_end_pass). Fewer native/visual alternations, longer visual runs.
                 if(!s.visual_pass && !b.replaying_visual && !graphics_native_switch_replay())graphics_close_pass_only(b);else graphics_end_pass(b);
-                vkCmdBeginRenderPass(b.command,&pass,VK_SUBPASS_CONTENTS_INLINE);graphics_mark(b,MarkPassBegin);
+                vkCmdBeginRenderPass(b.command,&pass,VK_SUBPASS_CONTENTS_INLINE);graphics_mark(b,MarkPassBegin);graphics_pass_begun(b,s.visual_pass,view_count);
                 b.active_framebuffer=framebuffer;++b.render_passes;::RsxPerfCounters::add(::RsxPerfCounters::render_passes);
             }else ++b.render_pass_reuses;
             // A framebuffer change may replay older visual draws. Open this
@@ -1361,7 +1616,7 @@ public:
             bool same=b.plane_count==passes && b.plane_extent.width==raster_width && b.plane_extent.height==raster_height;
             for(unsigned layer=1;layer<passes && same;++layer)same=b.plane_framebuffers[layer]==plane_fb[layer];
             if(!b.plane_draws.empty() && !same)graphics_end_pass(b);
-            if(b.plane_draws.empty()){b.plane_framebuffers=plane_fb;b.plane_pass=p.pass;b.plane_extent={raster_width,raster_height};b.plane_count=passes;}
+            if(b.plane_draws.empty()){b.plane_framebuffers=plane_fb;b.plane_pass=p.pass;b.plane_extent={raster_width,raster_height};b.plane_count=passes;b.plane_visual=s.visual_pass;b.plane_attachments=s.colors+(depth?1u:0u);}
             b.plane_draws.push_back(deferred);++b.plane_deferred;
         }
         if(ms_mode && depth && s.z.stencilTestEnable && (s.z.front.writeMask || s.z.back.writeMask))depth->ms_stencil_known=false;
@@ -1400,8 +1655,9 @@ public:
             if(depth)ok=ok && depth->layers==2 && graphics_ms_format(depth->format,true);
             for(const auto& t:textures)if(t && ok){for(unsigned i=0;i<s.colors;++i)ok=ok && t!=colors[i] && t->borrowed!=colors[i];ok=ok && (!depth || (t!=depth && t->borrowed!=depth));}
             if(ok){bool ready=true;
-                for(unsigned i=0;i<s.colors;++i){colors[i]->ms_wanted=true;ready=ready && colors[i]->ms;}
-                if(depth){depth->ms_wanted=true;ready=ready && depth->ms;}
+                const bool load=graphics_ms_load_on();   // the load path needs no full clear to create a working image
+                for(unsigned i=0;i<s.colors;++i){colors[i]->ms_wanted=true;if(load && !colors[i]->ms)graphics_ms_prepare(b,colors[i]);ready=ready && colors[i]->ms;}
+                if(depth){depth->ms_wanted=true;if(load && !depth->ms)graphics_ms_prepare(b,depth);ready=ready && depth->ms;}
                 if(ready){if(!pipeline->ms_variant){auto m=s;m.raster_samples=2;pipeline->ms_variant=graphics_pipeline(m,vs,fs,vs_owner,fs_owner);}ms_pipeline=pipeline->ms_variant;}}
         }
         // An optional tail (vertex input bytes) directly follows the words in
@@ -1409,7 +1665,7 @@ public:
         std::shared_ptr<GraphicsPipeline> paired;
         const auto words=data.size()*4,bytes=words+tail_bytes;if(bytes>graphics_properties.limits.maxStorageBufferRange)throw std::runtime_error("RSX graphics storage range limit");
         std::uint64_t at=reuse;
-        if(reuse==UINT64_MAX){graphics_begin(b);at=graphics_space(b,bytes);auto* out=static_cast<char*>(b.map)+at;std::memcpy(out,data.data(),words);if(tail_bytes)std::memcpy(out+words,tail,tail_bytes);
+        if(reuse==UINT64_MAX){graphics_begin(b,true);at=graphics_space(b,bytes);auto* out=static_cast<char*>(b.map)+at;std::memcpy(out,data.data(),words);if(tail_bytes)std::memcpy(out+words,tail,tail_bytes);
             b.upload_bytes+=bytes;::RsxPerfCounters::add(::RsxPerfCounters::upload_bytes,bytes);}
         // The dynamic blob binding's range is not observable by the shaders
         // (no length(), no robust access): round it to a power-of-two bucket
@@ -1422,7 +1678,7 @@ public:
         if(depth)b.pins.push_back(depth);
         for(const auto& image:textures)if(image)b.pins.push_back(image);
         for(const auto& raw:raw_textures)if(raw)b.buffer_pins.push_back(raw);
-        if(reuse==UINT64_MAX)b.uploads.push_back({at,at,bytes});
+        if(reuse==UINT64_MAX)graphics_upload_region(b,at,bytes);
         const bool counted=!s.visual_pass && s.visibility;
         if(counted && b.visibility_count+s.samples>1024)throw std::runtime_error("RSX graphics visibility budget");
         const auto query=counted?b.visibility_count++:UINT_MAX;::RsxPerfCounters::add(::RsxPerfCounters::draw_layers,s.samples);
@@ -1450,11 +1706,13 @@ public:
         std::optional<DrawJob> inline_job;DrawJob* job=asynchronous?&recorder_slot():&inline_job.emplace();
         const bool pair=!s.visual_pass && !s.raster_width && s.scale_visual && graphics_render_scale>1;
         if(pair)paired=pipeline;
-        job->batch=&b;job->pipeline=std::move(pipeline);job->ms_pipeline=std::move(ms_pipeline);job->s=s;job->colors=colors;job->depth=depth;job->textures=textures;job->raw_textures=raw_textures;job->positions=positions;
+        job->batch=&b;job->pipeline=std::move(pipeline);job->ms_pipeline=std::move(ms_pipeline);job->s=s;
+        for(unsigned i=0;i<4;++i)job->colors[i]=i<s.colors?colors[i].get():nullptr;   // only the attachments are pinned (and read)
+        job->depth=depth.get();for(unsigned u=0;u<20;++u)job->textures[u]=textures[u].get();for(unsigned u=0;u<16;++u)job->raw_textures[u]=raw_textures[u].get();job->positions=positions;
         job->bias_constant=bias_constant;job->bias_slope=bias_slope;job->min_bounds=min_bounds;job->max_bounds=max_bounds;job->vertices=vertices;job->first_vertex=first_vertex;
         job->query=query;job->passes=passes;job->layered=layered;job->multiview=multiview;job->defer_planes=defer_planes;job->at=at;job->range=range;
         job->indexed=data.size()>15 && data[15]==1;job->index_offset=job->indexed?std::uint64_t(data[13])*4:0;
-        if(asynchronous){b.pending_jobs.fetch_add(1,std::memory_order_relaxed);recorder_publish();}else graphics_record_draw(*job);
+        if(asynchronous){b.pending_jobs.fetch_add(1,std::memory_order_relaxed);recorder_publish();}else{recorder_queue_order();graphics_record_draw(*job);}
         if(!s.visual_pass && !s.raster_width && graphics_render_scale>1 && !s.visual_external){
             if(s.scale_visual){
                 auto scaled=s;scaled.visual_pass=true;scaled.raster_width=s.width*graphics_render_scale;scaled.raster_height=s.height*graphics_render_scale;
@@ -1477,9 +1735,36 @@ public:
         return at;
     }
     // A value identifies one queue prefix. Submission never waits for it.
-    std::uint64_t graphics_submit(GraphicsBatch& b){b.sync();
+    // With the draw recorder (ANYPS3_RSX_RECORDER_SUBMIT=1, default) the frontend books the submission -- the next timeline value,
+    // completion, submitted, recording=false -- and queues a Submit job: the recorder records the batch tail and the upload prelude
+    // and calls vkQueueSubmit right after the batch's last queued draw, so the RSX worker neither waits for the recorder nor pays the
+    // tail/submit. Ownership: from graphics_submit on, the batch's command buffers, status_offsets, uploads and staging bytes belong
+    // to the recorder until graphics_collect's b.sync(); the frontend writes nothing of the batch before that (it is in flight).
+    // Order: Submit jobs run in ring order (submission order = program order) and every other queue user drains the recorder first
+    // (recorder_queue_order: an inline graphics_submit, compute/resident/clear submissions, presentation, idle waits). A timeline
+    // value not yet submitted only reads as incomplete (graphics_completed is a poll; graphics_collect syncs before it waits). A
+    // Submit failure stops the run at the next sync/enqueue (recorder_failed) with the submit's own error. The async DMA prelude
+    // (transfer_queue) goes with it: each batch's transfer command buffer has its own pool, the transfer queue is only submitted to here
+    // (and by the GPU-loop diagnostic, which runs without the recorder), and graphics_upload_serial/upload_wait/transfer_pending are
+    // written by the submission and read after a drain/settle (graphics_collect, graphics_reset, ~GraphicsBatch). Not deferred: batches
+    // with timestamps/marks/inline draws and a present semaphore (b.signal), which keep the inline path below.
+    std::uint64_t graphics_submit(GraphicsBatch& b){
+        const bool deferred=draw_recorder && !in_recorder_thread() && graphics_recorder_submit && !b.queries && !b.marks && !b.inline_draws && !b.signal;
+        if(draw_recorder && !in_recorder_thread()){if(!deferred)recorder_queue_order();}else b.sync();
         if(b.failed)throw std::runtime_error("RSX graphics batch poisoned");
         if(!b.recording)return b.completion;
+        if(deferred){
+            if(graphics_serial==UINT64_MAX)throw std::runtime_error("RSX graphics timeline exhausted");
+            const std::uint64_t value=graphics_serial+1;auto& job=recorder_slot();job.batch=&b;job.kind=DrawJob::Submit;job.at=value;
+            b.recording=false;graphics_serial=value;b.completion=value;b.submitted=true;++b.submissions;
+            b.pending_jobs.fetch_add(1,std::memory_order_relaxed);recorder_publish();completion_watch(value);return value;
+        }
+        return graphics_submit_commands(b);
+    }
+    // The recording/submission half of graphics_submit: inline (queued==0: books the value itself) or as a Submit job (queued = the
+    // value graphics_submit booked; the frontend state of the submission is already set and is not touched here).
+    std::uint64_t graphics_submit_commands(GraphicsBatch& b,std::uint64_t queued=0){
+        if(queued)graphics_recorder_submits.fetch_add(1,std::memory_order_relaxed);
         try{
             graphics_end_pass(b);
             if(!b.status_offsets.empty()){
@@ -1503,7 +1788,7 @@ public:
             VkMemoryBarrier m{};m.sType=VK_STRUCTURE_TYPE_MEMORY_BARRIER;m.srcAccessMask=VK_ACCESS_MEMORY_WRITE_BIT;m.dstAccessMask=VK_ACCESS_HOST_READ_BIT;
             vkCmdPipelineBarrier(b.command,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,VK_PIPELINE_STAGE_HOST_BIT,0,1,&m,0,nullptr,0,nullptr);graphics_mark(b,MarkTail);
             if(b.busy_queries)vkCmdWriteTimestamp(b.command,VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,b.busy_queries,1);
-            check(vkEndCommandBuffer(b.command),"graphics end");b.recording=false;
+            check(vkEndCommandBuffer(b.command),"graphics end");if(!queued)b.recording=false;
             // Recording is complete, so every immutable slice is known. Upload
             // them once before all consumers instead of breaking every draw's
             // pass. Distinct allocations never overlap, even across versions.
@@ -1542,8 +1827,8 @@ public:
             check(vkEndCommandBuffer(b.upload_command),"graphics uploads end");
             commands[command_count++]=b.upload_command;commands[command_count++]=b.command;
             }
-            if(graphics_serial==UINT64_MAX)throw std::runtime_error("RSX graphics timeline exhausted");
-            const std::uint64_t value=graphics_serial+1,values[]={value,0};const VkSemaphore signals[]={graphics_timeline,b.signal};
+            if(!queued && graphics_serial==UINT64_MAX)throw std::runtime_error("RSX graphics timeline exhausted");
+            const std::uint64_t value=queued?queued:graphics_serial+1,values[]={value,0};const VkSemaphore signals[]={graphics_timeline,b.signal};
             const std::uint64_t wait_values[]={b.upload_wait};const VkSemaphore waits[]={graphics_upload_timeline};const VkPipelineStageFlags wait_stages[]={VK_PIPELINE_STAGE_ALL_COMMANDS_BIT};
             const bool wait_upload=transfer_queue && !b.uploads.empty();
             VkTimelineSemaphoreSubmitInfo timeline{};timeline.sType=VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;timeline.signalSemaphoreValueCount=b.signal?2:1;timeline.pSignalSemaphoreValues=values;
@@ -1572,7 +1857,7 @@ public:
                     if(graphics_loop_scratch_size<b.capacity){
                         if(graphics_loop_scratch){vkDeviceWaitIdle(device);vkDestroyBuffer(device,graphics_loop_scratch,nullptr);vkFreeMemory(device,graphics_loop_scratch_memory,nullptr);}
                         VkBufferCreateInfo sbi{};sbi.sType=VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;sbi.size=b.capacity;sbi.usage=VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-                        const std::uint32_t fam[2]={family,transfer_family};sbi.sharingMode=VK_SHARING_MODE_CONCURRENT;sbi.queueFamilyIndexCount=2;sbi.pQueueFamilyIndices=fam;
+                        const std::uint32_t fam[2]={family,transfer_family};if(transfer_family!=family){sbi.sharingMode=VK_SHARING_MODE_CONCURRENT;sbi.queueFamilyIndexCount=2;sbi.pQueueFamilyIndices=fam;}
                         check(vkCreateBuffer(device,&sbi,nullptr,&graphics_loop_scratch),"loop scratch");
                         VkMemoryRequirements r{};vkGetBufferMemoryRequirements(device,graphics_loop_scratch,&r);VkMemoryAllocateInfo mi{};mi.sType=VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;mi.allocationSize=r.size;mi.memoryTypeIndex=memory_type(r.memoryTypeBits,VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
                         check(vkAllocateMemory(device,&mi,nullptr,&graphics_loop_scratch_memory),"loop scratch memory");check(vkBindBufferMemory(device,graphics_loop_scratch,graphics_loop_scratch_memory,0),"loop scratch bind");graphics_loop_scratch_size=b.capacity;
@@ -1585,7 +1870,7 @@ public:
                         if(graphics_loop_snapshot_memory){vkFreeMemory(device,graphics_loop_snapshot_memory,nullptr);graphics_loop_snapshot_memory=VK_NULL_HANDLE;}
                         graphics_loop_snapshot_size=0;
                         VkBufferCreateInfo sbi{};sbi.sType=VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;sbi.size=b.capacity;sbi.usage=VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
-                        const std::uint32_t fam[2]={family,transfer_family};sbi.sharingMode=VK_SHARING_MODE_CONCURRENT;sbi.queueFamilyIndexCount=2;sbi.pQueueFamilyIndices=fam;
+                        const std::uint32_t fam[2]={family,transfer_family};if(transfer_family!=family){sbi.sharingMode=VK_SHARING_MODE_CONCURRENT;sbi.queueFamilyIndexCount=2;sbi.pQueueFamilyIndices=fam;}
                         check(vkCreateBuffer(device,&sbi,nullptr,&graphics_loop_snapshot),"loop snapshot");
                         VkMemoryRequirements r{};vkGetBufferMemoryRequirements(device,graphics_loop_snapshot,&r);VkMemoryAllocateInfo mi{};mi.sType=VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;mi.allocationSize=r.size;mi.memoryTypeIndex=host_read_memory_type(r.memoryTypeBits);
                         graphics_loop_snapshot_coherent=memory.memoryTypes[mi.memoryTypeIndex].propertyFlags&VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
@@ -1629,11 +1914,14 @@ public:
                 std::fprintf(stderr,"PERF GPU_LOOP batches=%llu steady_ns=%llu warm_ns=%llu\n",(unsigned long long)graphics_loop_batches,(unsigned long long)graphics_loop_ns,(unsigned long long)graphics_loop_warm_ns);
             }
             if(graphics_test_submit_fault){graphics_test_submit_fault=false;throw std::runtime_error("injected graphics submit failure (test hook)");}
-            check(vkQueueSubmit(queue,1,&si,b.fence),"graphics submit");::RsxPerfCounters::add(::RsxPerfCounters::submits);graphics_serial=value;b.completion=value;b.submitted=true;++b.submissions;completion_watch(value);return value;
-        }catch(...){b.failed=true;throw;}
+            check(vkQueueSubmit(queue,1,&si,b.fence),"graphics submit");::RsxPerfCounters::add(::RsxPerfCounters::submits);if(queued)return value;
+            graphics_serial=value;b.completion=value;b.submitted=true;++b.submissions;completion_watch(value);return value;
+        }catch(...){if(!queued)b.failed=true;else b.submit_failed=true;throw;}
     }
     std::uint64_t graphics_completed(){::RsxPerfCounters::add(::RsxPerfCounters::timeline_polls);std::uint64_t value=0;check(vkGetSemaphoreCounterValue(device,graphics_timeline,&value),"graphics timeline counter");return value;}
-    bool graphics_collect(GraphicsBatch& b,bool wait=true){b.sync();
+    bool graphics_collect(GraphicsBatch& b,bool wait=true){
+        if(!wait && b.submitted && b.pending_jobs.load(std::memory_order_acquire) && !recorder_failed())return false;   // its Submit job is still queued: not complete
+        b.settle();
         if(b.failed)throw std::runtime_error("RSX graphics batch poisoned");
         if(!b.submitted)return true;
         try{
@@ -1700,8 +1988,13 @@ public:
             if(b.frames && graphics_render_scale>1 && graphics_profile_frames%120==0)
                 std::fprintf(stderr,"PERF RENDER_SCALE scale=%u visual_draws=%llu native_copies=%llu host_invalidations=%llu queued=%llu drains=%llu max_run=%llu history_copies=%llu history_texels=%llu\n",graphics_render_scale,(unsigned long long)graphics_visual_draws,(unsigned long long)graphics_visual_native_copies,(unsigned long long)graphics_visual_host_invalidations,(unsigned long long)graphics_visual_queued_total,(unsigned long long)graphics_visual_drains_total,(unsigned long long)graphics_visual_run_max,(unsigned long long)graphics_visual_history_copies,(unsigned long long)graphics_visual_history_texels);
             if(b.frames && graphics_render_scale>1 && graphics_profile_frames%120==0 && graphics_visual_msaa())
-                std::fprintf(stderr,"PERF RENDER_SCALE_MSAA images=%llu clears=%llu draws=%llu plane_draws=%llu expands=%llu bit_expands=%llu\n",(unsigned long long)graphics_ms_images.load(),(unsigned long long)graphics_ms_clears.load(),
-                    (unsigned long long)graphics_ms_draws.load(),(unsigned long long)graphics_ms_plane_draws.load(),(unsigned long long)graphics_ms_expands.load(),(unsigned long long)graphics_ms_bit_expands.load());
+                std::fprintf(stderr,"PERF RENDER_SCALE_MSAA images=%llu clears=%llu draws=%llu plane_draws=%llu expands=%llu bit_expands=%llu loads=%llu\n",(unsigned long long)graphics_ms_images.load(),(unsigned long long)graphics_ms_clears.load(),
+                    (unsigned long long)graphics_ms_draws.load(),(unsigned long long)graphics_ms_plane_draws.load(),(unsigned long long)graphics_ms_expands.load(),(unsigned long long)graphics_ms_bit_expands.load(),(unsigned long long)graphics_ms_loads.load());
+            if(b.frames && graphics_render_scale>1 && graphics_profile_frames%120==0){std::string line="PERF RENDER_SCALE_WORK frames="+std::to_string(graphics_profile_frames);
+                for(unsigned k=0;k<WorkCount;++k){line+=' ';line+=graphics_work_names[k];line+='=';line+=std::to_string(graphics_work_value(k));}
+                static const char* const site_names[]={"none","tex_upload","surface_copy","transfer","unpack","pack","aspect","decode","raw_buffer","device_upload","predicate","present","clear","device_copies","visual"};
+                for(unsigned k=0;k<SiteCount;++k)if(const auto n=graphics_site_work()[2*k].load(std::memory_order_relaxed)){line+=" site_";line+=site_names[k];line+='=';line+=std::to_string(n);line+='/';line+=std::to_string(graphics_site_work()[2*k+1].load(std::memory_order_relaxed));}
+                std::fprintf(stderr,"%s\n",line.c_str());}
             if(b.frames && graphics_render_scale>1 && graphics_profile_frames%120==0)for(const auto& r:graphics_visual_reasons)
                 std::fprintf(stderr,"PERF RENDER_SCALE_SYNC reason=%s count=%llu pixels=%llu\n",r.name.c_str(),(unsigned long long)r.count,(unsigned long long)r.pixels);
             b.visibility.resize(b.visibility_count);
@@ -1711,9 +2004,11 @@ public:
     }
     void graphics_finish(GraphicsBatch& b){::RsxPerfCounters::add(::RsxPerfCounters::finish_waits);graphics_submit(b);graphics_collect(b);}
     static void graphics_move_stats(GraphicsBatch& from,GraphicsBatch& to){
-        from.sync();
+        // A batch with queued jobs (a Submit job after graphics_submit) keeps the counters the recorder writes until a later move
+        // (Session::retire moves them after graphics_collect synced it); the frontend counters move now, without waiting.
+        if(from.pending_jobs.load(std::memory_order_acquire)){if(from.owner->recorder_failed())from.owner->recorder_drain();}else from.settle();
         // Counters the draw recorder increments move only while the destination has no queued draws (otherwise they stay with `from`).
-        if(!to.pending_jobs.load(std::memory_order_acquire)){
+        if(!from.pending_jobs.load(std::memory_order_acquire) && !to.pending_jobs.load(std::memory_order_acquire)){
             to.visual_queued+=from.visual_queued;to.visual_drains+=from.visual_drains;to.visual_run_max=std::max(to.visual_run_max,from.visual_run_max);
             from.visual_queued=from.visual_drains=from.visual_run_max=0;
             to.draws+=from.draws;to.record_back_ms+=from.record_back_ms;to.descriptor_hits+=from.descriptor_hits;to.descriptor_misses+=from.descriptor_misses;to.framebuffer_hits+=from.framebuffer_hits;to.framebuffer_misses+=from.framebuffer_misses;
@@ -1746,17 +2041,31 @@ public:
             ++b.overflow_used;fresh=true;
         }
     }
-    void graphics_reset(GraphicsBatch& b){b.sync();
+    // The frontend half (pins, fence, the shared-pool upload/transfer buffers, front-owned bookkeeping) runs here; the recorder-owned
+    // half (graphics_reset_commands: the batch's own command pool buffer, its descriptor pools and cache, framebuffer pins, bound
+    // state) is queued as a Reset job when the draw recorder runs, so the driver's command-buffer/pool reset leaves the RSX worker
+    // thread. Nothing of that half is used before the job ran: the batch's next begin is either a queued Begin job (FIFO after the
+    // Reset) or inline after b.sync(), and every other entry point syncs first. A Reset failure stops the run at the next sync or
+    // enqueue (recorder_failed). Images can now be released (pins) before the framebuffer pins: a Framebuffer holds its images
+    // weakly and the device-wide cache already outlives the images it names (live() check), so no command uses a stale framebuffer.
+    void graphics_reset(GraphicsBatch& b){b.settle();
         if(b.recording || b.submitted || b.failed)throw std::runtime_error("RSX graphics reset pending/failed batch");
-        b.framebuffer_pins.clear();b.pipeline_pins.clear();b.pins.clear();b.buffer_pins.clear();b.compute_pins.clear();
-        check(vkResetFences(device,1,&b.fence),"graphics reset fence");check(vkResetCommandBuffer(b.command,0),"graphics reset commands");
-        check(vkResetCommandBuffer(b.upload_command,0),"graphics reset uploads");if(b.transfer_command)check(vkResetCommandBuffer(b.transfer_command,0),"graphics reset transfer");b.upload_wait=0;
+        b.pipeline_pins.clear();b.pins.clear();b.buffer_pins.clear();b.compute_pins.clear();
+        check(vkResetFences(device,1,&b.fence),"graphics reset fence");
+        b.upload_wait=0;
+        b.used=0;b.status_offsets.clear();b.visual_status_offsets.clear();b.paired_status_offsets.clear();b.uploads.clear();b.completion=0;b.frames=0;b.signal=VK_NULL_HANDLE;b.visibility_count=0;b.visibility.clear();b.query_count=0;b.phases.clear();b.phase_pipelines.clear();b.phase_visual.clear();
+        b.state_versions.fill(0);b.state_offsets.fill(0);
+        if(draw_recorder && !in_recorder_thread()){auto& job=recorder_slot();job.batch=&b;job.kind=DrawJob::Reset;b.pending_jobs.fetch_add(1,std::memory_order_relaxed);recorder_publish();}
+        else graphics_reset_commands(b);
+    }
+    void graphics_reset_commands(GraphicsBatch& b){
+        if(in_recorder_thread())graphics_recorder_resets.fetch_add(1,std::memory_order_relaxed);
+        b.framebuffer_pins.clear();check(vkResetCommandBuffer(b.command,0),"graphics reset commands");check(vkResetCommandBuffer(b.upload_command,0),"graphics reset uploads");
+        if(b.transfer_command)check(vkResetCommandBuffer(b.transfer_command,0),"graphics reset transfer");
         check(vkResetDescriptorPool(device,b.descriptors,0),"graphics reset descriptors");
         for(std::size_t i=0;i<b.overflow_used;++i){check(vkResetDescriptorPool(device,b.overflow_descriptors[i],0),"graphics reset descriptors");}
         if(!b.visual_jobs.empty())throw std::runtime_error("RSX pending visual draws at batch reset");
-        b.overflow_used=0;b.used=0;b.status_offsets.clear();b.visual_status_offsets.clear();b.paired_status_offsets.clear();b.uploads.clear();b.active_framebuffer=VK_NULL_HANDLE;b.completion=0;b.frames=0;b.descriptor_cache.clear();b.signal=VK_NULL_HANDLE;b.visibility_count=0;b.visibility.clear();b.query_count=0;b.phases.clear();b.phase_pipelines.clear();b.phase_visual.clear();
-        b.bound_graphics_pipeline=VK_NULL_HANDLE;b.dynamic_valid=false;b.state_versions.fill(0);b.state_offsets.fill(0);
-
+        b.overflow_used=0;b.active_framebuffer=VK_NULL_HANDLE;b.descriptor_cache.clear();b.bound_graphics_pipeline=VK_NULL_HANDLE;b.dynamic_valid=false;
     }
 private:
 #endif

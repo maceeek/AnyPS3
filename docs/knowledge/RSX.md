@@ -24,26 +24,48 @@ Source: `local/reference/rpcs3/rpcs3/Emu/RSX/gcm_enums.h:674`, `:677`, `:681`; `
 
 Distinguish guest command production, FIFO decoding, draw submission, shader execution, surface contents and flip/presentation. Record the counts of guest begin/end and draw methods, the vertex/index buffer range, type/stride/offset/endianness, the validity of programs and surfaces. Then verify viewport/scissor, depth/blend/clear and the display buffer.
 
-**Open ACIT question:** does the real guest get as far as draw, or is it still executing initialization? The answer should come from the current log, not from four historical black images. The host window, PPM file, clear and flip are separate results. The original menu requires real geometry/content and subsequently a verified gamepad state change.
+**Answered (2026-10-16 onwards, PC):** the guest draws the original menu and `great_clock_a` through the `gpu` backend.
+The open RSX questions are now the worker's CPU time per draw and the GPU time at render scale 2
+([CURRENT](CURRENT.md)). Keep the host window, a PPM capture, a clear and a flip separate as evidence.
 
 The public CELL PDFs describe the CPU/MFC, not the RSX shader ISA. For RSX use the public implementations above and record the derivation and its limitations.
 
-## Host cost of draws: cloud optimization round (2026-10-19/20)
+## Runtime structure (verified in the code, 2026-11-01)
 
-Scope: AnyPS3 runtime and its native tests, Lavapipe in a container without a GPU; no game frame was rendered. Evidence, benchmarks and
-limitations: [cloud optimization record, RSX](experiments/2026-10-19-cloud-optimization.md#rsx).
+- **Threads:**
+  - With `ANYPS3_RSX_WORKER=1`, a FIFO owner thread decodes and executes the guest FIFO
+    (`anyps3/rsx_game_worker.py`); every GUI launch sets it, while the binary's default is serial.
+  - With `ANYPS3_RSX_RECORDER=1`, an optional draw-recorder thread records Vulkan command buffers. It is off by default
+    (`anyps3/rsx_vk_graphics.py` `recorder_start`) and the GUI keeps it off (624b teal-frame question). Since HIRES7 it also
+    runs batch reset/begin, the submit and plane clears (`ANYPS3_RSX_RECORDER_SUBMIT`, default 1).
+- **Draw backends** (`ANYPS3_RSX_BACKEND`, `anyps3/rsx_draw.py`): `gpu` (default, the Vulkan graphics pipeline); `cpu` and
+  `compute` are diagnostic reference rasterizers. A draw the GPU path rejects stops the run unless
+  `ANYPS3_RSX_GPU_FALLBACK=1`.
+- **Render scale** `ANYPS3_RENDER_SCALE` (integer 1–4, default 1; the goal uses 2): visual companion surfaces with two sample planes per pixel at scale 2.
+  Optional visual 2× MSAA working images (`ANYPS3_RENDER_SCALE_MSAA`, default 0).
+- **Recording:**
+  - MSAA plane runs keep plane 0 of consecutive draws in one pass (`ANYPS3_RSX_PLANE_RUNS`, default 1).
+  - Occlusion-query elision while ZPASS counting is off is opt-in (`ANYPS3_RSX_LAZY_VISIBILITY=1`, default 0, no game A/B).
+  - The opt-in multiview variant raised GPU wait 5.6 → 30 ms/frame on the RTX 4070 SUPER (comment at
+    `anyps3/vulkan.py:282-284`).
+- **Presentation:** `ANYPS3_PRESENT=sdl` presents through an SDL2 Vulkan swapchain; headless runs need no window system.
+  PPM captures happen only with `ANYPS3_FRAME_DIR` (the first 8 flips, then every `ANYPS3_FRAME_STRIDE`-th).
+- **Device selection:** `ANYPS3_VK_DEVICE=auto|gpu|lavapipe`.
+- **Performance work and A/B switches** since 2026-10-27 are in [CURRENT](CURRENT.md); the history of draw-cost work
+  before 2026-10-25 is in the archived [cloud optimization record](../archive/knowledge/experiments/2026-10-19-cloud-optimization.md#rsx).
 
-- **Register epochs (verified by `tests/test_rsx_register_epochs.py`):** per-256-byte-block epochs are bumped only when a tracked `write`
-  changes presence or value; a mutable borrow marks the block exposed, so it is always verified by value, and copy/assignment forces a full rebuild.
-- **MSAA plane runs (verified for pixels/depth/stencil and Khronos plus sync validation; effect on GPU time unmeasured):** plane 0 of
-  consecutive draws on the same attachments stays in one render pass and planes >=1 are recorded as runs when that pass ends; every
-  command outside a pass replays pending planes first. `ANYPS3_RSX_PLANE_RUNS=0` restores the old recording. **Hypothesis (weak):** part
-  of the ~30 ms/frame GPU busy time in the level is render-pass switching (~1712 passes per frame before this change). Caveat
-  (code comment `anyps3/vulkan.py:222-224`): the opt-in multiview variant with 76 passes raised GPU wait 5.6 → 30 ms/frame on the RTX 4070 SUPER.
-  Distinguishing test: A/B `ANYPS3_RSX_PLANE_RUNS=0/1` in the same level window, comparing `PERF GPU busy_ns`, passes per frame and FPS.
-- **Stale `tests/test_rsx_gpu_upload.py` oracle (verified on a worktree of `43c6b27`):** it pasted `raw_vertex_glsl` into its own compute
-  shader, but since build 460 that code reads the state arena (`state_`), so the module failed with `'state_' : undeclared identifier`.
-  The oracle now maps `state_` to its single buffer; no runtime change was needed (production vertex shaders insert `state_glsl`).
-- **Occlusion-query elision is a candidate only, not implemented:** every draw wraps each plane in a precise occlusion query; the counts
-  are guest-visible only while ZPASS pixel counting (register 0x17cc) is enabled, otherwise they feed the diagnostic `draw.pixels`, an
-  oracle of 20 test modules. Eliding queries while 0x17cc is 0 needs a separate diagnostic mode and is worth it only if a PC profile shows query cost.
+## Reproduction without game data (lavapipe)
+
+```bash
+sudo pacman -Syu vulkan-headers vulkan-validation-layers vulkan-tools vulkan-swrast
+mkdir -p build
+python -m anyps3.render_demo -o build/rsx-vulkan.cpp
+c++ -std=c++17 -O1 -Wall -Wextra -Werror -DANYPS3_VULKAN build/rsx-vulkan.cpp -lvulkan -o build/rsx-vulkan
+VK_DRIVER_FILES=/usr/share/vulkan/icd.d/lvp_icd.json \
+VK_INSTANCE_LAYERS=VK_LAYER_KHRONOS_validation VK_LAYER_VALIDATE_SYNC=1 \
+  build/rsx-vulkan build/rsx-vulkan.ppm
+ANYPS3_REQUIRE_VULKAN=1 python -m unittest tests.test_vulkan -v   # the same path as a test
+```
+
+With `ANYPS3_REQUIRE_VULKAN=1` a missing device is an error, not a skip. The game's renderer itself is built with
+`python -m anyps3.native_build --vulkan` (glslang/SPIRV libraries required).

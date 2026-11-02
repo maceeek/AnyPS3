@@ -96,6 +96,13 @@ static unsigned explicit_sampler_mask(const std::vector<FpInst>& fp){
 // shader (run-time evaluation, the previous text).
 // ANYPS3_RSX_LAZY_VISIBILITY=1: draws with ZPASS counting off (0x17cc==0) record no occlusion query (see the main draw).
 // Default 0 keeps a query per sample pass of every draw (the host statistic draw.pixels counts all draws).
+// ANYPS3_RSX_GEOMETRY_REUSE (default 1; 0 = every draw reads its vertex inputs from guest memory): Session::read_inputs.
+static bool rsx_geometry_reuse(){
+    static const bool on=[]{const char* v=std::getenv("ANYPS3_RSX_GEOMETRY_REUSE");
+        if(v && std::strcmp(v,"0") && std::strcmp(v,"1")){throw std::runtime_error("invalid ANYPS3_RSX_GEOMETRY_REUSE");}
+        return !v || !std::strcmp(v,"1");}();
+    return on;
+}
 static bool rsx_lazy_visibility(){
     static const bool on=[]{const char* v=std::getenv("ANYPS3_RSX_LAZY_VISIBILITY");
         if(v && std::strcmp(v,"0") && std::strcmp(v,"1")){throw std::runtime_error("invalid ANYPS3_RSX_LAZY_VISIBILITY");}
@@ -352,12 +359,15 @@ void main(){C q[1];bool front=w[11]!=0u || gl_FrontFacing;
 static std::shared_ptr<const std::string> fragment_source(const std::vector<FpInst>& fp,const Reg& r,unsigned count,const std::array<Texture,16>& textures,bool lines=false,rsxvk::FragmentFailure* failure=nullptr,unsigned width=0,unsigned height=0){
     static thread_local std::vector<unsigned> key;const unsigned discard_state=fragment_discard_state(r,width,height);
     key.assign({count,unsigned(lines),unsigned(packed_color(r)),unsigned(bool(r(0x1d60)&14u)),r(0x1d60)&64u,unsigned(float_color(r(0x208)&31u)),unsigned(rsx_layered_shaders().load(std::memory_order_relaxed)),discard_state});
-    unsigned mask=0;for(unsigned unit=0;unit<16;++unit)if(textures[unit].valid)mask|=1u<<unit;else if(textures[unit].null_texture)mask|=0x10000u<<unit;key.push_back(mask);
+    // One pass over the units: the mask word is stored at its key position once every unit was seen.
+    unsigned mask=0;const auto mask_at=key.size();key.push_back(0);
     const unsigned explicit_units=explicit_sampler_mask(fp);
-    for(unsigned unit=0;unit<16;++unit){const auto& t=textures[unit];if(!t.valid)continue;
+    for(unsigned unit=0;unit<16;++unit){const auto& t=textures[unit];if(!t.valid){if(t.null_texture)mask|=0x10000u<<unit;continue;}
+        mask|=1u<<unit;
         const bool manual=!implicit_sampler(t) || (explicit_units&(1u<<unit));
         const bool dynamic=bool(t.resident_image) && dynamic_resident_sampler();
         key.insert(key.end(),{unsigned(bool(t.resident_image)),t.format,t.dimension,unsigned(t.dimension==3 && t.levels[0].depth>1),unsigned(t.cube),t.shadow,unsigned(t.alpha_kill),dynamic?0u:t.wrap_s,dynamic?0u:t.wrap_t,dynamic?0u:t.wrap_r,manual?t.mip_count:0u,dynamic?0u:unsigned(t.unnormalized),manual?t.min:0u,manual?t.mag:0u});}
+    key[mask_at]=mask;
     // The source reads only the instruction words of fp (never its constants). A loader structure id names exactly those words
     // (rsxdraw::FpInst::structure); the tag word keeps the two key forms disjoint.
     if(!fp.empty() && fp[0].structure)key.insert(key.end(),{1u,unsigned(fp.size()),unsigned(fp[0].structure),unsigned(fp[0].structure>>32)});
@@ -572,8 +582,10 @@ struct IndexBounds {
     const std::vector<std::array<unsigned,3>>& indices;
     unsigned lo=UINT_MAX,hi=0;const DeviceGeometry* device=nullptr;
     std::vector<std::pair<unsigned,std::pair<unsigned,unsigned>>> modulo;
-    explicit IndexBounds(const std::vector<std::array<unsigned,3>>& input,const DeviceGeometry* sequence=nullptr):indices(input),device(sequence){
+    // known: the exact extent of input recorded while its indices were decoded (RsxDrawState::triangle_extent), else scanned.
+    explicit IndexBounds(const std::vector<std::array<unsigned,3>>& input,const DeviceGeometry* sequence=nullptr,const std::pair<unsigned,unsigned>* known=nullptr):indices(input),device(sequence){
         if(device){const auto b=device->bounds(1,false);lo=b.first;hi=b.second;return;}
+        if(known){lo=known->first;hi=known->second;return;}
         index_extent(indices.data(),indices.size(),lo,hi);
     }
     std::pair<unsigned,unsigned> get(unsigned frequency,bool mod){
@@ -642,7 +654,12 @@ struct Session {
         std::shared_ptr<std::vector<std::uint64_t>> results;
         std::chrono::steady_clock::time_point submitted{};
         std::vector<std::function<void(const NativeVulkan::GraphicsBatch&)>> completions{};
+        unsigned report_floor=0;   // see pending_report_floor
     };
+    // RESET_REPORT clears the report attribution of every pending draw issued before it. Draws are only appended, so the
+    // attributed ones are exactly [report_floor, size) with Pending::report set: a reset moves the floors (O(flights))
+    // instead of rewriting every entry, and a report scans only the draws since the last reset.
+    unsigned pending_report_floor=0;
     // Host-only consumers of bytes that the GPU writes into the current batch (asynchronous frame capture): run once that batch
     // completed (retire, or the synchronous flush), before its staging memory is reset. They never touch guest state.
     std::vector<std::function<void(const NativeVulkan::GraphicsBatch&)>> completions;
@@ -657,6 +674,9 @@ struct Session {
     const unsigned flight_limit=rsx_flight_limit();
     std::deque<Flight> flights;
     std::vector<std::unique_ptr<NativeVulkan::GraphicsBatch>> spare_batches;
+    // Emptied label/pending vectors of retired flights: a submit moves the current ones into its flight, so without reuse every
+    // FIFO turn regrows them (Label moves on each reallocation). Only capacity is recycled; a pooled vector is always empty.
+    std::vector<std::vector<Label>> label_pool;std::vector<std::vector<Pending>> pending_pool;
     std::uint64_t async_submits=0,async_retires=0,label_waits=0,label_ready=0;
     unsigned submit_draws=64,submit_extend=4;
     void kick_draws(){
@@ -682,10 +702,10 @@ struct Session {
             if(status&2)throw std::runtime_error("RSX FP execution budget exhausted; no guest commit");
             if(status)throw std::runtime_error("RSX graphics shader error; no guest commit");}
     }
-    void retire_work(NativeVulkan::GraphicsBatch& b,const std::vector<Pending>& work,const std::shared_ptr<std::vector<std::uint64_t>>& results,std::vector<Label>& completed_labels){
+    void retire_work(NativeVulkan::GraphicsBatch& b,const std::vector<Pending>& work,const std::shared_ptr<std::vector<std::uint64_t>>& results,std::vector<Label>& completed_labels,unsigned report_floor=0){
         validate_pending(b,work);*results=b.visibility;
-        for(const auto& p:work){std::uint64_t count=0;for(unsigned i=0;i<p.count;++i)count+=b.visibility.at(p.first+i);
-            state.rsx.draw.pixels+=count;if(p.report)state.rsx.report_values[0]+=count;}
+        for(std::size_t n=0;n<work.size();++n){const auto& p=work[n];std::uint64_t count=0;for(unsigned i=0;i<p.count;++i)count+=b.visibility.at(p.first+i);
+            state.rsx.draw.pixels+=count;if(p.report && n>=report_floor)state.rsx.report_values[0]+=count;}
         publish_labels(completed_labels);
     }
     void retire(bool wait,std::uint64_t through=UINT64_MAX){
@@ -697,10 +717,12 @@ struct Session {
                 if(!vk.graphics_collect(*flight.batch,wait))break;}
             anyps3_ft::mark(anyps3_ft::GpuRetire,flight.batch->completion,flight.pending.size(),wait?1:0,flight.labels.size());
             anyps3_ft::current_completion=flight.batch->completion;
-            retire_work(*flight.batch,flight.pending,flight.results,flight.labels);
+            retire_work(*flight.batch,flight.pending,flight.results,flight.labels,flight.report_floor);
             for(auto& completion:flight.completions)completion(*flight.batch);
             if(rsx_poll_adaptive())flight_ns=0.8*flight_ns+0.2*double(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-flight.submitted).count());
-            vk.graphics_reset(*flight.batch);vk.graphics_move_stats(*flight.batch,*batch);
+            vk.graphics_move_stats(*flight.batch,*batch);vk.graphics_reset(*flight.batch);   // disjoint fields; move_stats first: its sync would wait for the queued Reset
+            if(flight.labels.empty() && flight.labels.capacity() && label_pool.size()<4)label_pool.push_back(std::move(flight.labels));
+            if(flight.pending.capacity() && pending_pool.size()<4){flight.pending.clear();pending_pool.push_back(std::move(flight.pending));}
             spare_batches.push_back(std::move(flight.batch));flights.pop_front();++async_retires;
         }}catch(...){failed=true;throw;}
     }
@@ -719,7 +741,7 @@ struct Session {
             return;
         }
         // A label with no preceding GPU command still has a completion point.
-        if(!batch->recording && !batch->submitted){const unsigned zero=0;vk.graphics_upload(*batch,&zero,4);}
+        if(!batch->recording && !batch->submitted){const unsigned zero=0;vk.graphics_upload(*batch,&zero,4,true);}   // graphics_submit syncs next
         auto& stats=fallback_stats();if(stats.enabled){++stats.flush_calls[reason];++stats.flush_submits[reason];}
         ::RsxPerfCounters::add(!std::strcmp(reason,"draw_prefix")?::RsxPerfCounters::submit_draw_prefix:!std::strcmp(reason,"fifo_labels")?::RsxPerfCounters::submit_labels: ::RsxPerfCounters::submit_other);
         try{
@@ -731,8 +753,10 @@ struct Session {
             else{{PerfTimer arena_timer(fallback_stats().enabled?&fallback_stats().flush_retire_time["arena_rotation"]:nullptr);retire(true,flights.front().batch->completion);}
                 next=std::move(spare_batches.back());spare_batches.pop_back();}
             vk.graphics_move_stats(*batch,*next);
-            flights.push_back({std::move(batch),std::move(pending),std::move(labels),std::move(query_results),rsx_poll_adaptive()?std::chrono::steady_clock::now():std::chrono::steady_clock::time_point{},std::move(completions)});
-            batch=std::move(next);pending.clear();labels.clear();completions.clear();query_results=std::make_shared<std::vector<std::uint64_t>>();++async_submits;
+            flights.push_back({std::move(batch),std::move(pending),std::move(labels),std::move(query_results),rsx_poll_adaptive()?std::chrono::steady_clock::now():std::chrono::steady_clock::time_point{},std::move(completions),pending_report_floor});
+            batch=std::move(next);pending.clear();pending_report_floor=0;labels.clear();completions.clear();query_results=std::make_shared<std::vector<std::uint64_t>>();++async_submits;
+            if(!label_pool.empty()){labels=std::move(label_pool.back());label_pool.pop_back();}
+            if(!pending_pool.empty()){pending=std::move(pending_pool.back());pending_pool.pop_back();}
         }catch(...){failed=true;throw;}
     }
     bool label_page_overlap(const Label& label,const void* pointer,std::uint64_t size)const{
@@ -800,12 +824,13 @@ struct Session {
         const auto& part=mapping.parts[0];GuestMemory::HostGuard probe(false);const bool safe=probe.add(part.data,16,*part.owner);probe.spans.clear();if(!safe)return false;
         for(const auto& surface:surfaces)if(surface.overlaps(part.data,16))return false;
         if(labels.size()>=256)submit_async("label_capacity");
-        Label report{mapping,address,type,16,true,active,stats,state.rsx.report_values[0],{}};
+        const auto* data=part.data;
+        Label report{std::move(mapping),address,type,16,true,active,stats,state.rsx.report_values[0],{}};
         // Snapshot attribution now: RESET_REPORT may clear the live pending
         // flags later, but cannot change an already issued report's prefix.
-        for(const auto& flight:flights)for(const auto& p:flight.pending)if(p.report)report.queries.push_back({flight.results,p.first,p.count});
-        for(const auto& p:pending)if(p.report)report.queries.push_back({query_results,p.first,p.count});
-        labels.push_back(std::move(report));watch_poll(part.data,16,true);++ownership_revision;
+        for(const auto& flight:flights)for(std::size_t n=flight.report_floor;n<flight.pending.size();++n){const auto& p=flight.pending[n];if(p.report)report.queries.push_back({flight.results,p.first,p.count});}
+        for(std::size_t n=pending_report_floor;n<pending.size();++n){const auto& p=pending[n];if(p.report)report.queries.push_back({query_results,p.first,p.count});}
+        labels.push_back(std::move(report));watch_poll(data,16,true);++ownership_revision;
         if(fallback_stats().enabled){++fallback_stats().paths["report_deferred"];std::ostringstream detail;detail<<"address=0x"<<std::hex<<address<<" type="<<type<<" pc=0x"<<state.pc;fallback_stats().detail("report_producer",detail.str());}
         return true;
     }
@@ -918,31 +943,58 @@ struct Session {
     // Bank epochs at the last refresh (RsxRegisters change tracking). A block
     // whose epoch is unchanged and that was never mutably borrowed holds the
     // same presence and values; every other block is compared by value.
-    std::array<std::uint64_t,32> register_epochs{};std::uint64_t register_identity=0;
+    std::array<std::uint64_t,32> register_epochs{};std::uint64_t register_identity=0;std::uint32_t register_values_stale=0;
     void refresh_registers(){
         const auto& bank=std::as_const(state.rsx).registers;const Reg r{state.rsx};
         const bool fresh=register_prefix.empty() || register_identity!=bank.identity;if(fresh)register_prefix.assign(2576,0);
         register_identity=bank.identity;
         static constexpr std::pair<unsigned,unsigned> defaults[]={{0xa6c,0x207},{0x394,0},{0x398,0x3f800000},{0x368,0x1d01},{0x1834,0x901},{0x388,0x3f800000},{0x308,0x207},{0x324,0x01010101},{0x378,0x1503},{0x1d7c,0xffff0000}};
-        for(unsigned block=0;block<32;++block){const auto* source=bank.values.data()+block*64;auto* previous=register_values.data()+block*64;
-            const bool tracked=!fresh && !bank.block_exposed(block) && register_epochs[block]==bank.epochs[block];
+        // Blocks that the loop below would not skip as tracked (fresh, exposed or epoch moved), found without branches first.
+        std::uint32_t visit=fresh?~UINT32_C(0):std::uint32_t(bank.exposed[0]);
+        for(unsigned block=0;block<32;++block)visit|=std::uint32_t(register_epochs[block]!=bank.epochs[block])<<block;
+        for(;visit;visit&=visit-1){const unsigned block=unsigned(__builtin_ctz(visit));const auto* source=bank.values.data()+block*64;auto* previous=register_values.data()+block*64;
+            const bool exposed=bank.block_exposed(block);
             register_epochs[block]=bank.epochs[block];
-            if(tracked)continue;
-            if(!fresh && register_presence[block]==bank.written[block] && !std::memcmp(source,previous,64*sizeof(*source)))continue;
-            ++register_blocks_rebuilt;++register_versions[block];std::copy_n(source,64,previous);register_presence[block]=bank.written[block];
-            for(unsigned i=0;i<64;++i)register_prefix[16+block*64+i]=(bank.written[block]&(UINT64_C(1)<<i))?source[i].second:0;
-            for(const auto& value:defaults)if(value.first/256==block)register_prefix[16+value.first/4]=r.get(value.first,value.second);
+            // A never-borrowed block whose epoch moved changed presence or a value since the last refresh (a write back to the
+            // old value is rebuilt too: the same words, one redundant upload), so only a borrowed block is compared, and only
+            // against a current snapshot: rebuilding a never-borrowed block leaves its snapshot stale (register_values_stale).
+            const bool stale=(register_values_stale>>block)&1;
+            if(!fresh && exposed && !stale && register_presence[block]==bank.written[block] && !std::memcmp(source,previous,64*sizeof(*source)))continue;
+            ++register_blocks_rebuilt;++register_versions[block];register_presence[block]=bank.written[block];
+            if(exposed){std::copy_n(source,64,previous);register_values_stale&=~(UINT32_C(1)<<block);}else register_values_stale|=UINT32_C(1)<<block;
+            // Absent registers read 0 except the reset defaults: zero the block, store present slots only (set presence bits).
+            auto* out=register_prefix.data()+16+block*64;std::memset(out,0,64*sizeof(unsigned));
+            for(auto bits=bank.written[block];bits;bits&=bits-1){const unsigned i=unsigned(__builtin_ctzll(bits));out[i]=source[i].second;}
+            static constexpr std::uint32_t default_blocks=[]{std::uint32_t m=0;for(const auto& value:defaults)m|=1u<<(value.first/256);return m;}();
+            if((default_blocks>>block)&1)for(const auto& value:defaults)if(value.first/256==block)register_prefix[16+value.first/4]=r.get(value.first,value.second);
+            // The transform-constant window (RsxRegisters::epoch_tracked) reads 0: no generated shader reads R/F/w[16+] of
+            // 0x1efc..0x1f7c (every R()/F() is a literal outside it, or 0xb40+4t, 0x2c0/0x2c4+8i, 0x1480+4(y&31), 0x32c..0x344
+            // (+offset 0/32); w[16u+] only 0x1fc0/0x1478/0x1ff4), and its stores do not move the epoch of blocks 30/31.
+            static_assert(0x1efc/256==30 && 0x1f00/256==31 && 0x1f7c/256==31,"constant window blocks");
+            if(block==30)out[(0x1efc/4)%64]=0;else if(block==31)std::memset(out,0,32*sizeof(unsigned));
         }
     }
     void serialize_registers(std::vector<unsigned>& data,unsigned width,unsigned height){
+        if(&data==&draw_data)draw_data_known=false;
         refresh_registers();const auto& bank=std::as_const(state.rsx).registers;
         data.assign(register_prefix.begin(),register_prefix.end());data[0]=width;data[1]=height;data[3]=data.size();
         for(unsigned i=0;i<8;++i)if(bank.count(0x2c0+8*i) && bank.count(0x2c4+8*i))data[8]|=1u<<i;
         data[9]=bank.count(0x8cc)!=0;
     }
+    // draw_data's 560-word head after the last serialize_draw_registers: only words 0..47 and the 32-word descriptor blocks of the
+    // units in draw_data_units can be non-zero (prepared() sets a unit's bit before it writes that block, and writes nothing else
+    // below word 560 on the non-alias path); draw_data_known is false while anything else may have written or moved draw_data
+    // (the alias path's serialize_registers and draw_alias, a fresh session).
+    bool draw_data_known=false;std::uint32_t draw_data_units=0;
     void serialize_draw_registers(std::vector<unsigned>& data,unsigned width,unsigned height){
         refresh_registers();const auto& bank=std::as_const(state.rsx).registers;
-        data.assign(48+16*32,0);data[0]=width;data[1]=height;data[3]=data.size();
+        // Same contents as assign(560,0): shrinking keeps the capacity without writes, then every possibly non-zero word is zeroed.
+        const bool known=&data==&draw_data && draw_data_known && data.size()>=48+16*32;
+        data.resize(48+16*32);
+        if(known){zero_words(data.data(),48);for(auto units=draw_data_units;units;units&=units-1)zero_words(data.data()+48+32*__builtin_ctz(units),32);}
+        else zero_words(data.data(),data.size());
+        draw_data_known=&data==&draw_data;draw_data_units=0;
+        data[0]=width;data[1]=height;data[3]=data.size();
         for(unsigned i=0;i<8;++i)if(bank.count(0x2c0+8*i) && bank.count(0x2c4+8*i))data[8]|=1u<<i;
         data[9]=bank.count(0x8cc)!=0;
     }
@@ -950,6 +1002,168 @@ struct Session {
     std::array<std::uint64_t,2> constants_versions{};
     std::vector<unsigned> vertex_constants_cache,draw_data;
     std::vector<std::uint8_t> vertex_tail;
+    // ---- Vertex input reuse (ANYPS3_RSX_GEOMETRY_REUSE; geometry_reuse is a per-session copy for tests) ----
+    // A draw's vertex input group (one Range of one mapping, DrawReadBatch) is the same guest bytes in most draws of most
+    // frames. An entry keeps a host copy of exactly the bytes of one group, keyed by guest address and size and pinned to
+    // the Range's physical identity (host pointer, backing, mapping identity). A hit copies the entry instead of reading
+    // guest memory. The draw still creates the group's Range (build_vertex_groups), so map/permission validation and the
+    // observer coherence point (GPU-authoritative bytes retired, which republishes them via publish_gpu_write) happen at
+    // the same point as before; a changed mapping at that address never matches the identity and is read afresh.
+    // Invalidation (the raw texture cache's CPU-dirty protocol, rsx_texture_cache.py dirty_inputs/raw_dirty):
+    //  * each entry owns a CpuDirtyWatch over exactly its bytes, registered and consumed BEFORE the bytes are read, so a
+    //    writer admitted during or after the copy leaves a set bit; each use consumes the bit and re-reads when it was set;
+    //  * lock-free writers publish after their payload stores and before any following label/PUT: PPU inline/medium/slow
+    //    stores (page dirty flag -> publish_cpu_write), SPU DMA and GuestMemory::transfer/Range::write (publish_cpu_write),
+    //    RSX/GPU claim commits and readbacks (publish_gpu_write). A write ordered before the draw by a label the FIFO
+    //    acquired is therefore seen as a set bit at the draw (property A of DrawReadBatch::read); a hit reads no guest byte,
+    //    so property B (the snapshot is complete before any later label) holds trivially;
+    //  * raw-pointer writers (RawPermit/HLE/syscall buffers) reach host_access(write) through the dirty filter
+    //    (raw_cpu_dirty_interested), which drops every overlapping entry (invalidate_geometry);
+    //  * map/unmap/configuration handoff: identity mismatch (above); entries pin their backing, so a host pointer is never
+    //    reused by another backing while an entry names it.
+    // Bounds: <= geometry_entry_limit entries/watches (as the 512 raw texture watches), <= geometry_byte_limit host bytes;
+    // LRU eviction. Cost for writers: a PPU store to a watched page takes the medium path, a GuestMemory::store to it publishes
+    // through the registry (O(log watches), CpuDirtyList). An address whose entry was invalidated twice is never cached again
+    // (rewritten buffers stay on the direct
+    // path), and every 4096 reads the entries already invalidated are dropped, so a rewritten buffer that is not drawn
+    // again does not stay watched.
+    struct GeometryEntry {
+        std::shared_ptr<RawTexture::DirtyInputs> dirty;std::vector<std::uint8_t> bytes;
+        const std::uint8_t* data=nullptr;std::shared_ptr<GuestBacking> owner;std::uint64_t mapping_id=0,last_use=0;
+    };
+    static constexpr unsigned geometry_entry_limit=512;static constexpr std::uint64_t geometry_byte_limit=64ull<<20,geometry_entry_bytes=4ull<<20;
+    bool geometry_reuse=rsx_geometry_reuse();
+    std::unordered_map<std::uint64_t,GeometryEntry> geometry_entries;std::unordered_map<std::uint64_t,unsigned> geometry_rewrites;
+    std::uint64_t geometry_bytes=0,geometry_clock=0,geometry_hits=0,geometry_misses=0,geometry_rereads=0,geometry_evictions=0;
+    // Counts one invalidation by a write of the entry at this guest address; true = never cache it again.
+    bool geometry_rewritten(std::uint64_t address){
+        if(geometry_rewrites.size()>=4096)geometry_rewrites.clear();
+        return ++geometry_rewrites[address]>=2;
+    }
+    void geometry_erase(std::unordered_map<std::uint64_t,GeometryEntry>::iterator it,bool rewritten){
+        if(rewritten)(void)geometry_rewritten(it->first>>32);
+        geometry_bytes-=it->second.bytes.size();geometry_entries.erase(it);
+    }
+    void invalidate_geometry(const void* p,std::uint64_t n){
+        if(!n || (geometry_entries.empty() && index_entries.empty()))return;
+        const auto a=reinterpret_cast<std::uintptr_t>(p);
+        for(auto it=geometry_entries.begin();it!=geometry_entries.end();){const auto b=reinterpret_cast<std::uintptr_t>(it->second.data);
+            if(b<a+n && a<b+it->second.bytes.size()){auto next=std::next(it);geometry_erase(it,true);it=next;}else ++it;}
+        for(auto it=index_entries.begin();it!=index_entries.end();){const auto b=reinterpret_cast<std::uintptr_t>(it->second.data);
+            if(b<a+n && a<b+it->second.size){auto next=std::next(it);index_erase(it,true);it=next;}else ++it;}
+    }
+    void clear_geometry(){geometry_entries.clear();index_entries.clear();geometry_bytes=0;}
+    // Copies the bytes of one vertex input Range to out; false = not reusable here (the caller reads the Range itself).
+    bool geometry_read(const GuestMemory::Range& range,std::uint8_t* out){
+        if(!geometry_reuse || !range.memory->concurrent() || range.memory!=&state.memory || range.parts.size()!=1 || !range.size ||
+           range.size>geometry_entry_bytes || range.parts[0].size!=range.size || (!state.memory.memory_owner() && !state.memory.renderer_owner()))return false;
+        const auto& part=range.parts[0];const std::uint64_t key=(range.address<<32)|range.size;
+        if(!(++geometry_clock&4095))for(auto it=geometry_entries.begin();it!=geometry_entries.end();){
+            const bool rewritten=it->second.dirty->watch->dirty.load(std::memory_order_acquire);
+            if(rewritten || geometry_clock-it->second.last_use>(1u<<20)){auto next=std::next(it);geometry_erase(it,rewritten);it=next;}else ++it;}
+        if(!(geometry_clock&4095))for(auto it=index_entries.begin();it!=index_entries.end();){
+            const bool rewritten=it->second.dirty->watch->dirty.load(std::memory_order_acquire);
+            if(rewritten || geometry_clock-it->second.last_use>(1u<<20)){auto next=std::next(it);index_erase(it,rewritten);it=next;}else ++it;}
+        auto it=geometry_entries.find(key);
+        if(it!=geometry_entries.end()){auto& e=it->second;
+            if(e.data==part.data && e.owner==part.owner && e.mapping_id==part.mapping_id){e.last_use=geometry_clock;
+                if(!e.dirty->consume()){std::memcpy(out,e.bytes.data(),range.size);++geometry_hits;::RsxPerfCounters::add(::RsxPerfCounters::geometry_hits);return true;}
+                // Written since the copy: the bit is consumed (clear before the read), refresh the copy under the same watch.
+                if(geometry_rewritten(range.address)){geometry_erase(it,false);return false;}
+                range.read(0,out,range.size);std::memcpy(e.bytes.data(),out,range.size);++geometry_rereads;::RsxPerfCounters::add(::RsxPerfCounters::geometry_rereads);return true;
+            }
+            geometry_erase(it,false);
+        }
+        {const auto rewrites=geometry_rewrites.find(range.address);if(rewrites!=geometry_rewrites.end() && rewrites->second>=2)return false;}
+        while(!(geometry_entries.empty() && index_entries.empty()) && (geometry_entries.size()+index_entries.size()>=geometry_entry_limit || geometry_bytes+range.size>geometry_byte_limit))geometry_evict();
+        GeometryEntry e;
+        try{e.dirty=std::make_shared<RawTexture::DirtyInputs>(state.memory);e.dirty->watch=state.memory.watch_cpu_dirty(range);}
+        catch(const std::exception&){return false;}   // not registrable (foreign thread, stale epoch): the caller's read raises any error
+        e.dirty->consume();   // clear BEFORE the read: a writer admitted during/after it leaves a new bit
+        range.read(0,out,range.size);
+        e.bytes.assign(out,out+range.size);e.data=part.data;e.owner=part.owner;e.mapping_id=part.mapping_id;e.last_use=geometry_clock;
+        geometry_bytes+=range.size;geometry_entries.emplace(key,std::move(e));++geometry_misses;::RsxPerfCounters::add(::RsxPerfCounters::geometry_misses);return true;
+    }
+    // ---- Index list reuse (same switch, bounds and invalidation protocol as the vertex input entries above) ----
+    // An entry keeps the decoded index list of one contiguous index span (rsx_execute_draw's union read), keyed by guest
+    // address and byte size, valid only for the decode parameters it was decoded with (width, restart, restart index,
+    // base index) and pinned to the span's physical identity. A use first creates the span's translation Range, which
+    // performs the map epoch/permission validation and the observer coherence point that the transfer performed (a
+    // GPU-authoritative span is retired and republished via publish_gpu_write), then consumes the entry's CPU-dirty bit.
+    // A miss registers the watch and consumes it BEFORE the transfer reads the bytes (index_prepare), and stores the
+    // decoded list afterwards (index_store); an exception in between drops the token (its watch is unregistered).
+    // The list is kept as its complete triangles (an immutable shared vector) plus the 0..2 trailing indices: a triangle-list
+    // draw without restart takes exactly those triangles (rsx_execute_draw's assemble) and pins the vector for the draw
+    // (RsxDrawState::shared_triangles) instead of copying it twice; every other use copies the flat list out.
+    using TriangleList=std::vector<std::array<std::uint32_t,3>>;
+    struct IndexEntry {
+        std::shared_ptr<RawTexture::DirtyInputs> dirty;const std::uint8_t* data=nullptr;std::shared_ptr<GuestBacking> owner;
+        std::uint64_t mapping_id=0,last_use=0;unsigned size=0,width=0,restart_index=0,base=0;bool restart=false,any=false;
+        std::uint32_t largest=0,smallest=0;std::size_t count=0;std::shared_ptr<const TriangleList> triangles;std::array<std::uint32_t,2> rest{};
+    };
+    std::unordered_map<std::uint64_t,IndexEntry> index_entries;std::uint64_t index_hits=0,index_misses=0;
+    void index_erase(std::unordered_map<std::uint64_t,IndexEntry>::iterator it,bool rewritten){
+        if(rewritten)(void)geometry_rewritten(it->first>>32);
+        geometry_bytes-=it->second.count*4;index_entries.erase(it);
+    }
+    bool index_cacheable(unsigned bytes)const{
+        return geometry_reuse && state.memory.concurrent() && bytes && bytes<=geometry_entry_bytes && (state.memory.memory_owner() || state.memory.renderer_owner());
+    }
+    // The decoded list of the span [address,address+bytes) for these parameters into out, or (shared, given by a triangle-list
+    // draw without restart) its triangles without a copy (out untouched); false = decode it (nothing changed).
+    bool index_read(std::uint64_t address,unsigned bytes,unsigned width,bool restart,unsigned restart_index,unsigned base,
+                    std::vector<std::uint32_t>& out,std::uint32_t& largest,std::uint32_t& smallest,bool& any,std::shared_ptr<const TriangleList>* shared=nullptr){
+        if(!index_cacheable(bytes))return false;
+        const std::uint64_t key=(address<<32)|bytes;auto it=index_entries.find(key);
+        if(it==index_entries.end())return false;
+        auto& e=it->second;GuestMemory::Range range;
+        try{range=state.memory.range_translated(address,bytes);}catch(const std::exception&){return false;}   // the transfer raises it
+        if(range.parts.size()!=1 || range.parts[0].data!=e.data || range.parts[0].owner!=e.owner || range.parts[0].mapping_id!=e.mapping_id){index_erase(it,false);return false;}
+        if(e.dirty->consume()){index_erase(it,true);return false;}
+        if(e.width!=width || e.restart!=restart || e.restart_index!=restart_index || e.base!=base){index_erase(it,false);return false;}
+        e.last_use=++geometry_clock;
+        if(shared)*shared=e.triangles;
+        else{const auto* flat=reinterpret_cast<const std::uint32_t*>(e.triangles->data());out.assign(flat,flat+e.triangles->size()*3);out.insert(out.end(),e.rest.begin(),e.rest.begin()+e.count%3);}
+        largest=e.largest;smallest=e.smallest;any=e.any;++index_hits;::RsxPerfCounters::add(::RsxPerfCounters::index_hits);return true;
+    }
+    struct IndexToken {std::uint64_t key;std::shared_ptr<RawTexture::DirtyInputs> dirty;const std::uint8_t* data;std::shared_ptr<GuestBacking> owner;std::uint64_t mapping_id;};
+    std::optional<IndexToken> index_prepare(std::uint64_t address,unsigned bytes){
+        if(!index_cacheable(bytes))return std::nullopt;
+        {const auto rewrites=geometry_rewrites.find(address);if(rewrites!=geometry_rewrites.end() && rewrites->second>=2)return std::nullopt;}
+        try{const auto range=state.memory.range_translated(address,bytes);if(range.parts.size()!=1 || range.parts[0].size!=bytes)return std::nullopt;
+            IndexToken token{(address<<32)|bytes,std::make_shared<RawTexture::DirtyInputs>(state.memory),range.parts[0].data,range.parts[0].owner,range.parts[0].mapping_id};
+            token.dirty->watch=state.memory.watch_cpu_dirty(range);token.dirty->consume();   // clear BEFORE the transfer reads the bytes
+            return token;
+        }catch(const std::exception&){return std::nullopt;}   // the transfer raises any error
+    }
+    void index_store(IndexToken&& token,unsigned width,bool restart,unsigned restart_index,unsigned base,const std::vector<std::uint32_t>& values,
+                     std::uint32_t largest,std::uint32_t smallest,bool any){
+        if(values.size()*4>geometry_entry_bytes)return;
+        {auto old=index_entries.find(token.key);if(old!=index_entries.end())index_erase(old,false);}
+        while(!(geometry_entries.empty() && index_entries.empty()) && (geometry_entries.size()+index_entries.size()>=geometry_entry_limit || geometry_bytes+values.size()*4>geometry_byte_limit))geometry_evict();
+        IndexEntry e;e.dirty=std::move(token.dirty);e.data=token.data;e.owner=std::move(token.owner);e.mapping_id=token.mapping_id;e.last_use=++geometry_clock;
+        e.size=unsigned(token.key&UINT32_MAX);e.width=width;e.restart=restart;e.restart_index=restart_index;e.base=base;e.any=any;e.largest=largest;e.smallest=smallest;
+        static_assert(sizeof(TriangleList::value_type)==3*sizeof(std::uint32_t),"packed triangle indices");
+        {const auto* first=reinterpret_cast<const TriangleList::value_type*>(values.data());e.triangles=std::make_shared<const TriangleList>(first,first+values.size()/3);}
+        e.count=values.size();std::copy(values.end()-values.size()%3,values.end(),e.rest.begin());
+        geometry_bytes+=values.size()*4;index_entries.emplace(token.key,std::move(e));++index_misses;::RsxPerfCounters::add(::RsxPerfCounters::index_misses);
+    }
+    // Least recently used vertex or index entry.
+    void geometry_evict(){
+        auto v=std::min_element(geometry_entries.begin(),geometry_entries.end(),[](const auto& x,const auto& y){return x.second.last_use<y.second.last_use;});
+        auto i=std::min_element(index_entries.begin(),index_entries.end(),[](const auto& x,const auto& y){return x.second.last_use<y.second.last_use;});
+        if(i==index_entries.end() || (v!=geometry_entries.end() && v->second.last_use<i->second.last_use))geometry_erase(v,false);else index_erase(i,false);
+        ++geometry_evictions;
+    }
+    // DrawReadBatch::read with reuse: the same per-input order, memory check and reads for every input not served above.
+    void read_inputs(const DrawReadBatch& batch,std::uint8_t* output){
+        if(!batch.count)return;
+        if(!geometry_reuse || !batch.inputs[0].range->memory->concurrent()){batch.read(output);return;}
+        const auto* memory=batch.inputs[0].range->memory;
+        for(unsigned i=0;i<batch.count;++i){const auto& input=batch.inputs[i];const auto& range=*input.range;
+            if(range.memory!=memory)throw std::runtime_error("RSX mixed draw input memory");
+            if(!geometry_read(range,output+input.destination))range.read(0,output+input.destination,range.size);}
+    }
     std::array<bool,468*4> vertex_constants_written{};
     std::uint64_t vertex_constants_version=0,fragment_constants_version=0;
     std::vector<unsigned> fragment_constants_cache;
@@ -959,6 +1173,7 @@ struct Session {
     static constexpr unsigned constant_chunk_words=128,constant_chunks=(468*4+constant_chunk_words-1)/constant_chunk_words;
     std::array<std::uint64_t,constant_chunks+1> constant_chunk_versions{};std::uint64_t constant_chunk_clock=0;
     std::array<unsigned,16> constant_table{};std::uint64_t constant_table_version=0;const void* constant_table_batch=nullptr;
+    std::array<std::uint64_t,constant_chunks> constants_chunk_seen{};std::uint64_t constants_identity=0;
     void refresh_vertex_constants(){
         constexpr unsigned words=468*4;
         const auto& gpu=std::as_const(state.rsx);
@@ -967,7 +1182,15 @@ struct Session {
             const bool fresh=vertex_constants_cache.size()!=words+468,masks=fresh || constants_versions[1]!=versions[1];
             constants_versions=versions;++vertex_constants_version;
             if(fresh)vertex_constants_cache.assign(words+468,0);
-            for(unsigned c=0;c<constant_chunks;++c){const unsigned first=c*constant_chunk_words,n=std::min(constant_chunk_words,words-first);
+            // A chunk whose write version is unchanged (same never-borrowed bank) holds the cached words: skip its compare.
+            static_assert(decltype(gpu.transform_constants)::chunk==constant_chunk_words,"constant chunks follow the bank's write chunks");
+            const bool tracked=!fresh && !gpu.transform_constants.borrowed() && constants_identity==gpu.transform_constants.identity;
+            constants_identity=gpu.transform_constants.identity;
+            // The chunks to compare, found without branches first: all, or (tracked) those whose write version moved.
+            std::uint32_t todo=tracked?0u:(UINT32_C(1)<<constant_chunks)-1;
+            if(tracked)for(unsigned c=0;c<constant_chunks;++c)todo|=std::uint32_t(constants_chunk_seen[c]!=gpu.transform_constants.chunk_version(c))<<c;
+            for(;todo;todo&=todo-1){const unsigned c=unsigned(__builtin_ctz(todo)),first=c*constant_chunk_words,n=std::min(constant_chunk_words,words-first);
+                constants_chunk_seen[c]=gpu.transform_constants.chunk_version(c);
                 const auto* source=gpu.transform_constants.data()+first;auto* cached=vertex_constants_cache.data()+first;
                 if(fresh || std::memcmp(source,cached,n*sizeof(unsigned))){std::copy_n(source,n,cached);constant_chunk_versions[c]=++constant_chunk_clock;}}
             if(masks){std::copy_n(gpu.transform_constants_written.begin(),words,vertex_constants_written.begin());
@@ -986,18 +1209,32 @@ struct Session {
             ++fragment_constants_version;}
     }
     void bind_draw_blocks(std::vector<unsigned>& data,bool direct){
-        std::array<NativeVulkan::GraphicsStateBlock,49> blocks{};
-        for(unsigned i=0;i<32;++i)blocks[i]={register_versions[i]*2,register_prefix.data()+16+i*64,64};
-        std::array<unsigned,64> last;
-        if(direct && !std::as_const(state.rsx).registers.count(0x1ff4)){
-            std::copy_n(blocks[31].data,64,last.begin());last[(0x1ff4/4)%64]=0x3fffff;
-            blocks[31].data=last.data();++blocks[31].version;
-        }
+        // Slots 0-48 in ascending order, exactly as one graphics_state_blocks call over all 49: a slot whose batch version
+        // equals is a hit (counted, nothing read), any other slot goes through graphics_state_blocks (its stop for an invalid
+        // block, upload, version/offset, upload count). Only the array of 49 descriptors is no longer built per draw.
+        auto& b=*batch;
+        auto slot=[&](unsigned index,std::uint64_t version,const unsigned* p,unsigned n){
+            if(version && n && b.state_versions[index]==version){++b.state_block_hits;return;}
+            vk.graphics_state_blocks(b,std::array<NativeVulkan::GraphicsStateBlock,1>{{{version,p,n}}},index);};
+        const bool default_viewport=direct && !std::as_const(state.rsx).registers.count(0x1ff4);
+        // Register slots 0-30 (31 too without the direct default) and the 16 constant slots: the slots whose batch version
+        // differs, found without branches; the rest hit. A version 0 (never produced: the first refresh of each source bumps
+        // it) still takes the slot path and its stop.
+        std::uint32_t changed=0;std::uint32_t constants=0;
+        for(unsigned i=0;i<32;++i){const auto v=register_versions[i]*2;changed|=std::uint32_t(b.state_versions[i]!=v || !v)<<i;}
+        if(default_viewport)changed&=~(UINT32_C(1)<<31);
+        for(unsigned c=0;c<=constant_chunks;++c){const auto v=constant_chunk_versions[c];constants|=std::uint32_t(b.state_versions[32+c]!=v || !v)<<c;}
+        b.state_block_hits+=31+!default_viewport-__builtin_popcount(changed);
+        for(;changed;changed&=changed-1){const unsigned i=unsigned(__builtin_ctz(changed));slot(i,register_versions[i]*2,register_prefix.data()+16+i*64,64);}
+        if(default_viewport){const auto version=register_versions[31]*2+1;   // odd: never the version of the stored block
+            if(version==b.state_versions[31])++b.state_block_hits;
+            else{std::array<unsigned,64> last;std::copy_n(register_prefix.data()+16+31*64,64,last.begin());last[(0x1ff4/4)%64]=0x3fffff;slot(31,version,last.data(),64);}}
         constexpr unsigned words=468*4;
-        for(unsigned c=0;c<constant_chunks;++c)blocks[32+c]={constant_chunk_versions[c],vertex_constants_cache.data()+c*constant_chunk_words,std::min(constant_chunk_words,words-c*constant_chunk_words)};
-        blocks[32+constant_chunks]={constant_chunk_versions[constant_chunks],vertex_constants_cache.data()+words,468};
-        blocks[48]={fragment_constants_version,fragment_constants_cache.data(),unsigned(fragment_constants_cache.size())};
-        vk.graphics_state_blocks(*batch,blocks);
+        b.state_block_hits+=constant_chunks+1-__builtin_popcount(constants);
+        for(;constants;constants&=constants-1){const unsigned c=unsigned(__builtin_ctz(constants));
+            if(c<constant_chunks)slot(32+c,constant_chunk_versions[c],vertex_constants_cache.data()+c*constant_chunk_words,std::min(constant_chunk_words,words-c*constant_chunk_words));
+            else slot(32+constant_chunks,constant_chunk_versions[constant_chunks],vertex_constants_cache.data()+words,468);}
+        slot(48,fragment_constants_version,fragment_constants_cache.data(),unsigned(fragment_constants_cache.size()));
         std::array<unsigned,16> table{};for(unsigned c=0;c<=constant_chunks;++c)table[c]=unsigned(batch->state_offsets[32+c]);
         if(table!=constant_table || constant_table_batch!=batch.get() || !constant_table_version){constant_table=table;constant_table_batch=batch.get();++constant_table_version;}
         vk.graphics_state_blocks(*batch,std::array<NativeVulkan::GraphicsStateBlock,1>{{{constant_table_version,constant_table.data(),16}}},49);
@@ -1095,7 +1332,7 @@ struct Session {
         },s.memory.regions,true}){}
     void issuer(std::uint32_t pc,std::uint32_t tid){state.pc=pc;state.thread_id=tid;}
     void map_snapshot(std::vector<GuestMemory::Region> maps){state.maps=std::move(maps);context_validated=false;}
-    ~Session(){GuestMemory::RawPermit metadata(state.memory);guard.disarm();clear_raw(nullptr);if(observer_installed)state.memory.host_access_observer=std::move(previous_observer);}
+    ~Session(){GuestMemory::RawPermit metadata(state.memory);guard.disarm();clear_raw(nullptr);clear_geometry();if(observer_installed)state.memory.host_access_observer=std::move(previous_observer);}
     void observe(){
         // Session lifecycle is confined to the renderer/map owner. A stable
         // observer needs no global raw admission on every FIFO invocation.
@@ -1201,7 +1438,7 @@ struct Session {
             if(stats.enabled)stats.flush_readbacks[reason]+=reads.size();
             if(!reads.empty()){::RsxPerfCounters::add(::RsxPerfCounters::readback_flushes);::RsxPerfCounters::add(::RsxPerfCounters::readback_surfaces,reads.size());}
             vk.graphics_finish(*batch);
-            retire_work(*batch,pending,query_results,labels);pending.clear();
+            retire_work(*batch,pending,query_results,labels,pending_report_floor);pending.clear();pending_report_floor=0;
             for(auto& completion:completions)completion(*batch);
             completions.clear();
             query_results=std::make_shared<std::vector<std::uint64_t>>();
@@ -1286,6 +1523,7 @@ struct Session {
         // The kernel does not deliver SIGSEGV for protected syscall buffers.
         // Release every texture sharing these pages before publishing a pointer.
         if(write || protected_access)invalidate_raw(p,size,write?"host_write":"protected_read");
+        if(write)invalidate_geometry(p,size);
         bool overlap=false;for(const auto& s:surfaces)if(s.overlaps(p,size)){overlap=true;break;}
         if(!overlap){
             if(!HostByteAccess::active() && guard.touches_any(p,size)){if(anyps3_ft::enabled(anyps3_ft::HostExec))anyps3_ft::exec_class|=256;guard.release(p,size);++ownership_revision;if(!state.rsx.graphics_session)leave_fifo();}
@@ -1792,7 +2030,8 @@ template<class Vertex> static bool prepared(Session& session,const std::vector<s
     // re-decode) and the feedback snapshots. Every other draw reads the caller's array.
     bool edit_textures=alias || color_feedback;
     if(!edit_textures)for(const auto& texture:supplied_textures)if(texture.resident_image && texture.plan && texture.plan->gathered){edit_textures=true;break;}
-    std::optional<std::array<Texture,16>> owned_textures;if(edit_textures)owned_textures.emplace(supplied_textures);
+    // Heap copy only on the editing path: an empty std::optional of 16 Textures still cost ~500 instructions per draw.
+    std::unique_ptr<std::array<Texture,16>> owned_textures;if(edit_textures)owned_textures=std::make_unique<std::array<Texture,16>>(supplied_textures);
     const auto& textures=edit_textures?*owned_textures:supplied_textures;
     if(alias)for(const auto& texture:textures)if(texture.null_texture)return attempt.reject("alias_null_texture");
     if(color_feedback)attempt.path("texture_feedback_snapshot");
@@ -1810,7 +2049,7 @@ template<class Vertex> static bool prepared(Session& session,const std::vector<s
     }
     if(device && alias){materialize();device=nullptr;}
     phase.next(HostStage::g_inputs);
-    IndexBounds bounds(indices,device);
+    std::pair<unsigned,unsigned> known_extent;IndexBounds bounds(indices,device,state.rsx.draw.triangle_extent(indices,known_extent));
     // Vertex attributes frequently interleave one buffer: attributes whose spans overlap or touch
     // share one guest Range (one lease/claim, one copy) and index into it by byte offset.
     struct VertexExtent {bool used=false;unsigned group=0;std::uint64_t address=0,span=0;};
@@ -1972,6 +2211,7 @@ template<class Vertex> static bool prepared(Session& session,const std::vector<s
     std::vector<unsigned> line_data;
     std::uint64_t tail_bytes=0;unsigned tail_attributes=0;std::array<unsigned,16> tail_rel{},group_rel{};std::array<bool,16> group_added{};
     struct TailPad {std::uint64_t at,n;};std::array<TailPad,16> tail_pads{};unsigned tail_pad_count=0;DrawReadBatch input_reads;
+    const std::uint8_t* index_tail=nullptr;std::uint64_t index_bytes=0;   // direct indexed draw: the triangle list as the blob slice's tail
     std::vector<std::array<unsigned,3>> accepted;
     phase.next(HostStage::g_data);
     unsigned vertices=0;
@@ -2021,7 +2261,9 @@ template<class Vertex> static bool prepared(Session& session,const std::vector<s
             for(const auto& range:device->ranges){data.push_back(range.first);data.push_back(range.second);}
             vertices=device->vertices;data[15]=2;attempt.path("gpu_array_topology");}
         else{static_assert(sizeof(std::array<unsigned,3>)==3*sizeof(unsigned),"packed triangle indices");
-            const auto* first=reinterpret_cast<const unsigned*>(indices.data());data.insert(data.end(),first,first+indices.size()*3);
+            // The triangle list is not copied into the blob: graphics_draw stores it as the slice's tail, directly behind the
+            // finished blob words, and data[13] (the index buffer offset, set below) names that position.
+            index_tail=reinterpret_cast<const std::uint8_t*>(indices.data());index_bytes=std::uint64_t(indices.size())*3*4;
             vertices=indices.size()*3;data[15]=1;}
         data[12]=data.size();const unsigned desc=data.size();data.resize(desc+16*8);
         std::uint64_t tail_used=0;
@@ -2039,10 +2281,13 @@ template<class Vertex> static bool prepared(Session& session,const std::vector<s
             }
             build_vertex_groups();
         }
-        for(unsigned a=0;a<16;++a){const unsigned d=desc+a*8,f=(r(0x1ff0)&(1u<<a))?r(0x1740+4*a):0;
+        const unsigned input_mask=r(0x1ff0);auto* words=data.data();
+        for(unsigned a=0;a<16;++a){const unsigned d=desc+a*8,f=(input_mask&(1u<<a))?r(0x1740+4*a):0;
             const unsigned type=f&15,n=(f>>4)&15,stride=(f>>8)&255,frequency=f>>16;
             data[d]=f;
-            if(!n){const auto v=(r(0x1ff0)&(1u<<a))?register_attribute(state.rsx.draw.immediate[a]):Vec4{0,0,0,1};
+            // A disabled input reads (0,0,0,1): its words directly (float_bits(1.f)==0x3f800000).
+            if(!(input_mask&(1u<<a))){words[d+4]=words[d+5]=words[d+6]=0;words[d+7]=0x3f800000u;continue;}
+            if(!n){const auto v=register_attribute(state.rsx.draw.immediate[a]);
                 for(unsigned c=0;c<4;++c)data[d+4+c]=float_bits(v[c]);
                 continue;}
             if(n>4 || type==0 || type>7)throw std::runtime_error("unsupported RSX vertex attribute type/size");
@@ -2074,7 +2319,7 @@ template<class Vertex> static bool prepared(Session& session,const std::vector<s
         // Per-primitive packed draws may change batches between uses: keep
         // one snapshot (same read point as before) and copy it per upload.
         if(sequential_packed && tail_bytes){if(session.vertex_tail.size()<tail_bytes)session.vertex_tail.resize(tail_bytes);
-            input_reads.read(session.vertex_tail.data());for(unsigned i=0;i<tail_pad_count;++i)std::memset(session.vertex_tail.data()+tail_pads[i].at,0,tail_pads[i].n);}
+            session.read_inputs(input_reads,session.vertex_tail.data());for(unsigned i=0;i<tail_pad_count;++i)std::memset(session.vertex_tail.data()+tail_pads[i].at,0,tail_pads[i].n);}
         attempt.path("gpu_vertex_fetch");
     }
     // Shader constants are draw data, not shader-source identity. Animated
@@ -2083,15 +2328,17 @@ template<class Vertex> static bool prepared(Session& session,const std::vector<s
         data[14]=data.size();for(const auto& inst:fp)rsxvk::append(data,inst.constant);}
     else{session.refresh_vertex_constants();session.refresh_fragment_constants(fp);}
     const unsigned line_base=data.size();if(lines){data[10]=line_base;data.insert(data.end(),line_data.begin(),line_data.end());}
-    std::array<std::shared_ptr<NativeVulkan::GraphicsBuffer>,16> raw_buffers{};
+    static const std::array<std::shared_ptr<NativeVulkan::GraphicsBuffer>,16> raw_buffers{};   // no raw texture buffers on this path
     std::array<std::shared_ptr<NativeVulkan::GraphicsImage>,20> texture_images{};
     phase.next(HostStage::g_tex);
     for(unsigned unit=0;unit<16;++unit){const auto& t=textures[unit];if(!t.valid)continue;
         texture_images[unit]=t.resident_image?t.resident_image:(!alias?session.texture_image(t):nullptr);
+        if(!alias)session.draw_data_units|=1u<<unit;   // before the block is written (serialize_draw_registers zeroes it next draw)
         const unsigned desc=(alias?2064:48)+unit*32;data[desc]=data.size();data[desc+1]=t.mip_count;data[desc+2]=t.unnormalized;data[desc+3]=t.wrap_s;data[desc+4]=t.wrap_t;
         data[desc+5]=t.min;data[desc+6]=t.mag;data[desc+7]=float_bits(t.bias);data[desc+8]=float_bits(t.min_lod);data[desc+9]=float_bits(t.max_lod);
         data[desc+10]=t.gamma;data[desc+11]=t.features;data[desc+12]=t.signed_mask;data[desc+13]=t.biased;data[desc+14]=t.alpha_kill;
-        for(unsigned c=0;c<4;++c){data[desc+15+c]=t.remap_channel[c];data[desc+19+c]=t.remap_control[c];data[desc+23+c]=float_bits((t.shadow?t.border:texture_input(t,t.border,true))[c]);}
+        const Vec4 border=t.shadow?t.border:texture_input(t,t.border,true);   // pure: once per unit, not per channel
+        for(unsigned c=0;c<4;++c){data[desc+15+c]=t.remap_channel[c];data[desc+19+c]=t.remap_control[c];data[desc+23+c]=float_bits(border[c]);}
         data[desc+27]=t.dimension;data[desc+28]=t.cube;data[desc+29]=t.shadow;data[desc+30]=t.wrap_r;
 
         const unsigned raw_levels=data.size();data[desc+31]=raw_levels;data.resize(raw_levels+t.levels.size()*8);
@@ -2100,13 +2347,15 @@ template<class Vertex> static bool prepared(Session& session,const std::vector<s
         data[desc]=data.size();const unsigned levels=data.size();data.resize(levels+t.levels.size()*4);
         for(unsigned l=0;l<t.levels.size();++l){const auto& level=t.levels[l];data[levels+4*l]=data.size();data[levels+4*l+1]=level.width;data[levels+4*l+2]=level.height;data[levels+4*l+3]=level.depth;
             if(alias && !t.resident_image)for(unsigned z=0;z<level.depth;++z)for(unsigned y=0;y<level.height;++y)for(unsigned x=0;x<level.width;++x){auto c=texel(t,level,x,y,z);rsxvk::append(data,t.shadow?c:texture_input(t,c,false));}}}
+    if(index_tail)data[13]=data.size();   // the blob is complete: its tail (the triangle list) starts here
+    const std::uint64_t blob_bytes=std::uint64_t(data.size())*4+index_bytes;
     if(vertices==0)return true;
     if(alias){bool parallel_alias=false;if(!draw_alias(session,std::move(data),*fs,colors,depth,width,height,samples,count,vertices,x0,y0,x1,y1,parallel_alias))return attempt.reject("color_depth_alias_device_capacity");
         attempt.path(parallel_alias?"parallel_attachment_alias":"component_attachment_alias");return true;}
     attempt.path("scalar_fragment");
-    const auto visual_blob_bytes=vk.graphics_render_scale>1?std::uint64_t(data.size())*4:0;
-    if(visual_blob_bytes && !session.ensure_upload_capacity(data.size()*4+tail_bytes+visual_blob_bytes+128*1024))throw std::runtime_error("RSX paired draw exceeds staging capacity");
-    if(session.batch->used+data.size()*4+visual_blob_bytes+32*1024*1024>session.batch->capacity || session.batch->visibility_count+samples>=1000 || session.batch->pipeline_pins.size()>=64)session.submit_async("batch_capacity");
+    const auto visual_blob_bytes=vk.graphics_render_scale>1?blob_bytes:0;
+    if(visual_blob_bytes && !session.ensure_upload_capacity(blob_bytes+tail_bytes+visual_blob_bytes+128*1024))throw std::runtime_error("RSX paired draw exceeds staging capacity");
+    if(session.batch->used+blob_bytes+visual_blob_bytes+32*1024*1024>session.batch->capacity || session.batch->visibility_count+samples>=1000 || session.batch->pipeline_pins.size()>=64)session.submit_async("batch_capacity");
     std::array<std::shared_ptr<NativeVulkan::GraphicsImage>,4> images{};std::shared_ptr<NativeVulkan::GraphicsImage> z;
     phase.next(HostStage::g_bind);
     for(unsigned i=0;i<count;++i)images[i]=colors[i].base?session.bind(colors[i],width,height,samples,format,false,srgb,packed).image:session.history_image(fixed.color,width,height,samples,4+i);
@@ -2118,7 +2367,7 @@ template<class Vertex> static bool prepared(Session& session,const std::vector<s
     if(packed)for(unsigned i=0;i<count;++i)texture_images[16+i]=session.history_image(fixed.color,width,height,samples,i);
     std::uint64_t reuse=UINT64_MAX;
     for(unsigned primitive=0;primitive<(sequential_packed?vertices/3:1u);++primitive){
-    if(session.batch->used+(reuse==UINT64_MAX?data.size()*4+tail_bytes:0)+visual_blob_bytes+128*1024>session.batch->capacity || session.batch->visibility_count+samples>=1000 || session.batch->pipeline_pins.size()>=64){session.submit_async("batch_capacity");reuse=UINT64_MAX;}
+    if(session.batch->used+(reuse==UINT64_MAX?blob_bytes+tail_bytes:0)+visual_blob_bytes+128*1024>session.batch->capacity || session.batch->visibility_count+samples>=1000 || session.batch->pipeline_pins.size()>=64){session.submit_async("batch_capacity");reuse=UINT64_MAX;}
     if(packed)for(unsigned i=0;i<count;++i){vk.graphics_copy(*session.batch,images[i],texture_images[16+i]);::RsxPerfCounters::add(::RsxPerfCounters::history_copies);}
     const auto first=session.batch->visibility_count;
     // graphics_draw allocates the descriptor blob at aligned staging offset.
@@ -2132,15 +2381,15 @@ template<class Vertex> static bool prepared(Session& session,const std::vector<s
         for(unsigned a=0;a<16;++a)if(tail_attributes&(1u<<a))data[data[12]+a*8+1]=unsigned(tail_at)+tail_rel[a];
         auto* out=static_cast<std::uint8_t*>(session.batch->map)+tail_at;
         if(sequential_packed)std::memcpy(out,session.vertex_tail.data(),tail_bytes);
-        else{input_reads.read(out);for(unsigned i=0;i<tail_pad_count;++i)std::memset(out+tail_pads[i].at,0,tail_pads[i].n);}
+        else{session.read_inputs(input_reads,out);for(unsigned i=0;i<tail_pad_count;++i)std::memset(out+tail_pads[i].at,0,tail_pads[i].n);}
     }
-    ::RsxPerfCounters::add(::RsxPerfCounters::blob_bytes,data.size()*4);
+    ::RsxPerfCounters::add(::RsxPerfCounters::blob_bytes,blob_bytes);
     phase.next(HostStage::draw);
     const auto actual=[&]{
         NativeVulkan::ConditionalScope condition(vk,*session.batch,session.conditional?session.conditional->buffer:nullptr,session.conditional?session.conditional->offset:0);
-        return vk.graphics_draw(*session.batch,fixed,images,z,vertex_shader,*fs,data,sequential_packed?3:vertices,positions,bits_float(r(0xa7c)),bits_float(r(0xa78)),bits_float(r(0x384)),bits_float(r.get(0x388,0x3f800000)),texture_images,sequential_packed?primitive*3:0,reuse,raw_buffers,vertex_owner,fs,nullptr,0,true);
+        return vk.graphics_draw(*session.batch,fixed,images,z,vertex_shader,*fs,data,sequential_packed?3:vertices,positions,bits_float(r(0xa7c)),bits_float(r(0xa78)),bits_float(r(0x384)),bits_float(r.get(0x388,0x3f800000)),texture_images,sequential_packed?primitive*3:0,reuse,raw_buffers,vertex_owner,fs,index_tail,index_bytes,true);
     }();
-    if(actual+data.size()*4+tail_bytes>UINT_MAX)throw std::runtime_error("RSX graphics status offset overflow");
+    if(actual+blob_bytes+tail_bytes>UINT_MAX)throw std::runtime_error("RSX graphics status offset overflow");
     reuse=actual;
     session.pending.push_back({static_cast<unsigned>(actual+7*4),first,vk.graphics_last_queries,r(0x17cc)!=0});
     for(auto& surface:session.surfaces){for(unsigned i=0;i<count;++i)if(surface.image==images[i])session.dirty_surface(surface);
@@ -2230,9 +2479,11 @@ static bool clear(Session& session,unsigned mask){
     if(depth.base)zi=session.bind(depth,width,height,samples,df,true,false,false,full_rect && full_depth).image;
     if(full_rect && (targets.empty() || full_color) && (!depth.base || !stencil_mask || stencil_mask==255)){
         VkClearColorValue value{};if(integer)value.uint32[0]=clear_word;else std::copy(color.begin(),color.end(),value.float32);
-        for(unsigned i=0;i<fixed.colors;++i)session.vk.graphics_clear_image(*session.batch,images[i],value,0,0,VK_IMAGE_ASPECT_COLOR_BIT);
+        // One leading barrier for the whole clear (graphics_group_lead): the targets are distinct images (non-overlapping).
+        auto lead=[&](const std::shared_ptr<NativeVulkan::GraphicsImage>& image,unsigned before){bool first=!before;for(unsigned j=0;j<before;++j)first|=images[j]==image;return first;};
+        for(unsigned i=0;i<fixed.colors;++i)session.vk.graphics_clear_image(*session.batch,images[i],value,0,0,VK_IMAGE_ASPECT_COLOR_BIT,lead(images[i],i));
         if(zi){const VkImageAspectFlags aspects=(mask&1?VK_IMAGE_ASPECT_DEPTH_BIT:0)|(stencil_mask?VK_IMAGE_ASPECT_STENCIL_BIT:0);
-            session.vk.graphics_clear_image(*session.batch,zi,value,z,r(0x1d8c)&255,aspects);}
+            session.vk.graphics_clear_image(*session.batch,zi,value,z,r(0x1d8c)&255,aspects,lead(zi,fixed.colors));}
         if(fallback_stats().enabled)++fallback_stats().paths["clear_transfer"];
     }else{
         static const auto vs=std::make_shared<const std::string>("#version 450\nvoid main(){vec2 p=vec2((gl_VertexIndex<<1)&2,gl_VertexIndex&2);gl_Position=vec4(p*2-1,0,1);}");

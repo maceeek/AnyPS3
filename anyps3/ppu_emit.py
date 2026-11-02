@@ -81,6 +81,39 @@ HELPERS_CPP = r'''
 #else
 #define ANYPS3_SPIN_HINT() ((void)0)
 #endif
+// flow.py checked_target's stop, raised after the caller published PC/steps.
+[[noreturn,gnu::noinline,gnu::cold]] inline void ppu_target_range(){throw std::runtime_error("branch target outside 32-bit space");}
+// Page switch selector: word slot of pc in the page at base (0..1023 for an
+// aligned in-page pc). Rotating instead of shifting keeps it a bijection:
+// misaligned or out-of-page values land at >= 1024, never on a case.
+[[maybe_unused,gnu::always_inline]] static inline std::uint32_t ppu_page_slot(std::uint32_t pc,std::uint32_t base){
+    const std::uint32_t offset=pc-base;return (offset>>2)|(offset<<30);
+}
+// Host-call return prediction. A call (bl to another page, bctrl out of the
+// page) whose continuation C is a head of the calling page pushes C and calls
+// the callee as a host function; a bclr whose next PC equals the innermost
+// pushed C pops it and returns to that host frame, which continues at C's
+// block head by goto, the block ppu_dispatch(C) reaches. Only equality with
+// the actual next PC is used, so any guest LR value stays exact.
+// Invariant while guest code runs: ppu_ret_depth equals the number of live
+// host call frames since anyps3_entry (its base). A pop returns exactly one
+// frame. Every other page-function return (slice cut, runtime call, guest
+// return to the host, STOP) leaves depth above the returning frame's own
+// slot, so each frame passes it on unchanged up to anyps3_entry, which
+// restores the base before it dispatches again (exceptions unwind the frames
+// the same way). A full stack keeps the tail-call transfer; the limit
+// (ANYPS3_PPU_RET_DEPTH, 0..64, anyps3_entry) never exceeds the array.
+constexpr std::uint32_t PPU_RET_FULL=UINT32_MAX;
+template<class S> [[maybe_unused,gnu::always_inline]] static inline std::uint32_t ppu_ret_push(S& state,std::uint32_t continuation){
+    const std::uint32_t depth=state.ppu_ret_depth;
+    if(depth>=state.ppu_ret_limit)return PPU_RET_FULL;
+    state.ppu_ret_stack[depth]=continuation;state.ppu_ret_depth=depth+1;return depth;
+}
+template<class S> [[maybe_unused,gnu::always_inline]] static inline bool ppu_ret_pop(S& state,std::uint32_t pc){
+    const std::uint32_t depth=state.ppu_ret_depth;
+    if(!depth || state.ppu_ret_stack[depth-1]!=pc)return false;
+    state.ppu_ret_depth=depth-1;return true;
+}
 // PPUFAST local-register forms of the flow.py CR/XER/CTR helpers.
 [[maybe_unused,gnu::always_inline]] static inline unsigned ppu_cmp(std::uint64_t a,std::uint64_t b,bool wide,bool signed_compare,std::uint64_t xer){
     if(!wide){a&=UINT32_MAX;b&=UINT32_MAX;}
@@ -108,6 +141,17 @@ HELPERS_CPP = r'''
 '''
 
 
+def ret_call(callee, continuation):
+    """Host call of `callee` with `continuation` pushed (HELPERS_CPP ppu_ret_*).
+
+    Matched return: continue at the continuation's block head, as ppu_dispatch
+    would. Any other return of the callee chain is passed on unchanged; a full
+    stack falls through to the caller's tail transfer.
+    """
+    return (f"if(const std::uint32_t ppu_d=ppu_ret_push(state,0x{continuation:x}u);ppu_d!=PPU_RET_FULL){{{callee};"
+            f"if(state.ppu_ret_depth!=ppu_d)return;steps_v=state.steps;goto ppu_{continuation:x};}}")
+
+
 def step_slow_cpp(max_steps: int) -> str:
     """Exact per-instruction accounting for trace builds; block-head budget stop."""
     return '\n'.join([
@@ -132,6 +176,7 @@ def declaration(name):
 
 
 LOCAL = re.compile(r'\b(gpr\d+|fpr\d+|cr_l|lr_l|ctr_l|xer_l)\b')
+STEPS = re.compile(r'\bstate\.steps\b')
 
 
 def written_locals(body):
@@ -198,6 +243,12 @@ class PageEmitter:
         self.by_address = by_address
         self.runtime_operation = runtime_operation
         self.pages = {}
+        # Largest block count; anyps3_entry derives the budget bound from it (head_bound()).
+        self.max_count = 0
+
+    def head_bound(self):
+        """K: below K steps no block can cross the budget (steps<K implies steps+count<=max_steps)."""
+        return max(0, self.options.max_steps - self.max_count + 1)
 
     def page(self, number):
         return self.pages.setdefault(number, dict(cases=[], body=[]))
@@ -249,15 +300,23 @@ class PageEmitter:
         count = len(block)
         first = block[0]
         page = self.page(first.address >> 12)
-        page['cases'].append(f"    case 0x{first.address:x}: goto ppu_{first.address:x};")
+        page['cases'].append((first.address, f"goto ppu_{first.address:x};"))
         limit = self.options.max_steps - count if count <= self.options.max_steps else -1
-        code = [f"ppu_{first.address:x}:",
-                f"    if(steps_v>=slice_v || state.reschedule){{pc_v=0x{first.address:x};goto out;}}"]
+        code = [f"ppu_{first.address:x}:"]
+        self.max_count = max(self.max_count, count)
+        if self.options.trace:
+            code.append(f"    if(steps_v>=slice_v || *resched_v){{pc_v=0x{first.address:x};goto out;}}")
+        else:
+            # Budget at the head without a per-block compare: head_v (ppu_head_end,
+            # anyps3_entry) is min(slice end, K) while steps<K, so no block below
+            # it can cross the budget; from K on anyps3_entry admits one block per
+            # dispatch by its recorded count (head_out: pc and count of this head).
+            code.append(f"    if(steps_v>=head_v || *resched_v){{pc_v=0x{first.address:x};cnt_v={count};goto head_out;}}")
         if self.options.trace:
             code.append(f"    slow=trace_v || steps_v>UINT64_C({limit});" if limit >= 0 else "    slow=true;")
         else:
-            code.append(f"    if(__builtin_expect(steps_v>UINT64_C({limit}),0)){{state.pc=0x{first.address:x};state.steps=steps_v;ppu_step_limit();}}"
-                        if limit >= 0 else f"    state.pc=0x{first.address:x};state.steps=steps_v;ppu_step_limit();")
+            if limit < 0:
+                code.append(f"    state.pc=0x{first.address:x};state.steps=steps_v;ppu_step_limit();")
         if any(inst.word in SPIN_HINTS for inst in block):
             code.append("    ANYPS3_SPIN_HINT();")
         locals_ = {'lr_l', 'gpr1', 'gpr3'} if self.options.trace and self.options.gpr_locals else set()
@@ -288,7 +347,13 @@ class PageEmitter:
             body = self.rewrite(body, inst.address)
             locals_ |= set(LOCAL.findall(body))
             sync = publish(inst.address, index + 1)
-            if self.needs_sync(body):
+            # bclr/bcctr: the 32-bit target check publishes only on its throw
+            # path (the only reader of the published PC/steps there).
+            body = body.replace('checked_target(target)', 'PPU_CHECKED_TARGET')
+            calls = self.needs_sync(body)
+            body = body.replace('PPU_CHECKED_TARGET', f'({{if(__builtin_expect(target>UINT32_MAX,0)){{{sync}ppu_target_range();}}'
+                                                      'static_cast<std::uint32_t>(target);})')
+            if calls:
                 lines.append(sync)
             body = expand_memory(body, sync, inst.address)
             written = store(written_locals(body))
@@ -318,13 +383,25 @@ class PageEmitter:
             if target in self.heads and target >> 12 == inst.address >> 12:
                 return f"goto ppu_{target:x};"
             return f"@@XFER_{target:x}@@"
+        continuation = (inst.address + 4) & 0xffffffff
+        # Host-call form (functions(), HELPERS_CPP ppu_ret_*): only for a call
+        # whose continuation is a head of this page, so the return can goto it.
+        host_call = bool(inst.word & 1) and continuation in self.heads and continuation >> 12 == inst.address >> 12
         if indirect:
+            if xo == 16:
+                code.append("    if(ppu_ret_pop(state,pc_v)){state.steps=steps_v;state.pc=pc_v;return;}")
             # A target in this page re-enters the page's own dispatch switch; it
             # resolves heads and missing blocks exactly as ppu_dispatch would.
             code.append(f"    if((pc_v>>12)==0x{inst.address >> 12:x}u)goto ppu_dispatch_local;")
-            code.append("    {state.steps=steps_v;state.pc=pc_v;[[gnu::musttail]] return ppu_dispatch(state);}")
+            if xo == 528 and host_call:
+                code.append("    {state.steps=steps_v;state.pc=pc_v;" + ret_call('anyps3_dispatch_page(state)', continuation) +
+                            "[[gnu::musttail]] return ppu_dispatch(state);}")
+            else:
+                code.append("    {state.steps=steps_v;state.pc=pc_v;[[gnu::musttail]] return ppu_dispatch(state);}")
         elif primary == 18:
-            code.append("    " + transfer(inst.successors[0]))
+            target = inst.successors[0]
+            local = target in self.heads and target >> 12 == inst.address >> 12
+            code.append("    " + (f"@@CALL_{target:x}_{continuation:x}@@" if host_call and not local else transfer(target)))
         elif primary == 16:
             target, fallthrough = inst.successors
             code.extend([f"    if(pc_v==0x{target:x}){transfer(target)}", "    " + transfer(fallthrough)])
@@ -336,14 +413,14 @@ class PageEmitter:
 
     def emit_trap(self, address, reason):
         page = self.page(address >> 12)
-        page['cases'].append(f"    case 0x{address:x}: goto ppu_{address:x};")
+        page['cases'].append((address, f"goto ppu_{address:x};"))
         page['body'].append(
             f"ppu_{address:x}: state.pc=0x{address:x};state.steps=steps_v;"
             f"if(steps_v>=UINT64_C({self.options.max_steps}))throw std::runtime_error(\"execution step limit reached\");"
             f"state.steps=steps_v+1;throw std::runtime_error({json.dumps(reason)});")
 
     def emit_lifecycle(self, address, call):
-        self.page(address >> 12)['cases'].append(f"    case 0x{address:x}: {call} return;")
+        self.page(address >> 12)['cases'].append((address, f"{call} return;"))
 
     def functions(self):
         """(page, C++ text) for every page.
@@ -359,19 +436,41 @@ class PageEmitter:
             if target >> 12 in self.pages:
                 return f"{{state.steps=steps_v;state.pc=0x{target:x};[[gnu::musttail]] return page_{target >> 12:x}(state);}}"
             return f"{{pc_v=0x{target:x};goto out;}}"
+        def call(m):
+            target, continuation = int(m[1], 16), int(m[2], 16)
+            if target >> 12 not in self.pages:
+                return xfer(m)
+            callee = f"page_{target >> 12:x}(state)"
+            return f"{{state.steps=steps_v;state.pc=0x{target:x};{ret_call(callee, continuation)}[[gnu::musttail]] return {callee};}}"
         for number, code in sorted(self.pages.items()):
-            code['body'] = [re.sub(r'@@XFER_([0-9a-f]+)@@', xfer, line) for line in code['body']]
+            code['body'] = [re.sub(r'@@CALL_([0-9a-f]+)_([0-9a-f]+)@@', call, re.sub(r'@@XFER_([0-9a-f]+)@@', xfer, line))
+                            for line in code['body']]
+            # Word slots, not raw PCs: GCC lowers a 4-byte-strided switch on
+            # pc_v to a compare tree, the dense slot switch to one jump table.
+            # ppu_page_slot is a bijection, so exactly the same pc_v values
+            # reach each case and the default as with switch (pc_v).
+            aligned = all(not address & 3 for address, _ in code['cases'])
+            base = number << 12
+            selector = f'ppu_page_slot(pc_v,0x{base:x}u)' if aligned else 'pc_v'
+            cases = [f"    case 0x{(address - base) >> 2 if aligned else address:x}: /* 0x{address:x} */ {action}"
+                     for address, action in code['cases']]
             missing = (f"    default: state.pc=pc_v;state.steps=steps_v;"
                        f"if(steps_v>=UINT64_C({self.options.max_steps}))throw std::runtime_error(\"execution step limit reached\");"
                        f"state.steps=steps_v+1;throw std::runtime_error(\"target has no statically translated block\");")
+            # steps and reschedule are reference members: their addresses are
+            # fixed, so the page reads/publishes them without reloading the
+            # reference each time (every state.steps of the page goes through steps_p).
+            body = [STEPS.sub('(*steps_p)', line) for line in
+                    (*cases, missing, '    }', *code['body'], '    head_out: __attribute__((unused)); state.ppu_head_exit=(std::uint64_t(cnt_v)<<32)|pc_v;',
+                     '    out: __attribute__((unused)); state.steps=steps_v;state.pc=pc_v;return;')]
             result.append((number, '\n'.join([
                 f'void page_{number:x}(PpuState& state) {{',
                 '    [[maybe_unused]] auto& r=state.r;',
-                '    std::uint64_t steps_v=state.steps;[[maybe_unused]] const std::uint64_t slice_v=state.ppu_slice_end;[[maybe_unused]] const bool trace_v=state.ppu_trace;',
-                '    std::uint32_t pc_v=state.pc;[[maybe_unused]] bool slow=false;',
+                '    std::uint64_t* const steps_p=&state.steps;',
+                '    std::uint64_t steps_v=*steps_p;[[maybe_unused]] const std::uint64_t slice_v=state.ppu_slice_end,head_v=state.ppu_head_end;[[maybe_unused]] const bool trace_v=state.ppu_trace;',
+                '    [[maybe_unused]] const bool* const resched_v=&state.reschedule;',
+                '    std::uint32_t pc_v=state.pc;[[maybe_unused]] std::uint32_t cnt_v=0;[[maybe_unused]] bool slow=false;',
                 '    ppu_dispatch_local: __attribute__((unused));',
-                '    switch (pc_v) {', *code['cases'], missing, '    }',
-                *code['body'],
-                '    out: __attribute__((unused)); state.steps=steps_v;state.pc=pc_v;return;',
+                f'    switch ({selector}) {{', *body,
                 '}'])))
         return result

@@ -4,18 +4,15 @@ CPP = r'''
 // Keep diagnostics, hashing and the decoder out of all static SPU TUs.
 // DMA provenance only serves the explicitly requested ANYPS3_SPU_DYNAMIC_LOG (and the
 // last_DMA part of dynamic fault messages in such runs). Without the log the map stays
-// empty, so spu_ls_forget on every STQ costs one empty() check.
+// empty, so spu_ls_forget(_quad) on every STQ costs one empty() check.
 static bool spu_provenance_enabled(){
     static const bool enabled=[]{const char* path=std::getenv("ANYPS3_SPU_DYNAMIC_LOG");return path && *path;}();
     return enabled;
 }
-void spu_ls_write(NativeSpu::Thread& t,unsigned base,unsigned size,std::uint64_t ea){
-    if(!size || !spu_provenance_enabled())return;
-    const unsigned end=base+size;
-    if(base>0x40000 || size>0x40000-base)throw std::runtime_error("invalid SPU provenance range");
+// Record (ea) or forget (UINT64_MAX) the provenance of LS [base,end) in the span map w.
+static void spu_ls_span(std::vector<NativeSpu::Thread::DmaWrite>& w,unsigned base,unsigned end,std::uint64_t ea){
     // Entries are disjoint and sorted by base, hence also by end: find the
     // overlapped run [first,last) in O(log n) and touch only that run.
-    auto& w=t.dma_writes;
     const auto first=std::lower_bound(w.begin(),w.end(),base,[](const auto& r,unsigned b){return r.end<=b;});
     auto last=first;while(last!=w.end() && last->base<end)++last;
     if(first==last){if(ea!=UINT64_MAX)w.insert(first,{base,end,ea});return;}
@@ -32,12 +29,30 @@ void spu_ls_write(NativeSpu::Thread& t,unsigned base,unsigned size,std::uint64_t
     const auto at=w.erase(first,last);
     w.insert(at,pieces,pieces+count);
 }
+// Forget the 16-byte lines marked by spu_ls_forget_quad (each run of adjacent lines within one mark word at once).
+static void spu_ls_apply(std::vector<NativeSpu::Thread::DmaWrite>& w,const std::array<std::uint64_t,256>& lines){
+    for(unsigned i=0;i<256;++i)for(std::uint64_t m=lines[i];m && !w.empty();){
+        const unsigned lo=__builtin_ctzll(m);const std::uint64_t x=m>>lo;const unsigned n=~x?__builtin_ctzll(~x):64;
+        spu_ls_span(w,(i*64+lo)*16,(i*64+lo+n)*16,UINT64_MAX);
+        m=lo+n<64?m&~(((std::uint64_t(1)<<n)-1)<<lo):m&((std::uint64_t(1)<<lo)-1);
+    }
+}
+static void spu_ls_drain(NativeSpu::Thread& t){
+    if(!t.ls_forget_pending)return;
+    spu_ls_apply(t.dma_writes,t.ls_forget);t.ls_forget={};t.ls_forget_pending=false;
+}
+void spu_ls_write(NativeSpu::Thread& t,unsigned base,unsigned size,std::uint64_t ea){
+    if(!size || !spu_provenance_enabled())return;
+    if(base>0x40000 || size>0x40000-base)throw std::runtime_error("invalid SPU provenance range");
+    spu_ls_drain(t);spu_ls_span(t.dma_writes,base,base+size,ea);
+}
 [[noreturn]] void spu_dynamic_fault(const NativeSpu::Thread& t,const std::uint8_t* ls,const char* reason){
     char message[384];
     const auto word=t.pc<=0x3fffc && !(t.pc&3)?spu_load_word(ls+t.pc):0;
     std::snprintf(message,sizeof(message),"%s: SPU id=%x pc=%05x word=%08x",reason,t.id,t.pc,word);
     std::string result=message;
-    for(const auto& r:t.dma_writes)if(t.pc>=r.base && t.pc<r.end){
+    auto writes=t.dma_writes;if(t.ls_forget_pending)spu_ls_apply(writes,t.ls_forget);
+    for(const auto& r:writes)if(t.pc>=r.base && t.pc<r.end){
         std::snprintf(message,sizeof(message)," last_DMA ls=%05x size=%x ea=%016" PRIx64 " pc_ea=%016" PRIx64,
             r.base,r.end-r.base,r.ea,r.ea+t.pc-r.base);result+=message;break;
     }
@@ -76,6 +91,7 @@ static std::string spu_dynamic_sha256(const std::uint8_t* bytes,unsigned size){
 static void spu_dynamic_record(NativeSpu::Thread& t,const std::uint8_t* ls,const char* mode="interpreted"){
     static const char* path=std::getenv("ANYPS3_SPU_DYNAMIC_LOG");
     if(!path || !*path)return;
+    spu_ls_drain(t);
     // A diagnostic block is a fixed 64-byte LS cell, not a guessed job extent.
     const auto base=t.pc&~63u;const unsigned size=64;
     std::vector<NativeSpu::Thread::DmaWrite> overlap;

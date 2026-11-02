@@ -19,6 +19,31 @@ public:
         for(const auto& p:stats.kinds)std::fprintf(stderr," %s=%zu %s_bytes=%llu %s_peak=%llu %s_peak_bytes=%llu",p.first.c_str(),p.second.objects.size(),p.first.c_str(),(unsigned long long)p.second.bytes,p.first.c_str(),(unsigned long long)p.second.peak_count,p.first.c_str(),(unsigned long long)p.second.peak_bytes);
         std::fputc('\n',stderr);
     }
+    // TEST HOOK / diagnostic: pool structure of one device. Stops on a broken invariant: ranges of a block (live + free)
+    // must tile it exactly without overlap, free neighbours must be coalesced, block live/used counts and the retained
+    // empty bytes must match the ranges.
+    struct PoolReport {std::uint64_t blocks=0,empty_blocks=0,live=0,free_ranges=0,used=0,reserved=0;};
+    static PoolReport memory_pool_report(VkDevice d){
+        auto& c=memory_cache();std::lock_guard<std::mutex> lock(c.mutex);PoolReport report;
+        const auto device=c.devices.find(d);if(device==c.devices.end())return report;
+        std::map<const void*,std::vector<std::pair<VkDeviceSize,VkDeviceSize>>> live;
+        for(const auto& [key,sub]:c.subs)if(sub->device==d){(void)key;live[sub->block].push_back({sub->offset,sub->size});}
+        for(const auto& [type,pool]:device->second.pools){std::size_t indexed=0;(void)type;for(const auto& block:pool.blocks){
+            auto ranges=live[block.get()];VkDeviceSize used=0;for(const auto& r:ranges)used+=r.second;
+            if(ranges.size()!=block->live || used!=block->used)throw std::runtime_error("pool block live/used count mismatch");
+            for(auto it=block->free.begin();it!=block->free.end();++it){ranges.push_back(*it);
+                const auto next=std::next(it);if(next!=block->free.end() && it->first+it->second==next->first)throw std::runtime_error("pool free ranges not coalesced");}
+            std::sort(ranges.begin(),ranges.end());VkDeviceSize at=0;
+            for(const auto& r:ranges){if(r.first!=at || !r.second)throw std::runtime_error("pool block ranges overlap or leave a hole");at+=r.second;}
+            if(at!=block->size)throw std::runtime_error("pool block ranges do not cover the block");
+            for(const auto& [offset,size]:block->free)if(!pool.by_size.count({size,reinterpret_cast<std::uintptr_t>(block.get()),offset}))throw std::runtime_error("pool size index misses a free range");
+            indexed+=block->free.size();
+            ++report.blocks;report.empty_blocks+=!block->live;report.live+=block->live;report.free_ranges+=block->free.size();report.used+=block->used;report.reserved+=block->size;}
+            if(indexed!=pool.by_size.size())throw std::runtime_error("pool size index holds stale ranges");}
+        VkDeviceSize all_empty=0;for(const auto& [dev,state]:c.devices)for(const auto& [type,pool]:state.pools)for(const auto& block:pool.blocks){(void)dev;(void)type;if(!block->live)all_empty+=block->size;}
+        if(all_empty!=c.pool_empty)throw std::runtime_error("pool retained empty bytes mismatch");
+        return report;
+    }
     // DIAGNOSTIC driver-call attribution, only with ANYPS3_FRAMETIME and ANYPS3_FRAMETIME_MODE=full (else one predictable
     // branch per wrapped call). Every call of a wrapped entry point adds to per-code totals (RSX VK CALLS, printed with the
     // periodic compile statistics); a call lasting >= ANYPS3_VK_CALL_SPAN_US (default 50) is also a frame-ring Mark event
@@ -78,8 +103,10 @@ private:
     static void vkDestroyImageView(VkDevice d,VkImageView v,const VkAllocationCallbacks* a){VkCallTimer t(VcDestroyView);::vkDestroyImageView(d,v,a);}
     static VkResult vkCreateSampler(VkDevice d,const VkSamplerCreateInfo* ci,const VkAllocationCallbacks* a,VkSampler* out){VkCallTimer t(VcCreateSampler);return ::vkCreateSampler(d,ci,a,out);}
     static VkResult vkGetQueryPoolResults(VkDevice d,VkQueryPool p,std::uint32_t first,std::uint32_t n,std::size_t size,void* data,VkDeviceSize stride,VkQueryResultFlags f){VkCallTimer t(VcQueryResults,n);return ::vkGetQueryPoolResults(d,p,first,n,size,data,stride,f);}
-    static void vkCmdBeginRenderPass(VkCommandBuffer c,const VkRenderPassBeginInfo* i,VkSubpassContents s){VkCallTimer t(VcBeginRenderPass);::vkCmdBeginRenderPass(c,i,s);}
-    static void vkCmdPipelineBarrier(VkCommandBuffer c,VkPipelineStageFlags src,VkPipelineStageFlags dst,VkDependencyFlags f,std::uint32_t nm,const VkMemoryBarrier* m,std::uint32_t nb,const VkBufferMemoryBarrier* b,std::uint32_t ni,const VkImageMemoryBarrier* i){VkCallTimer t(VcPipelineBarrier);::vkCmdPipelineBarrier(c,src,dst,f,nm,m,nb,b,ni,i);}
+    static void vkCmdBeginRenderPass(VkCommandBuffer c,const VkRenderPassBeginInfo* i,VkSubpassContents s){VkCallTimer t(VcBeginRenderPass);graphics_command_recorded();::vkCmdBeginRenderPass(c,i,s);}
+    static void vkCmdEndRenderPass(VkCommandBuffer c){graphics_command_recorded();::vkCmdEndRenderPass(c);}
+    static void vkCmdPipelineBarrier(VkCommandBuffer c,VkPipelineStageFlags src,VkPipelineStageFlags dst,VkDependencyFlags f,std::uint32_t nm,const VkMemoryBarrier* m,std::uint32_t nb,const VkBufferMemoryBarrier* b,std::uint32_t ni,const VkImageMemoryBarrier* i){VkCallTimer t(VcPipelineBarrier);
+        graphics_command_recorded();graphics_work_add(WorkPipelineBarriers);if(graphics_last_kind()==MarkOther)graphics_last_kind()=MarkBarrier;::vkCmdPipelineBarrier(c,src,dst,f,nm,m,nb,b,ni,i);}
     static VkResult vkAcquireNextImageKHR(VkDevice d,VkSwapchainKHR s,std::uint64_t timeout,VkSemaphore sem,VkFence f,std::uint32_t* index){VkCallTimer t(VcAcquire);return ::vkAcquireNextImageKHR(d,s,timeout,sem,f,index);}
     static VkResult vkQueuePresentKHR(VkQueue q,const VkPresentInfoKHR* i){VkCallTimer t(VcPresent);return ::vkQueuePresentKHR(q,i);}
     static VkResult vkCreateBuffer(VkDevice d,const VkBufferCreateInfo* ci,const VkAllocationCallbacks* a,VkBuffer* out){VkCallTimer t(VcCreateBuffer,ci->size);
@@ -113,38 +140,154 @@ private:
         resource_stats().remove("descriptor_pools",resource_id(object));release_descriptor_sets(object);::vkDestroyDescriptorPool(d,object,a);
     }
 
-    // Device-local (never host-visible, hence never mapped) allocations are recycled by exact
-    // (memory type, size): vkFreeMemory/vkAllocateMemory cost dozens of RM ioctls each on NVIDIA.
-    // The Vulkan lifetime rules are unchanged: a block enters the cache only where the old code
-    // freed it, i.e. after the GPU finished with every resource bound to it. ANYPS3_RSX_MEMORY_CACHE_MB
-    // (default 384, 0 = off) bounds the cached bytes; the oldest blocks are really freed first.
+    // Device-local (never host-visible, hence never mapped) allocations: vkFreeMemory/vkAllocateMemory cost dozens of RM ioctls
+    // each on NVIDIA (single frees up to 16.8 ms at 1440p, HIRES2), so the driver should rarely see them during play.
+    // (1) POOL (ANYPS3_RSX_MEMORY_POOL, default 1; 0 = the exact-size recycler alone): an allocation of at most half a block is
+    //     a sub-range of a large driver block (ANYPS3_RSX_MEMORY_POOL_MB, default 256) of the same memory type. Best fit over
+    //     offset-ordered free ranges, coalesced on free. The caller gets a pool handle (the address of its Sub record, never a
+    //     driver handle: a colliding driver handle is an explicit stop); the bind/map/free wrappers below translate it to
+    //     (block, offset). A range is pooled only when this thread's preceding vkGet*MemoryRequirements call reported the
+    //     same size, so its alignment is known; offsets are aligned to max(alignment, bufferImageGranularity) and sizes
+    //     rounded to the granularity, so linear and optimal resources never share a granularity page. Every bind re-reads
+    //     the object's requirements and stops if the range cannot hold it. A freed range is reusable at once: the old code
+    //     freed the whole allocation at the same point, i.e. after the GPU finished with every resource bound to it.
+    //     Empty blocks stay allocated up to the recycler limit (at least one block per pool); only the excess is freed.
+    // (2) RECYCLER (ANYPS3_RSX_MEMORY_CACHE_MB, default 384, 0 = off, which also disables the pool): every other cacheable
+    //     allocation is recycled by exact (memory type, size); the oldest blocks are really freed first.
+    // TEST HOOK ANYPS3_RSX_MEMORY_POOL_TYPES=coherent also pools HOST_COHERENT host-visible types (lavapipe has no
+    // device-local-only type): a mapped pool range is a view of its block's persistent mapping. Non-coherent pool memory is
+    // never created, so a flush/invalidate of a pool handle is an explicit stop.
     struct MemoryCache {
         struct Free {VkDevice device;std::uint32_t type;VkDeviceSize size;VkDeviceMemory memory;std::uint64_t stamp;};
+        struct Pool;
+        struct Block {VkDeviceMemory memory=VK_NULL_HANDLE;VkDeviceSize size=0,used=0;std::map<VkDeviceSize,VkDeviceSize> free;unsigned live=0;void* map=nullptr;Pool* pool=nullptr;};
+        // by_size indexes every free range of every block as (size, block address, offset): best fit is a lower_bound.
+        struct Pool {std::vector<std::unique_ptr<Block>> blocks;std::set<std::tuple<VkDeviceSize,std::uintptr_t,VkDeviceSize>> by_size;};
+        static void free_add(Block& b,VkDeviceSize offset,VkDeviceSize size){b.free[offset]=size;b.pool->by_size.insert({size,reinterpret_cast<std::uintptr_t>(&b),offset});}
+        static std::map<VkDeviceSize,VkDeviceSize>::iterator free_remove(Block& b,std::map<VkDeviceSize,VkDeviceSize>::iterator it){
+            b.pool->by_size.erase({it->second,reinterpret_cast<std::uintptr_t>(&b),it->first});return b.free.erase(it);}
+        static void free_drop_block(Block& b){for(const auto& [offset,size]:b.free)b.pool->by_size.erase({size,reinterpret_cast<std::uintptr_t>(&b),offset});b.free.clear();}
+        struct Sub {VkDevice device;std::uint32_t type;Block* block;VkDeviceSize offset,size,requested;};
+        struct Device {std::uint32_t recycle=0,pool=0;VkDeviceSize granularity=1,block=UINT64_C(256)<<20;std::map<std::uint32_t,Pool> pools;};
         std::mutex mutex;std::vector<Free> free;std::map<std::pair<std::uint64_t,std::uint64_t>,std::pair<std::uint32_t,VkDeviceSize>> live;   // key (VkDevice, VkDeviceMemory): handles are only unique per device
-        std::map<VkDevice,std::uint32_t> types;VkDeviceSize bytes=0,limit=UINT64_C(384)<<20;std::uint64_t clock=0;
+        std::map<VkDevice,Device> devices;std::unordered_map<std::uint64_t,std::unique_ptr<Sub>> subs;   // key: pool handle value
+        VkDeviceSize bytes=0,limit=UINT64_C(384)<<20,pool_empty=0;std::uint64_t clock=0;
     };
     static MemoryCache& memory_cache(){static MemoryCache cache;return cache;}
+    // This thread's last vkGet*MemoryRequirements result (consumed by the next vkAllocateMemory of the same size).
+    struct PendingRequirement {VkDevice device=VK_NULL_HANDLE;VkDeviceSize size=0,alignment=0;};
+    static PendingRequirement& pending_requirement(){static thread_local PendingRequirement pending;return pending;}
+    static void vkGetImageMemoryRequirements(VkDevice d,VkImage image,VkMemoryRequirements* r){::vkGetImageMemoryRequirements(d,image,r);pending_requirement()={d,r->size,r->alignment};}
+    static void vkGetBufferMemoryRequirements(VkDevice d,VkBuffer buffer,VkMemoryRequirements* r){::vkGetBufferMemoryRequirements(d,buffer,r);pending_requirement()={d,r->size,r->alignment};}
     void configure_memory_cache(VkDevice d){
-        std::uint32_t mask=0;
+        const char* types=std::getenv("ANYPS3_RSX_MEMORY_POOL_TYPES");
+        if(types && std::strcmp(types,"coherent"))throw std::runtime_error("invalid ANYPS3_RSX_MEMORY_POOL_TYPES");
+        std::uint32_t mask=0,pool_mask=0;
         for(std::uint32_t i=0;i<memory.memoryTypeCount;++i){const auto f=memory.memoryTypes[i].propertyFlags;
-            if((f&VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) && !(f&VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT))mask|=1u<<i;}
+            if((f&VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) && !(f&VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)){mask|=1u<<i;pool_mask|=1u<<i;}
+            else if(types && (f&VK_MEMORY_PROPERTY_HOST_COHERENT_BIT))pool_mask|=1u<<i;}
+        VkPhysicalDeviceProperties properties{};::vkGetPhysicalDeviceProperties(physical,&properties);
         auto& c=memory_cache();std::lock_guard<std::mutex> lock(c.mutex);
         c.limit=UINT64_C(384)<<20;   // default on every configuration: the singleton must not keep a previous device's setting
         if(const char* v=std::getenv("ANYPS3_RSX_MEMORY_CACHE_MB")){char* end=nullptr;const auto n=std::strtoull(v,&end,10);
             if(!*v || *end || n>65536){throw std::runtime_error("invalid ANYPS3_RSX_MEMORY_CACHE_MB");}
             c.limit=n<<20;}
-        c.types[d]=c.limit?mask:0;
+        bool pool=true;VkDeviceSize block=UINT64_C(256)<<20;
+        if(const char* v=std::getenv("ANYPS3_RSX_MEMORY_POOL")){if(std::strcmp(v,"0") && std::strcmp(v,"1"))throw std::runtime_error("invalid ANYPS3_RSX_MEMORY_POOL");pool=*v=='1';}
+        if(const char* v=std::getenv("ANYPS3_RSX_MEMORY_POOL_MB")){char* end=nullptr;const auto n=std::strtoull(v,&end,10);
+            if(!*v || *end || n<1 || n>4096)throw std::runtime_error("invalid ANYPS3_RSX_MEMORY_POOL_MB");
+            block=n<<20;}
+        auto& device=c.devices[d];device=MemoryCache::Device{};
+        device.recycle=c.limit?mask:0;device.pool=c.limit && pool?pool_mask:0;
+        device.granularity=std::max<VkDeviceSize>(1,properties.limits.bufferImageGranularity);device.block=block;
     }
     static void release_memory_cache(VkDevice d)noexcept{
         auto& c=memory_cache();std::lock_guard<std::mutex> lock(c.mutex);
         for(auto it=c.free.begin();it!=c.free.end();){if(it->device==d){c.bytes-=it->size;::vkFreeMemory(d,it->memory,nullptr);it=c.free.erase(it);}else ++it;}
-        c.types.erase(d);
+        const auto device=c.devices.find(d);
+        if(device!=c.devices.end()){
+            for(auto& [type,pool]:device->second.pools)for(auto& block:pool.blocks){(void)type;if(!block->live)c.pool_empty-=block->size;
+                if(block->map){::vkUnmapMemory(d,block->memory);}::vkFreeMemory(d,block->memory,nullptr);}
+            c.devices.erase(device);}
+        for(auto it=c.subs.begin();it!=c.subs.end();)if(it->second->device==d)it=c.subs.erase(it);else ++it;
         for(auto it=c.live.begin();it!=c.live.end();)if(it->first.first==resource_id(d))it=c.live.erase(it);else ++it;
+    }
+    // Pool lookup (caller holds the mutex); nullptr for a driver handle.
+    static MemoryCache::Sub* pool_sub(MemoryCache& c,VkDevice d,VkDeviceMemory memory){
+        const auto it=c.subs.find(resource_id(memory));return it!=c.subs.end() && it->second->device==d?it->second.get():nullptr;
+    }
+    // Best fit over every block of the pool (size index); a new block when nothing fits. Caller holds the mutex.
+    static VkResult pool_allocate(MemoryCache& c,VkDevice d,MemoryCache::Device& device,std::uint32_t type,VkDeviceSize requested,VkDeviceSize alignment,VkDeviceMemory* out){
+        const auto granularity=device.granularity;
+        const auto align=std::max(alignment?alignment:1,granularity);
+        if(align&(align-1))return VK_ERROR_FEATURE_NOT_PRESENT;   // not a power of two: leave it to the driver
+        const auto size=(requested+granularity-1)/granularity*granularity;
+        auto& pool=device.pools[type];
+        // Smallest free range that holds the aligned request (ranges are granularity aligned; larger alignments may skip some).
+        MemoryCache::Block* best=nullptr;VkDeviceSize best_offset=0;
+        for(auto it=pool.by_size.lower_bound({size,0,0});it!=pool.by_size.end();++it){const auto [length,block,offset]=*it;
+            const auto at=(offset+align-1)&~(align-1);
+            if(at+size>offset+length)continue;
+            best=reinterpret_cast<MemoryCache::Block*>(block);best_offset=at;break;
+        }
+        if(!best){
+            VkMemoryAllocateInfo ai{};ai.sType=VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;ai.allocationSize=device.block;ai.memoryTypeIndex=type;
+            auto block=std::make_unique<MemoryCache::Block>();
+            VkResult r;{VkCallTimer miss(VcAllocMiss,ai.allocationSize);r=::vkAllocateMemory(d,&ai,nullptr,&block->memory);}
+            if(r!=VK_SUCCESS)return r;
+            if(c.subs.count(resource_id(block->memory))){::vkFreeMemory(d,block->memory,nullptr);throw std::runtime_error("Vulkan device memory handle collides with a pool range");}
+            ::RsxPerfCounters::add(::RsxPerfCounters::vk_memory_allocs);::RsxPerfCounters::add(::RsxPerfCounters::vk_pool_blocks);
+            resource_stats().add("device_memory_blocks",resource_id(block->memory),ai.allocationSize);
+            block->size=ai.allocationSize;block->pool=&pool;MemoryCache::free_add(*block,0,ai.allocationSize);c.pool_empty+=block->size;
+            best=block.get();best_offset=0;pool.blocks.push_back(std::move(block));
+        }
+        // Split the chosen free range around [best_offset, best_offset+size).
+        auto range=best->free.upper_bound(best_offset);--range;
+        const auto start=range->first,end=range->first+range->second;MemoryCache::free_remove(*best,range);
+        if(best_offset>start)MemoryCache::free_add(*best,start,best_offset-start);
+        if(best_offset+size<end)MemoryCache::free_add(*best,best_offset+size,end-best_offset-size);
+        if(!best->live++)c.pool_empty-=best->size;
+        best->used+=size;
+        auto sub=std::make_unique<MemoryCache::Sub>(MemoryCache::Sub{d,type,best,best_offset,size,requested});
+        *out=reinterpret_cast<VkDeviceMemory>(sub.get());c.subs.emplace(resource_id(*out),std::move(sub));
+        ::RsxPerfCounters::add(::RsxPerfCounters::vk_pool_ranges);
+        return VK_SUCCESS;
+    }
+    // Returns a range (coalescing with its neighbours); frees empty blocks beyond the retained limit. Caller holds the mutex.
+    static void pool_release(MemoryCache& c,MemoryCache::Sub& sub){
+        auto& block=*sub.block;auto offset=sub.offset,size=sub.size;
+        auto next=block.free.lower_bound(offset);
+        if(next!=block.free.end() && next->first==offset+size){size+=next->second;next=MemoryCache::free_remove(block,next);}
+        if(next!=block.free.begin()){auto previous=std::prev(next);if(previous->first+previous->second==offset){offset=previous->first;size+=previous->second;MemoryCache::free_remove(block,previous);}}
+        MemoryCache::free_add(block,offset,size);block.used-=sub.size;
+        if(--block.live)return;
+        c.pool_empty+=block.size;
+        auto& pool=c.devices.at(sub.device).pools.at(sub.type);
+        while(c.pool_empty>std::max(c.limit,block.size)){
+            auto victim=std::find_if(pool.blocks.begin(),pool.blocks.end(),[](const auto& b){return !b->live;});
+            if(victim==pool.blocks.end())break;
+            c.pool_empty-=(*victim)->size;resource_stats().remove("device_memory_blocks",resource_id((*victim)->memory));
+            MemoryCache::free_drop_block(**victim);if((*victim)->map){::vkUnmapMemory(sub.device,(*victim)->memory);}
+            {VkCallTimer t(VcFree);::RsxPerfCounters::add(::RsxPerfCounters::vk_memory_frees);::vkFreeMemory(sub.device,(*victim)->memory,nullptr);}
+            if(victim->get()==&block){pool.blocks.erase(victim);break;}
+            pool.blocks.erase(victim);
+        }
     }
     static VkResult vkAllocateMemory(VkDevice d,const VkMemoryAllocateInfo* ci,const VkAllocationCallbacks* a,VkDeviceMemory* out){
         auto& c=memory_cache();bool cacheable=false;
+        const auto pending=pending_requirement();pending_requirement()={};
         {std::lock_guard<std::mutex> lock(c.mutex);
-            const auto t=c.types.find(d);cacheable=!ci->pNext && !a && t!=c.types.end() && ci->memoryTypeIndex<32 && (t->second&(1u<<ci->memoryTypeIndex));
+            const auto device=c.devices.find(d);
+            const bool plain=!ci->pNext && !a && device!=c.devices.end() && ci->memoryTypeIndex<32;
+            if(plain && (device->second.pool&(1u<<ci->memoryTypeIndex)) && pending.device==d && pending.size==ci->allocationSize && ci->allocationSize && ci->allocationSize<=device->second.block/2){
+                auto r=pool_allocate(c,d,device->second,ci->memoryTypeIndex,ci->allocationSize,pending.alignment,out);
+                if(r==VK_ERROR_OUT_OF_DEVICE_MEMORY){
+                    for(auto it=c.free.begin();it!=c.free.end();){if(it->device==d){c.bytes-=it->size;::RsxPerfCounters::add(::RsxPerfCounters::vk_memory_frees);::vkFreeMemory(d,it->memory,nullptr);it=c.free.erase(it);}else ++it;}
+                    r=pool_allocate(c,d,device->second,ci->memoryTypeIndex,ci->allocationSize,pending.alignment,out);}
+                if(r==VK_SUCCESS){resource_stats().add("device_memory",resource_id(*out),ci->allocationSize);return r;}
+                // Anything else (no block fits the heap any more, odd alignment): an exact driver allocation below.
+            }
+            cacheable=plain && (device->second.recycle&(1u<<ci->memoryTypeIndex));
             if(cacheable){
                 for(auto it=c.free.begin();it!=c.free.end();++it)if(it->device==d && it->type==ci->memoryTypeIndex && it->size==ci->allocationSize){
                     VkCallTimer reuse(VcAllocReuse,ci->allocationSize);*out=it->memory;c.bytes-=it->size;c.free.erase(it);c.live[{resource_id(d),resource_id(*out)}]={ci->memoryTypeIndex,ci->allocationSize};
@@ -154,17 +297,27 @@ private:
         // device-local blocks) gets the cached blocks back before the failure is reported.
         if(r==VK_ERROR_OUT_OF_DEVICE_MEMORY){release_memory_cache_blocks(d);r=::vkAllocateMemory(d,ci,a,out);}
         if(r==VK_SUCCESS){resource_stats().add("device_memory",resource_id(*out),ci->allocationSize);
-            if(cacheable){std::lock_guard<std::mutex> lock(c.mutex);c.live[{resource_id(d),resource_id(*out)}]={ci->memoryTypeIndex,ci->allocationSize};}}
+            std::lock_guard<std::mutex> lock(c.mutex);
+            if(c.subs.count(resource_id(*out))){::vkFreeMemory(d,*out,a);*out=VK_NULL_HANDLE;throw std::runtime_error("Vulkan device memory handle collides with a pool range");}
+            if(cacheable)c.live[{resource_id(d),resource_id(*out)}]={ci->memoryTypeIndex,ci->allocationSize};}
         return r;
     }
+    // Out of device memory: every cached exact block and every empty pool block goes back to the driver.
     static void release_memory_cache_blocks(VkDevice d){
         auto& c=memory_cache();std::lock_guard<std::mutex> lock(c.mutex);
         for(auto it=c.free.begin();it!=c.free.end();){if(it->device==d){c.bytes-=it->size;::RsxPerfCounters::add(::RsxPerfCounters::vk_memory_frees);::vkFreeMemory(d,it->memory,nullptr);it=c.free.erase(it);}else ++it;}
+        const auto device=c.devices.find(d);if(device==c.devices.end())return;
+        for(auto& [type,pool]:device->second.pools){(void)type;
+            for(auto it=pool.blocks.begin();it!=pool.blocks.end();){auto& block=**it;if(block.live){++it;continue;}
+                c.pool_empty-=block.size;resource_stats().remove("device_memory_blocks",resource_id(block.memory));MemoryCache::free_drop_block(block);if(block.map){::vkUnmapMemory(d,block.memory);}
+                ::RsxPerfCounters::add(::RsxPerfCounters::vk_memory_frees);::vkFreeMemory(d,block.memory,nullptr);it=pool.blocks.erase(it);}}
     }
     static void vkFreeMemory(VkDevice d,VkDeviceMemory object,const VkAllocationCallbacks* a){
         resource_stats().remove("device_memory",resource_id(object));
         auto& c=memory_cache();
         {std::lock_guard<std::mutex> lock(c.mutex);
+            if(auto* sub=pool_sub(c,d,object)){if(a)throw std::runtime_error("pool range freed with allocation callbacks");
+                pool_release(c,*sub);c.subs.erase(resource_id(object));return;}
             const auto live=c.live.find({resource_id(d),resource_id(object)});
             if(live!=c.live.end() && !a){
                 const auto entry=live->second;c.live.erase(live);
@@ -175,20 +328,74 @@ private:
                     return;}}}
         VkCallTimer t(VcFree);::RsxPerfCounters::add(::RsxPerfCounters::vk_memory_frees);::vkFreeMemory(d,object,a);
     }
+    // A pool range must hold the object it is bound to: aligned offset, enough bytes (re-read from the driver).
+    static VkResult vkBindImageMemory(VkDevice d,VkImage image,VkDeviceMemory memory,VkDeviceSize offset){
+        auto& c=memory_cache();VkDeviceMemory target=memory;
+        {std::lock_guard<std::mutex> lock(c.mutex);
+            if(const auto* sub=pool_sub(c,d,memory)){VkMemoryRequirements r{};::vkGetImageMemoryRequirements(d,image,&r);
+                if(!(r.memoryTypeBits&(1u<<sub->type)) || (sub->offset+offset)%std::max<VkDeviceSize>(1,r.alignment) || offset+r.size>sub->requested)
+                    throw std::runtime_error("RSX image does not fit its pooled device-memory range");
+                target=sub->block->memory;offset+=sub->offset;}}
+        return ::vkBindImageMemory(d,image,target,offset);
+    }
+    static VkResult vkBindBufferMemory(VkDevice d,VkBuffer buffer,VkDeviceMemory memory,VkDeviceSize offset){
+        auto& c=memory_cache();VkDeviceMemory target=memory;
+        {std::lock_guard<std::mutex> lock(c.mutex);
+            if(const auto* sub=pool_sub(c,d,memory)){VkMemoryRequirements r{};::vkGetBufferMemoryRequirements(d,buffer,&r);
+                if(!(r.memoryTypeBits&(1u<<sub->type)) || (sub->offset+offset)%std::max<VkDeviceSize>(1,r.alignment) || offset+r.size>sub->requested)
+                    throw std::runtime_error("RSX buffer does not fit its pooled device-memory range");
+                target=sub->block->memory;offset+=sub->offset;}}
+        return ::vkBindBufferMemory(d,buffer,target,offset);
+    }
+    // Pool memory is HOST_COHERENT whenever it is host-visible (test hook): one persistent block mapping serves every range.
+    static VkResult vkMapMemory(VkDevice d,VkDeviceMemory memory,VkDeviceSize offset,VkDeviceSize size,VkMemoryMapFlags flags,void** data){
+        auto& c=memory_cache();
+        {std::lock_guard<std::mutex> lock(c.mutex);
+            if(const auto* sub=pool_sub(c,d,memory)){
+                if(flags || offset>sub->requested || (size!=VK_WHOLE_SIZE && size>sub->requested-offset))throw std::runtime_error("invalid map of a pooled device-memory range");
+                if(!sub->block->map){const auto r=::vkMapMemory(d,sub->block->memory,0,VK_WHOLE_SIZE,0,&sub->block->map);if(r!=VK_SUCCESS)return r;}
+                *data=static_cast<char*>(sub->block->map)+sub->offset+offset;return VK_SUCCESS;}}
+        return ::vkMapMemory(d,memory,offset,size,flags,data);
+    }
+    static void vkUnmapMemory(VkDevice d,VkDeviceMemory memory){
+        auto& c=memory_cache();
+        {std::lock_guard<std::mutex> lock(c.mutex);if(pool_sub(c,d,memory))return;}   // the block mapping stays until the block is freed
+        ::vkUnmapMemory(d,memory);
+    }
+    static VkResult vkFlushMappedMemoryRanges(VkDevice d,std::uint32_t n,const VkMappedMemoryRange* ranges){
+        {auto& c=memory_cache();std::lock_guard<std::mutex> lock(c.mutex);for(std::uint32_t i=0;i<n;++i)if(pool_sub(c,d,ranges[i].memory))throw std::runtime_error("flush of a coherent pooled device-memory range");}
+        return ::vkFlushMappedMemoryRanges(d,n,ranges);
+    }
+    static VkResult vkInvalidateMappedMemoryRanges(VkDevice d,std::uint32_t n,const VkMappedMemoryRange* ranges){
+        {auto& c=memory_cache();std::lock_guard<std::mutex> lock(c.mutex);for(std::uint32_t i=0;i<n;++i)if(pool_sub(c,d,ranges[i].memory))throw std::runtime_error("invalidate of a coherent pooled device-memory range");}
+        return ::vkInvalidateMappedMemoryRanges(d,n,ranges);
+    }
     static void vkDestroyPipeline(VkDevice d,VkPipeline object,const VkAllocationCallbacks* a){VkCallTimer t(VcPipelineDestroy);resource_stats().remove("pipelines",resource_id(object));::vkDestroyPipeline(d,object,a);}
     static void release_descriptor_sets(VkDescriptorPool pool){auto& stats=resource_stats();std::lock_guard<std::recursive_mutex> lock(stats.mutex);auto it=stats.descriptor_sets.find(resource_id(pool));if(it!=stats.descriptor_sets.end()){for(auto id:it->second)stats.remove("descriptor_sets",id);stats.descriptor_sets.erase(it);}}
     static VkResult vkResetDescriptorPool(VkDevice d,VkDescriptorPool pool,VkDescriptorPoolResetFlags flags){VkCallTimer t(VcResetDescriptorPool);const auto r=::vkResetDescriptorPool(d,pool,flags);if(r==VK_SUCCESS)release_descriptor_sets(pool);return r;}
     static VkResult vkAllocateDescriptorSets(VkDevice d,const VkDescriptorSetAllocateInfo* ci,VkDescriptorSet* out){VkCallTimer t(VcAllocateDescriptorSets);const auto r=::vkAllocateDescriptorSets(d,ci,out);if(r==VK_SUCCESS){auto& stats=resource_stats();std::lock_guard<std::recursive_mutex> lock(stats.mutex);for(unsigned i=0;i<ci->descriptorSetCount;++i){auto id=resource_id(out[i]);stats.add("descriptor_sets",id);stats.descriptor_sets[resource_id(ci->descriptorPool)].push_back(id);}}return r;}
     static VkResult vkCreateGraphicsPipelines(VkDevice d,VkPipelineCache cache,std::uint32_t n,const VkGraphicsPipelineCreateInfo* ci,const VkAllocationCallbacks* a,VkPipeline* out){VkCallTimer t(VcGraphicsPipeline,n);const auto r=::vkCreateGraphicsPipelines(d,cache,n,ci,a,out);for(unsigned i=0;i<n;++i)if(out[i])resource_stats().add("pipelines",resource_id(out[i]));return r;}
-    // Diagnostic command-kind tags for ANYPS3_RSX_VK_MARKS (see GraphicsMark); the wrappers only record the kind.
-    static void vkCmdCopyBuffer(VkCommandBuffer c,VkBuffer a,VkBuffer b,std::uint32_t n,const VkBufferCopy* r){graphics_last_kind()=MarkCopyBuffer;::vkCmdCopyBuffer(c,a,b,n,r);}
-    static void vkCmdCopyBufferToImage(VkCommandBuffer c,VkBuffer a,VkImage b,VkImageLayout l,std::uint32_t n,const VkBufferImageCopy* r){graphics_last_kind()=MarkCopyImage;::vkCmdCopyBufferToImage(c,a,b,l,n,r);}
-    static void vkCmdCopyImageToBuffer(VkCommandBuffer c,VkImage a,VkImageLayout l,VkBuffer b,std::uint32_t n,const VkBufferImageCopy* r){graphics_last_kind()=MarkCopyImage;::vkCmdCopyImageToBuffer(c,a,l,b,n,r);}
-    static void vkCmdCopyImage(VkCommandBuffer c,VkImage a,VkImageLayout al,VkImage b,VkImageLayout bl,std::uint32_t n,const VkImageCopy* r){graphics_last_kind()=MarkCopyImage;::vkCmdCopyImage(c,a,al,b,bl,n,r);}
-    static void vkCmdFillBuffer(VkCommandBuffer c,VkBuffer b,VkDeviceSize o,VkDeviceSize n,std::uint32_t v){graphics_last_kind()=MarkFill;::vkCmdFillBuffer(c,b,o,n,v);}
-    static void vkCmdDispatch(VkCommandBuffer c,std::uint32_t x,std::uint32_t y,std::uint32_t z){graphics_last_kind()=MarkDispatch;::vkCmdDispatch(c,x,y,z);}
-    static void vkCmdClearColorImage(VkCommandBuffer c,VkImage i,VkImageLayout l,const VkClearColorValue* v,std::uint32_t n,const VkImageSubresourceRange* r){graphics_last_kind()=MarkClear;::vkCmdClearColorImage(c,i,l,v,n,r);}
-    static void vkCmdClearDepthStencilImage(VkCommandBuffer c,VkImage i,VkImageLayout l,const VkClearDepthStencilValue* v,std::uint32_t n,const VkImageSubresourceRange* r){graphics_last_kind()=MarkClear;::vkCmdClearDepthStencilImage(c,i,l,v,n,r);}
+    // Diagnostic command-kind tags for ANYPS3_RSX_VK_MARKS (see GraphicsMark): the wrappers record the kind; the next mark
+    // attributes the time since the previous mark to it (graphics_mark). They also feed graphics_command_serial (every action
+    // command outside a render pass, see graphics_barrier) and the work counters (count, bytes or texels; PERF RENDER_SCALE_WORK).
+    static std::uint64_t graphics_region_texels(const VkExtent3D& e,std::uint32_t layers){return std::uint64_t(e.width)*e.height*e.depth*layers;}
+    static void vkCmdCopyBuffer(VkCommandBuffer c,VkBuffer a,VkBuffer b,std::uint32_t n,const VkBufferCopy* r){graphics_last_kind()=MarkCopyBuffer;graphics_command_recorded();
+        std::uint64_t bytes=0;for(std::uint32_t k=0;k<n;++k)bytes+=r[k].size;graphics_work_add(WorkCopyBuffer);graphics_work_add(WorkCopyBufferBytes,bytes);::vkCmdCopyBuffer(c,a,b,n,r);}
+    static void vkCmdCopyBufferToImage(VkCommandBuffer c,VkBuffer a,VkImage b,VkImageLayout l,std::uint32_t n,const VkBufferImageCopy* r){graphics_last_kind()=MarkCopyImage;graphics_command_recorded();
+        std::uint64_t texels=0;for(std::uint32_t k=0;k<n;++k)texels+=graphics_region_texels(r[k].imageExtent,r[k].imageSubresource.layerCount);graphics_work_add(WorkBufferImage);graphics_work_add(WorkBufferImageTexels,texels);graphics_site_copy(texels);::vkCmdCopyBufferToImage(c,a,b,l,n,r);}
+    static void vkCmdCopyImageToBuffer(VkCommandBuffer c,VkImage a,VkImageLayout l,VkBuffer b,std::uint32_t n,const VkBufferImageCopy* r){graphics_last_kind()=MarkCopyImage;graphics_command_recorded();
+        std::uint64_t texels=0;for(std::uint32_t k=0;k<n;++k)texels+=graphics_region_texels(r[k].imageExtent,r[k].imageSubresource.layerCount);graphics_work_add(WorkBufferImage);graphics_work_add(WorkBufferImageTexels,texels);graphics_site_copy(texels);::vkCmdCopyImageToBuffer(c,a,l,b,n,r);}
+    static void vkCmdCopyImage(VkCommandBuffer c,VkImage a,VkImageLayout al,VkImage b,VkImageLayout bl,std::uint32_t n,const VkImageCopy* r){graphics_last_kind()=MarkCopyImage;graphics_command_recorded();
+        std::uint64_t texels=0;for(std::uint32_t k=0;k<n;++k)texels+=graphics_region_texels(r[k].extent,r[k].srcSubresource.layerCount);graphics_work_add(WorkCopyImage);graphics_work_add(WorkCopyImageTexels,texels);graphics_site_copy(texels);::vkCmdCopyImage(c,a,al,b,bl,n,r);}
+    static void vkCmdBlitImage(VkCommandBuffer c,VkImage a,VkImageLayout al,VkImage b,VkImageLayout bl,std::uint32_t n,const VkImageBlit* r,VkFilter f){graphics_last_kind()=MarkCopyImage;graphics_command_recorded();
+        std::uint64_t texels=0;for(std::uint32_t k=0;k<n;++k)texels+=std::uint64_t(std::abs(r[k].dstOffsets[1].x-r[k].dstOffsets[0].x))*std::abs(r[k].dstOffsets[1].y-r[k].dstOffsets[0].y)*r[k].dstSubresource.layerCount;
+        graphics_work_add(WorkBlits);graphics_work_add(WorkBlitTexels,texels);graphics_site_copy(texels);::vkCmdBlitImage(c,a,al,b,bl,n,r,f);}
+    static void vkCmdFillBuffer(VkCommandBuffer c,VkBuffer b,VkDeviceSize o,VkDeviceSize n,std::uint32_t v){graphics_last_kind()=MarkFill;graphics_command_recorded();::vkCmdFillBuffer(c,b,o,n,v);}
+    static void vkCmdDispatch(VkCommandBuffer c,std::uint32_t x,std::uint32_t y,std::uint32_t z){graphics_last_kind()=MarkDispatch;graphics_command_recorded();graphics_work_add(WorkDispatches);::vkCmdDispatch(c,x,y,z);}
+    static void vkCmdClearColorImage(VkCommandBuffer c,VkImage i,VkImageLayout l,const VkClearColorValue* v,std::uint32_t n,const VkImageSubresourceRange* r){graphics_last_kind()=MarkClear;graphics_command_recorded();graphics_work_add(WorkClears);::vkCmdClearColorImage(c,i,l,v,n,r);}
+    static void vkCmdClearDepthStencilImage(VkCommandBuffer c,VkImage i,VkImageLayout l,const VkClearDepthStencilValue* v,std::uint32_t n,const VkImageSubresourceRange* r){graphics_last_kind()=MarkClear;graphics_command_recorded();graphics_work_add(WorkClears);::vkCmdClearDepthStencilImage(c,i,l,v,n,r);}
+    static void vkCmdResetQueryPool(VkCommandBuffer c,VkQueryPool p,std::uint32_t first,std::uint32_t n){graphics_command_recorded();::vkCmdResetQueryPool(c,p,first,n);}
+    static void vkCmdCopyQueryPoolResults(VkCommandBuffer c,VkQueryPool p,std::uint32_t first,std::uint32_t n,VkBuffer b,VkDeviceSize o,VkDeviceSize stride,VkQueryResultFlags f){graphics_command_recorded();::vkCmdCopyQueryPoolResults(c,p,first,n,b,o,stride,f);}
     static VkResult vkCreateComputePipelines(VkDevice d,VkPipelineCache cache,std::uint32_t n,const VkComputePipelineCreateInfo* ci,const VkAllocationCallbacks* a,VkPipeline* out){VkCallTimer t(VcComputePipeline,n);const auto r=::vkCreateComputePipelines(d,cache,n,ci,a,out);for(unsigned i=0;i<n;++i)if(out[i])resource_stats().add("pipelines",resource_id(out[i]));return r;}
 #endif
 '''

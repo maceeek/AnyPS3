@@ -61,7 +61,7 @@ private:
                 VkFenceCreateInfo f{};f.sType=VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;check(vkCreateFence(vk.device,&f,nullptr,&acquire),"present acquire fence");
             }
             if(swapchain && width==w && height==h && vsync==sync)return;
-            check(vkQueueWaitIdle(vk.queue),"present resize wait");
+            vk.recorder_queue_order();check(vkQueueWaitIdle(vk.queue),"present resize wait");
             vk.graphics_host->invoke([&]{resize(window,w,h);show(window);});shown=true;width=w;height=h;vsync=sync;
             VkSurfaceCapabilitiesKHR caps{};check(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(vk.physical,surface,&caps),"present capabilities");
             unsigned n=0;check(vkGetPhysicalDeviceSurfaceFormatsKHR(vk.physical,surface,&n,nullptr),"present formats");std::vector<VkSurfaceFormatKHR> formats(n);

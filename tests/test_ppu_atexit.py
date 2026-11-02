@@ -12,7 +12,7 @@ from tests.test_anyps3 import BLR, program
 class PpuAtexitTests(unittest.TestCase):
     def test_trampoline_page_is_emitted(self):
         source = compile_program(ElfImage.parse(program(BLR)), process_entry=True).cpp()
-        self.assertIn(f'case 0x{ATEXIT_RETURN:x}: anyps3_op_{ATEXIT_RETURN:x}(state);', source)
+        self.assertIn(f'/* 0x{ATEXIT_RETURN:x} */ anyps3_op_{ATEXIT_RETURN:x}(state);', source)
         self.assertIn('ppu_atexit_continue(state);', source)
 
     def test_callbacks_run_in_slot_order_then_thread_exits_with_saved_value(self):
