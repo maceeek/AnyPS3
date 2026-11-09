@@ -13,8 +13,8 @@
   `local/ratchet/work/hires9pc/`. Full suite on `1e45a72`: `work/hires9pc/suite-1e45a72/` (result in the record).
 - **Live processes:** none after the suite (check `pgrep -af run_suite`); no game run, no build.
 - **First next action:** the frame-chain latency analysis at 1440p (CURRENT, plan item 1).
-- **Disk cleanup:** prepared in `local/ratchet/work/cleanup-2026-11-09/` (≈ 108.6 GiB sure, ≈ 26.8 GiB ask, 23.1 GiB ISO);
-  **not applied** — waits for the user.
+- **Disk cleanup:** applied on the user's request (≈ 137 GiB; `/home` free 205 → 320 GB); the ISO kept. Details, archives and
+  restore commands in the [record](experiments/2026-11-09-hires9-pc.md#disk-cleanup--applied-on-the-users-request-verified).
 - **Environment note:** PySide6 is not installed on the PC, so the GUI test modules (`tests/gui/*`, `tests/manager/test_gui*`)
   fail at import here; they are not code failures.
 

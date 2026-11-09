@@ -149,8 +149,6 @@ The HIRES9 PPU memory and block-head cuts and the HIRES8 jump tables have no swi
    worst frames are 126–146 ms, 1034's 160–162).
 5. **Exactness spot checks:** a `--max-steps` stop with the same message, PC and steps as before (H9 block heads);
    `ANYPS3_SPU_DYNAMIC_LOG` rows against the base build.
-6. **Disk cleanup:** the plan in `local/ratchet/work/cleanup-2026-11-09/PLAN.md` waits for the user's go (`cleanup.sh --apply`,
-   optionally `--with-ask`); record the result like the 2026-10-25 cleanup.
 
 ## Next levers once measured (derived from the cloud analysis)
 
@@ -309,6 +307,8 @@ bash local/ratchet/tools/measure_menu.sh N 0-5,12-17 ANYPS3_RSX_WORKER=1 ANYPS3_
   `walk-hdd-template-20261025/` (`ANYPS3_HDD_ROOT`); concurrent runs must never share an HDD.
 - The PC agent shell is zsh, so an unquoted `$FILES` stays one word; use bash arrays.
 - Builds cited as baselines: 706, 960, 1031, 1034, 1037 (1035 for MSAA). They must survive any `local/ratchet` cleanup.
+- Cleanup of 2026-11-09 (≈ 137 GiB, [record](experiments/2026-11-09-hires9-pc.md#disk-cleanup--applied-on-the-users-request-verified)):
+  only baselines 706, 960, 1031, 1034, 1035 and builds ≥ 1036 remain runnable; per-run HDD copies of old runs are gone.
 - Logs over 1 MiB are `.zst`. Old source snapshots are in `local/ratchet/archive/source-snapshots-*.tar.zst`, restored with
   `zstd -dc --long=27 … | tar -xf - source-snapshot-N` (cleanup of 2026-10-25:
   [archived note](../archive/knowledge/history/CURRENT-2026-10-21-to-10-25.md#local-data-cleanup--2026-10-25-user-request)).
