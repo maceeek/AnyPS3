@@ -169,6 +169,20 @@ class ManagerTests(unittest.TestCase):
         env = settings.run_environment(self.lib, "BCES00511", values, [], self.root)
         self.assertNotIn("ANYPS3_PAD_RUMBLE", env)
 
+    def test_recorder_on_by_default_where_the_runtime_reads_it(self):
+        # Since 2026-11-09 Play launches enable the asynchronous draw recorder (624b teal frames do not reproduce);
+        # a title can still turn it off, and a build that does not read the switch gets none.
+        self.import_title()
+        values = settings.effective(self.lib, "BCES00511")
+        self.assertIs(values["experimental.recorder"], True)
+        env = settings.run_environment(self.lib, "BCES00511", values, ["ANYPS3_RSX_RECORDER"], self.root)
+        self.assertEqual(env["ANYPS3_RSX_RECORDER"], "1")
+        values["experimental.recorder"] = False
+        env = settings.run_environment(self.lib, "BCES00511", values, ["ANYPS3_RSX_RECORDER"], self.root)
+        self.assertEqual(env["ANYPS3_RSX_RECORDER"], "0")
+        env = settings.run_environment(self.lib, "BCES00511", values, [], self.root)
+        self.assertNotIn("ANYPS3_RSX_RECORDER", env)
+
     def test_disabled_play_and_tool_environments_silent_and_unavailable_switch_omitted(self):
         self.import_title()
         ambient = {"ANYPS3_AUDIO_AUDIBLE": "1", "SDL_AUDIODRIVER": "pulseaudio",
