@@ -207,6 +207,7 @@ private:
         const auto device=c.devices.find(d);
         if(device!=c.devices.end()){
             for(auto& [type,pool]:device->second.pools)for(auto& block:pool.blocks){(void)type;if(!block->live)c.pool_empty-=block->size;
+                resource_stats().remove("device_memory_blocks",resource_id(block->memory));
                 if(block->map){::vkUnmapMemory(d,block->memory);}::vkFreeMemory(d,block->memory,nullptr);}
             c.devices.erase(device);}
         for(auto it=c.subs.begin();it!=c.subs.end();)if(it->second->device==d)it=c.subs.erase(it);else ++it;

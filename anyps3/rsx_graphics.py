@@ -96,11 +96,16 @@ static unsigned explicit_sampler_mask(const std::vector<FpInst>& fp){
 // shader (run-time evaluation, the previous text).
 // ANYPS3_RSX_LAZY_VISIBILITY=1: draws with ZPASS counting off (0x17cc==0) record no occlusion query (see the main draw).
 // Default 0 keeps a query per sample pass of every draw (the host statistic draw.pixels counts all draws).
-// ANYPS3_RSX_GEOMETRY_REUSE (default 1; 0 = every draw reads its vertex inputs from guest memory): Session::read_inputs.
+// ANYPS3_RSX_GEOMETRY_REUSE (default 0 = every draw reads its vertex inputs and index span from guest memory; 1 = the
+// session's vertex/index reuse entries, Session::read_inputs/index_read). Off by default since the PC run of 2026-11-09:
+// the game's heavy views draw far more distinct spans than the 512 entries hold, so the LRU thrashes and every miss
+// registers/unregisters a CPU-dirty watch, each republishing the whole sorted watch registry (publish_dirty_registry):
+// build 1036 walked at 11 FPS with the RSX worker at 75 ms/frame, vs 44 FPS / 8.9 ms with 0. Without reuse the two
+// stages it replaces cost ~1 ms/frame in total, which bounds what any reuse can save.
 static bool rsx_geometry_reuse(){
     static const bool on=[]{const char* v=std::getenv("ANYPS3_RSX_GEOMETRY_REUSE");
         if(v && std::strcmp(v,"0") && std::strcmp(v,"1")){throw std::runtime_error("invalid ANYPS3_RSX_GEOMETRY_REUSE");}
-        return !v || !std::strcmp(v,"1");}();
+        return v && !std::strcmp(v,"1");}();
     return on;
 }
 static bool rsx_lazy_visibility(){

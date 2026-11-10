@@ -17,8 +17,9 @@ progress log up to 2026-11-01 (every build, stop and wave) is archived as
 | 2026-10-21 | 706 | **Native resolution holds the 60 Hz cap:** 59.71 / 59.69 FPS, ~99.8 % one-vblank, ~3–4 ms headroom (75 Hz emulated not held). DualSense motion, rumble and PS button; GUI audio toggle. |
 | 2026-10-23 | 801–810 | Render scale with GUI selection: 1440p 14.22 FPS (801) → 45.52 standing (803, recorder on). FIX7: START crash fixed (810). |
 | 2026-10-25 | 870–882 | 1440p walking: GPU depth copies, bounded caches, sampler shader reuse. 882 walks at 33.15 FPS (720p 44.68). The 1440p image was found to be 720p-derived (sample-grid bug, fixed in HIRES). |
-| 2026-10-25/27 | 960–1035 | HIRES/HIRES2 waves: 1440p walking 37.3 / 35.9 (960) → **39.9 / 40.6 FPS (1031)**, GPU 19 → 15.4 ms. Blockers: RSX worker ~21 ms, main thread ~14.8 ms, GPU ~15.4 ms, stutter. Merged to main (PR #14). **Last game measurement.** |
-| 2026-10-28 … 11-01 | — (cloud) | HIRES3–HIRES9 on branch `ccr-b1a3987e-aypb5o`, no game run: RSX worker per-draw cuts, GPU barrier cuts, device-memory pool, SPU job −50 % non-FP Ir, PPU page code −11..−18 % Ir. Unmeasured in the game. |
+| 2026-10-25/27 | 960–1035 | HIRES/HIRES2 waves: 1440p walking 37.3 / 35.9 (960) → **39.9 / 40.6 FPS (1031)**, GPU 19 → 15.4 ms. Blockers: RSX worker ~21 ms, main thread ~14.8 ms, GPU ~15.4 ms, stutter. Merged to main (PR #14). |
+| 2026-10-28 … 11-01 | — (cloud) | HIRES3–HIRES9 on branch `ccr-b1a3987e-aypb5o` (PR #15), no game run: RSX worker per-draw cuts, GPU barrier cuts, device-memory pool, SPU job −50 % non-FP Ir, PPU page code −11..−18 % Ir. Unmeasured in the game. |
 | 2026-11-01 | — | Documentation cleanup: superseded material moved to [archive/](archive/README.md). |
+| 2026-11-09 | 1036–1037 | HIRES9-PC: the cloud tip as merged walks at 11 FPS (H5 geometry reuse thrashes); with reuse off by default **1037 walks at 43.1 / 43.2 FPS at 1440p** (1034: 39.8 / 40.2) and **52.3 / 53.2 at 720p** (960: 44.4 / 44.7). Pool and test fixes; recorder on for GUI Play. **Last game measurement.** |
 
 Not reached yet: stable 60 FPS at 1440p, and acceptance with a physical gamepad.

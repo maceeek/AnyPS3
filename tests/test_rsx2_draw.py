@@ -240,7 +240,7 @@ static void geometry_reuse_(){
  PpuState s;setup_draw(s,16,8,64,false);auto& m=s.memory;auto& R=s.rsx.registers;m.enable_concurrency();
  s.rsx.renderer=std::make_unique<NativeVulkan>();auto session=std::make_unique<rsxgraphics::Session>(*s.rsx.renderer,s);session->observe();s.rsx.graphics_session=session.get();
  setenv("ANYPS3_RSX_BACKEND","gpu",1);
- assert(session->geometry_reuse);   // default 1
+ assert(!session->geometry_reuse);session->geometry_reuse=true;   // default 0 (opt-in); this test exercises the reuse path
  unsigned round=0;std::uint64_t at=0x70003000;
  auto draw=[&]{R[0x210]=0x100000+round*0x4000;s.rsx.draw.primitive=8;s.rsx.draw.ranges={{0,4}};rsx_execute_draw(s);return round++;};
  auto image=[&](unsigned r){session->flush();std::vector<std::uint32_t> out(128);GuestMemory::ObserverPause pause(m);
@@ -308,6 +308,7 @@ static void geometry_reuse_(){
 static void index_reuse_(){
  PpuState s;setup_draw(s,16,8,64,false);auto& m=s.memory;auto& R=s.rsx.registers;auto& d=s.rsx.draw;m.enable_concurrency();
  s.rsx.renderer=std::make_unique<NativeVulkan>();rsxgraphics::Session session(*s.rsx.renderer,s);session.observe();s.rsx.graphics_session=&session;
+ session.geometry_reuse=true;   // default 0 (opt-in); this test exercises the reuse path
  setenv("ANYPS3_RSX_BACKEND","gpu",1);
  std::uint64_t at=0xc0003000;unsigned width=2;
  auto be=[&](const std::vector<unsigned>& v){std::vector<std::uint8_t> b;for(auto x:v)for(unsigned k=0;k<width;++k)b.push_back(std::uint8_t(x>>(8*(width-1-k))));return b;};

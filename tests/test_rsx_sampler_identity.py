@@ -18,7 +18,8 @@ static void source_identity(){
   auto first=rsxgraphics::fragment_source(fp,reg,1,textures);assert(first);
   for(unsigned mip:{1u,2u,5u,9u})for(unsigned min=1;min<=6;++min)for(unsigned mag:{1u,2u}){
    t.mip_count=mip;t.min=min;t.mag=mag;
-   const auto raw=rsxgraphics::fragment_source_uncached(fp,reg,1,textures);
+   // same register-driven discard state as the cached source (fragment_discard_state); the default keeps every run-time test
+   const auto raw=rsxgraphics::fragment_source_uncached(fp,reg,1,textures,false,nullptr,rsxgraphics::fragment_discard_state(reg));
    const auto hit=rsxgraphics::fragment_source(fp,reg,1,textures);
    assert(raw && *raw==*first && hit==first);
   }

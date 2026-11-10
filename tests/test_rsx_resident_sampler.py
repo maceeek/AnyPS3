@@ -36,7 +36,8 @@ static void resident_oracle(bool dynamic){
   const float border[]={.25f,.5f,.75f,1.f};for(unsigned c=0;c<4;++c){data[d+15+c]=c;data[d+19+c]=2;data[d+23+c]=rsxdraw::float_bits(border[c]);}
   data[level+1]=data[level+2]=4;data[level+3]=1;
   auto fs=rsxgraphics::fragment_source(fp,rsxdraw::Reg{guest.rsx},1,textures);assert(fs);
-  auto raw=rsxgraphics::fragment_source_uncached(fp,rsxdraw::Reg{guest.rsx},1,textures);assert(raw && *raw==*fs);
+  // same register-driven discard state as the cached source (fragment_discard_state); the default keeps every run-time test
+  auto raw=rsxgraphics::fragment_source_uncached(fp,rsxdraw::Reg{guest.rsx},1,textures,false,nullptr,rsxgraphics::fragment_discard_state(rsxdraw::Reg{guest.rsx}));assert(raw && *raw==*fs);
   if(!first)first=fs;else if(dynamic)assert(first==fs && *first==*raw);
   session.refresh_vertex_constants();session.refresh_fragment_constants(fp);session.bind_draw_blocks(data,false);
   std::array<std::shared_ptr<NativeVulkan::GraphicsImage>,4> colors{destination};std::array<std::shared_ptr<NativeVulkan::GraphicsImage>,20> inputs{};inputs[0]=source;

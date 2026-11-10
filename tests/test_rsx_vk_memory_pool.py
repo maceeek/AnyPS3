@@ -85,6 +85,12 @@ static void pool_rounds(){
  // Every range came back with the session; at most one empty block is retained (limit 1 MiB = one block).
  if(on.end.live || on.end.blocks>1)throw std::runtime_error("pool on: after the session "+std::to_string(on.end.live)+" live ranges, "+std::to_string(on.end.blocks)+" retained blocks (limit 1)");
  if(!on.driver_frees)throw std::runtime_error("pool on: excess empty blocks were never released");
+ // The device is gone (rounds() destroyed its NativeVulkan): the block it still retained was freed with it, so the live
+ // object registry must not list any pool block (PC regression: device teardown freed blocks without unregistering them).
+ if(on.end.blocks!=1)throw std::runtime_error("pool on: expected one retained block at teardown, got "+std::to_string(on.end.blocks));
+ {auto& stats=NativeVulkan::resource_stats();std::lock_guard<std::recursive_mutex> lock(stats.mutex);const auto k=stats.kinds.find("device_memory_blocks");
+  if(k==stats.kinds.end() || k->second.peak_count<2)throw std::runtime_error("pool on: pool blocks were never registered");
+  if(!k->second.objects.empty() || k->second.bytes)throw std::runtime_error("pool on: "+std::to_string(k->second.objects.size())+" pool blocks still registered after the device was destroyed");}
  std::printf("PASS pooled ranges keep their own bytes (ranges=%llu driver allocs %llu vs %llu, peak blocks %llu, peak live %llu)\n",(unsigned long long)on.ranges,
   (unsigned long long)on.driver_allocs,(unsigned long long)off.driver_allocs,(unsigned long long)on.max_blocks,(unsigned long long)on.max_live);
 }

@@ -12,6 +12,9 @@ Entry point for the next model, a new run or a human. A record here does not, by
 
 ## Records (newest first; each describes its own snapshot)
 
+- 2026-11-09 [HIRES9-PC](experiments/2026-11-09-hires9-pc.md): **the last game measurement on the PC** — first game run of the
+  cloud rounds; the H5 geometry reuse thrashed (11 FPS) and is off by default; 1440p walk 43.1 / 43.2 FPS (1034: 39.8 / 40.2),
+  720p 52.3 / 53.2; pool and test fixes; recorder teal check clean; disk-cleanup plan prepared.
 - 2026-11-01 [cloud HIRES9](experiments/2026-11-01-cloud-hires9.md): PPU inline guest accesses through one pointer, MOVBE,
   budget-free block heads (memory kernels −14..−17 % Ir); SPU job remainder: shared chained-call scope, DMA copy, untracked DMA
   writes, SHUFB lanes (−9.8 % native); full suite.
@@ -27,7 +30,7 @@ Entry point for the next model, a new run or a human. A record here does not, by
   (−37 % worker Ir per frame).
 - 2026-10-28 [cloud HIRES3](experiments/2026-10-28-cloud-hires3.md): device-memory pool, DrawJob pointers, report floors,
   typed-RTT literals, the FIFO bench.
-- 2026-10-25/27 [HIRES and HIRES2 waves](experiments/2026-10-25-hires-wave.md): **the last game measurement on the PC**
+- 2026-10-25/27 [HIRES and HIRES2 waves](experiments/2026-10-25-hires-wave.md): the previous game measurement on the PC
   (1440p walking 1031: 39.91 / 40.58 FPS), GPU split, stutter classes, blockers.
 
 ## Topic pages (stable knowledge)

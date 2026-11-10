@@ -67,7 +67,7 @@ FIELDS = {
     "diagnostics.capture_stride": field(0, "Capture every Nth frame; 0 disables captures.", "Diagnostics", minimum=0, maximum=1000000),
     "diagnostics.spu_max_steps": field(1000000000000, "SPU instruction budget per thread.", "Diagnostics", env="ANYPS3_SPU_MAX_STEPS", minimum=1, maximum=18446744073709551615),
     "diagnostics.sleep_budget_us": field(300000000000, "Guest sleep budget in microseconds.", "Diagnostics", env="ANYPS3_SLEEP_BUDGET_US", minimum=1, maximum=18446744073709551615),
-    "experimental.recorder": field(False, "Asynchronous recorder; known teal-frame issue, keep off.", "Experimental", env="ANYPS3_RSX_RECORDER"),
+    "experimental.recorder": field(True, "Asynchronous draw recorder (faster RSX worker); the old teal-frame issue does not reproduce (2026-11-09).", "Experimental", env="ANYPS3_RSX_RECORDER"),
 }
 for _f in FIELDS.values():
     if _f["group"] in ("Diagnostics", "Experimental"):

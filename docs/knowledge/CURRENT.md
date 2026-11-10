@@ -1,8 +1,8 @@
-# Current state — 2026-11-01
+# Current state — 2026-11-09
 
-This page is the whole current state. It keeps the last game measurement on the PC (HIRES2, 2026-10-27) and the cloud
-rounds since (HIRES3–HIRES9, source changes measured only synthetically). Everything older is in [../archive/](../archive/README.md)
-and is not needed for orientation.
+This page is the whole current state. It keeps the last game measurement on the PC (HIRES9-PC, 2026-11-09: the cloud rounds
+HIRES3–HIRES9 built and measured in the game), the previous one (HIRES2, 2026-10-27) and the cloud rounds' summary.
+Everything older is in [../archive/](../archive/README.md) and is not needed for orientation.
 
 ## Goal and acceptance
 
@@ -18,12 +18,35 @@ Boot, videos (START skips), `front_end` loading, title screen, the **original ma
 with the virtual pad and the first level `great_clock_a`, all through static PPU/SPU translation and the own Vulkan RSX
 (PC: Ryzen 9 9900X, RTX 4070 SUPER, Linux).
 - **720p (scale 1):** standing still holds the 60 Hz cap. Build 706 (2026-10-21) did 59.71 / 59.69 FPS, ~99.8 % one-vblank, main ~11 ms
-  and worker ~12 ms. Walking in heavy views misses (HIRES2: ~44–46 FPS).
-- **1440p (scale 2) walking:** build 1031 did **39.91 / 40.58 FPS** (HIRES2, below). The image is the game's 960×704 scene rendered at
+  and worker ~12 ms. Walking: build 1037 does **52.31 / 53.21 FPS**, 88–90 % one-vblank (HIRES9-PC; 960: 44.4 / 44.7).
+- **1440p (scale 2) walking:** build 1037 does **43.08 / 43.22 FPS** (HIRES9-PC, below; 1034: 39.80 / 40.23). The image is the game's 960×704 scene rendered at
   1920×1408 and resampled 4:3 horizontally, with no comb and no block replication (verified over whole frames). Full 2560-column
   detail would need a horizontal scale of 8/3, which is **a user decision, open**.
 
-## Last PC measurement — HIRES2, 2026-10-27 (verified; main 95756e2 = PR #14)
+## Last PC measurement — HIRES9-PC, 2026-11-09 (verified; branch `claude/hires9-pc`)
+
+Build 1037 = cloud tip `a114612` (PR #15) + `e3b53f3` (geometry reuse off by default) + a pool accounting fix and test fixes.
+Decision-grade, QUIET, alternating, timed virtual-pad walk (recorder on), no STOP:
+
+| scale | build | runs | FPS | one-vblank % | main_ppu ms | rsx_worker ms | GPU busy ms |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 2 | 1037 | 1037a1 / 1037a2 | **43.08 / 43.22** | 65.1 / 66.0 | 10.10 / 10.03 | 9.23 / 9.21 | 13.89 / 13.94 |
+| 2 | 1034 | 1034h1 / 1034h2 | 39.80 / 40.23 | 55.8 / 57.6 | 10.85 / 10.65 | 12.08 / 11.84 | 14.01 / 13.89 |
+| 1 | 1037 | 1037a1s1 / 1037a2s1 | **52.31 / 53.21** | 88.2 / 89.9 | 10.29 / 10.27 | 8.86 / 8.96 | 6.60 / 6.55 |
+| 1 | 960 | 960h1s1 / 960h2s1 | 44.36 / 44.69 | 68.7 / 69.4 | 10.65 / 10.62 | 10.83 / 10.67 | 7.38 / 7.33 |
+
+- **The cloud tip as merged was 4× slower:** 1036 (= `a114612`) walked at 10.96 FPS, RSX worker 74.8 ms/frame. The H5
+  geometry/index reuse thrashes its 512-entry LRU in the game and every miss republishes the whole CPU-dirty watch registry
+  (`publish_dirty_registry`, O(n log n)). `ANYPS3_RSX_GEOMETRY_REUSE` now defaults to 0 (same binary with 0: 43.81 FPS).
+- **What the cloud rounds bought (verified, 1037 vs 1034 at 1440p):** worker −2.7 ms (−23 %), main −0.7 ms, GPU unchanged,
+  worst frame 138–146 ms instead of 160–162. The 1002 question is settled: the tip is faster than 960 at scale 1.
+- **Why not 60 yet (derived):** every per-frame mean is below 14 ms, yet a third of the 1440p frames take two vblanks. The
+  frame is a serial chain (main → worker → GPU → flip; the guest never runs ahead past the flip), so the chain's latency,
+  not any one thread's busy time, misses 16.7 ms.
+
+Record: [HIRES9-PC](experiments/2026-11-09-hires9-pc.md).
+
+## Previous PC measurement — HIRES2, 2026-10-27 (verified; main 95756e2 = PR #14)
 
 Decision-grade, QUIET, alternating, scale-2 timed virtual-pad walk, no STOP, original PT_LOAD exact:
 
@@ -49,14 +72,14 @@ Decision-grade, QUIET, alternating, scale-2 timed virtual-pad walk, no STOP, ori
    - **Class C (main thread, ~140 ms frames, 4–5 per 80 s):** the main thread runs with no block event and no GPU output.
 
 **Still open from HIRES2:**
-- 1035 (visual 2× MSAA on/off) was compiled but never measured.
-- 1002 (unrolled atomic copy cf7a6ef, since merged to main) looked slower in one disturbed run. Its copy body was rewritten in
-  HIRES7 and HIRES9, so measuring the branch tip at scale 1 against 960 answers the question.
+- 1035 (visual 2× MSAA on/off) was compiled but never measured. The NVIDIA unit test of the MSAA plane and load paths passes
+  (HIRES9-PC).
+- ~~1002~~ settled by HIRES9-PC (the tip is faster than 960 at scale 1).
 
 Record: [HIRES/HIRES2](experiments/2026-10-25-hires-wave.md). PC-only evidence:
 `local/ratchet/work/hires2{w,s}/RESULT.md`.
 
-## Cloud rounds HIRES3–HIRES9 — 2026-10-28 … 11-01 (branch `ccr-b1a3987e-aypb5o`; nothing measured in the game)
+## Cloud rounds HIRES3–HIRES9 — 2026-10-28 … 11-01 (branch `ccr-b1a3987e-aypb5o`, PR #15; measured on the PC 2026-11-09, above)
 
 The cloud container has no game data, no `local/` tree and no NVIDIA GPU. Every change is exact or gated, has a native
 regression test with an independent oracle and mutation checks, and was measured only with callgrind or thread-CPU time on
@@ -78,12 +101,16 @@ synthetic benches (instructions are not time). The branch is main 95756e2 plus t
 - **GPU:** ≈ 14–14.5 ms at scale 2 (1034 plus barrier cuts). That fits the 16.7 ms frame with little headroom.
 - **Stutter:** classes B and C are not addressed.
 
+**PC result (HIRES9-PC, verified):** worker 9.2 ms and main 10.0 ms per frame at 1440p (means over the window), GPU 13.9 ms;
+better than the estimates above, but only after `ANYPS3_RSX_GEOMETRY_REUSE` was turned off. The H5 reuse estimate
+("−24 % per indexed draw") assumed static geometry and a small working set; in the game it thrashed (see HIRES9-PC).
+
 Records (detail on demand, one per round): [H3](experiments/2026-10-28-cloud-hires3.md),
 [H4](experiments/2026-10-30-cloud-hires4.md), [H5](experiments/2026-10-31-cloud-hires5.md),
 [H6](experiments/2026-10-31-cloud-hires6.md), [H7](experiments/2026-11-01-cloud-hires7.md),
 [H8](experiments/2026-11-01-cloud-hires8.md), [H9](experiments/2026-11-01-cloud-hires9.md).
 
-## A/B switches on the branch (defaults verified in the code, 2026-11-01)
+## A/B switches on the branch (defaults verified in the code, 2026-11-09)
 
 Each switch is read once per process; any value other than `0`/`1` stops the run. The table lists those meant for the PC's A/B runs.
 
@@ -93,11 +120,11 @@ Each switch is read once per process; any value other than `0`/`1` stops the run
 | `ANYPS3_RSX_RTT_LITERALS` | 1 | 0 = typed-RTT addressing through constants | H3 |
 | `ANYPS3_GUEST_PAGE_READ`, `ANYPS3_RSX_RENDER_BATCH`, `ANYPS3_GUEST_RANGE_ADMISSION` | 1 | 0 = old renderer-thread guest-memory admission | H4 |
 | `ANYPS3_RSX_FIFO_PAIR` | 1 | 0 = no paired FIFO loads | H4 |
-| `ANYPS3_RSX_GEOMETRY_REUSE` | 1 | 0 = copy vertex inputs/index spans every draw | H5 |
+| `ANYPS3_RSX_GEOMETRY_REUSE` | **0** (since HIRES9-PC) | 1 = vertex/index reuse entries (thrashes in the game: 1036 walked at 11 FPS) | H5 |
 | `ANYPS3_RSX_RTT_PREFILTER`, `ANYPS3_RSX_TEXTURE_IMAGE_MEMO` | 1 | 0 = old texture/RTT lookup | H5 |
 | `ANYPS3_RSX_BARRIER_DEDUPE`, `ANYPS3_RSX_PAIR_BARRIERS`, `ANYPS3_RSX_PASS_BARRIER` | 1 | 0 = old barriers | H6 |
-| `ANYPS3_RENDER_SCALE_MSAA` / `ANYPS3_RENDER_SCALE_MSAA_LOAD` | 0 / 0 | 1 = visual 2× MSAA working images / their plane→sample load path (NVIDIA test pending) | HIRES2 / H6 |
-| `ANYPS3_RSX_RECORDER` | 0 (GUI too) | 1 = asynchronous draw recorder (the walking wrapper sets 1; 624b teal-frame question open) | older |
+| `ANYPS3_RENDER_SCALE_MSAA` / `ANYPS3_RENDER_SCALE_MSAA_LOAD` | 0 / 0 | 1 = visual 2× MSAA working images / their plane→sample load path (NVIDIA unit test passes, HIRES9-PC; game A/B pending) | HIRES2 / H6 |
+| `ANYPS3_RSX_RECORDER` | 0 (runtime); **GUI Play: 1** since HIRES9-PC | 1 = asynchronous draw recorder (walks set 1; the 624b teal frames do not reproduce on 1037) | older |
 | `ANYPS3_RSX_RECORDER_SUBMIT` | 1 | 0 = inline submit (only matters with the recorder on) | H7 |
 | `ANYPS3_SPU_CHAIN` / `ANYPS3_SPU_CHAIN_SHARED` | 1 / 1 | 0 = BRSL through the dispatcher / per-call scope | H7 / H9 |
 | `ANYPS3_GUEST_WRITE_TRACKED_ONLY` | 1 | 0 = DMA writes bump/notify every line | H9 |
@@ -106,29 +133,22 @@ Each switch is read once per process; any value other than `0`/`1` stops the run
 
 The HIRES9 PPU memory and block-head cuts and the HIRES8 jump tables have no switch. For them the A/B is two builds.
 
-## First next actions on the PC (one plan; replaces the per-round lists)
+## First next actions (after HIRES9-PC; one plan)
 
-1. **Targeted NVIDIA tests on the branch tip:** `test_rsx_visual_msaa`, `test_rsx_async_upload`, `test_rsx_recorder`,
-   `test_rsx_gpu_work`. Then the full suite (the cloud container cannot build some modules; see [HANDOFF](HANDOFF.md)).
-2. **One integration build N of the tip** (new number, source snapshot). Record compile wall time and the `.text` of the
-   ppu-*/spu-* units against 1034.
-3. **QUIET alternating 1440p walks, N vs 1034 (or 1031), two each**, with the walking wrapper's `ANYPS3_RSX_RECORDER=1`. Record:
-   FPS and one-vblank %; `main_ppu`, `rsx_worker`, rsx-record and GPU busy ms/frame; µs/draw in heavy frames; the SPU-wait shares
-   (0x666068, 0x5564d4, 0x696c10) and the awaited ig lane's time (sampler); the worst frames. Check the image for the recorder's teal frames. Also run a scale-1 pair
-   against 960, which settles the 1002 question.
-4. **If not at the target, one switch at a time, alternating, with the same binary** (switches in the table above):
-   - worker: `ANYPS3_RSX_GEOMETRY_REUSE=0`, `ANYPS3_RSX_RECORDER_SUBMIT=0`, the three H4 memory switches together;
-   - main thread: `ANYPS3_SPU_CHAIN=0`, `ANYPS3_SPU_CHAIN_SHARED=0`, `ANYPS3_GUEST_WRITE_TRACKED_ONLY=0`, `ANYPS3_PPU_RET_DEPTH=0`;
-   - GPU: one `ANYPS3_RSX_VK_MARKS=1` walk (does the 12.6 µs native pass begin move to clears/copies in `PERF GPU_MARKS`?),
-     then `ANYPS3_RSX_BARRIER_DEDUPE=0`, then MSAA on with load 1 vs 0 vs MSAA off.
-5. **Stutter:** full frame ring with `hitch_marks.py`, `ANYPS3_RSX_MEMORY_POOL=1` vs 0. Class A should vanish with the pool; if
-   class B persists, the first-touch hypothesis is refuted.
-6. **Exactness spot checks:**
-   - animated/skinned geometry with geometry reuse on (visual);
-   - a run that hits `--max-steps` stops with the same message, PC and steps as before;
-   - `ANYPS3_SPU_DYNAMIC_LOG` rows match the base build.
-7. **If the recorder shows no teal frames on the tip,** make it the default in the runtime and the GUI
-   (`anyps3_manager/settings.py` `experimental.recorder`).
+1. **Frame-chain latency at 1440p (the actual blocker now).** Means are main 10.0, worker 9.2, GPU 13.9 ms, yet 34 % of frames
+   take two vblanks. One build-1037 walk with the full frame ring (`ANYPS3_FRAMETIME_MODE=full`, HIRES2 `measure-walk-960full.sh`
+   pattern) and `work/hires2w/tools/{segments.py,overlap.py}`: per two-vblank frame, where the 16.7 ms go (main work span,
+   worker start → last draw, submit → GPU end, flip wait). This decides between overlapping the stages (worker/GPU pipelining
+   across the flip) and cutting one of them.
+2. **Switch A/Bs on 1037, one at a time, alternating, same binary** (table above): `ANYPS3_RSX_RECORDER_SUBMIT=0`;
+   the three H4 memory switches together; `ANYPS3_SPU_CHAIN_SHARED=0`; `ANYPS3_GUEST_WRITE_TRACKED_ONLY=0`;
+   `ANYPS3_PPU_RET_DEPTH=0`; `ANYPS3_RSX_BARRIER_DEDUPE=0`. Each cloud switch is unmeasured on its own in the game.
+3. **GPU:** one `ANYPS3_RSX_VK_MARKS=1` walk (the 12.6 µs native pass begin), then visual MSAA on with load 1 vs 0 vs off
+   (the NVIDIA unit test passes).
+4. **Stutter:** full ring with `hitch_marks.py`, `ANYPS3_RSX_MEMORY_POOL=1` vs 0 (class A should vanish with the pool; 1037's
+   worst frames are 126–146 ms, 1034's 160–162).
+5. **Exactness spot checks:** a `--max-steps` stop with the same message, PC and steps as before (H9 block heads);
+   `ANYPS3_SPU_DYNAMIC_LOG` rows against the base build.
 
 ## Next levers once measured (derived from the cloud analysis)
 
@@ -175,6 +195,12 @@ The HIRES9 PPU memory and block-head cuts and the HIRES8 jump tables have no swi
   - A guest timer slack of 1 ns adds +1.3 ms main busy, so it stays opt-in (FAST2).
   - `[[gnu::cold]]` does not stop GCC homing live vectors around a call that returns into hot generated code (H8).
   - A 64-byte aligned SPU register file has no effect; it was reverted (H9).
+- **RSX worker, geometry reuse (HIRES9-PC):** the H5 vertex/index reuse with a 512-entry LRU and per-entry CPU-dirty watches
+  thrashes in the game (build 1036: 11 FPS, worker 75 ms/frame; every miss republishes the whole watch registry). Without
+  reuse the two stages it replaces cost ~1 ms/frame, which bounds any reuse design.
+- **Tests:** the "lavapipe cache asserts" of the cloud rounds (`test_rsx_fp_cache`, `test_rsx_sampler_identity`,
+  `test_rsx_resident_sampler`) were stale oracles since 409f8bb, not lavapipe (fixed `1e45a72`); `test_rsx_pipeline_cache`
+  failed on the pool's teardown accounting (fixed `a020c8d`).
 - **PPU:**
   - A block-local copy of the inline view: −1 % Ir for +1.4 % text (H8).
   - Register locals across a self loop's back edge: text +5.7 % (H9).
@@ -188,7 +214,8 @@ The HIRES9 PPU memory and block-head cuts and the HIRES8 jump tables have no swi
   [FIX7 record](../archive/knowledge/experiments/2026-10-23-fix7.md#rpcs3-game-patches-for-acit--researched-not-adopted-user-decision).
 - **No substitutes:** no substitute menu, no pre-unpacked assets, no other emulator.
 - **Explicit stops:** unknown behaviour stops the run explicitly.
-- **Recorder off by default:** in the runtime and the GUI, until the 624b teal frames are checked; walks measure with it on.
+- **Recorder:** on for GUI Play launches since HIRES9-PC (624b teal frames do not reproduce on 1037); the runtime default
+  (variable unset) stays off for tests and CLI runs; walks set it explicitly.
 - **Visual 2× MSAA off by default** until the NVIDIA test and an A/B.
 - **GUI launches:**
   - always set `ANYPS3_RSX_WORKER=1 ANYPS3_SPU_THREADS=1`; the game is unplayable without them (`anyps3_manager/settings.py`);
@@ -254,8 +281,10 @@ python -P -m anyps3.build_game local/ratchet/EBOOT.analysis.elf --firmware local
   --key-file local/ratchet/app-key.json --profile profiles/ratchet-acit.json --max-steps 1000000000000 -o local/ratchet/native-bundle-N
 ANYPS3_EXTRA_CXXFLAGS='-march=native -ffp-contract=off' ANYPS3_RSX_VK_BUILD=1 PYTHONPATH=. \
   python local/ratchet/tools/virtual_pad.py build -j 16 local/ratchet/native-bundle-N local/ratchet/native-virtual-N
-# 1440p walk (QUIET, pattern of the HIRES2 walk scripts) and its report (writes local/ratchet/walking-RUN.json):
-QUIET=1 bash local/ratchet/work/hires2s/measure-walk-1034.sh RUN        # copy and adapt for build N
+# Whole-commit snapshot + build (HIRES9-PC; snapshot = git archive of COMMIT, holds the compile lock via the caller):
+bash local/ratchet/tools/snapshot_build_git.sh N COMMIT "README text"   # see work/hires9pc/build-1037.sh for the lock wrapper
+# 1440p walk of any build (QUIET; append ANYPS3_RENDER_SCALE=1 for 720p) and its report (writes local/ratchet/walking-RUN.json):
+QUIET=1 bash local/ratchet/work/hires9pc/measure-walk-b.sh BUILD RUN [ENV=VAL ...]   # RUN must start with BUILD
 python local/ratchet/report-walking.py RUN
 # Stutter / marks analysis: local/ratchet/work/hires2s/tools/{hitch_marks.py,marks_worst.py}; SPU-wait split:
 # local/ratchet/work/hires2w/tools/wallsplit.py; call stacks: local/ratchet/tools/sample_callers.py
@@ -277,7 +306,9 @@ bash local/ratchet/tools/measure_menu.sh N 0-5,12-17 ANYPS3_RSX_WORKER=1 ANYPS3_
 - Walks use `measure-walk-N.sh`: QUIET, WARM20/WIN90, `walk-timed.py`, recorder=1. Each run gets a private CoW HDD from
   `walk-hdd-template-20261025/` (`ANYPS3_HDD_ROOT`); concurrent runs must never share an HDD.
 - The PC agent shell is zsh, so an unquoted `$FILES` stays one word; use bash arrays.
-- Builds cited as baselines: 706, 960, 1031, 1034 (1035 for MSAA). They must survive any `local/ratchet` cleanup.
+- Builds cited as baselines: 706, 960, 1031, 1034, 1037 (1035 for MSAA). They must survive any `local/ratchet` cleanup.
+- Cleanup of 2026-11-09 (≈ 137 GiB, [record](experiments/2026-11-09-hires9-pc.md#disk-cleanup--applied-on-the-users-request-verified)):
+  only baselines 706, 960, 1031, 1034, 1035 and builds ≥ 1036 remain runnable; per-run HDD copies of old runs are gone.
 - Logs over 1 MiB are `.zst`. Old source snapshots are in `local/ratchet/archive/source-snapshots-*.tar.zst`, restored with
   `zstd -dc --long=27 … | tar -xf - source-snapshot-N` (cleanup of 2026-10-25:
   [archived note](../archive/knowledge/history/CURRENT-2026-10-21-to-10-25.md#local-data-cleanup--2026-10-25-user-request)).

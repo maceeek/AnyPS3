@@ -1,6 +1,24 @@
 # Handoff to the next instance
 
-## State at the end of the cloud rounds — 2026-11-01
+## State after HIRES9-PC — 2026-11-09 (PC)
+
+- **Goal not reached.** 1440p walk: build 1037 **43.08 / 43.22 FPS** (65–66 % one-vblank); 720p walk 52.31 / 53.21 FPS. Read
+  [CURRENT.md](CURRENT.md) (results table, switch table, the new ordered plan) and the
+  [HIRES9-PC record](experiments/2026-11-09-hires9-pc.md).
+- **Branch:** `claude/hires9-pc` = main `a114612` (PR #15, cloud HIRES3–HIRES9) + test fixes `72fcca2`, `1e45a72`, the pool
+  accounting fix `a020c8d`, geometry reuse off by default `e3b53f3`, GUI recorder on `bd93d9e`, and this documentation. Pushed
+  for a PR; not merged by the agent.
+- **Builds/runs (PC, `local/ratchet`):** 1036 (= `a114612`, slow: reuse thrash), 1037 (= `e3b53f3`, the new baseline);
+  runs 1036w1/a1/g1, 1037a1/a2, 1037a1s1/a2s1, 1037r1/r0, 1034h1/h2, 960h1s1/h2s1. Scripts and logs:
+  `local/ratchet/work/hires9pc/`. Full suite on `1e45a72`: `work/hires9pc/suite-1e45a72/` (result in the record).
+- **Live processes:** none after the suite (check `pgrep -af run_suite`); no game run, no build.
+- **First next action:** the frame-chain latency analysis at 1440p (CURRENT, plan item 1).
+- **Disk cleanup:** applied on the user's request (≈ 137 GiB; `/home` free 205 → 320 GB); the ISO kept. Details, archives and
+  restore commands in the [record](experiments/2026-11-09-hires9-pc.md#disk-cleanup--applied-on-the-users-request-verified).
+- **Environment note:** PySide6 is not installed on the PC, so the GUI test modules (`tests/gui/*`, `tests/manager/test_gui*`)
+  fail at import here; they are not code failures.
+
+## State at the end of the cloud rounds — 2026-11-01 (historical)
 
 - **Goal not reached.** Nothing has been measured in the game since HIRES2 (2026-10-27, PC). Read [CURRENT.md](CURRENT.md):
   the last PC numbers, the cloud changes since, the switch table and **one ordered PC measurement plan**. The next step
@@ -45,7 +63,9 @@
   - SDL offscreen without Vulkan: `test_present_window`;
   - GCC 13 `-Werror`: `test_ppu_fp_lazy`, `test_ppuperf3`, `test_savedata_vsh`, `test_rsx_residency`;
   - lavapipe-sensitive cache asserts: `test_rsx_fp_cache`, `test_rsx_sampler_identity`, `test_rsx_resident_sampler`,
-    `test_rsx_perf_decode`, `test_rsx_pipeline_cache`;
+    `test_rsx_perf_decode`, `test_rsx_pipeline_cache` — **refuted on the PC (HIRES9-PC):** the first three were stale oracles
+    since 409f8bb (fixed `1e45a72`), `test_rsx_pipeline_cache` a real pool accounting bug (fixed `a020c8d`),
+    `test_rsx_perf_decode` passes on the PC;
   - compile limits too short for the container (vary with load): `test_program`, `test_services`, `test_native_audio*`,
     `test_spufast_blocks`, `test_vulkan`.
 - **HIRES9 suite result** (merge e896fed, 204 modules): 188 OK, 16 failing, all 16 identical to HIRES7 and all in the list above;

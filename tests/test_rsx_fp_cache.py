@@ -388,7 +388,10 @@ static void constant_rewrites(){
   program(2,7.f);const auto c=rsxdraw::load_fragment_program_shared(s,reg);
   assert(a!=b && a->front().structure==b->front().structure && c->front().structure!=a->front().structure);
   const auto fa=rsxgraphics::fragment_source(*a,reg,1,textures),fb=rsxgraphics::fragment_source(*b,reg,1,textures),fc=rsxgraphics::fragment_source(*c,reg,1,textures);
-  const auto ua=rsxgraphics::fragment_source_uncached(*a,reg,1,textures),ub=rsxgraphics::fragment_source_uncached(*b,reg,1,textures),uc=rsxgraphics::fragment_source_uncached(*c,reg,1,textures);
+  // fragment_source specialises the register-driven discards (fragment_discard_state); the uncached oracle gets the same
+  // state (its default keeps every run-time test, the ANYPS3_RSX_FS_STATIC_DISCARD=0 text).
+  const unsigned discards=rsxgraphics::fragment_discard_state(reg);
+  const auto ua=rsxgraphics::fragment_source_uncached(*a,reg,1,textures,false,nullptr,discards),ub=rsxgraphics::fragment_source_uncached(*b,reg,1,textures,false,nullptr,discards),uc=rsxgraphics::fragment_source_uncached(*c,reg,1,textures,false,nullptr,discards);
   assert(fa && fb && fc && ua && ub && uc && *ua==*ub && *ua!=*uc);
   assert(fa==fb && *fa==*ua && *fc==*uc && fc!=fa);
   // a mutable copy carries no structure id, so an edited copy is keyed by its words
